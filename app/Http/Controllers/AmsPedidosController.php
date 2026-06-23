@@ -1,0 +1,1135 @@
+<?php
+
+namespace App\Http\Controllers;
+
+use App\Models\User;
+use App\Services\MeliOrderSyncService;
+use App\Support\AmsMarcaPedidos;
+use Carbon\Carbon;
+use Illuminate\Http\Request;
+use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
+use Inertia\Inertia;
+use Inertia\Response;
+
+class AmsPedidosController extends Controller
+{
+    public function index(Request $request): Response
+    {
+        $fechaSeleccionada = $this->resolveFecha($request, false);
+
+        $rows = $this->basePedidosQuery()
+            ->whereDate('o.created_at', $fechaSeleccionada)
+            ->get();
+
+        $grouped = $this->computePedidosGrouped($rows);
+
+        return Inertia::render('Ams/PedidosIndex', [
+            'pedidos' => $this->pedidosToInertiaArray($grouped['pedidos']),
+            'fechaSeleccionada' => $fechaSeleccionada,
+            'totalPedidos' => $grouped['totalPedidos'],
+            'totalPiezas' => $grouped['totalPiezas'],
+            'totalVendido' => $grouped['totalVendido'],
+            'tituloPagina' => 'AMS - Pedidos del día',
+            'subtitulo' => 'Mostrando pedidos vendidos el día:',
+            'dateFilterUrl' => route('ams.pedidos.index'),
+        ]);
+    }
+
+    public function procesar(Request $request, MeliOrderSyncService $meliSync): Response
+    {
+        $fechaSeleccionada = $this->resolveFecha($request, false);
+        $alcance = $this->resolveAlcanceProcesar($request);
+
+        $this->maybeRefreshProcesarShipments($request, $fechaSeleccionada, $alcance, $meliSync);
+
+        $query = $this->procesarCandidateQuery($fechaSeleccionada, $alcance);
+
+        $this->applyProcesarSoloListosEnTiendaSinEnviar($query);
+
+        $rows = $query->get();
+
+        $subtitulo = $alcance === 'colecta'
+            ? 'Lote Flex/Colecta: solo envíos aún en tienda (listo para enviar / etiqueta). Ventana y feriados: config/ams_colecta.php. Referencia:'
+            : 'Etiqueta lista: pagado + listo para enviar + etiqueta por imprimir. Incluye filas sin ítems en BD y estados leídos del JSON si las columnas van atrasadas.';
+
+        return $this->renderPedidosProcesarInertia(
+            $rows,
+            $fechaSeleccionada,
+            'AMS - Pedidos por procesar',
+            $subtitulo,
+            route('ams.pedidos.procesar'),
+            $this->resolveOrdenProcesar($request),
+            $alcance
+        );
+    }
+
+    public function procesarManana(Request $request, MeliOrderSyncService $meliSync): Response
+    {
+        $fechaSeleccionada = now()->addDay()->toDateString();
+
+        $this->maybeRefreshProcesarShipments($request, $fechaSeleccionada, 'colecta', $meliSync);
+
+        $query = $this->procesarCandidateQuery($fechaSeleccionada, 'colecta');
+
+        $this->applyProcesarSoloListosEnTiendaSinEnviar($query);
+
+        $rows = $query->get();
+
+        return $this->renderPedidosProcesarInertia(
+            $rows,
+            $fechaSeleccionada,
+            'AMS - Pedidos para mañana',
+            'Mostrando pedidos para mañana (misma ventana colecta; fecha = día de colecta / envío):',
+            route('ams.pedidos.manana'),
+            $this->resolveOrdenProcesar($request),
+            'colecta'
+        );
+    }
+
+    /**
+     * colecta = Flex/Colecta + ventana de fecha (operación diaria).
+     * ml_listado = alineado al filtro ML “etiqueta lista” (más pedidos; incluye otros envíos Me2).
+     *
+     * @return 'colecta'|'ml_listado'
+     */
+    protected function resolveAlcanceProcesar(Request $request): string
+    {
+        $v = strtolower(trim((string) $request->input('alcance', 'ml_listado')));
+
+        return $v === 'ml_listado' ? 'ml_listado' : 'colecta';
+    }
+
+    /**
+     * @return 'fecha'|'marca'
+     */
+    protected function resolveOrdenProcesar(Request $request): string
+    {
+        $orden = strtolower(trim((string) $request->input('orden', 'fecha')));
+
+        return $orden === 'marca' ? 'marca' : 'fecha';
+    }
+
+    /**
+     * Misma base que “Procesar” pero sin filtrar por listo-en-tienda (sirve para armar la lista de shipping_id a refrescar).
+     *
+     * @param  'colecta'|'ml_listado'  $alcance
+     */
+    protected function procesarCandidateQuery(string $fechaSeleccionada, string $alcance)
+    {
+        $query = $this->basePedidosQuery($alcance === 'colecta');
+
+        if ($alcance === 'ml_listado') {
+            $query->where(function ($q) {
+                $q->whereRaw("LOWER(COALESCE(o.status, '')) = 'paid'")
+                    ->orWhereRaw(
+                        "LOWER(TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(o.raw, '$.status')), ''))) = 'paid'"
+                    );
+            });
+            $this->applyMlListadoShippingReadyToPrint($query);
+        } else {
+            $query->whereRaw("LOWER(COALESCE(o.status, '')) = 'paid'");
+        }
+
+        if ($alcance === 'colecta') {
+            $query->where(function ($q) {
+                $q->whereRaw("LOWER(COALESCE(o.shipping_mode, '')) = 'flex'")
+                    ->orWhereRaw("LOWER(COALESCE(o.shipping_type, '')) LIKE '%flex%'")
+                    ->orWhereRaw("LOWER(COALESCE(o.shipping_logistic_type, '')) LIKE '%flex%'")
+
+                    ->orWhereRaw("LOWER(COALESCE(o.shipping_type, '')) IN ('drop_off', 'xd_drop_off', 'self_service')")
+                    ->orWhereRaw("LOWER(COALESCE(o.shipping_logistic_type, '')) IN ('cross_docking', 'drop_off', 'xd_drop_off', 'self_service')")
+                    ->orWhereRaw("LOWER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(o.raw, '$.shipping.logistic_type')), '')) IN ('cross_docking', 'drop_off', 'xd_drop_off', 'self_service')")
+                    ->orWhereRaw("LOWER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(o.raw, '$.shipping.shipping_option.name')), '')) LIKE '%colecta%'")
+                    ->orWhereRaw("LOWER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(o.raw, '$.shipping.shipping_option.shipping_method_name')), '')) LIKE '%colecta%'");
+            });
+            $this->applyColectaProcesarDayFilter($query, $fechaSeleccionada);
+        }
+
+        return $query;
+    }
+
+    /**
+     * Consulta GET /shipments/{id} por cada envío del lote para que el filtro “solo listos” use datos actuales de MeLi.
+     *
+     * Nota importante (ml_listado):
+     * Antes el universo de refresh era "todos los pagados" ordenados por created_at DESC,
+     * cap a 150. Eso refrescaba los 150 más recientes y dejaba las órdenes viejas con
+     * shipping_substatus 'ready_to_print' colgadas en el listado aunque en ML ya estuvieran
+     * 'printed' / 'picked_up' / 'shipped'. Resultado: el conteo en el panel quedaba MAYOR
+     * que el filtro de ML "Etiqueta lista para imprimir".
+     *
+     * Ahora, en ml_listado, el universo de refresh es exactamente lo que el listado piensa
+     * mostrar (effective_substatus = 'ready_to_print'). Esos son los únicos que pueden
+     * estar stale; refrescar otra cosa es desperdicio. Después de refrescar, el filtro
+     * final saca los que ML ya marcó como avanzados y el conteo coincide.
+     */
+    protected function maybeRefreshProcesarShipments(
+        Request $request,
+        string $fechaSeleccionada,
+        string $alcance,
+        MeliOrderSyncService $meliSync
+    ): void {
+        if ($request->boolean('sin_refrescar')) {
+            return;
+        }
+
+        if (!config('ams_colecta.refresh_shipments_on_procesar', true)) {
+            return;
+        }
+
+        $user = User::query()->whereNotNull('access_token')->first();
+        if (!$user) {
+            return;
+        }
+
+        if ($alcance === 'ml_listado') {
+            $effSt = $this->sqlEffectiveShippingStatus();
+            $effSub = $this->sqlEffectiveShippingSubstatus();
+
+            $candidate = $this->basePedidosQuery(false)
+                ->where(function ($q) {
+                    $q->whereRaw("LOWER(COALESCE(o.status, '')) = 'paid'")
+                        ->orWhereRaw(
+                            "LOWER(TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(o.raw, '$.status')), ''))) = 'paid'"
+                        );
+                })
+                ->whereRaw("({$effSt}) = 'ready_to_ship'")
+                ->whereRaw("({$effSub}) = 'ready_to_print'");
+        } else {
+            $candidate = $this->procesarCandidateQuery($fechaSeleccionada, $alcance);
+        }
+
+        $ids = $candidate
+            ->whereNotNull('o.shipping_id')
+            ->where('o.shipping_id', '!=', '')
+            ->select('o.shipping_id')
+            ->distinct()
+            ->pluck('o.shipping_id')
+            ->unique()
+            ->values()
+            ->all();
+
+        $max = max(1, (int) config('ams_colecta.refresh_shipments_max_ids', 150));
+        if (count($ids) > $max) {
+            $ids = array_slice($ids, 0, $max);
+        }
+
+        if ($ids !== []) {
+            $meliSync->refreshShipmentsByShippingIds($user, $ids);
+        }
+    }
+
+    /**
+     * Varias órdenes tienen shipping_status/substatus desactualizado en columnas; el JSON `raw` suele ir más al día.
+     */
+    protected function applyMlListadoShippingReadyToPrint($query): void
+    {
+        $effSt = $this->sqlEffectiveShippingStatus();
+        $effSub = $this->sqlEffectiveShippingSubstatus();
+
+        $query->whereRaw("({$effSt}) = 'ready_to_ship'")
+            ->whereRaw("({$effSub}) = 'ready_to_print'");
+    }
+
+    /**
+     * @param  bool  $innerJoinOrderItems  false = LEFT JOIN (modo ML listado: no pierde pedidos sin meli_order_items).
+     */
+    protected function basePedidosQuery(bool $innerJoinOrderItems = true)
+    {
+        $productsBySku = DB::table('products as p1')
+            ->select(
+                'p1.sku',
+                DB::raw('MAX(p1.id) as id'),
+                DB::raw('MAX(p1.name) as name'),
+                DB::raw('MAX(p1.thumbnail) as thumbnail'),
+                DB::raw('MAX(p1.price) as price')
+            )
+            ->whereNotNull('p1.sku')
+            ->where('p1.sku', '!=', '')
+            ->groupBy('p1.sku');
+
+        $productsByMl = DB::table('products as p2')
+            ->select(
+                'p2.ml',
+                DB::raw('MAX(p2.id) as id'),
+                DB::raw('MAX(p2.name) as name'),
+                DB::raw('MAX(p2.thumbnail) as thumbnail'),
+                DB::raw('MAX(p2.price) as price')
+            )
+            ->whereNotNull('p2.ml')
+            ->where('p2.ml', '!=', '')
+            ->groupBy('p2.ml');
+
+        $orders = DB::table('meli_orders as o');
+
+        if ($innerJoinOrderItems) {
+            $orders->join('meli_order_items as i', 'i.meli_order_id', '=', 'o.id');
+        } else {
+            $orders->leftJoin('meli_order_items as i', 'i.meli_order_id', '=', 'o.id');
+        }
+
+        return $orders
+
+            ->leftJoinSub($productsBySku, 'ps', function ($join) {
+                $join->on('ps.sku', '=', 'i.sku');
+            })
+
+            ->leftJoinSub($productsByMl, 'pm', function ($join) {
+                $join->on('pm.ml', '=', 'i.item_id');
+            })
+
+            ->where(function ($q) {
+                $q->whereRaw("COALESCE(LOWER(JSON_UNQUOTE(JSON_EXTRACT(o.raw, '$.fulfilled'))), 'false') <> 'true'")
+                  ->whereRaw("COALESCE(LOWER(o.shipping_mode), '') NOT IN ('fulfillment', 'full')")
+                  ->whereRaw("COALESCE(LOWER(o.shipping_logistic_type), '') NOT IN ('fulfillment', 'full')")
+                  ->whereRaw("COALESCE(LOWER(o.shipping_type), '') NOT LIKE '%full%'");
+            })
+
+            ->select([
+                'o.id as id_local',
+                'o.order_id as order_id',
+                'o.display_id as ml_display_id',
+                'o.status as order_status',
+                'o.created_at as fecha_pedido',
+                'o.shipping_process_date',
+                'o.shipping_id',
+                'o.shipping_status',
+                'o.shipping_substatus',
+                'o.shipping_mode',
+                'o.shipping_type',
+                'o.shipping_logistic_type',
+                'o.shipping_raw as order_shipping_raw',
+                'o.raw as raw_order',
+                DB::raw("JSON_UNQUOTE(JSON_EXTRACT(o.raw, '$.pack_id')) as raw_pack_id"),
+
+                'i.id as item_row_id',
+                'i.item_id',
+                'i.sku',
+                'i.quantity',
+                'i.unit_price',
+                DB::raw('COALESCE(i.title, "") as item_title'),
+                DB::raw('COALESCE(i.variation_text, "") as item_variation_text'),
+
+                'ps.name as sku_product_name',
+                'ps.thumbnail as sku_product_thumbnail',
+                'ps.price as sku_product_price',
+
+                'pm.name as ml_product_name',
+                'pm.thumbnail as ml_product_thumbnail',
+                'pm.price as ml_product_price',
+            ])
+            ->orderByDesc('o.created_at')
+            ->orderByDesc('o.order_id')
+            ->orderByDesc('i.id');
+    }
+
+    protected function resolveFecha(Request $request, bool $defaultTomorrow = false): string
+    {
+        $fecha = $request->input('fecha');
+
+        try {
+            if ($fecha) {
+                return Carbon::parse($fecha)->toDateString();
+            }
+
+            return $defaultTomorrow
+                ? now()->addDay()->toDateString()
+                : now()->toDateString();
+        } catch (\Throwable $e) {
+            return $defaultTomorrow
+                ? now()->addDay()->toDateString()
+                : now()->toDateString();
+        }
+    }
+
+    /**
+     * Zona horaria para ventanas de colecta MeLi (México). Ajustá con AMS_COLECTA_TIMEZONE en .env si operás otro estado.
+     */
+    protected function colectaBusinessTimezone(): string
+    {
+        return env('AMS_COLECTA_TIMEZONE', 'America/Mexico_City');
+    }
+
+    /**
+     * 1) shipping_raw = JSON del GET /shipments/{id} (sync reciente); 2) raw.shipping (suele ir sin status); 3) columnas.
+     */
+    protected function sqlEffectiveShippingStatus(): string
+    {
+        return "LOWER(TRIM(COALESCE(
+            NULLIF(TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(o.shipping_raw, '$.status')), '')), ''),
+            NULLIF(TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(o.raw, '$.shipping.status')), '')), ''),
+            NULLIF(TRIM(COALESCE(o.shipping_status, '')), '')
+        )))";
+    }
+
+    protected function sqlEffectiveShippingSubstatus(): string
+    {
+        return "LOWER(TRIM(COALESCE(
+            NULLIF(TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(o.shipping_raw, '$.substatus')), '')), ''),
+            NULLIF(TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(o.raw, '$.shipping.substatus')), '')), ''),
+            NULLIF(TRIM(COALESCE(o.shipping_substatus, '')), '')
+        )))";
+    }
+
+    /**
+     * Misma prioridad que sqlEffectiveShipping*: shipping_raw → raw.shipping → columnas (primer valor no vacío).
+     *
+     * @return array{status: string, substatus: string, label: string}
+     */
+    protected function resolveEffectiveMeliShippingFromRow(object $row): array
+    {
+        $shippingRaw = null;
+        $payload = $row->order_shipping_raw ?? null;
+        if ($payload !== null && $payload !== '') {
+            if (is_string($payload)) {
+                try {
+                    $shippingRaw = json_decode($payload, true, 512, JSON_THROW_ON_ERROR);
+                } catch (\Throwable) {
+                    $shippingRaw = null;
+                }
+            } elseif (is_array($payload)) {
+                $shippingRaw = $payload;
+            }
+        }
+
+        $raw = [];
+        if (!empty($row->raw_order)) {
+            try {
+                $raw = is_array($row->raw_order)
+                    ? $row->raw_order
+                    : json_decode((string) $row->raw_order, true, 512, JSON_THROW_ON_ERROR);
+            } catch (\Throwable) {
+                $raw = [];
+            }
+        }
+        $shipOrder = is_array($raw['shipping'] ?? null) ? $raw['shipping'] : [];
+
+        $st = '';
+        foreach ([data_get($shippingRaw, 'status'), data_get($shipOrder, 'status'), $row->shipping_status ?? ''] as $cand) {
+            $t = strtolower(trim((string) $cand));
+            if ($t !== '') {
+                $st = $t;
+                break;
+            }
+        }
+
+        $sub = '';
+        foreach ([data_get($shippingRaw, 'substatus'), data_get($shipOrder, 'substatus'), $row->shipping_substatus ?? ''] as $cand) {
+            $t = strtolower(trim((string) $cand));
+            if ($t !== '') {
+                $sub = $t;
+                break;
+            }
+        }
+
+        return [
+            'status' => $st,
+            'substatus' => $sub,
+            'label' => $this->labelEnvioAmsParaPantalla($st, $sub),
+        ];
+    }
+
+    protected function labelEnvioAmsParaPantalla(string $status, string $substatus): string
+    {
+        if (in_array($status, ['shipped', 'in_transit'], true)) {
+            return 'En camino';
+        }
+        if ($status === 'delivered' || $substatus === 'delivered') {
+            return 'Entregado';
+        }
+        if ($status === 'cancelled' || $substatus === 'cancelled') {
+            return 'Cancelado';
+        }
+        if ($status === 'ready_to_ship') {
+            if ($substatus === 'ready_to_print') {
+                return 'Listo para imprimir / empacar';
+            }
+            if ($substatus === 'printed') {
+                return 'Etiqueta impresa (llevar a colecta)';
+            }
+            if ($substatus !== '') {
+                return 'Listo para enviar · '.$substatus;
+            }
+
+            return 'Listo para enviar';
+        }
+        if ($status === 'pending' || $status === '') {
+            return $substatus !== '' ? 'Envío: '.$substatus : 'Estado de envío pendiente';
+        }
+
+        return $status !== '' ? $status.($substatus !== '' ? ' · '.$substatus : '') : 'Sin estado de envío';
+    }
+
+    /**
+     * Excluye pedidos ya enviados / en tránsito: solo ready_to_ship + subestados de etiqueta en tienda.
+     */
+    protected function applyProcesarSoloListosEnTiendaSinEnviar($query): void
+    {
+        $effSt = $this->sqlEffectiveShippingStatus();
+        $effSub = $this->sqlEffectiveShippingSubstatus();
+
+        $allowed = config('ams_colecta.procesar_allowed_substatuses', ['ready_to_print']);
+        $allowed = array_values(array_filter(array_map(static fn ($s) => strtolower(trim((string) $s)), is_array($allowed) ? $allowed : [])));
+        if ($allowed === []) {
+            $allowed = ['ready_to_print'];
+        }
+
+        $inList = implode(',', array_map(static function (string $s): string {
+            return "'".str_replace("'", "''", $s)."'";
+        }, $allowed));
+
+        $query->whereRaw("({$effSt}) = 'ready_to_ship'")
+            ->whereRaw("({$effSub}) IN ({$inList})")
+            ->whereRaw("({$effSt}) NOT IN ('shipped', 'in_transit', 'delivered', 'cancelled')");
+
+        $blockedSubs = config('ams_colecta.procesar_blocked_substatuses', []);
+        $blockedSubs = array_values(array_filter(array_map(static fn ($s) => strtolower(trim((string) $s)), is_array($blockedSubs) ? $blockedSubs : [])));
+        if ($blockedSubs !== []) {
+            $blockedIn = implode(',', array_map(static function (string $s): string {
+                return "'".str_replace("'", "''", $s)."'";
+            }, $blockedSubs));
+            $query->whereRaw("({$effSub}) NOT IN ({$blockedIn})");
+        }
+    }
+
+    /**
+     * Día elegido = foco de colecta.
+     *
+     * Modo estricto (config ams_colecta.strict_day_filter): evita meter dos días enteros de created_at.
+     * Ventana horaria: config `ams_colecta.window` (por defecto desde 12:00 del día anterior hasta 10:32 del día elegido).
+     *
+     * Modo legacy: comportamiento anterior (OR amplio).
+     */
+    protected function applyColectaProcesarDayFilter($query, string $fechaColectaYmd): void
+    {
+        $tz = $this->colectaBusinessTimezone();
+        $F = Carbon::createFromFormat('Y-m-d', $fechaColectaYmd, $tz)->startOfDay();
+
+        $w = config('ams_colecta.window', []);
+        $sh = (int) ($w['start_hour'] ?? 12);
+        $sm = (int) ($w['start_minute'] ?? 0);
+        $eh = (int) ($w['end_hour'] ?? 10);
+        $em = (int) ($w['end_minute'] ?? 32);
+
+        $windowStart = $F->copy()->subDay()->setTime(max(0, min(23, $sh)), max(0, min(59, $sm)), 0);
+        $windowEnd = $F->copy()->setTime(max(0, min(23, $eh)), max(0, min(59, $em)), 59);
+
+        $startUtc = $windowStart->clone()->timezone('UTC');
+        $endUtc = $windowEnd->clone()->timezone('UTC');
+        $dateF = $F->toDateString();
+        $datePrev = $F->copy()->subDay()->toDateString();
+
+        if (!config('ams_colecta.strict_day_filter', true)) {
+            $query->where(function ($q) use ($fechaColectaYmd, $dateF, $datePrev, $startUtc, $endUtc) {
+                $q->whereDate('o.created_at', '=', $fechaColectaYmd)
+                    ->orWhereDate('o.created_at', '=', $datePrev)
+                    ->orWhereDate('o.shipping_process_date', '=', $dateF)
+                    ->orWhereDate('o.shipping_process_date', '=', $datePrev)
+                    ->orWhere(function ($q2) use ($startUtc, $endUtc) {
+                        $q2->where('o.created_at', '>', $startUtc)
+                            ->where('o.created_at', '<=', $endUtc);
+                    });
+            });
+
+            return;
+        }
+
+        $merge = config('ams_colecta.merge_shipping_process_dates.' . $fechaColectaYmd);
+        $candidateDates = is_array($merge) && $merge !== []
+            ? array_values(array_unique(array_map(static fn ($d) => (string) $d, $merge)))
+            : [$dateF];
+
+        $query->where(function ($q) use ($candidateDates, $startUtc, $endUtc) {
+            $q->where(function ($qShip) use ($candidateDates) {
+                foreach ($candidateDates as $d) {
+                    $qShip->orWhereDate('o.shipping_process_date', '=', $d);
+                }
+            })->orWhere(function ($qCre) use ($candidateDates) {
+                foreach ($candidateDates as $d) {
+                    $qCre->orWhereDate('o.created_at', '=', $d);
+                }
+            })->orWhere(function ($q2) use ($startUtc, $endUtc) {
+                $q2->where('o.created_at', '>', $startUtc)
+                    ->where('o.created_at', '<=', $endUtc);
+            });
+        });
+    }
+
+    protected function renderPedidosProcesarInertia(
+        $rows,
+        string $fechaSeleccionada,
+        string $tituloPagina,
+        string $subtitulo,
+        string $formAction,
+        string $orden = 'fecha',
+        string $alcance = 'colecta'
+    ): Response {
+        // En "procesar" conviene unir por pack_id para que un mismo pedido con varios ítems
+        // se vea junto en una sola tarjeta (especialmente en tablet al empacar/imprimir).
+        $grouped = $this->computePedidosGrouped($rows, true);
+        $pedidos = $grouped['pedidos'];
+        if ($orden === 'marca') {
+            $pedidos = $this->sortPedidosPorMarca($pedidos);
+        }
+
+        return Inertia::render('Ams/PedidosProcesar', [
+            'pedidos' => $this->pedidosToInertiaArray($pedidos, $orden === 'marca'),
+            'fechaSeleccionada' => $fechaSeleccionada,
+            'totalPedidos' => $grouped['totalPedidos'],
+            'totalPiezas' => $grouped['totalPiezas'],
+            'tituloPagina' => $tituloPagina,
+            'subtitulo' => $subtitulo,
+            'formAction' => $formAction,
+            'orden' => $orden,
+            'alcance' => $alcance,
+        ]);
+    }
+
+    /**
+     * Orden global por marca (menor índice entre ítems del pedido); dentro de la misma marca, SKU alfanumérico.
+     * Los ítems dentro del pedido quedan ordenados por marca y luego por SKU (alfanumérico natural).
+     */
+    protected function sortPedidosPorMarca(Collection $pedidosAgrupados): Collection
+    {
+        return $pedidosAgrupados
+            ->map(function ($p) {
+                $items = collect($p->items)
+                    ->map(function ($i) {
+                        [$idx, $label] = AmsMarcaPedidos::resolve(
+                            (string) ($i->titulo ?? ''),
+                            (string) ($i->sku ?? '')
+                        );
+
+                        return (object) array_merge((array) $i, [
+                            'ams_marca_idx' => $idx,
+                            'ams_marca_label' => $label,
+                        ]);
+                    })
+                    ->sort(function ($a, $b) {
+                        $cmpMarca = ((int) ($a->ams_marca_idx ?? AmsMarcaPedidos::UNKNOWN_INDEX))
+                            <=> ((int) ($b->ams_marca_idx ?? AmsMarcaPedidos::UNKNOWN_INDEX));
+                        if ($cmpMarca !== 0) {
+                            return $cmpMarca;
+                        }
+
+                        $cmpSku = strnatcasecmp(
+                            $this->skuComparableValue((string) ($a->sku ?? '')),
+                            $this->skuComparableValue((string) ($b->sku ?? ''))
+                        );
+                        if ($cmpSku !== 0) {
+                            return $cmpSku;
+                        }
+
+                        return strnatcasecmp(
+                            mb_strtolower((string) ($a->titulo ?? '')),
+                            mb_strtolower((string) ($b->titulo ?? ''))
+                        );
+                    })
+                    ->values();
+
+                $minIdx = (int) $items->min('ams_marca_idx');
+                $primaryLabel = AmsMarcaPedidos::UNKNOWN_LABEL;
+                foreach ($items as $it) {
+                    if ((int) $it->ams_marca_idx === $minIdx) {
+                        $primaryLabel = (string) $it->ams_marca_label;
+                        break;
+                    }
+                }
+
+                return (object) [
+                    'group_key' => $p->group_key,
+                    'pack_id' => $p->pack_id ?? null,
+                    'order_id' => $p->order_id,
+                    'display_id' => $p->display_id,
+                    'ams_tipo' => $p->ams_tipo ?? 'OTRO',
+                    'fecha_pedido' => $p->fecha_pedido,
+                    'fecha_pedido_formateada' => $p->fecha_pedido_formateada,
+                    'ml_envio_status' => (string) ($p->ml_envio_status ?? ''),
+                    'ml_envio_substatus' => (string) ($p->ml_envio_substatus ?? ''),
+                    'ml_envio_label' => (string) ($p->ml_envio_label ?? ''),
+                    'items' => $items,
+                    'total_piezas' => $p->total_piezas,
+                    'total_pedido' => $p->total_pedido,
+                    'ams_marca_sort' => $minIdx,
+                    'ams_marca_label' => $primaryLabel,
+                    'ams_sku_sort' => $this->pedidoPrimarySkuSort($items),
+                ];
+            })
+            ->sort(function ($a, $b) {
+                $cmp = ((int) $a->ams_marca_sort) <=> ((int) $b->ams_marca_sort);
+                if ($cmp !== 0) {
+                    return $cmp;
+                }
+
+                $cmpSku = strnatcasecmp(
+                    (string) ($a->ams_sku_sort ?? ''),
+                    (string) ($b->ams_sku_sort ?? '')
+                );
+                if ($cmpSku !== 0) {
+                    return $cmpSku;
+                }
+
+                $ta = $a->fecha_pedido ? strtotime((string) $a->fecha_pedido) : 0;
+                $tb = $b->fecha_pedido ? strtotime((string) $b->fecha_pedido) : 0;
+                if ($tb !== $ta) {
+                    return $tb <=> $ta;
+                }
+
+                return strnatcasecmp((string) ($a->display_id ?? ''), (string) ($b->display_id ?? ''));
+            })
+            ->values();
+    }
+
+    protected function skuComparableValue(string $sku): string
+    {
+        $value = mb_strtolower(trim($sku));
+
+        return $value !== '' ? $value : 'zzzzzzzzzz';
+    }
+
+    protected function pedidoPrimarySkuSort(Collection $items): string
+    {
+        foreach ($items as $item) {
+            $sku = $this->skuComparableValue((string) ($item->sku ?? ''));
+            if ($sku !== 'zzzzzzzzzz') {
+                return $sku;
+            }
+        }
+
+        return 'zzzzzzzzzz';
+    }
+
+    /**
+     * Evita agrupar mal por pack_id inválido o la cadena "null" desde JSON/SQL.
+     */
+    protected function normalizeMeliPackId(mixed $value): ?string
+    {
+        if ($value === null) {
+            return null;
+        }
+        if (is_string($value)) {
+            $s = trim($value);
+            if ($s === '' || strcasecmp($s, 'null') === 0) {
+                return null;
+            }
+
+            return $s;
+        }
+        if (is_numeric($value)) {
+            $s = (string) $value;
+            if ($s === '0') {
+                return null;
+            }
+
+            return $s;
+        }
+
+        return null;
+    }
+
+    /**
+     * @param  bool  $mergeByPack  Si false, un renglón por orden ML (p. ej. pantalla "por procesar").
+     * @return array{pedidos: \Illuminate\Support\Collection, totalPedidos: int, totalPiezas: int, totalVendido: float}
+     */
+    protected function computePedidosGrouped($rows, bool $mergeByPack = true): array
+    {
+        $items = collect($rows)->map(function ($row) use ($mergeByPack) {
+            $raw = [];
+
+            if (!empty($row->raw_order)) {
+                try {
+                    $raw = is_array($row->raw_order)
+                        ? $row->raw_order
+                        : json_decode($row->raw_order, true, 512, JSON_THROW_ON_ERROR);
+                } catch (\Throwable $e) {
+                    $raw = [];
+                }
+            }
+
+            $packIdRaw = $row->raw_pack_id ?? null;
+            if ($packIdRaw === null || $packIdRaw === '') {
+                $packIdRaw = $raw['pack_id'] ?? null;
+            }
+            $packId = $this->normalizeMeliPackId($packIdRaw);
+
+            $orderIdStr = $row->order_id !== null && (string) $row->order_id !== ''
+                ? (string) $row->order_id
+                : '';
+            $orderGroupPart = $orderIdStr !== '' ? $orderIdStr : ('id_' . $row->id_local);
+
+            $groupKey = ($mergeByPack && $packId !== null)
+                ? ('pack_' . $packId)
+                : ('order_' . $orderGroupPart);
+
+            $rawItem = null;
+            $rawItems = $raw['order_items'] ?? [];
+
+            foreach ($rawItems as $candidate) {
+                $candidateItem = $candidate['item'] ?? [];
+                $candidateItemId = (string) ($candidateItem['id'] ?? '');
+                $candidateSku = (string) ($candidateItem['seller_sku'] ?? '');
+
+                if (
+                    $candidateItemId === (string) $row->item_id ||
+                    ($candidateSku !== '' && $candidateSku === (string) $row->sku)
+                ) {
+                    $rawItem = $candidate;
+                    break;
+                }
+            }
+
+            $rawItemInfo = $rawItem['item'] ?? [];
+            $variationAttributes = $rawItemInfo['variation_attributes'] ?? [];
+
+            $tituloBase = $row->item_title
+                ?: ($rawItemInfo['title']
+                ?? $row->sku_product_name
+                ?? $row->ml_product_name
+                ?? ('Producto SKU: ' . ($row->sku ?: $row->item_id)));
+
+            $variationText = trim((string) ($row->item_variation_text ?? ''));
+            $tono = $this->extractVariationLabel($variationAttributes);
+            $presentacion = $this->extractPresentationLabel($variationAttributes);
+
+            if ($variationText !== '' && !$this->titleAlreadyContainsText($tituloBase, $variationText)) {
+                $tituloBase .= ' - ' . $variationText;
+            } else {
+                if ($tono && !$this->titleAlreadyContainsText($tituloBase, $tono)) {
+                    $tituloBase .= ' - ' . $tono;
+                }
+
+                if ($presentacion && !$this->titleAlreadyContainsText($tituloBase, $presentacion)) {
+                    $tituloBase .= ' - ' . $presentacion;
+                }
+            }
+
+            $cantidad = (int) ($row->quantity ?? 0);
+            $precioUnitario = $row->unit_price !== null
+                ? (float) $row->unit_price
+                : (float) ($row->sku_product_price ?? $row->ml_product_price ?? 0);
+
+            $imagen = $row->sku_product_thumbnail
+                ?: $row->ml_product_thumbnail
+                ?: ($rawItemInfo['thumbnail'] ?? null);
+
+            $amsTipo = $this->classifyAmsTipo(
+                $row->shipping_mode,
+                $row->shipping_type,
+                $row->shipping_logistic_type,
+                $raw
+            );
+
+            $effEnvio = $this->resolveEffectiveMeliShippingFromRow($row);
+
+            return (object) [
+                'group_key' => $groupKey,
+                'pack_id' => $packId,
+                'id_local' => (int) $row->id_local,
+                'ml_display_id' => isset($row->ml_display_id) && $row->ml_display_id !== null && (string) $row->ml_display_id !== ''
+                    ? (string) $row->ml_display_id
+                    : null,
+                'order_id' => $orderIdStr,
+                'item_id' => (string) $row->item_id,
+                'sku' => (string) ($row->sku ?? ''),
+                'titulo' => $tituloBase,
+                'imagen' => $imagen,
+                'cantidad' => $cantidad,
+                'precio_unitario' => $precioUnitario,
+                'total_linea' => $cantidad * $precioUnitario,
+                'fecha_pedido' => $row->fecha_pedido,
+                'shipping_id' => isset($row->shipping_id) ? (string) $row->shipping_id : '',
+                'fecha_pedido_formateada' => $row->fecha_pedido
+                    ? Carbon::parse($row->fecha_pedido)->format('d/m/Y H:i')
+                    : null,
+                'ams_tipo' => $amsTipo,
+                'ml_envio_status' => $effEnvio['status'],
+                'ml_envio_substatus' => $effEnvio['substatus'],
+                'ml_envio_label' => $effEnvio['label'],
+            ];
+        });
+
+        $items = $this->removeDuplicateItems($items);
+
+        $pedidosAgrupados = $items
+            ->groupBy('group_key')
+            ->map(function (Collection $group) {
+                $primer = $group->sortByDesc('fecha_pedido')->first();
+
+                $headerLabel = $primer->ml_display_id
+                    ?: (trim((string) ($primer->order_id ?? '')) !== '' ? (string) $primer->order_id : null)
+                    ?: ('ID-' . $primer->id_local);
+
+                return (object) [
+                    'group_key' => $primer->group_key,
+                    'pack_id' => $primer->pack_id,
+                    'order_id' => $primer->order_id,
+                    'display_id' => $headerLabel,
+                    'ams_tipo' => $primer->ams_tipo ?? 'OTRO',
+                    'fecha_pedido' => $primer->fecha_pedido,
+                    'shipping_id' => (string) ($primer->shipping_id ?? ''),
+                    'fecha_pedido_formateada' => $primer->fecha_pedido_formateada,
+                    'ml_envio_status' => (string) ($primer->ml_envio_status ?? ''),
+                    'ml_envio_substatus' => (string) ($primer->ml_envio_substatus ?? ''),
+                    'ml_envio_label' => (string) ($primer->ml_envio_label ?? ''),
+                    'items' => $group->values(),
+                    'total_piezas' => (int) $group->sum('cantidad'),
+                    'total_pedido' => (float) $group->sum('total_linea'),
+                ];
+            })
+            ->sortByDesc(function ($pedido) {
+                return $pedido->fecha_pedido;
+            })
+            ->values();
+
+        $totalPedidos = $pedidosAgrupados->count();
+        $totalPiezas = (int) $pedidosAgrupados->sum('total_piezas');
+        $totalVendido = (float) $pedidosAgrupados->sum('total_pedido');
+
+        return [
+            'pedidos' => $pedidosAgrupados,
+            'totalPedidos' => $totalPedidos,
+            'totalPiezas' => $totalPiezas,
+            'totalVendido' => $totalVendido,
+        ];
+    }
+
+    protected function pedidosToInertiaArray(Collection $pedidosAgrupados, bool $incluirMarca = false): array
+    {
+        return $pedidosAgrupados
+            ->map(function ($p) use ($incluirMarca) {
+                $row = [
+                    'group_key' => $p->group_key,
+                    'order_id' => (string) $p->order_id,
+                    'display_id' => $p->display_id,
+                    'ams_tipo' => $p->ams_tipo ?? 'OTRO',
+                    'fecha_pedido_formateada' => $p->fecha_pedido_formateada,
+                    'shipping_id' => (string) ($p->shipping_id ?? ''),
+                    'ml_envio_status' => (string) ($p->ml_envio_status ?? ''),
+                    'ml_envio_substatus' => (string) ($p->ml_envio_substatus ?? ''),
+                    'ml_envio_label' => (string) ($p->ml_envio_label ?? ''),
+                    'total_piezas' => $p->total_piezas,
+                    'total_pedido' => (float) $p->total_pedido,
+                    'items' => collect($p->items)
+                        ->map(function ($i) use ($incluirMarca) {
+                            $item = [
+                                'item_id' => (string) ($i->item_id ?? ''),
+                                'titulo' => $i->titulo,
+                                'imagen' => $i->imagen,
+                                'cantidad' => (int) $i->cantidad,
+                                'sku' => (string) ($i->sku ?? ''),
+                                'precio_unitario' => (float) $i->precio_unitario,
+                                'total_linea' => (float) $i->total_linea,
+                            ];
+                            if ($incluirMarca && isset($i->ams_marca_label)) {
+                                $item['ams_marca_label'] = (string) $i->ams_marca_label;
+                            }
+
+                            return $item;
+                        })
+                        ->values()
+                        ->all(),
+                ];
+                if ($incluirMarca && isset($p->ams_marca_label)) {
+                    $row['ams_marca_label'] = (string) $p->ams_marca_label;
+                }
+
+                return $row;
+            })
+            ->values()
+            ->all();
+    }
+
+    /**
+     * Pantalla tablet: mensaje "Imprimiendo..." y disparo de impresión del PDF (sin abrir solo el visor).
+     */
+    public function shippingLabelPrintPage(Request $request, string $shippingId)
+    {
+        $shippingId = trim($shippingId);
+        if ($shippingId === '' || !ctype_digit($shippingId)) {
+            abort(422, 'shipping_id inválido');
+        }
+
+        $user = $request->user();
+        if (!$user || !$user->access_token) {
+            return redirect()
+                ->route('ams.pedidos.procesar')
+                ->with('error', 'No hay token de Mercado Libre para imprimir la etiqueta.');
+        }
+
+        return Inertia::render('Ams/ShippingLabelPrint', [
+            'shippingId' => $shippingId,
+            'pdfUrl' => route('ams.pedidos.shipping_label', ['shippingId' => $shippingId]),
+            'procesarUrl' => route('ams.pedidos.procesar'),
+        ]);
+    }
+
+    public function printShippingLabel(Request $request, string $shippingId)
+    {
+        $shippingId = trim($shippingId);
+        if ($shippingId === '' || !ctype_digit($shippingId)) {
+            abort(422, 'shipping_id inválido');
+        }
+
+        $user = $request->user();
+        if (!$user || !$user->access_token) {
+            return redirect()
+                ->back()
+                ->with('error', 'No hay token de Mercado Libre para imprimir la etiqueta.');
+        }
+
+        $endpoint = 'https://api.mercadolibre.com/shipment_labels';
+        $query = [
+            'shipment_ids' => $shippingId,
+            'response_type' => 'pdf',
+        ];
+
+        $ml = Http::withToken((string) $user->access_token)
+            ->withHeaders(['Accept' => 'application/pdf'])
+            ->timeout(25)
+            ->get($endpoint, $query);
+
+        if (!$ml->successful() || stripos((string) $ml->header('Content-Type', ''), 'pdf') === false) {
+            return redirect()
+                ->back()
+                ->with('error', 'No se pudo descargar la etiqueta desde Mercado Libre.');
+        }
+
+        $filename = "etiqueta_{$shippingId}.pdf";
+
+        return response($ml->body(), 200, [
+            'Content-Type' => 'application/pdf',
+            'Content-Disposition' => 'inline; filename="'.$filename.'"',
+            'Cache-Control' => 'no-store, no-cache, must-revalidate',
+        ]);
+    }
+
+    protected function removeDuplicateItems(Collection $items): Collection
+    {
+        return $items->unique(function ($item) {
+            return implode('|', [
+                (string) $item->group_key,
+                (string) $item->item_id,
+                (string) $item->sku,
+                (string) $item->titulo,
+                (string) $item->cantidad,
+                number_format((float) $item->precio_unitario, 2, '.', ''),
+            ]);
+        })->values();
+    }
+
+    protected function extractVariationLabel(array $variationAttributes): ?string
+    {
+        if (empty($variationAttributes)) {
+            return null;
+        }
+
+        $priorityNames = [
+            'Tono',
+            'HAIR_TONE',
+            'Color',
+            'COLOR',
+            'Color del rubor',
+            'BLUSH_COLOR',
+        ];
+
+        foreach ($priorityNames as $priority) {
+            foreach ($variationAttributes as $attr) {
+                $name = (string) ($attr['name'] ?? '');
+                $id = (string) ($attr['id'] ?? '');
+                $valueName = trim((string) ($attr['value_name'] ?? ''));
+
+                if ($valueName === '') {
+                    continue;
+                }
+
+                if ($name === $priority || $id === $priority) {
+                    return $valueName;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    protected function extractPresentationLabel(array $variationAttributes): ?string
+    {
+        if (empty($variationAttributes)) {
+            return null;
+        }
+
+        $priorityNames = [
+            'Presentación',
+            'HAIR_SHAMPOO_AND_CONDITIONER_PRESENTATION',
+            'Tipo de envase',
+            'PACKAGING_TYPE',
+        ];
+
+        foreach ($priorityNames as $priority) {
+            foreach ($variationAttributes as $attr) {
+                $name = (string) ($attr['name'] ?? '');
+                $id = (string) ($attr['id'] ?? '');
+                $valueName = trim((string) ($attr['value_name'] ?? ''));
+
+                if ($valueName === '') {
+                    continue;
+                }
+
+                if ($name === $priority || $id === $priority) {
+                    return $valueName;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    protected function titleAlreadyContainsText(string $title, string $text): bool
+    {
+        return mb_stripos($title, $text) !== false;
+    }
+
+    protected function classifyAmsTipo(
+        ?string $shippingMode,
+        ?string $shippingType,
+        ?string $shippingLogisticType,
+        array $raw
+    ): string {
+        $mode = strtolower(trim((string) ($shippingMode ?? '')));
+        $type = strtolower(trim((string) ($shippingType ?? '')));
+        $logistic = strtolower(trim((string) ($shippingLogisticType ?? '')));
+
+        $ship = is_array($raw['shipping'] ?? null) ? $raw['shipping'] : [];
+        $jsonLt = strtolower(trim((string) (data_get($ship, 'logistic_type') ?? '')));
+        $optName = strtolower(trim((string) (data_get($ship, 'shipping_option.name') ?? '')));
+        $optMethod = strtolower(trim((string) (data_get($ship, 'shipping_option.shipping_method_name') ?? '')));
+
+        if (data_get($raw, 'fulfilled') === true) {
+            return 'FULL';
+        }
+
+        if (in_array($mode, ['fulfillment', 'full'], true)
+            || in_array($logistic, ['fulfillment', 'full'], true)
+            || str_contains($type, 'full')) {
+            return 'FULL';
+        }
+
+        if ($mode === 'flex' || str_contains($type, 'flex') || str_contains($logistic, 'flex')) {
+            return 'FLEX';
+        }
+
+        $colectaLogistic = ['cross_docking', 'drop_off', 'xd_drop_off', 'self_service'];
+        if (in_array($type, $colectaLogistic, true)
+            || in_array($logistic, $colectaLogistic, true)
+            || in_array($jsonLt, $colectaLogistic, true)) {
+            return 'COLECTA';
+        }
+
+        if (str_contains($optName, 'colecta') || str_contains($optMethod, 'colecta')) {
+            return 'COLECTA';
+        }
+
+        return 'OTRO';
+    }
+}

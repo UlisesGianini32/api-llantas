@@ -3,7 +3,6 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
-use App\Models\Llanta;
 
 class ProductoCompuesto extends Model
 {
@@ -12,17 +11,19 @@ class ProductoCompuesto extends Model
     protected $fillable = [
         'llanta_id',
         'sku',
-        'descripcion',
         'tipo',
-        'stock', // 👈 CONSUMO (2 o 4)
+        'stock',
+        'descripcion',
         'title_familyname',
+        'costo',
+        'precio_ML',
         'MLM',
+        'price_mode', // ✅ IMPORTANTÍSIMO
     ];
 
     protected $appends = [
-        'stock_disponible',
-        'precio_ml_calculado',
-        'costo_calculado',
+        'precio_ml_real',
+        'costo_real',
         'titulo_real',
     ];
 
@@ -31,62 +32,22 @@ class ProductoCompuesto extends Model
         return $this->belongsTo(Llanta::class);
     }
 
-    protected static function booted()
+    public function getPrecioMlRealAttribute()
     {
-        static::creating(function ($producto) {
-            // set consumo por tipo si no viene
-            if (!$producto->stock) {
-                if ($producto->tipo === 'par') $producto->stock = 2;
-                if ($producto->tipo === 'juego4') $producto->stock = 4;
-            }
-
-            // sku autogenerado si no viene
-            if (empty($producto->sku)) {
-                $llanta = Llanta::find($producto->llanta_id);
-                if (!$llanta) return;
-
-                if ($producto->tipo === 'par') $producto->sku = $llanta->sku . '-2';
-                if ($producto->tipo === 'juego4') $producto->sku = $llanta->sku . '-4';
-            }
-        });
+        return $this->precio_ML ?? 0;
     }
 
-    // ✅ Stock disponible = stock_real / consumo
-    public function getStockDisponibleAttribute()
+    public function getCostoRealAttribute()
     {
-        if (!$this->llanta) return 0;
-
-        $consumo = (int) ($this->stock ?: 0);
-        if ($consumo <= 0) return 0;
-
-        return intdiv((int)$this->llanta->stock, $consumo);
+        return $this->costo ?? 0;
     }
 
-    public function getPrecioMlCalculadoAttribute()
-    {
-        if (!$this->llanta || !$this->llanta->precio_ML) return 0;
-
-        $consumo = (int) ($this->stock ?: 0);
-        if ($consumo <= 0) return 0;
-
-        return (float)$this->llanta->precio_ML * $consumo;
-    }
-
-    public function getCostoCalculadoAttribute()
-    {
-        if (!$this->llanta) return 0;
-
-        $consumo = (int) ($this->stock ?: 0);
-        if ($consumo <= 0) return 0;
-
-        return (float)$this->llanta->costo * $consumo;
-    }
-
-    // ✅ Título real: si compuesto no tiene, usa el de la llanta
     public function getTituloRealAttribute()
     {
-        return $this->title_familyname
-            ?? $this->llanta->title_familyname
-            ?? '—';
+        return $this->title_familyname ?? '—';
     }
+	public function meliPublications()
+{
+    return $this->hasMany(\App\Models\MeliPublication::class, 'sku', 'sku');
+}
 }

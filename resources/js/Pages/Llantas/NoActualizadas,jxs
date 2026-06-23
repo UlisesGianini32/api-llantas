@@ -1,0 +1,139 @@
+import { Link, router } from '@inertiajs/react'
+import AppShell from '@/Components/layout/AppShell'
+import PageSection from '@/Components/ui/PageSection'
+import Pagination from '@/Components/ui/Pagination'
+
+function SortLink({ col, label, filters }) {
+    const active = (filters.sort || 'sku') === col
+    const dir = filters.dir || 'asc'
+    const nextDir = active && dir === 'asc' ? 'desc' : 'asc'
+
+    return (
+        <button
+            type="button"
+            onClick={() =>
+                router.get('/llantas/no-actualizadas', {
+                    search: filters.search || '',
+                    sort: col,
+                    dir: nextDir,
+                }, { preserveState: true, preserveScroll: true })
+            }
+            className="inline-flex items-center gap-1 font-medium transition hover:text-indigo-600 dark:hover:text-indigo-400"
+        >
+            <span>{label}</span>
+            <span className="text-[10px] text-slate-400 dark:text-slate-500" aria-hidden>
+                {active ? (dir === 'asc' ? '▲' : '▼') : '↕'}
+            </span>
+        </button>
+    )
+}
+
+export default function LlantasNoActualizadas({ llantas, filters = {} }) {
+    const onSearch = (e) => {
+        e.preventDefault()
+        const fd = new FormData(e.currentTarget)
+        const search = fd.get('search') || ''
+
+        router.get('/llantas/no-actualizadas', {
+            search,
+            sort: filters.sort || 'sku',
+            dir: filters.dir || 'asc',
+        }, { preserveState: true, preserveScroll: true })
+    }
+
+    const rows = llantas?.data || []
+    const total = Number(llantas?.total ?? 0)
+    const searchActive = Boolean((filters.search || '').trim())
+    const emptyMessage = searchActive
+        ? 'No hay coincidencias con la búsqueda.'
+        : 'No hay llantas pendientes con este criterio.'
+
+    return (
+        <AppShell title="Llantas no actualizadas">
+            <div className="space-y-8">
+                <PageSection
+                    eyebrow="Inventario"
+                    title="Llantas no actualizadas"
+                    description="Referencias con actualización antigua o sin import reciente. Ordena columnas y filtra por texto."
+                />
+
+                <form onSubmit={onSearch} className="max-w-xl">
+                    <label htmlFor="search-no-act" className="mb-2 block text-sm font-semibold text-slate-900 dark:text-white">
+                        Buscar
+                    </label>
+                    <input
+                        id="search-no-act"
+                        type="text"
+                        name="search"
+                        defaultValue={filters.search || ''}
+                        placeholder="SKU, título, MLM…"
+                        className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-slate-900 outline-none transition focus:border-indigo-500 dark:border-neutral-700 dark:bg-neutral-950 dark:text-white"
+                    />
+                </form>
+
+                <div className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm dark:border-neutral-800 dark:bg-neutral-900">
+                    <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-6 py-4 dark:border-neutral-800">
+                        {llantas?.from != null && llantas?.to != null && total > 0 && (
+                            <p className="text-sm text-slate-600 dark:text-slate-400">
+                                Mostrando{' '}
+                                <span className="font-semibold text-slate-900 dark:text-white">
+                                    {llantas.from}–{llantas.to}
+                                </span>{' '}
+                                de {total.toLocaleString()}
+                            </p>
+                        )}
+                    </div>
+                    <div className="overflow-x-auto">
+                        <table className="w-full text-sm text-slate-700 dark:text-slate-300">
+                            <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-600 dark:bg-neutral-800/80 dark:text-slate-400">
+                                <tr>
+                                    <th className="px-4 py-3 text-left"><SortLink col="sku" label="SKU" filters={filters} /></th>
+                                    <th className="px-4 py-3 text-left"><SortLink col="marca" label="Marca" filters={filters} /></th>
+                                    <th className="px-4 py-3 text-left"><SortLink col="medida" label="Medida" filters={filters} /></th>
+                                    <th className="px-4 py-3 text-left"><SortLink col="descripcion" label="Descripción" filters={filters} /></th>
+                                    <th className="px-4 py-3 text-center"><SortLink col="stock" label="Stock" filters={filters} /></th>
+                                    <th className="px-4 py-3 text-center"><SortLink col="last_import_at" label="Última importación" filters={filters} /></th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {rows.length === 0 ? (
+                                    <tr>
+                                        <td colSpan={6} className="px-4 py-10 text-center text-slate-500 dark:text-slate-400">
+                                            {emptyMessage}
+                                        </td>
+                                    </tr>
+                                ) : (
+                                    rows.map((llanta) => (
+                                        <tr
+                                            key={llanta.id}
+                                            className="border-t border-slate-200 hover:bg-slate-50 dark:border-neutral-800 dark:hover:bg-neutral-800/60"
+                                        >
+                                            <td className="px-4 py-2 font-mono">
+                                                <Link
+                                                    href={`/llantas/${llanta.id}/editar`}
+                                                    className="text-blue-600 hover:underline dark:text-blue-400"
+                                                >
+                                                    {llanta.sku}
+                                                </Link>
+                                            </td>
+                                            <td className="px-4 py-2">{llanta.marca}</td>
+                                            <td className="px-4 py-2">{llanta.medida}</td>
+                                            <td className="px-4 py-2 text-slate-500 dark:text-slate-400">{llanta.descripcion}</td>
+                                            <td className="px-4 py-2 text-center font-bold text-amber-600 dark:text-amber-400">{llanta.stock}</td>
+                                            <td className="px-4 py-2 text-center text-xs text-slate-500 dark:text-slate-400">
+                                                {llanta.last_import_at ? new Date(llanta.last_import_at).toLocaleString() : 'Nunca'}
+                                            </td>
+                                        </tr>
+                                    ))
+                                )}
+                            </tbody>
+                        </table>
+                    </div>
+                    <div className="border-t border-slate-200 px-6 py-4 dark:border-neutral-800">
+                        <Pagination className="mt-0" links={llantas?.links || []} />
+                    </div>
+                </div>
+            </div>
+        </AppShell>
+    )
+}

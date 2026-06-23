@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use Illuminate\Http\Request;
 use Maatwebsite\Excel\Facades\Excel;
 use App\Imports\LlantasImport;
+use Inertia\Inertia;
 
 class ExcelImportController extends Controller
 {
@@ -13,7 +14,7 @@ class ExcelImportController extends Controller
      */
     public function vista()
     {
-        return view('excel.importar');
+        return Inertia::render('Excel/Importar');
     }
 
     /**
