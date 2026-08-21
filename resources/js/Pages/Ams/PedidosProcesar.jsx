@@ -1,5 +1,97 @@
 import AppShell from '@/Components/layout/AppShell'
+import { useState } from 'react'
 import { router } from '@inertiajs/react'
+import qz from 'qz-tray'
+
+let qzSecurityConfigured = false
+
+// AMS_PRIMARY_THERMAL_PRINTER_V2
+const THERMAL_PRINTER_STORAGE_KEY = 'ams_primary_thermal_printer_v2'
+
+function csrfToken() {
+    const metaToken = document
+        .querySelector('meta[name="csrf-token"]')
+        ?.getAttribute('content')
+
+    if (metaToken) {
+        return metaToken
+    }
+
+    const cookie = document.cookie
+        .split('; ')
+        .find((item) => item.startsWith('XSRF-TOKEN='))
+
+    return cookie
+        ? decodeURIComponent(cookie.substring('XSRF-TOKEN='.length))
+        : ''
+}
+
+function configureQzSecurity() {
+    if (qzSecurityConfigured) {
+        return
+    }
+
+    qz.security.setCertificatePromise((resolve, reject) => {
+        fetch('/qz/certificate', {
+            method: 'GET',
+            credentials: 'same-origin',
+            cache: 'no-store',
+            headers: {
+                Accept: 'text/plain',
+            },
+        })
+            .then(async (response) => {
+                const body = await response.text()
+
+                if (!response.ok) {
+                    throw new Error(
+                        body || `No se pudo cargar el certificado QZ (${response.status}).`
+                    )
+                }
+
+                return body
+            })
+            .then(resolve)
+            .catch(reject)
+    })
+
+    qz.security.setSignatureAlgorithm('SHA512')
+
+    qz.security.setSignaturePromise((toSign) => {
+        return (resolve, reject) => {
+            const token = csrfToken()
+
+            fetch('/qz/sign', {
+                method: 'POST',
+                credentials: 'same-origin',
+                cache: 'no-store',
+                headers: {
+                    Accept: 'text/plain',
+                    'Content-Type': 'application/json',
+                    ...(token ? { 'X-CSRF-TOKEN': token } : {}),
+                },
+                body: JSON.stringify({
+                    request: toSign,
+                }),
+            })
+                .then(async (response) => {
+                    const body = await response.text()
+
+                    if (!response.ok) {
+                        throw new Error(
+                            body || `No se pudo firmar la solicitud QZ (${response.status}).`
+                        )
+                    }
+
+                    return body.trim()
+                })
+                .then(resolve)
+                .catch(reject)
+        }
+    })
+
+    qzSecurityConfigured = true
+}
 
 function formatFechaCorta(iso) {
     if (!iso) {
@@ -59,12 +151,66 @@ function mlVentaUrl(pedido) {
     return `https://www.mercadolibre.com.mx/ventas?search=${term}`
 }
 
-function etiquetaUrl(pedido) {
+function etiquetaUrl(pedido, labelBaseUrl) {
     const shippingId = String(pedido?.shipping_id || '').trim()
     if (!shippingId) {
         return null
     }
-    return `/ams/pedidos/shipping-label/${encodeURIComponent(shippingId)}/print`
+
+    const base = String(labelBaseUrl || '/ams/pedidos/shipping-label').replace(/\/+$/, '')
+    return `${base}/${encodeURIComponent(shippingId)}/print`
+}
+
+function esImpresoraKamo(printerName) {
+    const name = String(printerName || '')
+        .trim()
+        .toLowerCase()
+
+    return name.includes('kamo ka-l1')
+        || name.includes('kamo')
+        || name.includes('td-402s')
+}
+
+function etiquetaKamoTsplUrl(pedido, labelBaseUrl) {
+    const shippingId = String(
+        pedido?.shipping_id || ''
+    ).trim()
+
+    if (!shippingId) {
+        return null
+    }
+
+    const base = String(
+        labelBaseUrl || '/ams/pedidos/shipping-label'
+    ).replace(/\/+$/, '')
+
+    return `${base}/${encodeURIComponent(shippingId)}/kamo-tspl`
+}
+
+function etiquetaKamoPngUrl(pedido, labelBaseUrl) {
+    const shippingId = String(
+        pedido?.shipping_id || ''
+    ).trim()
+
+    if (!shippingId) {
+        return null
+    }
+
+    const base = String(
+        labelBaseUrl || '/ams/pedidos/shipping-label'
+    ).replace(/\/+$/, '')
+
+    return `${base}/${encodeURIComponent(shippingId)}/kamo-png`
+}
+
+function etiquetaTermicaRawUrl(pedido, labelBaseUrl) {
+    const shippingId = String(pedido?.shipping_id || '').trim()
+    if (!shippingId) {
+        return null
+    }
+
+    const base = String(labelBaseUrl || '/ams/pedidos/shipping-label').replace(/\/+$/, '')
+    return `${base}/${encodeURIComponent(shippingId)}/zpl-raw`
 }
 
 export default function PedidosProcesar({
@@ -75,9 +221,409 @@ export default function PedidosProcesar({
     tituloPagina = 'AMS - Pedidos por procesar',
     subtitulo = 'Mostrando pedidos que te toca procesar el día:',
     formAction = '/ams/pedidos-procesar',
+    syncAction = '',
+    labelBaseUrl = '/ams/pedidos/shipping-label',
     orden = 'fecha',
     alcance = 'ml_listado',
+    meliAccounts = [],
+    selectedMeliAccountId = null,
+    selectedMeliAccountLabel = '',
 }) {
+    const [printingShippingId, setPrintingShippingId] = useState(null)
+    const [printerBusy, setPrinterBusy] = useState(false)
+    const [selectedThermalPrinter, setSelectedThermalPrinter] = useState(() => {
+        try {
+            return window.localStorage.getItem(THERMAL_PRINTER_STORAGE_KEY) || ''
+        } catch {
+            return ''
+        }
+    })
+
+    const connectQz = async () => {
+        configureQzSecurity()
+
+        if (!qz.websocket.isActive()) {
+            await qz.websocket.connect({
+                retries: 3,
+                delay: 1,
+            })
+        }
+    }
+
+    const listThermalPrinters = async () => {
+        await connectQz()
+
+        const found = await qz.printers.find()
+        const printers = (Array.isArray(found) ? found : [found])
+            .map((name) => String(name || '').trim())
+            .filter(Boolean)
+
+        if (printers.length === 0) {
+            throw new Error(
+                'QZ Tray no encontró impresoras instaladas en esta computadora.'
+            )
+        }
+
+        return printers
+    }
+
+    const saveThermalPrinter = (printer) => {
+        const normalized = String(printer || '').trim()
+
+        if (!normalized) {
+            return
+        }
+
+        setSelectedThermalPrinter(normalized)
+
+        try {
+            window.localStorage.setItem(
+                THERMAL_PRINTER_STORAGE_KEY,
+                normalized
+            )
+        } catch {
+            // La impresión puede continuar aunque el navegador bloquee localStorage.
+        }
+    }
+
+    const resolverImpresoraTermica = async (forceSelection = false) => {
+        const printers = await listThermalPrinters()
+        const saved = String(selectedThermalPrinter || '').trim()
+
+        if (!forceSelection && saved && printers.includes(saved)) {
+            return saved
+        }
+
+        const savedIndex = printers.indexOf(saved)
+        const zebraIndex = printers.findIndex((name) => {
+            const normalized = name.toLowerCase()
+
+            return normalized.includes('zebra')
+                || normalized.includes('zdesigner')
+                || normalized.includes('gk420')
+        })
+
+        const suggestedIndex = savedIndex >= 0
+            ? savedIndex
+            : (zebraIndex >= 0 ? zebraIndex : 0)
+
+        const list = printers
+            .map((name, index) => `${index + 1}. ${name}`)
+            .join('\n')
+
+        const answer = window.prompt(
+            'Impresoras detectadas por QZ Tray:\n\n'
+                + list
+                + '\n\nEscribe el número de la impresora térmica que deseas usar.',
+            String(suggestedIndex + 1)
+        )
+
+        if (answer === null) {
+            throw new Error('No seleccionaste una impresora.')
+        }
+
+        const index = Number.parseInt(String(answer).trim(), 10) - 1
+
+        if (!Number.isInteger(index) || index < 0 || index >= printers.length) {
+            throw new Error('El número de impresora seleccionado no es válido.')
+        }
+
+        const printer = printers[index]
+        saveThermalPrinter(printer)
+
+        return printer
+    }
+
+    const seleccionarImpresoraTermica = async () => {
+        setPrinterBusy(true)
+
+        try {
+            const printer = await resolverImpresoraTermica(true)
+
+            window.alert(
+                `Impresora guardada para esta computadora: ${printer}`
+            )
+        } catch (error) {
+            console.error('No se pudo seleccionar la impresora:', error)
+
+            const message = error instanceof Error
+                ? error.message
+                : String(error)
+
+            window.alert(`No se pudo seleccionar la impresora. ${message}`)
+        } finally {
+            setPrinterBusy(false)
+        }
+    }
+
+    const probarImpresoraTermica = async () => {
+        setPrinterBusy(true)
+
+        try {
+            const printer = await resolverImpresoraTermica(false)
+            const config = qz.configs.create(printer, {
+                encoding: 'UTF-8',
+            })
+
+            const testZpl = [
+                '^XA',
+                '^PW812',
+                '^LL1218',
+                '^FO80,100^A0N,55,55^FDPRUEBA DE IMPRESORA^FS',
+                '^FO80,190^A0N,38,38^FDAMS - ETIQUETA TERMICA^FS',
+                `^FO80,270^A0N,30,30^FD${printer.replace(/[\^~]/g, ' ')}^FS`,
+                '^FO80,350^GB650,3,3^FS',
+                '^FO80,410^A0N,32,32^FDSi ves esta etiqueta, QZ Tray funciona.^FS',
+                '^XZ',
+            ].join('\n')
+
+            await qz.print(config, [
+                {
+                    type: 'raw',
+                    format: 'command',
+                    flavor: 'plain',
+                    data: testZpl,
+                },
+            ])
+
+            window.alert(`Prueba enviada correctamente a: ${printer}`)
+        } catch (error) {
+            console.error('Error en prueba de impresora:', error)
+
+            const message = error instanceof Error
+                ? error.message
+                : String(error)
+
+            window.alert(`No se pudo imprimir la prueba. ${message}`)
+        } finally {
+            setPrinterBusy(false)
+        }
+    }
+
+    const imprimirTermica = async (pedido) => {
+        const shippingId = String(
+            pedido?.shipping_id || ''
+        ).trim()
+
+        const rawUrl = etiquetaTermicaRawUrl(
+            pedido,
+            labelBaseUrl
+        )
+
+        const kamoUrl = etiquetaKamoPngUrl(
+            pedido,
+            labelBaseUrl
+        )
+
+        if (!shippingId || !rawUrl) {
+            window.alert(
+                'Este pedido no tiene shipping_id.'
+            )
+            return
+        }
+
+        setPrintingShippingId(shippingId)
+
+        try {
+            const printer =
+                await resolverImpresoraTermica(false)
+
+            /*
+             * ============================================
+             * KAMO KA-L1
+             * ============================================
+             *
+             * No interpreta ZPL.
+             * Pedimos el PNG renderizado y QZ lo imprime
+             * como imagen mediante el driver de Windows.
+             */
+            if (esImpresoraKamo(printer)) {
+                const kamoTsplUrl =
+                    etiquetaKamoTsplUrl(
+                        pedido,
+                        labelBaseUrl
+                    )
+
+                if (!kamoTsplUrl) {
+                    throw new Error(
+                        'No se pudo generar la URL TSPL KAMO.'
+                    )
+                }
+
+                /*
+                 * Pedimos el archivo binario TSPL.
+                 */
+                const response = await fetch(
+                    kamoTsplUrl,
+                    {
+                        credentials: 'same-origin',
+                        cache: 'no-store',
+                        headers: {
+                            Accept:
+                                'application/octet-stream',
+                        },
+                    }
+                )
+
+                if (!response.ok) {
+                    const message =
+                        await response.text()
+
+                    throw new Error(
+                        message
+                        || `Error HTTP ${response.status}`
+                    )
+                }
+
+                const buffer =
+                    await response.arrayBuffer()
+
+                const bytes =
+                    new Uint8Array(buffer)
+
+                /*
+                 * Convertimos el binario a Base64
+                 * sin alterar ningún byte del BITMAP.
+                 */
+                let binary = ''
+
+                const chunkSize = 0x8000
+
+                for (
+                    let offset = 0;
+                    offset < bytes.length;
+                    offset += chunkSize
+                ) {
+                    const chunk = bytes.subarray(
+                        offset,
+                        Math.min(
+                            offset + chunkSize,
+                            bytes.length
+                        )
+                    )
+
+                    binary +=
+                        String.fromCharCode(...chunk)
+                }
+
+                const base64 =
+                    window.btoa(binary)
+
+                /*
+                 * RAW puro.
+                 *
+                 * La KAMO interpreta el TSPL directamente.
+                 */
+                const config =
+                    qz.configs.create(
+                        printer,
+                        {
+                            encoding: 'UTF-8',
+                        }
+                    )
+
+                await qz.print(
+                    config,
+                    [
+                        {
+                            type: 'raw',
+                            format: 'command',
+                            flavor: 'base64',
+                            data: base64,
+                        },
+                    ]
+                )
+
+                window.alert(
+                    `Etiqueta KAMO enviada correctamente a: ${printer}`
+                )
+
+                return
+            }
+
+            /*
+             * ============================================
+             * ZEBRA / 4BARCODE / ZPL
+             * ============================================
+             */
+            const response = await fetch(rawUrl, {
+                credentials: 'same-origin',
+                headers: {
+                    Accept: 'text/plain',
+                },
+            })
+
+            const body = await response.text()
+
+            if (!response.ok) {
+                throw new Error(
+                    body
+                    || `Error HTTP ${response.status}`
+                )
+            }
+
+            if (
+                !body.includes('^XA')
+                || !body.includes('^XZ')
+            ) {
+                throw new Error(
+                    'El servidor no devolvió una etiqueta ZPL válida.'
+                )
+            }
+
+            let zpl = body
+
+            const printerNormalized = normalizePrinterName(printer)
+
+            if (
+                printerNormalized.includes('4barcode')
+                || printerNormalized.includes('4b-2054a')
+            ) {
+                zpl = body.replace(
+                    '^XA',
+                    '^XA\n^LL1624'
+                )
+            }
+
+            const config = qz.configs.create(
+                printer,
+                {
+                    encoding: 'UTF-8',
+                }
+            )
+
+            await qz.print(config, [
+                {
+                    type: 'raw',
+                    format: 'command',
+                    flavor: 'plain',
+                    data: zpl,
+                },
+            ])
+
+            window.alert(
+                `Etiqueta enviada correctamente a: ${printer}`
+            )
+        } catch (error) {
+            console.error(
+                'Error al imprimir con QZ Tray:',
+                error
+            )
+
+            const message =
+                error instanceof Error
+                    ? error.message
+                    : String(error)
+
+            window.alert(
+                `No se pudo imprimir la etiqueta térmica. ${message}`
+            )
+        } finally {
+            setPrintingShippingId(null)
+        }
+    }
+
+
     const queryNav = (patch) => {
         router.get(
             formAction,
@@ -85,6 +631,7 @@ export default function PedidosProcesar({
                 fecha: fechaSeleccionada,
                 orden,
                 alcance,
+                account_id: selectedMeliAccountId || undefined,
                 ...patch,
             },
             { preserveState: true, preserveScroll: true }
@@ -112,6 +659,28 @@ export default function PedidosProcesar({
         queryNav({ alcance: nuevo })
     }
 
+    const setAccount = (accountId) => {
+        queryNav({ account_id: accountId })
+    }
+
+    const syncSecondaryOrders = () => {
+        if (!syncAction || !selectedMeliAccountId) {
+            return
+        }
+
+        router.post(
+            syncAction,
+            {
+                account_id: selectedMeliAccountId,
+                days: 7,
+                fecha: fechaSeleccionada,
+                orden,
+                alcance,
+            },
+            { preserveScroll: true }
+        )
+    }
+
     return (
         <AppShell title={tituloPagina}>
             <section className="bg-[#0b1220] min-h-[calc(100vh-4rem)] py-4 sm:py-6">
@@ -127,6 +696,45 @@ export default function PedidosProcesar({
                                     ) : null}
                                 </p>
                             </div>
+
+                            {meliAccounts.length > 0 ? (
+                                <div className="flex w-full flex-col gap-2 md:max-w-[260px]">
+                                    <label
+                                        htmlFor="meli-account"
+                                        className="text-xs font-medium uppercase tracking-wide text-slate-400"
+                                    >
+                                        Cuenta Mercado Libre
+                                    </label>
+
+                                    <select
+                                        id="meli-account"
+                                        value={selectedMeliAccountId || ''}
+                                        onChange={(event) => setAccount(event.target.value)}
+                                        className="rounded-lg border border-slate-500 bg-slate-800 px-4 py-2 text-white outline-none focus:border-sky-400"
+                                    >
+                                        {meliAccounts.map((account) => (
+                                            <option key={account.id} value={account.id}>
+                                                {account.nickname}
+                                            </option>
+                                        ))}
+                                    </select>
+
+                                    <button
+                                        type="button"
+                                        onClick={syncSecondaryOrders}
+                                        disabled={!selectedMeliAccountId}
+                                        className="rounded-lg border border-emerald-500/60 bg-emerald-700/25 px-4 py-2 text-sm font-semibold text-emerald-100 transition hover:bg-emerald-700/40 disabled:cursor-not-allowed disabled:opacity-50"
+                                    >
+                                        Sincronizar últimos 7 días
+                                    </button>
+
+                                    {selectedMeliAccountLabel ? (
+                                        <span className="text-xs text-slate-400">
+                                            Mostrando: {selectedMeliAccountLabel}
+                                        </span>
+                                    ) : null}
+                                </div>
+                            ) : null}
 
                             <form
                                 onSubmit={onSubmitFecha}
@@ -189,6 +797,18 @@ export default function PedidosProcesar({
                                     >
                                         Como ML · etiqueta lista
                                     </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => setAlcance('procesados')}
+                                        className={`rounded-lg border px-3 py-2 text-xs font-semibold transition sm:text-sm ${
+                                            alcance === 'procesados'
+                                                ? 'border-violet-400 bg-violet-500/20 text-violet-100'
+                                                : 'border-slate-500 bg-slate-800 text-slate-200 hover:bg-slate-700'
+                                        }`}
+                                        title="Pedidos con etiqueta impresa o cuyo envío ya avanzó"
+                                    >
+                                        Procesados
+                                    </button>
                                 </div>
                             </div>
 
@@ -240,12 +860,16 @@ export default function PedidosProcesar({
                                     <p className="text-3xl font-semibold text-white">
                                         {alcance === 'ml_listado'
                                             ? 'No hay pedidos con etiqueta lista en la base'
-                                            : 'No hay pedidos para esta fecha'}
+                                            : alcance === 'procesados'
+                                              ? 'No hay pedidos procesados para esta fecha'
+                                              : 'No hay pedidos para esta fecha'}
                                     </p>
                                     <p className="mt-3 text-lg text-slate-300">
                                         {alcance === 'ml_listado'
                                             ? 'Sincronizá órdenes desde ML o revisá que no sean Full (esos no entran en AMS).'
-                                            : 'Cambia la fecha o probá “Como ML · etiqueta lista” para ver todo lo listo para imprimir.'}
+                                            : alcance === 'procesados'
+                                              ? 'Cambia la fecha o vuelve a entrar para actualizar el estado de los envíos.'
+                                              : 'Cambia la fecha o probá “Como ML · etiqueta lista” para ver todo lo listo para imprimir.'}
                                     </p>
                                 </div>
                             ) : (
@@ -284,14 +908,54 @@ export default function PedidosProcesar({
                                                 ) : null}
                                             </div>
                                             <div className="flex items-center gap-2">
-                                                {etiquetaUrl(pedido) ? (
-                                                    <a
-                                                        href={etiquetaUrl(pedido)}
-                                                        className="rounded-md border border-lime-500/60 bg-lime-700/20 px-3 py-1.5 text-xs font-semibold text-lime-100 transition hover:bg-lime-700/35"
-                                                        title="Imprimir: pantalla de preparación y diálogo de impresión"
-                                                    >
-                                                        Imprimir etiqueta
-                                                    </a>
+                                                {etiquetaUrl(pedido, labelBaseUrl) ? (
+                                                    <>
+                                                        <a
+                                                            href={etiquetaUrl(pedido, labelBaseUrl)}
+                                                            className="rounded-md border border-lime-500/60 bg-lime-700/20 px-3 py-1.5 text-xs font-semibold text-lime-100 transition hover:bg-lime-700/35"
+                                                            title="Abre el PDF y el diálogo de impresión"
+                                                        >
+                                                            Imprimir PDF
+                                                        </a>
+
+                                                        <button
+                                                            type="button"
+                                                            onClick={seleccionarImpresoraTermica}
+                                                            disabled={printerBusy || printingShippingId !== null}
+                                                            className="rounded-md border border-violet-500/60 bg-violet-700/20 px-3 py-1.5 text-xs font-semibold text-violet-100 transition hover:bg-violet-700/35 disabled:cursor-wait disabled:opacity-60"
+                                                            title={selectedThermalPrinter
+                                                                ? `Impresora actual: ${selectedThermalPrinter}`
+                                                                : 'Elegir la impresora térmica de esta computadora'}
+                                                        >
+                                                            {printerBusy
+                                                                ? 'Buscando...'
+                                                                : (selectedThermalPrinter ? 'Cambiar impresora' : 'Elegir impresora')}
+                                                        </button>
+
+                                                        <button
+                                                            type="button"
+                                                            onClick={probarImpresoraTermica}
+                                                            disabled={printerBusy || printingShippingId !== null}
+                                                            className="rounded-md border border-fuchsia-500/60 bg-fuchsia-700/20 px-3 py-1.5 text-xs font-semibold text-fuchsia-100 transition hover:bg-fuchsia-700/35 disabled:cursor-wait disabled:opacity-60"
+                                                            title={selectedThermalPrinter
+                                                                ? `Enviar prueba a ${selectedThermalPrinter}`
+                                                                : 'Seleccionar impresora y enviar una etiqueta de prueba'}
+                                                        >
+                                                            Probar impresora
+                                                        </button>
+
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => imprimirTermica(pedido)}
+                                                            disabled={printingShippingId === String(pedido?.shipping_id || '').trim()}
+                                                            className="rounded-md border border-cyan-500/60 bg-cyan-700/20 px-3 py-1.5 text-xs font-semibold text-cyan-100 transition hover:bg-cyan-700/35 disabled:cursor-wait disabled:opacity-60"
+                                                            title="Imprime la etiqueta modificada mediante QZ Tray"
+                                                        >
+                                                            {printingShippingId === String(pedido?.shipping_id || '').trim()
+                                                                ? 'Imprimiendo...'
+                                                                : 'Imprimir térmica'}
+                                                        </button>
+                                                    </>
                                                 ) : (
                                                     <a
                                                         href={mlVentaUrl(pedido)}

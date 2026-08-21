@@ -14,9 +14,8 @@ use Illuminate\Support\Facades\Log;
  * Endpoint observado:
  *   GET https://www.syscom.mx/api/productos/{id}/existencias
  *
- * Auth: cookies del navegador del usuario (sesión NextAuth + cf_clearance de Cloudflare).
- * Las cookies se cargan desde config/syscom.php (env: SYSCOM_PORTAL_COOKIES). Cuando
- * vencen, hay que regenerarlas desde DevTools del navegador.
+ * Auth: opcional. GET /api/productos/{id}/existencias responde sin login en muchas cuentas;
+ * si Cloudflare bloquea el servidor, cargá cookies del navegador (SYSCOM_PORTAL_COOKIES).
  *
  * Respuesta típica:
  *   {
@@ -37,11 +36,7 @@ class SyscomPortalScraper
 
     public function isEnabled(): bool
     {
-        if (! (bool) config('syscom.portal_scrape_enabled', false)) {
-            return false;
-        }
-
-        return $this->cookies() !== '';
+        return (bool) config('syscom.portal_scrape_enabled', false);
     }
 
     /**

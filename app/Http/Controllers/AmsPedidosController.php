@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\MeliOrder;
 use App\Models\User;
 use App\Services\MeliOrderSyncService;
 use App\Support\AmsMarcaPedidos;
@@ -42,17 +43,40 @@ class AmsPedidosController extends Controller
         $fechaSeleccionada = $this->resolveFecha($request, false);
         $alcance = $this->resolveAlcanceProcesar($request);
 
-        $this->maybeRefreshProcesarShipments($request, $fechaSeleccionada, $alcance, $meliSync);
+        $this->maybeRefreshProcesarShipments(
+            $request,
+            $fechaSeleccionada,
+            $alcance,
+            $meliSync
+        );
 
-        $query = $this->procesarCandidateQuery($fechaSeleccionada, $alcance);
+        if ($alcance === 'procesados') {
+            $query = $this->processedMainOrdersQuery(
+                $fechaSeleccionada
+            );
+        } else {
+            $query = $this->procesarCandidateQuery(
+                $fechaSeleccionada,
+                $alcance
+            );
 
-        $this->applyProcesarSoloListosEnTiendaSinEnviar($query);
+            $this->applyProcesarSoloListosEnTiendaSinEnviar(
+                $query
+            );
+        }
 
         $rows = $query->get();
 
-        $subtitulo = $alcance === 'colecta'
-            ? 'Lote Flex/Colecta: solo envíos aún en tienda (listo para enviar / etiqueta). Ventana y feriados: config/ams_colecta.php. Referencia:'
-            : 'Etiqueta lista: pagado + listo para enviar + etiqueta por imprimir. Incluye filas sin ítems en BD y estados leídos del JSON si las columnas van atrasadas.';
+        if ($alcance === 'procesados') {
+            $subtitulo =
+                'Pedidos ya procesados, impresos o cuyo envío ya avanzó.';
+        } elseif ($alcance === 'colecta') {
+            $subtitulo =
+                'Lote Flex/Colecta: solo envíos aún en tienda (listo para enviar / etiqueta). Ventana y feriados: config/ams_colecta.php. Referencia:';
+        } else {
+            $subtitulo =
+                'Etiqueta lista: pagado + listo para enviar + etiqueta por imprimir. Incluye filas sin ítems en BD y estados leídos del JSON si las columnas van atrasadas.';
+        }
 
         return $this->renderPedidosProcesarInertia(
             $rows,
@@ -89,17 +113,110 @@ class AmsPedidosController extends Controller
     }
 
     /**
-     * colecta = Flex/Colecta + ventana de fecha (operación diaria).
-     * ml_listado = alineado al filtro ML “etiqueta lista” (más pedidos; incluye otros envíos Me2).
+     * colecta    = Flex/Colecta + ventana de fecha.
+     * ml_listado = etiqueta lista para imprimir.
+     * procesados = pedidos cuya etiqueta ya fue impresa o
+     *              cuyo envío ya avanzó.
      *
-     * @return 'colecta'|'ml_listado'
+     * @return 'colecta'|'ml_listado'|'procesados'
      */
     protected function resolveAlcanceProcesar(Request $request): string
     {
-        $v = strtolower(trim((string) $request->input('alcance', 'ml_listado')));
+        $v = strtolower(
+            trim(
+                (string) $request->input(
+                    'alcance',
+                    'ml_listado'
+                )
+            )
+        );
 
-        return $v === 'ml_listado' ? 'ml_listado' : 'colecta';
+        return in_array(
+            $v,
+            [
+                'colecta',
+                'ml_listado',
+                'procesados',
+            ],
+            true
+        )
+            ? $v
+            : 'ml_listado';
     }
+
+    /**
+     * Pedidos principales cuyo envío ya avanzó después
+     * de generar o imprimir la etiqueta.
+     */
+    protected function processedMainOrdersQuery(
+        string $fechaSeleccionada
+    ) {
+        $effectiveStatus =
+            $this->sqlEffectiveShippingStatus();
+
+        $effectiveSubstatus =
+            $this->sqlEffectiveShippingSubstatus();
+
+        return $this->basePedidosQuery(false)
+            ->whereDate(
+                'o.created_at',
+                $fechaSeleccionada
+            )
+            ->where(function ($query) {
+                $query
+                    ->whereRaw(
+                        "LOWER(COALESCE(o.status, '')) = 'paid'"
+                    )
+                    ->orWhereRaw(
+                        "LOWER(TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(o.raw, '$.status')), ''))) = 'paid'"
+                    );
+            })
+            ->where(function ($query) use (
+                $effectiveStatus,
+                $effectiveSubstatus
+            ) {
+                $query
+                    ->where(function ($printed) use (
+                        $effectiveStatus,
+                        $effectiveSubstatus
+                    ) {
+                        $printed
+                            ->whereRaw(
+                                "({$effectiveStatus}) = 'ready_to_ship'"
+                            )
+                            ->whereRaw(
+                                "({$effectiveSubstatus}) IN (
+                                    'printed',
+                                    'invoice_pending',
+                                    'waiting_for_carrier_authorization',
+                                    'packed',
+                                    'in_packing_list'
+                                )"
+                            );
+                    })
+                    ->orWhereRaw(
+                        "({$effectiveStatus}) IN (
+                            'handling',
+                            'shipped',
+                            'in_transit',
+                            'delivered'
+                        )"
+                    )
+                    ->orWhereRaw(
+                        "({$effectiveSubstatus}) IN (
+                            'printed',
+                            'packed',
+                            'in_packing_list',
+                            'dropped_off',
+                            'picked_up',
+                            'in_hub',
+                            'out_for_delivery',
+                            'delivered'
+                        )"
+                    );
+            });
+    }
+
 
     /**
      * @return 'fecha'|'marca'
@@ -190,15 +307,44 @@ class AmsPedidosController extends Controller
 
             $candidate = $this->basePedidosQuery(false)
                 ->where(function ($q) {
-                    $q->whereRaw("LOWER(COALESCE(o.status, '')) = 'paid'")
+                    $q->whereRaw(
+                        "LOWER(COALESCE(o.status, '')) = 'paid'"
+                    )
                         ->orWhereRaw(
                             "LOWER(TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(o.raw, '$.status')), ''))) = 'paid'"
                         );
                 })
-                ->whereRaw("({$effSt}) = 'ready_to_ship'")
-                ->whereRaw("({$effSub}) = 'ready_to_print'");
+                ->whereRaw(
+                    "({$effSt}) = 'ready_to_ship'"
+                )
+                ->whereRaw(
+                    "({$effSub}) = 'ready_to_print'"
+                );
+        } elseif ($alcance === 'procesados') {
+            /*
+             * Refrescamos todos los envíos pagados de la fecha.
+             *
+             * Esto permite detectar inmediatamente que una
+             * etiqueta pasó de ready_to_print a printed.
+             */
+            $candidate = $this->basePedidosQuery(false)
+                ->whereDate(
+                    'o.created_at',
+                    $fechaSeleccionada
+                )
+                ->where(function ($q) {
+                    $q->whereRaw(
+                        "LOWER(COALESCE(o.status, '')) = 'paid'"
+                    )
+                        ->orWhereRaw(
+                            "LOWER(TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(o.raw, '$.status')), ''))) = 'paid'"
+                        );
+                });
         } else {
-            $candidate = $this->procesarCandidateQuery($fechaSeleccionada, $alcance);
+            $candidate = $this->procesarCandidateQuery(
+                $fechaSeleccionada,
+                $alcance
+            );
         }
 
         $ids = $candidate
@@ -236,7 +382,7 @@ class AmsPedidosController extends Controller
     /**
      * @param  bool  $innerJoinOrderItems  false = LEFT JOIN (modo ML listado: no pierde pedidos sin meli_order_items).
      */
-    protected function basePedidosQuery(bool $innerJoinOrderItems = true)
+    protected function basePedidosQuery(bool $innerJoinOrderItems = true, ?int $meliAccountId = 1)
     {
         $productsBySku = DB::table('products as p1')
             ->select(
@@ -263,6 +409,13 @@ class AmsPedidosController extends Controller
             ->groupBy('p2.ml');
 
         $orders = DB::table('meli_orders as o');
+
+        // Este controlador corresponde a la cuenta principal.
+        // El filtro evita que sus listados y contadores mezclen pedidos
+        // de otras cuentas de Mercado Libre almacenadas en meli_orders.
+        if ($meliAccountId !== null) {
+            $orders->where('o.meli_account_id', $meliAccountId);
+        }
 
         if ($innerJoinOrderItems) {
             $orders->join('meli_order_items as i', 'i.meli_order_id', '=', 'o.id');
@@ -358,18 +511,18 @@ class AmsPedidosController extends Controller
     protected function sqlEffectiveShippingStatus(): string
     {
         return "LOWER(TRIM(COALESCE(
+            NULLIF(TRIM(COALESCE(o.shipping_status, '')), ''),
             NULLIF(TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(o.shipping_raw, '$.status')), '')), ''),
-            NULLIF(TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(o.raw, '$.shipping.status')), '')), ''),
-            NULLIF(TRIM(COALESCE(o.shipping_status, '')), '')
+            NULLIF(TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(o.raw, '$.shipping.status')), '')), '')
         )))";
     }
 
     protected function sqlEffectiveShippingSubstatus(): string
     {
         return "LOWER(TRIM(COALESCE(
+            NULLIF(TRIM(COALESCE(o.shipping_substatus, '')), ''),
             NULLIF(TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(o.shipping_raw, '$.substatus')), '')), ''),
-            NULLIF(TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(o.raw, '$.shipping.substatus')), '')), ''),
-            NULLIF(TRIM(COALESCE(o.shipping_substatus, '')), '')
+            NULLIF(TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(o.raw, '$.shipping.substatus')), '')), '')
         )))";
     }
 
@@ -1003,6 +1156,995 @@ class AmsPedidosController extends Controller
             'Content-Disposition' => 'inline; filename="'.$filename.'"',
             'Cache-Control' => 'no-store, no-cache, must-revalidate',
         ]);
+    }
+
+    /**
+     * Devuelve la etiqueta ZPL de la cuenta principal, con el contenido
+     * del pedido insertado en el espacio libre de la misma guía.
+     */
+    public function rawShippingLabelZpl(
+        Request $request,
+        string $shippingId
+    ) {
+        $shippingId = trim($shippingId);
+
+        if ($shippingId === '' || ! ctype_digit($shippingId)) {
+            abort(422, 'shipping_id inválido');
+        }
+
+        $user = $request->user();
+
+        if (! $user || empty($user->access_token)) {
+            return response(
+                'No hay token de Mercado Libre.',
+                422,
+                ['Content-Type' => 'text/plain; charset=UTF-8']
+            );
+        }
+
+        /*
+         * Un mismo PACK puede estar compuesto por varias órdenes de Mercado
+         * Libre que comparten el mismo shipping_id. Por eso se cargan todas,
+         * no únicamente la primera.
+         */
+        $orders = MeliOrder::query()
+            ->with([
+                'items' => function ($query) {
+                    $query->orderBy('id');
+                },
+            ])
+            ->where('shipping_id', $shippingId)
+            ->whereHas('meliAccount', function ($query) use ($user) {
+                $query
+                    ->where('user_id', $user->id)
+                    ->where('is_default', true);
+            })
+            ->orderBy('id')
+            ->get();
+
+        if ($orders->isEmpty()) {
+            return response(
+                'No se encontró el pedido de la cuenta principal.',
+                404,
+                ['Content-Type' => 'text/plain; charset=UTF-8']
+            );
+        }
+
+        /*
+         * Se utiliza la primera orden como contenedor para conservar el flujo
+         * existente, pero su relación items se reemplaza por el contenido
+         * consolidado de todas las órdenes del mismo envío.
+         */
+        $order = $orders->first();
+        $order->setRelation(
+            'items',
+            $this->mergeMainShippingLabelItems($orders)
+        );
+
+        $meliResponse = Http::withToken((string) $user->access_token)
+            ->withHeaders([
+                'Accept' =>
+                    'application/zip, application/octet-stream, text/plain',
+            ])
+            ->timeout(25)
+            ->get(
+                'https://api.mercadolibre.com/shipment_labels',
+                [
+                    'shipment_ids' => $shippingId,
+                    'response_type' => 'zpl2',
+                ]
+            );
+
+        if (! $meliResponse->successful() || $meliResponse->body() === '') {
+            $message = 'Mercado Libre no devolvió la etiqueta térmica.';
+
+            $json = $meliResponse->json();
+
+            if (is_array($json)) {
+                $apiMessage = trim((string) ($json['message'] ?? ''));
+
+                if ($apiMessage !== '') {
+                    $message .= ' '.$apiMessage;
+                }
+            }
+
+            return response(
+                $message,
+                502,
+                ['Content-Type' => 'text/plain; charset=UTF-8']
+            );
+        }
+
+        $body = $meliResponse->body();
+
+        /*
+         * Algunas respuestas llegan como ZPL directo.
+         */
+        if (
+            str_contains($body, '^XA')
+            && str_contains($body, '^XZ')
+        ) {
+            $zplFinal = $this->injectOrderContentsIntoMainZpl(
+                $body,
+                $order
+            );
+
+            return response($zplFinal, 200, [
+                'Content-Type' => 'text/plain; charset=UTF-8',
+                'Cache-Control' => 'no-store, no-cache, must-revalidate',
+                'Pragma' => 'no-cache',
+            ]);
+        }
+
+        if (! class_exists(\ZipArchive::class)) {
+            return response(
+                'La extensión ZIP de PHP no está habilitada.',
+                500,
+                ['Content-Type' => 'text/plain; charset=UTF-8']
+            );
+        }
+
+        $temporaryFile = tempnam(
+            sys_get_temp_dir(),
+            'meli_main_zpl_'
+        );
+
+        if ($temporaryFile === false) {
+            return response(
+                'No se pudo crear el archivo temporal.',
+                500,
+                ['Content-Type' => 'text/plain; charset=UTF-8']
+            );
+        }
+
+        try {
+            if (file_put_contents($temporaryFile, $body) === false) {
+                return response(
+                    'No se pudo guardar temporalmente la etiqueta.',
+                    500,
+                    ['Content-Type' => 'text/plain; charset=UTF-8']
+                );
+            }
+
+            $zip = new \ZipArchive();
+
+            if ($zip->open($temporaryFile) !== true) {
+                return response(
+                    'Mercado Libre devolvió una etiqueta térmica inválida.',
+                    502,
+                    ['Content-Type' => 'text/plain; charset=UTF-8']
+                );
+            }
+
+            $zpl = null;
+
+            for ($index = 0; $index < $zip->numFiles; $index++) {
+                $entryName = (string) $zip->getNameIndex($index);
+                $entryContents = $zip->getFromIndex($index);
+
+                if ($entryContents === false) {
+                    continue;
+                }
+
+                $extension = strtolower(
+                    pathinfo($entryName, PATHINFO_EXTENSION)
+                );
+
+                if (
+                    in_array($extension, ['txt', 'zpl'], true)
+                    || (
+                        str_contains($entryContents, '^XA')
+                        && str_contains($entryContents, '^XZ')
+                    )
+                ) {
+                    $zpl = $entryContents;
+                    break;
+                }
+            }
+
+            $zip->close();
+
+            if (
+                ! is_string($zpl)
+                || ! str_contains($zpl, '^XA')
+                || ! str_contains($zpl, '^XZ')
+            ) {
+                return response(
+                    'No se encontró código ZPL dentro del ZIP.',
+                    502,
+                    ['Content-Type' => 'text/plain; charset=UTF-8']
+                );
+            }
+
+            $zplFinal = $this->injectOrderContentsIntoMainZpl(
+                $zpl,
+                $order
+            );
+
+            return response($zplFinal, 200, [
+                'Content-Type' => 'text/plain; charset=UTF-8',
+                'Cache-Control' => 'no-store, no-cache, must-revalidate',
+                'Pragma' => 'no-cache',
+            ]);
+        } finally {
+            if (is_file($temporaryFile)) {
+                @unlink($temporaryFile);
+            }
+        }
+    }
+
+    /**
+     * Inserta el producto dentro de la misma etiqueta, antes de la
+     * zona del destinatario que comienza aproximadamente en Y=950.
+     */
+    /**
+     * Convierte la etiqueta ZPL personalizada del AMS principal
+     * a PNG 4x8 para impresoras que no interpretan ZPL,
+     * especialmente KAMO KA-L1.
+     */
+    public function kamoShippingLabelPng(
+        Request $request,
+        string $shippingId
+    ) {
+        $shippingId = trim($shippingId);
+
+        if ($shippingId === '' || ! ctype_digit($shippingId)) {
+            abort(422, 'shipping_id inválido');
+        }
+
+        /*
+         * Reutilizamos exactamente el mismo endpoint ZPL.
+         * De esta forma NO existen dos diseños diferentes.
+         */
+        $zplResponse = $this->rawShippingLabelZpl(
+            $request,
+            $shippingId
+        );
+
+        $status = method_exists($zplResponse, 'getStatusCode')
+            ? $zplResponse->getStatusCode()
+            : 500;
+
+        if ($status !== 200) {
+            return $zplResponse;
+        }
+
+        $zpl = method_exists($zplResponse, 'getContent')
+            ? (string) $zplResponse->getContent()
+            : '';
+
+        if (
+            $zpl === ''
+            || ! str_contains($zpl, '^XA')
+            || ! str_contains($zpl, '^XZ')
+        ) {
+            return response(
+                'No se pudo generar el ZPL personalizado.',
+                502,
+                ['Content-Type' => 'text/plain; charset=UTF-8']
+            );
+        }
+
+        /*
+         * Labelary:
+         * 8dpmm ~= 203 dpi
+         * 4 x 8 pulgadas
+         * índice 0 = primera etiqueta
+         */
+        try {
+            $render = Http::withHeaders([
+                    'Accept' => 'image/png',
+                    'Content-Type' => 'application/x-www-form-urlencoded',
+                ])
+                ->timeout(25)
+                ->withBody(
+                    $zpl,
+                    'application/x-www-form-urlencoded'
+                )
+                ->post(
+                    'https://api.labelary.com/v1/printers/8dpmm/labels/4x8/0/'
+                );
+        } catch (\Throwable $e) {
+            report($e);
+
+            return response(
+                'No se pudo convertir la etiqueta para KAMO.',
+                502,
+                ['Content-Type' => 'text/plain; charset=UTF-8']
+            );
+        }
+
+        if (! $render->successful() || $render->body() === '') {
+            $message = trim((string) $render->body());
+
+            return response(
+                'Labelary no pudo convertir la etiqueta.'
+                    .($message !== '' ? ' '.$message : ''),
+                502,
+                ['Content-Type' => 'text/plain; charset=UTF-8']
+            );
+        }
+
+        return response($render->body(), 200, [
+            'Content-Type' => 'image/png',
+            'Content-Disposition' =>
+                'inline; filename="kamo_'.$shippingId.'.png"',
+            'Cache-Control' =>
+                'no-store, no-cache, must-revalidate',
+            'Pragma' => 'no-cache',
+        ]);
+    }
+
+
+    /**
+     * Genera TSPL RAW para la KAMO KA-L1.
+     *
+     * El diseño proviene exactamente del mismo PNG 4x8 generado
+     * desde el ZPL personalizado.
+     */
+    public function kamoShippingLabelTspl(
+        Request $request,
+        string $shippingId
+    ) {
+        $shippingId = trim($shippingId);
+
+        if ($shippingId === '' || ! ctype_digit($shippingId)) {
+            abort(422, 'shipping_id inválido');
+        }
+
+        /*
+         * Reutilizamos la misma imagen PNG 4x8.
+         */
+        $pngResponse = $this->kamoShippingLabelPng(
+            $request,
+            $shippingId
+        );
+
+        $status = method_exists($pngResponse, 'getStatusCode')
+            ? $pngResponse->getStatusCode()
+            : 500;
+
+        if ($status !== 200) {
+            return $pngResponse;
+        }
+
+        $png = method_exists($pngResponse, 'getContent')
+            ? (string) $pngResponse->getContent()
+            : '';
+
+        if ($png === '') {
+            return response(
+                'La imagen KAMO está vacía.',
+                502,
+                ['Content-Type' => 'text/plain; charset=UTF-8']
+            );
+        }
+
+        if (! function_exists('imagecreatefromstring')) {
+            return response(
+                'GD no está disponible en PHP.',
+                500,
+                ['Content-Type' => 'text/plain; charset=UTF-8']
+            );
+        }
+
+        $source = @imagecreatefromstring($png);
+
+        if ($source === false) {
+            return response(
+                'No se pudo abrir la imagen KAMO.',
+                502,
+                ['Content-Type' => 'text/plain; charset=UTF-8']
+            );
+        }
+
+        /*
+         * Tamaño físico validado:
+         * 4 x 8 pulgadas a 203 dpi.
+         */
+        $width = 812;
+        $height = 1624;
+
+        /*
+         * BITMAP trabaja por bytes.
+         * 812 px necesitan 102 bytes:
+         *
+         * 102 * 8 = 816 pixels.
+         */
+        $bytesPerRow = (int) ceil($width / 8);
+
+        $canvas = imagecreatetruecolor(
+            $width,
+            $height
+        );
+
+        if ($canvas === false) {
+            imagedestroy($source);
+
+            return response(
+                'No se pudo crear el lienzo KAMO.',
+                500,
+                ['Content-Type' => 'text/plain; charset=UTF-8']
+            );
+        }
+
+        $white = imagecolorallocate(
+            $canvas,
+            255,
+            255,
+            255
+        );
+
+        imagefill(
+            $canvas,
+            0,
+            0,
+            $white
+        );
+
+        /*
+         * Escalamos al tamaño exacto 812x1624.
+         */
+        imagecopyresampled(
+            $canvas,
+            $source,
+            0,
+            0,
+            0,
+            0,
+            $width,
+            $height,
+            imagesx($source),
+            imagesy($source)
+        );
+
+        imagedestroy($source);
+
+        /*
+         * Generar datos BITMAP.
+         *
+         * POLARIDAD KAMO COMPROBADA:
+         *
+         * 1 = blanco
+         * 0 = negro
+         */
+        $bitmap = '';
+
+        for ($y = 0; $y < $height; $y++) {
+            for ($byteIndex = 0; $byteIndex < $bytesPerRow; $byteIndex++) {
+                $byte = 0;
+
+                for ($bit = 0; $bit < 8; $bit++) {
+                    $x = ($byteIndex * 8) + $bit;
+
+                    /*
+                     * Los cuatro píxeles extra de padding
+                     * deben permanecer blancos.
+                     */
+                    if ($x >= $width) {
+                        $byte |= (1 << (7 - $bit));
+                        continue;
+                    }
+
+                    $rgb = imagecolorat(
+                        $canvas,
+                        $x,
+                        $y
+                    );
+
+                    $r = ($rgb >> 16) & 0xFF;
+                    $g = ($rgb >> 8) & 0xFF;
+                    $b = $rgb & 0xFF;
+
+                    /*
+                     * Luminancia simple.
+                     */
+                    $gray = (
+                        ($r * 299)
+                        + ($g * 587)
+                        + ($b * 114)
+                    ) / 1000;
+
+                    /*
+                     * Fondo blanco = bit 1.
+                     *
+                     * Umbral relativamente alto para
+                     * conservar texto fino y códigos.
+                     */
+                    if ($gray >= 180) {
+                        $byte |= (1 << (7 - $bit));
+                    }
+                }
+
+                $bitmap .= chr($byte);
+            }
+        }
+
+        imagedestroy($canvas);
+
+        /*
+         * Comandos TSPL.
+         *
+         * No usamos REFERENCE ni SHIFT porque ya comprobamos
+         * que esta KAMO no los maneja bien.
+         */
+        $header =
+            "SIZE 4 in,8 in\r\n"
+            ."GAP 0,0\r\n"
+            ."DIRECTION 1\r\n"
+            ."CLS\r\n"
+            ."BITMAP 0,0,"
+            .$bytesPerRow
+            .","
+            .$height
+            .",0,";
+
+        $footer =
+            "\r\n"
+            ."PRINT 1,1\r\n";
+
+        $tspl = $header
+            .$bitmap
+            .$footer;
+
+        return response($tspl, 200, [
+            'Content-Type' =>
+                'application/octet-stream',
+
+            'Content-Disposition' =>
+                'inline; filename="kamo_'
+                .$shippingId
+                .'.prn"',
+
+            'Content-Length' =>
+                strlen($tspl),
+
+            'Cache-Control' =>
+                'no-store, no-cache, must-revalidate',
+
+            'Pragma' => 'no-cache',
+        ]);
+    }
+
+
+    protected function injectOrderContentsIntoMainZpl(
+        string $zpl,
+        MeliOrder $order
+    ): string {
+        /*
+         * ETIQUETA 4x8 - AMS PRINCIPAL
+         *
+         * Mismo diseño validado físicamente en AMS secundaria:
+         *
+         * CONTENIDO DEL PAQUETE
+         *
+         * 2x TITULO
+         * SKU: XXXXX
+         *
+         * La guía original de Mercado Libre se desplaza hacia abajo
+         * para reservar la zona superior.
+         */
+        $zpl = $this->shiftOriginalMainMercadoLibreZpl(
+            $zpl,
+            340,
+            -18
+        );
+
+        $extraZpl = $this->buildCompactMainOrderContentsZpl(
+            $order,
+            315
+        );
+
+        /*
+         * Insertamos nuestro bloque inmediatamente después de ^XA.
+         */
+        $xaPosition = strpos($zpl, '^XA');
+
+        if ($xaPosition !== false) {
+            $insertAt = $xaPosition + 3;
+
+            return substr($zpl, 0, $insertAt)
+                ."
+"
+                .$extraZpl
+                ."
+"
+                .substr($zpl, $insertAt);
+        }
+
+        return $zpl;
+    }
+    /**
+     * Consolida todos los artículos de las órdenes que pertenecen al mismo
+     * shipping_id. Si una misma línea aparece más de una vez, suma cantidades.
+     *
+     * @param  Collection<int, MeliOrder>  $orders
+     * @return Collection<int, object>
+     */
+    protected function mergeMainShippingLabelItems(
+        Collection $orders
+    ): Collection {
+        $merged = [];
+
+        foreach ($orders as $order) {
+            $items = $order->relationLoaded('items')
+                ? $order->items
+                : $order->items()->orderBy('id')->get();
+
+            foreach ($items as $item) {
+                $title = trim((string) ($item->title ?? ''));
+                $sku = trim((string) ($item->sku ?? ''));
+                $itemId = trim((string) ($item->item_id ?? ''));
+                $variationText = trim(
+                    (string) ($item->variation_text ?? '')
+                );
+
+                $keyParts = [
+                    $sku !== '' ? 'sku:'.$sku : 'item:'.$itemId,
+                    'variation:'.$variationText,
+                    'title:'.$title,
+                ];
+
+                $key = implode('|', $keyParts);
+
+                if (! isset($merged[$key])) {
+                    $merged[$key] = (object) [
+                        'id' => (int) ($item->id ?? 0),
+                        'item_id' => $itemId,
+                        'title' => $title,
+                        'sku' => $sku,
+                        'variation_text' => $variationText,
+                        'quantity' => 0,
+                    ];
+                }
+
+                $merged[$key]->quantity += max(
+                    1,
+                    (int) ($item->quantity ?? 1)
+                );
+            }
+        }
+
+        return collect(array_values($merged))
+            ->sortBy('id')
+            ->values();
+    }
+
+    /**
+     * Genera el contenido compacto para el espacio Y=870 a Y=945.
+     */
+    protected function buildCompactMainOrderContentsZpl(
+        MeliOrder $order,
+        int $contentHeight = 315
+    ): string {
+        /*
+         * Los items ya vienen consolidados por shipping_id desde
+         * mergeMainShippingLabelItems().
+         */
+        $items = $order->items;
+
+        $lines = [
+            '^FX CONTENIDO DEL PAQUETE AMS PRINCIPAL ^FS',
+
+            /*
+             * Caja superior centrada.
+             */
+            '^FO20,15^GB772,315,2^FS',
+
+            /*
+             * Barra negra superior.
+             */
+            '^FO20,15^GB772,48,48^FS',
+
+            /*
+             * Título blanco sobre negro.
+             */
+            '^FO175,22^A0N,32,32^FR^FDCONTENIDO DEL PAQUETE^FS',
+        ];
+
+        if ($items->isEmpty()) {
+            $lines[] =
+                '^FO75,95^A0N,31,31^FDSIN PRODUCTOS REGISTRADOS^FS';
+
+            $lines[] =
+                '^FO75,140^A0N,27,27^FDSKU: N/A^FS';
+
+            return implode("
+", $lines);
+        }
+
+        /*
+         * Máximo cinco productos visibles.
+         */
+        $itemsToPrint = $items->take(5);
+
+        $count = $itemsToPrint->count();
+
+        /*
+         * Ajustamos tamaños automáticamente según cantidad.
+         */
+        if ($count <= 3) {
+            $titleFont = 30;
+            $skuFont = 25;
+            $rowHeight = 78;
+        } elseif ($count === 4) {
+            $titleFont = 26;
+            $skuFont = 22;
+            $rowHeight = 63;
+        } else {
+            $titleFont = 23;
+            $skuFont = 20;
+            $rowHeight = 52;
+        }
+
+        $y = 75;
+
+        foreach ($itemsToPrint as $item) {
+            $quantity = max(
+                1,
+                (int) ($item->quantity ?? 1)
+            );
+
+            $title = $this->cleanMainZplLabelText(
+                (string) ($item->title ?? '')
+            );
+
+            if ($title === '') {
+                $title = 'PRODUCTO';
+            }
+
+            /*
+             * Evitamos que un título demasiado largo invada el
+             * siguiente producto.
+             */
+            if (mb_strlen($title) > 48) {
+                $title = mb_substr($title, 0, 45).'...';
+            }
+
+            $sku = $this->cleanMainZplLabelText(
+                (string) ($item->sku ?? '')
+            );
+
+            if ($sku === '') {
+                $sku = 'N/A';
+            }
+
+            $productText = $quantity.'x '.$title;
+
+            /*
+             * Título en pseudo-negrita.
+             */
+            $lines[] =
+                '^FO70,'.$y
+                .'^A0N,'.$titleFont.','.$titleFont
+                .'^FB680,1,0,L,0'
+                .'^FD'.$productText.'^FS';
+
+            $lines[] =
+                '^FO71,'.$y
+                .'^A0N,'.$titleFont.','.$titleFont
+                .'^FB680,1,0,L,0'
+                .'^FD'.$productText.'^FS';
+
+            /*
+             * SKU grande y en negrita debajo.
+             */
+            $skuY = $y + $titleFont + 5;
+
+            $lines[] =
+                '^FO90,'.$skuY
+                .'^A0N,'.$skuFont.','.$skuFont
+                .'^FDSKU: '.$sku.'^FS';
+
+            $lines[] =
+                '^FO91,'.$skuY
+                .'^A0N,'.$skuFont.','.$skuFont
+                .'^FDSKU: '.$sku.'^FS';
+
+            $y += $rowHeight;
+        }
+
+        /*
+         * Si existen más de cinco líneas consolidadas.
+         */
+        $remaining = max(
+            0,
+            $items->count() - $itemsToPrint->count()
+        );
+
+        if ($remaining > 0) {
+            $lines[] =
+                '^FO520,300^A0N,18,18'
+                .'^FD+'.$remaining.' PRODUCTO(S)^FS';
+        }
+
+        return implode("
+", $lines);
+    }
+    /**
+     * Limpia texto dinámico para que no rompa los comandos ZPL.
+     */
+    /**
+     * Mueve hacia abajo todos los elementos ZPL cuya coordenada Y sea igual
+     * o superior al límite indicado. También alarga físicamente la etiqueta.
+     */
+    /**
+     * Desplaza la guía original de Mercado Libre para reservar
+     * la zona superior de contenido en la etiqueta 4x8.
+     */
+    protected function shiftOriginalMainMercadoLibreZpl(
+        string $zpl,
+        int $offsetY,
+        int $offsetX = 0
+    ): string {
+        /*
+         * Mover todos los campos ^FO y ^FT.
+         */
+        $zpl = preg_replace_callback(
+            '/\^(FO|FT)(-?\d+),(-?\d+)/',
+            static function (array $match) use (
+                $offsetX,
+                $offsetY
+            ): string {
+                $command = $match[1];
+
+                $x = (int) $match[2];
+                $y = (int) $match[3];
+
+                $x += $offsetX;
+                $y += $offsetY;
+
+                /*
+                 * Evitamos coordenadas horizontales negativas.
+                 */
+                $x = max(0, $x);
+
+                return '^'.$command.$x.','.$y;
+            },
+            $zpl
+        ) ?? $zpl;
+
+        /*
+         * Ancho real aproximado de 4 pulgadas a 203 dpi.
+         */
+        if (preg_match('/\^PW\d+/', $zpl)) {
+            $zpl = preg_replace(
+                '/\^PW\d+/',
+                '^PW812',
+                $zpl,
+                1
+            ) ?? $zpl;
+        } else {
+            $zpl = preg_replace(
+                '/\^XA/',
+                "^XA\n^PW812",
+                $zpl,
+                1
+            ) ?? $zpl;
+        }
+
+        /*
+         * Largo 4x8 aproximado a 203 dpi.
+         */
+        if (preg_match('/\^LL\d+/', $zpl)) {
+            $zpl = preg_replace(
+                '/\^LL\d+/',
+                '^LL1624',
+                $zpl,
+                1
+            ) ?? $zpl;
+        } else {
+            $zpl = preg_replace(
+                '/\^XA/',
+                "^XA\n^LL1624",
+                $zpl,
+                1
+            ) ?? $zpl;
+        }
+
+        /*
+         * Limitar los recuadros ^GB para que no rebasen el
+         * ancho físico que ya validamos con la Kamo.
+         */
+        $zpl = preg_replace_callback(
+            '/\^FO(\d+),(\d+)\^GB(\d+),(\d+),(\d+)/',
+            static function (array $match): string {
+                $x = (int) $match[1];
+                $y = (int) $match[2];
+
+                $width = (int) $match[3];
+                $height = (int) $match[4];
+                $thickness = (int) $match[5];
+
+                /*
+                 * Dejamos margen derecho físico.
+                 */
+                $maximumWidth = max(
+                    1,
+                    792 - $x
+                );
+
+                if ($width > $maximumWidth) {
+                    $width = $maximumWidth;
+                }
+
+                return '^FO'
+                    .$x.','.$y
+                    .'^GB'
+                    .$width.','.$height.','.$thickness;
+            },
+            $zpl
+        ) ?? $zpl;
+
+        return $zpl;
+    }
+
+    protected function shiftMainZplLowerSection(
+        string $zpl,
+        int $fromY,
+        int $offset
+    ): string {
+        $zpl = preg_replace_callback(
+            '/\^(FO|FT)(-?\d+),(-?\d+)/',
+            static function (array $match) use ($fromY, $offset): string {
+                $command = $match[1];
+                $x = (int) $match[2];
+                $y = (int) $match[3];
+
+                if ($y >= $fromY) {
+                    $y += $offset;
+                }
+
+                return '^'.$command.$x.','.$y;
+            },
+            $zpl
+        ) ?? $zpl;
+
+        /*
+         * Aumenta la longitud configurada de la etiqueta para que la parte
+         * desplazada no quede fuera del área imprimible.
+         */
+        $zpl = preg_replace_callback(
+            '/\^LL(\d+)/',
+            static function (array $match) use ($offset): string {
+                return '^LL'.((int) $match[1] + $offset);
+            },
+            $zpl,
+            1
+        ) ?? $zpl;
+
+        return $zpl;
+    }
+
+    protected function cleanMainZplLabelText(string $text): string
+    {
+        $text = trim($text);
+
+        if ($text === '') {
+            return '';
+        }
+
+        $text = \Illuminate\Support\Str::ascii($text);
+
+        $text = str_replace(
+            ['^', '~', '\\'],
+            [' ', ' ', '/'],
+            $text
+        );
+
+        $text = preg_replace(
+            '/[\x00-\x1F\x7F]/',
+            ' ',
+            $text
+        ) ?? $text;
+
+        $text = preg_replace(
+            '/\s+/',
+            ' ',
+            $text
+        ) ?? $text;
+
+        return strtoupper(trim($text));
     }
 
     protected function removeDuplicateItems(Collection $items): Collection

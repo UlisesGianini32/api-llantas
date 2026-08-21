@@ -1,20 +1,31 @@
 <?php
 
 use App\Http\Controllers\AmsPedidosController;
+use App\Http\Controllers\AmsSecondaryOrdersController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\ExcelImportController;
 use App\Http\Controllers\LlantaController;
+use App\Http\Controllers\MeliBatchRepublishController;
 use App\Http\Controllers\MeliCompareController;
+use App\Http\Controllers\MeliFullStockController;
 use App\Http\Controllers\MeliMessagingController;
+use App\Http\Controllers\MeliQuestionController;
 use App\Http\Controllers\MeliPublishController;
 use App\Http\Controllers\MeliRepublishController;
+use App\Http\Controllers\MeliSecondaryPublicationController;
 use App\Http\Controllers\PriceRulesController;
 use App\Http\Controllers\ProductoCompuestoController;
 use App\Http\Controllers\ProductoController;
 use App\Http\Controllers\ProductoSyncController;
 use App\Http\Controllers\Settings\ProfileController;
 use App\Http\Controllers\SyscomMeliController;
+use App\Http\Controllers\SystemHealthController;
+use App\Http\Controllers\SystemActionController;
+use App\Http\Controllers\SystemLogController;
+use App\Http\Controllers\SystemQueueController;
+use App\Http\Controllers\SystemServerController;
+use App\Http\Controllers\QzTrayController;
 use Illuminate\Support\Facades\Route;
 use Laravel\Fortify\Features;
 
@@ -23,6 +34,42 @@ Route::get('/auth/meli/callback', [AuthController::class, 'handleMeliCallback'])
     ->name('meli.callback');
 
 Route::middleware('auth')->group(function () {
+    // SISTEMA
+    Route::get('/sistema/estado', [SystemHealthController::class, 'index'])
+        ->name('system.health.index');
+
+
+    Route::get('/sistema/servidor/metricas', [SystemServerController::class, 'metrics'])
+        ->name('system.server.metrics');
+
+    // CENTRO DE CONTROL
+    Route::get('/sistema/colas', [SystemQueueController::class, 'index'])
+        ->name('system.queues.index');
+    Route::post('/sistema/colas/retry-all', [SystemQueueController::class, 'retryAll'])
+        ->name('system.queues.retry-all');
+    Route::post('/sistema/colas/flush', [SystemQueueController::class, 'flush'])
+        ->name('system.queues.flush');
+    Route::post('/sistema/colas/{uuid}/retry', [SystemQueueController::class, 'retry'])
+        ->name('system.queues.retry');
+    Route::delete('/sistema/colas/{uuid}', [SystemQueueController::class, 'destroy'])
+        ->name('system.queues.destroy');
+
+    Route::get('/sistema/logs', [SystemLogController::class, 'index'])
+        ->name('system.logs.index');
+
+    Route::get('/sistema/acciones', fn () => inertia('System/Actions'))
+        ->name('system.actions.index');
+    Route::post('/sistema/acciones/{action}', [SystemActionController::class, 'run'])
+        ->whereIn('action', [
+            'cache-clear',
+            'config-clear',
+            'route-clear',
+            'view-clear',
+            'queue-restart',
+            'schedule-run',
+        ])
+        ->name('system.actions.run');
+
     // DASHBOARD
     Route::get('/dashboard', [DashboardController::class, 'index'])->name('dashboard');
 
@@ -59,16 +106,159 @@ Route::middleware('auth')->group(function () {
         ->whereNumber('flow')
         ->name('meli.messaging.reply');
 
-    // PEDIDOS
+    Route::get('/meli/preguntas', [MeliQuestionController::class, 'index'])
+        ->name('meli.questions.index');
+    Route::post('/meli/preguntas/sincronizar', [MeliQuestionController::class, 'sync'])
+        ->name('meli.questions.sync');
+    Route::post('/meli/preguntas/{question}/responder', [MeliQuestionController::class, 'answer'])
+        ->whereNumber('question')
+        ->name('meli.questions.answer');
+
+    // PEDIDOS PRINCIPALES
     Route::get('/ams/pedidos', [AmsPedidosController::class, 'index'])->name('ams.pedidos.index');
     Route::get('/ams/pedidos-procesar', [AmsPedidosController::class, 'procesar'])->name('ams.pedidos.procesar');
     Route::get('/ams/pedidos-manana', [AmsPedidosController::class, 'procesarManana'])->name('ams.pedidos.manana');
-    Route::get('/ams/pedidos/shipping-label/{shippingId}/print', [AmsPedidosController::class, 'shippingLabelPrintPage'])
-        ->name('ams.pedidos.shipping_label_print');
-    Route::get('/ams/pedidos/shipping-label/{shippingId}', [AmsPedidosController::class, 'printShippingLabel'])
-        ->name('ams.pedidos.shipping_label');
+
+    Route::get(
+        '/ams/pedidos/shipping-label/{shippingId}/print',
+        [AmsPedidosController::class, 'shippingLabelPrintPage']
+    )->name('ams.pedidos.shipping_label_print');
+
+    Route::get(
+        '/ams/pedidos/shipping-label/{shippingId}',
+        [AmsPedidosController::class, 'printShippingLabel']
+    )->name('ams.pedidos.shipping_label');
+
+Route::get(
+    '/ams/pedidos/shipping-label/{shippingId}/zpl-raw',
+    [AmsPedidosController::class, 'rawShippingLabelZpl']
+)
+    ->whereNumber('shippingId')
+    ->name('ams.pedidos.shipping_label_zpl_raw');
+
+
+Route::get(
+    '/ams/pedidos/shipping-label/{shippingId}/kamo-png',
+    [AmsPedidosController::class, 'kamoShippingLabelPng']
+)
+    ->whereNumber('shippingId')
+    ->name('ams.pedidos.shipping_label_kamo_png');
+
+
+Route::get(
+    '/ams/pedidos/shipping-label/{shippingId}/kamo-tspl',
+    [AmsPedidosController::class, 'kamoShippingLabelTspl']
+)
+    ->whereNumber('shippingId')
+    ->name('ams.pedidos.shipping_label_kamo_tspl');
+
+// PEDIDOS - CUENTAS SECUNDARIAS
+Route::get(
+    '/ams/pedidos-secundaria',
+    [AmsSecondaryOrdersController::class, 'procesar']
+)->name('ams.secondary.procesar');
+
+Route::post(
+    '/ams/pedidos-secundaria/sync',
+    [AmsSecondaryOrdersController::class, 'sync']
+)->name('ams.secondary.sync');
+
+Route::get(
+    '/ams/secundaria/pedidos/shipping-label/{shippingId}/print',
+    [AmsSecondaryOrdersController::class, 'shippingLabelPrintPage']
+)
+    ->whereNumber('shippingId')
+    ->name('ams.secondary.shipping_label_print');
+
+Route::get(
+    '/ams/secundaria/pedidos/shipping-label/{shippingId}/zpl',
+    [AmsSecondaryOrdersController::class, 'downloadShippingLabelZpl']
+)
+    ->whereNumber('shippingId')
+    ->name('ams.secondary.shipping_label_zpl');
+
+
+Route::get(
+    '/ams/secundaria/pedidos/shipping-label/{shippingId}/kamo-png',
+    [AmsSecondaryOrdersController::class, 'kamoShippingLabelPng']
+)
+    ->whereNumber('shippingId')
+    ->name('ams.secondary.shipping_label_kamo_png');
+
+Route::get(
+    '/ams/secundaria/pedidos/shipping-label/{shippingId}/kamo-tspl',
+    [AmsSecondaryOrdersController::class, 'kamoShippingLabelTspl']
+)
+    ->whereNumber('shippingId')
+    ->name('ams.secondary.shipping_label_kamo_tspl');
+
+Route::get(
+    '/ams/secundaria/pedidos/shipping-label/{shippingId}',
+    [AmsSecondaryOrdersController::class, 'printShippingLabel']
+)
+    ->whereNumber('shippingId')
+    ->name('ams.secondary.shipping_label');
+
+Route::get(
+    '/ams/secundaria/pedidos/shipping-label/{shippingId}/zpl-raw',
+    [AmsSecondaryOrdersController::class, 'rawShippingLabelZpl']
+)
+    ->whereNumber('shippingId')
+    ->name('ams.secondary.shipping_label_zpl_raw');
+
+        //QZTRAY
+        Route::get('/qz/certificate', [QzTrayController::class, 'certificate'])
+    ->name('qz.certificate');
+
+    Route::post('/qz/sign', [QzTrayController::class, 'sign'])
+    ->name('qz.sign');
 
     // MERCADO LIBRE
+    Route::post('/producto/ml/batch-republish', [MeliBatchRepublishController::class, 'store'])
+        ->name('producto.ml.batch-republish');
+
+    Route::delete('/producto/ml/secondary-publications', [MeliSecondaryPublicationController::class, 'destroy'])
+        ->name('producto.ml.secondary-publications.destroy');
+
+
+    // CENTRO DE PUBLICACIONES MERCADO LIBRE
+    Route::get('/meli/publicaciones', [MeliSecondaryPublicationController::class, 'index'])
+        ->name('meli.publications.index');
+    Route::get('/meli/publicaciones/{publication}/editar', [MeliSecondaryPublicationController::class, 'edit'])
+        ->name('meli.publications.edit');
+
+
+    Route::put('/meli/publicaciones/{publication}', [MeliSecondaryPublicationController::class, 'update'])
+        ->whereNumber('publication')
+        ->name('meli.publications.update');
+
+    Route::post('/meli/publicaciones/{publication}/refresh', [MeliSecondaryPublicationController::class, 'refresh'])
+        ->whereNumber('publication')
+        ->name('meli.publications.refresh');
+
+    Route::patch('/meli/publicaciones/{publication}/status', [MeliSecondaryPublicationController::class, 'changeStatus'])
+        ->whereNumber('publication')
+        ->name('meli.publications.status');
+
+    Route::delete('/meli/publicaciones/{publication}', [MeliSecondaryPublicationController::class, 'destroy'])
+        ->whereNumber('publication')
+        ->name('meli.publications.destroy');
+
+
+    // INVENTARIO FULL MERCADO LIBRE
+    Route::get('/meli/full', [MeliFullStockController::class, 'index'])
+        ->name('meli.full.index');
+
+    Route::get('/meli/full/recommendations/export', [MeliFullStockController::class, 'exportRecommendations'])
+        ->name('meli.full.recommendations.export');
+
+    Route::post('/meli/full/sync', [MeliFullStockController::class, 'sync'])
+        ->name('meli.full.sync');
+
+    Route::post('/meli/full/{mlm}/sync', [MeliFullStockController::class, 'syncOne'])
+        ->where('mlm', '[A-Za-z0-9]+')
+        ->name('meli.full.sync-one');
+
     Route::post('/ml/publications/{pub}/refresh', [MeliRepublishController::class, 'refreshPublication'])
         ->name('ml.publications.refresh');
 
@@ -153,24 +343,57 @@ Route::middleware('auth')->group(function () {
     Route::get('/importar-excel', [ExcelImportController::class, 'vista'])->name('excel.vista');
     Route::post('/importar-excel', [ExcelImportController::class, 'importar'])->name('excel.importar');
 
-    // SYSCOM → MERCADO LIBRE (catálogo sucursal Hermosillo, publicación 1 clic)
+    // SYSCOM → MERCADO LIBRE
     Route::get('/syscom-ml', [SyscomMeliController::class, 'index'])->name('syscom.meli.index');
     Route::get('/syscom-ml/{id}/editar', [SyscomMeliController::class, 'editWeb'])->name('syscom.meli.edit');
     Route::put('/syscom-ml/{id}', [SyscomMeliController::class, 'updateWeb'])->name('syscom.meli.update');
-    Route::post('/syscom-ml/{id}/price/manual', [SyscomMeliController::class, 'setPriceManual'])->name('syscom.meli.price.manual');
-    Route::post('/syscom-ml/{id}/price/auto', [SyscomMeliController::class, 'setPriceAuto'])->name('syscom.meli.price.auto');
-    Route::post('/syscom-ml/{id}/price/recalc', [SyscomMeliController::class, 'recalcPrice'])->name('syscom.meli.price.recalc');
-    Route::get('/syscom-ml/meli-categories/browse', [SyscomMeliController::class, 'meliCategoriesBrowse'])->name('syscom.meli.categories.browse');
-    Route::get('/syscom-ml/meli-categories/search', [SyscomMeliController::class, 'meliCategoriesSearch'])->name('syscom.meli.categories.search');
-    Route::post('/syscom-ml/sync-catalog', [SyscomMeliController::class, 'requestCatalogSync'])->name('syscom.meli.sync');
-    Route::post('/syscom-ml/import-search', [SyscomMeliController::class, 'importSearchFromSyscom'])->name('syscom.meli.import_search');
-    Route::post('/syscom-ml/refresh-status', [SyscomMeliController::class, 'refreshPublicationStatus'])->name('syscom.meli.refresh_status');
-    Route::post('/syscom-ml/refresh-prices-page', [SyscomMeliController::class, 'refreshPricesOnPage'])->name('syscom.meli.refresh_prices_page');
-    Route::post('/syscom-ml/sync-prices-page', [SyscomMeliController::class, 'syncPricesOnPage'])->name('syscom.meli.sync_prices_page');
+
+    Route::post('/syscom-ml/{id}/price/manual', [SyscomMeliController::class, 'setPriceManual'])
+        ->name('syscom.meli.price.manual');
+
+    Route::post('/syscom-ml/{id}/price/auto', [SyscomMeliController::class, 'setPriceAuto'])
+        ->name('syscom.meli.price.auto');
+
+    Route::post('/syscom-ml/{id}/price/recalc', [SyscomMeliController::class, 'recalcPrice'])
+        ->name('syscom.meli.price.recalc');
+
+    Route::get('/syscom-ml/meli-categories/browse', [SyscomMeliController::class, 'meliCategoriesBrowse'])
+        ->name('syscom.meli.categories.browse');
+
+    Route::get('/syscom-ml/meli-categories/search', [SyscomMeliController::class, 'meliCategoriesSearch'])
+        ->name('syscom.meli.categories.search');
+
+    Route::post('/syscom-ml/sync-catalog', [SyscomMeliController::class, 'requestCatalogSync'])
+        ->name('syscom.meli.sync');
+
+    Route::post('/syscom-ml/import-search', [SyscomMeliController::class, 'importSearchFromSyscom'])
+        ->name('syscom.meli.import_search');
+
+    Route::post('/syscom-ml/refresh-status', [SyscomMeliController::class, 'refreshPublicationStatus'])
+        ->name('syscom.meli.refresh_status');
+
+    Route::post('/syscom-ml/refresh-prices-page', [SyscomMeliController::class, 'refreshPricesOnPage'])
+        ->name('syscom.meli.refresh_prices_page');
+
+    Route::post('/syscom-ml/sync-prices-page', [SyscomMeliController::class, 'syncPricesOnPage'])
+        ->name('syscom.meli.sync_prices_page');
+
     Route::post('/syscom-ml/{id}/sync-price', [SyscomMeliController::class, 'syncPriceToMl'])
         ->whereNumber('id')
         ->name('syscom.meli.sync_price');
-    Route::post('/syscom-ml/publish/{id}', [SyscomMeliController::class, 'publish'])->name('syscom.meli.publish');
+
+    Route::post('/syscom-ml/publish/{id}', [SyscomMeliController::class, 'publish'])
+        ->name('syscom.meli.publish');
+
+    Route::post(
+        '/syscom-ml/publish-categorized-marketmax',
+        [
+            SyscomMeliController::class,
+            'publishCategorizedMarketmax',
+        ]
+    )->name(
+        'syscom.meli.publish_categorized_marketmax'
+    );
 
     // PRICE RULES
     Route::get('/price-rules', [PriceRulesController::class, 'index'])->name('price_rules.index');
@@ -201,7 +424,10 @@ Route::middleware('auth')->group(function () {
         ->middleware(
             when(
                 Features::canManageTwoFactorAuthentication()
-                && Features::optionEnabled(Features::twoFactorAuthentication(), 'confirmPassword'),
+                && Features::optionEnabled(
+                    Features::twoFactorAuthentication(),
+                    'confirmPassword'
+                ),
                 ['password.confirm'],
                 [],
             )

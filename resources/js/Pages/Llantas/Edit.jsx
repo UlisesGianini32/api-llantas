@@ -31,6 +31,13 @@ export default function Edit({ llanta, filters }) {
 
         form.put(`/llantas/${llanta.id}`, {
             preserveScroll: true,
+            onSuccess: () => {
+                router.visit(backUrl, {
+                    preserveScroll: true,
+                    preserveState: true,
+                    replace: true,
+                })
+            },
         })
     }
 

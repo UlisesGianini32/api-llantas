@@ -3,6 +3,8 @@
 namespace App\Http\Middleware;
 
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Inertia\Middleware;
 
 class HandleInertiaRequests extends Middleware
@@ -44,6 +46,12 @@ class HandleInertiaRequests extends Middleware
                 'ok' => fn () => $request->session()->get('ok'),
                 'err' => fn () => $request->session()->get('err'),
             ],
+            'meli_questions_pending' => fn () => $user && Schema::hasTable('meli_questions')
+                ? DB::table('meli_questions')
+                    ->where('user_id', $user->id)
+                    ->where('status', 'UNANSWERED')
+                    ->count()
+                : 0,
         ];
     }
 }

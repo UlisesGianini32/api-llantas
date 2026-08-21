@@ -51,6 +51,8 @@ function mxn(n) {
 
 const COLA_OPTIONS = [
     { value: '', label: 'Todo el catálogo' },
+    { value: 'categorizado', label: 'Categorizados' },
+    { value: 'publicando', label: 'Publicando' },
     { value: 'en_cola', label: 'En cola ML' },
     { value: 'pendiente', label: 'Pendiente publicar' },
     { value: 'publicado', label: 'Con MLM' },
@@ -63,7 +65,14 @@ export default function Index({
     sucursal,
     recibesEstimateConfigured = false,
     meliLinked = false,
-    queueCounts = { total: 0, pendiente: 0, publicado: 0, error: 0 },
+    queueCounts = {
+        total: 0,
+        pendiente: 0,
+        publicado: 0,
+        error: 0,
+        publicando: 0,
+        categorizado: 0,
+    },
 }) {
     const { auth, flash = {} } = usePage().props
     const [refreshing, setRefreshing] = useState(false)
@@ -71,6 +80,9 @@ export default function Index({
     const [refreshingPrices, setRefreshingPrices] = useState(false)
     const [syncingPriceId, setSyncingPriceId] = useState(null)
     const [importingSearch, setImportingSearch] = useState(false)
+    const [bulkPublishing, setBulkPublishing] = useState(false)
+    const [gtinByProduct, setGtinByProduct] = useState({})
+    const [retryingGtinId, setRetryingGtinId] = useState(null)
     const [columnsOpen, setColumnsOpen] = useState(false)
     const [columnVis, setColumnVis] = useState(defaultColumnVisibility)
 
@@ -139,7 +151,7 @@ export default function Index({
     const qForm = useForm({ q: filters?.q || '', cola: filters?.cola || '' })
     const publishForm = useForm({
         category_id: '',
-        official_store_mode: 'tobeauty',
+        official_store_mode: 'marketmax',
         price_scope: 'llanta',
         universal_code: '',
     })
@@ -263,6 +275,34 @@ export default function Index({
         )
     }
 
+    const publishCategorizedMarketmax = (limit = null) => {
+        if (!auth?.user?.meli_linked) {
+            alert('Vinculá tu cuenta de Mercado Libre primero.')
+            return
+        }
+
+        const total = Number(queueCounts?.categorizado || 0)
+
+        const message = limit
+            ? `Se enviará a la cola una prueba de hasta ${limit} productos categorizados, con stock y sin MLM, exclusivamente a MARKETMAX. Los productos que fallen por GTIN u otra validación quedarán en Error y los demás continuarán. ¿Continuar?`
+            : `Se enviarán a la cola los productos categorizados disponibles de los ${total} categorizados actuales. Solo se intentarán los que tengan stock, no tengan MLM y no estén ya publicándose o en Error. El destino será exclusivamente MARKETMAX. ¿Continuar?`
+
+        if (!confirm(message)) {
+            return
+        }
+
+        setBulkPublishing(true)
+
+        router.post(
+            '/syscom-ml/publish-categorized-marketmax',
+            limit ? { limit } : {},
+            {
+                preserveScroll: true,
+                onFinish: () => setBulkPublishing(false),
+            }
+        )
+    }
+
     const refreshMlStatus = () => {
         if (!auth?.user?.meli_linked) {
             alert('Vinculá Mercado Libre primero.')
@@ -279,6 +319,114 @@ export default function Index({
             {
                 preserveScroll: true,
                 onFinish: () => setRefreshing(false),
+            }
+        )
+    }
+
+    const needsGtin = (row) => {
+        if (!row || row.mlm) {
+            return false
+        }
+
+        const error = String(row.publish_error || '').toLowerCase()
+
+        if (!error) {
+            return false
+        }
+
+        return (
+            error.includes('exige gtin') ||
+            error.includes('código universal') ||
+            error.includes('codigo universal') ||
+            error.includes('gtin/ean/upc') ||
+            error.includes('product_identifier') ||
+            error.includes('invalid_format') ||
+            error.includes('error 7810')
+        )
+    }
+
+    const setRowGtin = (productId, value) => {
+        const digits = String(value || '')
+            .replace(/\D/g, '')
+            .slice(0, 14)
+
+        setGtinByProduct((current) => ({
+            ...current,
+            [productId]: digits,
+        }))
+    }
+
+    const retryWithGtin = (row) => {
+        if (!auth?.user?.meli_linked) {
+            alert('Vinculá tu cuenta de Mercado Libre primero.')
+            return
+        }
+
+        const gtin = String(
+            gtinByProduct[row.id] || ''
+        ).trim()
+
+        if (
+            !/^(?:\d{8}|\d{12}|\d{13}|\d{14})$/.test(gtin)
+        ) {
+            alert(
+                'El código universal debe contener exactamente 8, 12, 13 o 14 dígitos.'
+            )
+            return
+        }
+
+        if (
+            !confirm(
+                `Reintentar publicación en Marketmax con GTIN ${gtin}?`
+            )
+        ) {
+            return
+        }
+
+        setRetryingGtinId(row.id)
+
+        router.post(
+            '/syscom-ml/publish/' + row.id,
+            {
+                /*
+                 * Categoría vacía:
+                 * el backend usará el mapping/override
+                 * aprobado que ya tiene este producto.
+                 */
+                category_id: '',
+
+                /*
+                 * Esta pantalla SYSCOM publica a Marketmax.
+                 */
+                official_store_mode: 'marketmax',
+
+                /*
+                 * Mismo scope usado por el bulk SYSCOM.
+                 */
+                price_scope: 'llanta',
+
+                /*
+                 * GTIN exclusivo de esta fila.
+                 */
+                universal_code: gtin,
+            },
+            {
+                preserveScroll: true,
+                preserveState: true,
+
+                onFinish: () => {
+                    setRetryingGtinId(null)
+                },
+
+                onError: (errors) => {
+                    const msg =
+                        typeof errors === 'string'
+                            ? errors
+                            : errors?.message ||
+                              'No se pudo reintentar la publicación.'
+
+                    alert(msg)
+                },
             }
         )
     }
@@ -362,15 +510,19 @@ export default function Index({
                         {COLA_OPTIONS.map((opt) => {
                             const active = (filters?.cola || '') === opt.value
                             const count =
-                                opt.value === 'pendiente'
-                                    ? queueCounts.pendiente
-                                    : opt.value === 'publicado'
-                                      ? queueCounts.publicado
-                                      : opt.value === 'error'
-                                        ? queueCounts.error
-                                        : opt.value === 'en_cola'
-                                          ? queueCounts.total
-                                          : null
+                                opt.value === 'categorizado'
+                                    ? queueCounts.categorizado
+                                    : opt.value === 'publicando'
+                                      ? queueCounts.publicando
+                                      : opt.value === 'pendiente'
+                                        ? queueCounts.pendiente
+                                        : opt.value === 'publicado'
+                                          ? queueCounts.publicado
+                                          : opt.value === 'error'
+                                            ? queueCounts.error
+                                            : opt.value === 'en_cola'
+                                              ? queueCounts.total
+                                              : null
                             const params = new URLSearchParams()
                             if (filters?.q) params.set('q', filters.q)
                             if (opt.value) params.set('cola', opt.value)
@@ -451,6 +603,27 @@ export default function Index({
                             title="PUT precio y stock en ML según fórmulas SYSCOM (o precio MANUAL en cola)"
                         >
                             {syncingPrices ? 'Sincronizando…' : 'Sincronizar precios ML (página)'}
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => publishCategorizedMarketmax(20)}
+                            disabled={bulkPublishing}
+                            className="rounded-md border border-fuchsia-300 bg-fuchsia-50 px-3 py-2 text-sm font-semibold text-fuchsia-950 hover:bg-fuchsia-100 disabled:opacity-50 dark:border-fuchsia-800 dark:bg-fuchsia-950/40 dark:text-fuchsia-100"
+                            title="Encola hasta 20 productos categorizados para comprobar el flujo real"
+                        >
+                            {bulkPublishing ? 'Encolando…' : 'Probar 20 categorizados'}
+                        </button>
+
+                        <button
+                            type="button"
+                            onClick={() => publishCategorizedMarketmax(null)}
+                            disabled={bulkPublishing}
+                            className="rounded-md border border-emerald-400 bg-emerald-600 px-3 py-2 text-sm font-bold text-white hover:bg-emerald-700 disabled:opacity-50 dark:border-emerald-700 dark:bg-emerald-700 dark:hover:bg-emerald-600"
+                            title="Encola todos los productos con categoría aprobada, stock y sin publicación existente"
+                        >
+                            {bulkPublishing
+                                ? 'Encolando…'
+                                : 'Publicar categorizados en Marketmax'}
                         </button>
                     </form>
 
@@ -810,16 +983,76 @@ export default function Index({
                                                                 Sync no disponible (INACTIVA). Usá Republicar.
                                                             </span>
                                                         )}
-                                                    {row.puede_republicar && !row.mlm && (
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => publish(row.id, false)}
-                                                            disabled={publishForm.processing}
-                                                            className="rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-500 disabled:opacity-50"
-                                                        >
-                                                            Publicar
-                                                        </button>
-                                                    )}
+                                                    {row.puede_republicar &&
+                                                        !row.mlm &&
+                                                        needsGtin(row) && (
+                                                            <div className="w-[230px] rounded-lg border border-amber-300 bg-amber-50 p-2 text-left dark:border-amber-800 dark:bg-amber-950/30">
+                                                                <div className="mb-1 text-[10px] font-semibold text-amber-900 dark:text-amber-200">
+                                                                    Código universal requerido
+                                                                </div>
+
+                                                                <input
+                                                                    type="text"
+                                                                    inputMode="numeric"
+                                                                    autoComplete="off"
+                                                                    maxLength={14}
+                                                                    value={gtinByProduct[row.id] || ''}
+                                                                    onChange={(e) =>
+                                                                        setRowGtin(
+                                                                            row.id,
+                                                                            e.target.value
+                                                                        )
+                                                                    }
+                                                                    onKeyDown={(e) => {
+                                                                        if (
+                                                                            e.key === 'Enter'
+                                                                        ) {
+                                                                            e.preventDefault()
+                                                                            retryWithGtin(row)
+                                                                        }
+                                                                    }}
+                                                                    className="mb-1.5 w-full rounded-md border border-amber-300 bg-white px-2 py-1.5 font-mono text-xs text-zinc-900 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 dark:border-amber-800 dark:bg-neutral-950 dark:text-white"
+                                                                    placeholder="8, 12, 13 o 14 dígitos"
+                                                                />
+
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() =>
+                                                                        retryWithGtin(row)
+                                                                    }
+                                                                    disabled={
+                                                                        retryingGtinId ===
+                                                                        row.id
+                                                                    }
+                                                                    className="w-full rounded-md bg-amber-600 px-2 py-1.5 text-xs font-semibold text-white hover:bg-amber-500 disabled:cursor-wait disabled:opacity-50"
+                                                                >
+                                                                    {retryingGtinId ===
+                                                                    row.id
+                                                                        ? 'Reintentando…'
+                                                                        : 'Reintentar con GTIN'}
+                                                                </button>
+                                                            </div>
+                                                        )}
+
+                                                    {row.puede_republicar &&
+                                                        !row.mlm &&
+                                                        !needsGtin(row) && (
+                                                            <button
+                                                                type="button"
+                                                                onClick={() =>
+                                                                    publish(
+                                                                        row.id,
+                                                                        false
+                                                                    )
+                                                                }
+                                                                disabled={
+                                                                    publishForm.processing
+                                                                }
+                                                                className="rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-500 disabled:opacity-50"
+                                                            >
+                                                                Publicar
+                                                            </button>
+                                                        )}
                                                     {canRepublishRow(row) && (
                                                         <button
                                                             type="button"
@@ -837,10 +1070,10 @@ export default function Index({
                                                     )}
                                                     {row.mlm && !row.puede_republicar && !categoryIdFilled && (
                                                         <span
-                                                            className="max-w-[12rem] text-right text-[10px] text-amber-800 dark:text-amber-200"
-                                                            title="Mercado Libre no permite cambiar categoría en publicaciones Activas. Pegá MLM437575 (cámaras) u otro MLM arriba y usá Republicar."
+                                                            className="max-w-[12rem] text-right text-[10px] text-slate-500 dark:text-slate-400"
+                                                            title="La publicación actual está activa. Solo captura una categoría manual si necesitas crear una publicación nueva en otra categoría."
                                                         >
-                                                            Categoría bloqueada en ML
+                                                            Categoría manual opcional para republicar
                                                         </span>
                                                     )}
                                                     {row.mlm && row.ml_permalink && (

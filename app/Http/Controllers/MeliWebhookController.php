@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Jobs\ProcessMeliMessageNotification;
 use App\Jobs\ProcessMeliOrderNotification;
+use App\Jobs\ProcessMeliQuestionNotification;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 
@@ -91,6 +92,29 @@ class MeliWebhookController extends Controller
             ]);
 
             ProcessMeliMessageNotification::dispatch($payload)->onQueue('meli');
+
+            return response()->json(['ok' => true]);
+        }
+
+        if ($topic === 'questions') {
+            if (! preg_match('#^/questions/\d+$#', $resource)) {
+                Log::warning('MELI WEBHOOK: questions ignorado por resource inválido', [
+                    'resource' => $resource,
+                ]);
+
+                return response()->json([
+                    'ok' => true,
+                    'ignored' => true,
+                    'reason' => 'invalid_questions_resource',
+                ], 200);
+            }
+
+            ProcessMeliQuestionNotification::dispatch($payload)->onQueue('meli');
+
+            Log::info('MELI WEBHOOK: questions encolado', [
+                'resource' => $resource,
+                'user_id' => $payload['user_id'] ?? null,
+            ]);
 
             return response()->json(['ok' => true]);
         }

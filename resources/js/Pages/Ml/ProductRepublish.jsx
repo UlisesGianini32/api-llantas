@@ -7,6 +7,7 @@ function RepublishForm({
     isUserProduct,
     hasCatalogProduct,
     currentUniversalCode,
+    requiredAttributes = [],
     pub,
     item,
 }) {
@@ -147,6 +148,58 @@ function RepublishForm({
                 {errors.universal_code && <p className="mt-1 text-sm text-red-600 dark:text-red-400">{errors.universal_code}</p>}
             </div>
 
+            {requiredAttributes.length > 0 && (
+                <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 dark:border-amber-900 dark:bg-amber-950/30">
+                    <div className="mb-4">
+                        <h3 className="text-sm font-semibold text-amber-950 dark:text-amber-100">
+                            Datos obligatorios de la categoría
+                        </h3>
+                        <p className="mt-1 text-xs text-amber-800 dark:text-amber-200">
+                            Revisa las sugerencias antes de publicar. Las opciones vienen directamente de Mercado Libre.
+                        </p>
+                    </div>
+
+                    <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                        {requiredAttributes.map((attribute) => {
+                            const fieldName = `required_attributes.${attribute.id}`
+                            const fieldError = errors?.[fieldName]
+
+                            return (
+                                <div key={attribute.id}>
+                                    <label
+                                        htmlFor={`republish-required-${attribute.id}`}
+                                        className="mb-2 block text-sm font-medium text-slate-700 dark:text-slate-300"
+                                    >
+                                        {attribute.name}
+                                    </label>
+                                    <select
+                                        id={`republish-required-${attribute.id}`}
+                                        value={data.required_attributes?.[attribute.id] ?? ''}
+                                        onChange={(event) => setData('required_attributes', {
+                                            ...(data.required_attributes ?? {}),
+                                            [attribute.id]: event.target.value,
+                                        })}
+                                        required={Boolean(attribute.required)}
+                                        disabled={processing}
+                                        className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-slate-900 outline-none transition focus:border-indigo-500 dark:border-neutral-600 dark:bg-neutral-950 dark:text-white"
+                                    >
+                                        <option value="">Selecciona una opción</option>
+                                        {(attribute.options ?? []).map((option) => (
+                                            <option key={`${attribute.id}-${option.id}`} value={option.id}>
+                                                {option.name}
+                                            </option>
+                                        ))}
+                                    </select>
+                                    {fieldError && (
+                                        <p className="mt-1 text-sm text-red-600 dark:text-red-400">{fieldError}</p>
+                                    )}
+                                </div>
+                            )
+                        })}
+                    </div>
+                </div>
+            )}
+
             {hasCatalogProduct && (
                 <label className="flex items-center gap-2">
                     <input
@@ -180,7 +233,7 @@ function RepublishForm({
 
 export default function ProductRepublish(props) {
     const { ml, defaults } = props
-    const formKey = `${ml}-${defaults.title}-${defaults.price}-${defaults.official_store_mode}-${defaults.copy_catalog}-${defaults.universal_code}`
+    const formKey = `${ml}-${defaults.title}-${defaults.price}-${defaults.official_store_mode}-${defaults.copy_catalog}-${defaults.universal_code}-${JSON.stringify(defaults.required_attributes ?? {})}`
 
     return (
         <AppShell title="Republicar publicación">

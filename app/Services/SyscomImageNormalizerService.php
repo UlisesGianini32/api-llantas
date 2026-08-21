@@ -48,8 +48,43 @@ class SyscomImageNormalizerService
      */
     public function normalizeToBytes(string $url): ?string
     {
-        $url = trim($url);
-        if ($url === '' || ! filter_var($url, FILTER_VALIDATE_URL)) {
+        $url = trim(
+            html_entity_decode(
+                $url,
+                ENT_QUOTES | ENT_HTML5,
+                'UTF-8'
+            )
+        );
+
+        /*
+         * SYSCOM devuelve algunas rutas con espacios reales:
+         *
+         *   /HIKSEMI by HIKVISION/
+         *   /ASSA ABLOY/
+         *
+         * Antes FILTER_VALIDATE_URL las rechazaba sin intentar
+         * siquiera la descarga.
+         */
+        $url = str_replace(
+            ' ',
+            '%20',
+            $url
+        );
+
+        if (
+            $url === ''
+            || ! filter_var(
+                $url,
+                FILTER_VALIDATE_URL
+            )
+        ) {
+            Log::warning(
+                'SyscomImageNormalizer: URL inválida.',
+                [
+                    'url' => $url,
+                ]
+            );
+
             return null;
         }
 
@@ -111,8 +146,43 @@ class SyscomImageNormalizerService
      */
     public function normalizeUrlForMeli(string $url, string $cacheKey, int $index = 0): ?string
     {
-        $url = trim($url);
-        if ($url === '' || ! filter_var($url, FILTER_VALIDATE_URL)) {
+        $url = trim(
+            html_entity_decode(
+                $url,
+                ENT_QUOTES | ENT_HTML5,
+                'UTF-8'
+            )
+        );
+
+        /*
+         * SYSCOM devuelve algunas rutas con espacios reales:
+         *
+         *   /HIKSEMI by HIKVISION/
+         *   /ASSA ABLOY/
+         *
+         * Antes FILTER_VALIDATE_URL las rechazaba sin intentar
+         * siquiera la descarga.
+         */
+        $url = str_replace(
+            ' ',
+            '%20',
+            $url
+        );
+
+        if (
+            $url === ''
+            || ! filter_var(
+                $url,
+                FILTER_VALIDATE_URL
+            )
+        ) {
+            Log::warning(
+                'SyscomImageNormalizer: URL inválida.',
+                [
+                    'url' => $url,
+                ]
+            );
+
             return null;
         }
 

@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class MeliAccount extends Model
 {
@@ -35,5 +36,20 @@ class MeliAccount extends Model
     public function user(): BelongsTo
     {
         return $this->belongsTo(User::class);
+    }
+
+    public function orders(): HasMany
+    {
+        return $this->hasMany(MeliOrder::class);
+    }
+
+    public function chatFlows(): HasMany
+    {
+        return $this->hasMany(MeliChatFlow::class);
+    }
+
+    public function questions(): HasMany
+    {
+        return $this->hasMany(MeliQuestion::class);
     }
 }

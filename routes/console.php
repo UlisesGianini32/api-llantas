@@ -86,7 +86,15 @@ Schedule::command('meli:refresh-token')
     ->everyTenMinutes()
     ->withoutOverlapping();
 
-// Sincronizar stock/precio SYSCOM + llantas (cada 15 min; refresh Hermosillo corre aparte cada 10 min)
+// Preguntas preventa de todas las cuentas vinculadas.
+Schedule::command('meli:sync-questions --pages=4')
+    ->everyTwoMinutes()
+    ->withoutOverlapping()
+    ->runInBackground()
+    ->appendOutputTo(storage_path('logs/meli-questions-sync.log'));
+
+// Sincronizar inventario/precio local con Mercado Libre cada 15 minutos.
+// Este comando ya no consulta SYSCOM; la consulta rápida de SYSCOM corre aparte cada hora.
 Schedule::command('meli:sync-stock')
     ->everyFifteenMinutes()
     ->withoutOverlapping();
@@ -110,10 +118,13 @@ if ($meliSyncOrdersUserId > 0) {
         ->withoutOverlapping();
 }
 
-// Stock SYSCOM (solo sucursal config) en BD → luego meli:sync-stock alinea ML
-Schedule::command('syscom:refresh-hermosillo-for-published')
-    ->everyTenMinutes()
-    ->withoutOverlapping();
+// Stock y precios SYSCOM por lotes de hasta 300 IDs.
+// Corre al minuto 5 de cada hora y solo llama a Mercado Libre cuando detecta cambios.
+Schedule::command('syscom:sync-stock-fast')
+    ->hourlyAt(5)
+    ->withoutOverlapping(55)
+    ->runInBackground()
+    ->appendOutputTo(storage_path('logs/syscom-stock-fast.log'));
 
 // Convierte órdenes ML pagadas a pedidos SYSCOM (solo para publicaciones SYSCOM-*).
 Schedule::command('syscom:sync-orders-from-ml --max=100')
@@ -129,4 +140,9 @@ Schedule::command('syscom:cancel-orders-from-ml --max=50')
 // pasó a printed/picked_up/shipped quedan como ready_to_print en BD y aparecen de más.
 Schedule::command('ams:refresh-ready-to-print --max=300')
     ->everyTenMinutes()
+    ->withoutOverlapping();
+
+// Heartbeat del panel de salud.
+Schedule::command('system:heartbeat')
+    ->everyMinute()
     ->withoutOverlapping();

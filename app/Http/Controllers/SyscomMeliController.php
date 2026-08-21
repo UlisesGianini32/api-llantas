@@ -626,11 +626,85 @@ class SyscomMeliController extends Controller
     }
 
     /**
-     * @return array{total: int, pendiente: int, publicado: int, error: int}
+     * Limita un query de syscom_products a productos cuya categoría
+     * Mercado Libre ya fue aprobada manualmente:
+     *
+     * 1) override por producto
+     * 2) mapping aprobado de categoría SYSCOM
+     */
+    private function applyApprovedCategoryFilter($query): void
+    {
+        $mappedCategoryIds = DB::table(
+            'syscom_meli_category_maps'
+        )
+            ->where('approved', true)
+            ->pluck('syscom_category_id')
+            ->map(fn ($id) => (int) $id)
+            ->values()
+            ->all();
+
+        $overrideProductIds = DB::table(
+            'syscom_meli_product_category_overrides'
+        )
+            ->where('approved', true)
+            ->pluck('syscom_product_id')
+            ->map(fn ($id) => (int) $id)
+            ->values()
+            ->all();
+
+        $query->where(function ($w) use (
+            $mappedCategoryIds,
+            $overrideProductIds
+        ) {
+            $hasCondition = false;
+
+            if ($mappedCategoryIds !== []) {
+                $w->whereIn(
+                    'syscom_primary_category_id',
+                    $mappedCategoryIds
+                );
+
+                $hasCondition = true;
+            }
+
+            if ($overrideProductIds !== []) {
+                if ($hasCondition) {
+                    $w->orWhereIn(
+                        'id',
+                        $overrideProductIds
+                    );
+                } else {
+                    $w->whereIn(
+                        'id',
+                        $overrideProductIds
+                    );
+                }
+
+                $hasCondition = true;
+            }
+
+            if (! $hasCondition) {
+                $w->whereRaw('1 = 0');
+            }
+        });
+    }
+
+    /**
+     * @return array{
+     *     total:int,
+     *     pendiente:int,
+     *     publicado:int,
+     *     error:int,
+     *     publicando:int,
+     *     categorizado:int
+     * }
      */
     private function syscomMeliQueueCounts(int $userId): array
     {
         $base = SyscomMeliQueue::query()->where('user_id', $userId);
+
+        $categorized = SyscomProduct::query();
+        $this->applyApprovedCategoryFilter($categorized);
 
         return [
             'total' => (clone $base)->count(),
@@ -647,6 +721,18 @@ class SyscomMeliController extends Controller
                 })
                 ->count(),
             'error' => (clone $base)->where('status', 'error')->count(),
+
+            'publicando' => (clone $base)
+                ->whereIn(
+                    'status',
+                    [
+                        'queued_publish',
+                        'publishing',
+                    ]
+                )
+                ->count(),
+
+            'categorizado' => (clone $categorized)->count(),
         ];
     }
 
@@ -657,6 +743,39 @@ class SyscomMeliController extends Controller
     {
         $cola = strtolower($cola);
         if ($cola === '' || $cola === 'todos') {
+            return;
+        }
+
+        if ($cola === 'categorizado') {
+            $this->applyApprovedCategoryFilter($query);
+
+            return;
+        }
+
+        if ($cola === 'publicando') {
+            $ids = SyscomMeliQueue::query()
+                ->where('user_id', $userId)
+                ->whereIn(
+                    'status',
+                    [
+                        'queued_publish',
+                        'publishing',
+                    ]
+                )
+                ->pluck('syscom_product_id')
+                ->filter()
+                ->unique()
+                ->values()
+                ->all();
+
+            if ($ids === []) {
+                $query->whereRaw('1 = 0');
+
+                return;
+            }
+
+            $query->whereIn('id', $ids);
+
             return;
         }
 
@@ -951,22 +1070,54 @@ class SyscomMeliController extends Controller
             return back()->with('error', 'No se pudo resolver la sucursal SYSCOM "'.$branchName.'". Revisa credenciales o el nombre de sucursal.');
         }
 
+        $usingLocalSyscomFallback = false;
+
         try {
             $detail = $syscom->getProduct($token, $product->syscom_producto_id, $branchCode);
         } catch (\Throwable $e) {
-            return back()->with('error', 'Error leyendo producto en SYSCOM: '.$e->getMessage());
+            $message = $e->getMessage();
+
+            $productNotAvailable =
+                str_contains($message, '404')
+                && str_contains($message, 'product_not_available');
+
+            if (! $productNotAvailable) {
+                return back()->with('error', 'Error leyendo producto en SYSCOM: '.$message);
+            }
+
+            $detail = is_array($product->raw_list)
+                ? $product->raw_list
+                : [];
+
+            if ($detail === []) {
+                return back()->with(
+                    'error',
+                    'SYSCOM devolvió product_not_available y no existe información local suficiente para publicar este producto.'
+                );
+            }
+
+            $usingLocalSyscomFallback = true;
+
+            Log::warning('SyscomMeli: usando raw_list local por product_not_available', [
+                'syscom_product_id' => $product->id,
+                'syscom_producto_id' => $product->syscom_producto_id,
+                'modelo' => $product->modelo,
+                'stock_hermosillo_conservado' => $product->stock_hermosillo,
+            ]);
         }
 
-        $exist = is_array($detail['existencia'] ?? null) ? $detail['existencia'] : [];
-        $branchScoped = (bool) ($detail['__branch_scoped_existencia'] ?? false);
-        $herm = SyscomHermosilloStock::fromProductDetail(
-            $exist,
-            $branchCode,
-            $branchName,
-            (int) ($detail['total_existencia'] ?? 0),
-            $branchScoped
-        );
-        $product->stock_hermosillo = $herm;
+        if (! $usingLocalSyscomFallback) {
+            $exist = is_array($detail['existencia'] ?? null) ? $detail['existencia'] : [];
+            $branchScoped = (bool) ($detail['__branch_scoped_existencia'] ?? false);
+            $herm = SyscomHermosilloStock::fromProductDetail(
+                $exist,
+                $branchCode,
+                $branchName,
+                (int) ($detail['total_existencia'] ?? 0),
+                $branchScoped
+            );
+            $product->stock_hermosillo = $herm;
+        }
         if (is_array($detail)) {
             $product->descripcion = (string) ($product->descripcion ?: ($detail['descripcion'] ?? ''));
             $item = is_array($product->raw_list) ? $product->raw_list : [];
@@ -976,7 +1127,9 @@ class SyscomMeliController extends Controller
                     $product->{$pk} = $prices[$pk];
                 }
             }
-            $product->raw_detail = $detail;
+            if (! $usingLocalSyscomFallback) {
+                $product->raw_detail = $detail;
+            }
         }
         $product->save();
 
@@ -987,7 +1140,7 @@ class SyscomMeliController extends Controller
                 $product,
                 $branchCode,
                 $categoryId !== '' ? $categoryId : null,
-                (string) $request->input('official_store_mode', 'tobeauty'),
+                (string) $request->input('official_store_mode', 'marketmax'),
                 $priceScope,
                 (string) $request->input('universal_code', '')
             );
@@ -1017,6 +1170,98 @@ class SyscomMeliController extends Controller
         }
 
         return back()->with('success', $successMsg);
+    }
+
+    public function publishCategorizedMarketmax(
+        Request $request,
+        SyscomMeliPublishService $pub
+    ): RedirectResponse {
+        $user = $request->user();
+
+        if (! $user) {
+            abort(401);
+        }
+
+        if (! $user->access_token) {
+            return back()->with(
+                'error',
+                'Falta vincular Mercado Libre.'
+            );
+        }
+
+        $validated = $request->validate([
+            'limit' => [
+                'nullable',
+                'integer',
+                'min:1',
+                'max:2500',
+            ],
+        ]);
+
+        $marketmaxId = (int) (
+            $pub->resolveOfficialStoreId(
+                'marketmax'
+            )
+            ?? 0
+        );
+
+        /*
+         * Seguridad adicional:
+         * este flujo masivo es EXCLUSIVAMENTE Marketmax.
+         */
+        if ($marketmaxId !== 281112) {
+            return back()->with(
+                'error',
+                'Publicación masiva abortada: '
+                .'Marketmax no está configurado con '
+                .'official_store_id 281112. '
+                .'Valor actual: '.$marketmaxId
+            );
+        }
+
+        /*
+         * Evita mandar varios coordinadores iguales
+         * antes de que el worker procese el primero.
+         */
+        if (Schema::hasTable('jobs')) {
+            $alreadyQueued = DB::table('jobs')
+                ->where('queue', 'meli')
+                ->where(
+                    'payload',
+                    'like',
+                    '%QueueCategorizedSyscomMarketmaxJob%'
+                )
+                ->exists();
+
+            if ($alreadyQueued) {
+                return back()->with(
+                    'error',
+                    'Ya existe una solicitud masiva '
+                    .'de Marketmax esperando en la cola meli.'
+                );
+            }
+        }
+
+        $limit = isset($validated['limit'])
+            ? (int) $validated['limit']
+            : null;
+
+        \App\Jobs\QueueCategorizedSyscomMarketmaxJob::dispatch(
+            (int) $user->id,
+            $limit
+        )->onQueue('meli');
+
+        $scope = $limit !== null
+            ? 'hasta '.$limit.' producto(s)'
+            : 'todos los productos categorizados disponibles';
+
+        return back()->with(
+            'success',
+            'Solicitud enviada a la cola meli para '
+            .$scope
+            .' en Marketmax. '
+            .'Usá el filtro «Publicando» para ver el avance.'
+        );
     }
 
     public function refreshPublicationStatus(

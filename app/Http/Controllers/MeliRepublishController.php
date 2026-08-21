@@ -80,6 +80,29 @@ class MeliRepublishController extends Controller
         try {
             $form = $republishSvc->getFormData($user, $ml);
 
+            $requiredAttributes = is_array($form['requiredAttributes'] ?? null)
+                ? $form['requiredAttributes']
+                : [];
+
+            $oldRequiredAttributes = old('required_attributes', []);
+            if (!is_array($oldRequiredAttributes)) {
+                $oldRequiredAttributes = [];
+            }
+
+            $requiredAttributeDefaults = [];
+            foreach ($requiredAttributes as $attribute) {
+                $attributeId = strtoupper(trim((string) ($attribute['id'] ?? '')));
+                if ($attributeId === '') {
+                    continue;
+                }
+
+                $requiredAttributeDefaults[$attributeId] = (string) (
+                    $oldRequiredAttributes[$attributeId]
+                    ?? $attribute['default_value_id']
+                    ?? ''
+                );
+            }
+
             return Inertia::render('Ml/ProductRepublish', [
                 'ml' => $form['ml'],
                 'item' => $form['item'],
@@ -87,12 +110,14 @@ class MeliRepublishController extends Controller
                 'isUserProduct' => $form['isUserProduct'],
                 'hasCatalogProduct' => ! empty($form['item']['catalog_product_id'] ?? null),
                 'currentUniversalCode' => (string) ($form['currentUniversalCode'] ?? ''),
+                'requiredAttributes' => $requiredAttributes,
                 'defaults' => [
                     'title' => (string) old('title', $form['defaultLabel']),
                     'price' => (float) old('price', $form['defaultPrice']),
                     'official_store_mode' => (string) old('official_store_mode', $form['defaultOfficialStoreMode']),
                     'copy_catalog' => (bool) old('copy_catalog', false),
                     'universal_code' => (string) old('universal_code', ''),
+                    'required_attributes' => $requiredAttributeDefaults,
                 ],
             ]);
         } catch (\Throwable $e) {
@@ -119,6 +144,8 @@ class MeliRepublishController extends Controller
             'copy_catalog' => ['nullable', 'boolean'],
             'official_store_mode' => ['required', 'string', 'in:marketmax,tobeauty,none'],
             'universal_code' => ['nullable', 'string', 'max:32'],
+            'required_attributes' => ['nullable', 'array'],
+            'required_attributes.*' => ['nullable', 'string', 'max:120'],
         ], [
             'title.required' => 'Debes capturar el nuevo título o nombre de familia.',
             'title.min' => 'El campo debe tener al menos 3 caracteres.',
@@ -148,6 +175,9 @@ class MeliRepublishController extends Controller
                     'keep_catalog'      => (bool) $request->boolean('copy_catalog'),
                     'official_store_id' => $officialStoreId,
                     'universal_code'    => trim((string) ($data['universal_code'] ?? '')),
+                    'attribute_overrides' => is_array($data['required_attributes'] ?? null)
+                        ? $data['required_attributes']
+                        : [],
                 ]
             );
 
