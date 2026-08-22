@@ -4,12 +4,14 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class AutomotivePartEnrichmentReview extends Model
 {
     public const STATUSES = ['pending', 'in_review', 'approved', 'rejected'];
 
-    public const SOURCES = ['manual', 'rules', 'future_ai'];
+    public const SOURCES = ['manual', 'rules', 'future_ai', 'openai'];
 
     protected $fillable = [
         'automotive_part_id',
@@ -46,5 +48,15 @@ class AutomotivePartEnrichmentReview extends Model
     public function reviewer(): BelongsTo
     {
         return $this->belongsTo(User::class, 'reviewed_by');
+    }
+
+    public function aiRuns(): HasMany
+    {
+        return $this->hasMany(AutomotivePartAiRun::class, 'automotive_part_enrichment_review_id');
+    }
+
+    public function latestAiRun(): HasOne
+    {
+        return $this->hasOne(AutomotivePartAiRun::class, 'automotive_part_enrichment_review_id')->latestOfMany();
     }
 }

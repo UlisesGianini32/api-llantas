@@ -7,7 +7,16 @@ function OriginalField({ label, value }) {
     return <div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">{label}</dt><dd className="mt-1 whitespace-pre-wrap text-sm text-slate-800 dark:text-slate-200">{value ?? '—'}</dd></div>
 }
 
-export default function EnriquecimientoDetalle({ review, part }) {
+function ProposalCard({ title, proposal }) {
+    return (
+        <article className="rounded-xl border border-slate-200 p-4 dark:border-neutral-700">
+            <h3 className="text-sm font-semibold text-slate-900 dark:text-white">{title}</h3>
+            {proposal ? <dl className="mt-3 space-y-2 text-sm"><OriginalField label="Título" value={proposal.title_es ?? proposal.proposed_title} /><OriginalField label="Descripción" value={proposal.description_es ?? proposal.proposed_description} /><OriginalField label="Marca" value={proposal.brand_normalized ?? proposal.proposed_brand} /><OriginalField label="Categoría" value={proposal.category_suggestion ?? proposal.proposed_category} /></dl> : <p className="mt-2 text-sm text-slate-500">Sin propuesta conservada.</p>}
+        </article>
+    )
+}
+
+export default function EnriquecimientoDetalle({ review, part, ai = {}, proposalComparison = {} }) {
     const { data, setData, put, post, processing, errors } = useForm({
         proposed_title: review.proposed_title ?? '',
         proposed_description: review.proposed_description ?? '',
@@ -22,6 +31,15 @@ export default function EnriquecimientoDetalle({ review, part }) {
     const save = (event) => {
         event.preventDefault()
         put(`/autopartes/enriquecimiento/${review.id}`, { preserveScroll: true })
+    }
+
+    const latestAiRun = review.ai_runs?.[0] ?? null
+    const aiPath = review.enrichment_source === 'openai'
+        ? `/autopartes/enriquecimiento/${review.id}/ia/regenerar`
+        : `/autopartes/enriquecimiento/${review.id}/ia/generar`
+    const queueAi = () => {
+        if (!window.confirm('¿Encolar una propuesta con IA? El resultado seguirá pendiente de aprobación humana.')) return
+        router.post(aiPath, {}, { preserveScroll: true })
     }
 
     return (
@@ -40,6 +58,41 @@ export default function EnriquecimientoDetalle({ review, part }) {
                     <h2 className="text-sm font-bold text-amber-900 dark:text-amber-200">Problemas detectados</h2>
                     <div className="mt-3 flex flex-wrap gap-2">{(review.issue_codes ?? []).map((code) => <span key={code} className="rounded-full bg-white px-2 py-1 text-xs font-medium text-amber-800 shadow-sm dark:bg-neutral-900 dark:text-amber-200">{code}</span>)}</div>
                 </div>
+
+                <section className="rounded-2xl border border-violet-200 bg-violet-50 p-5 dark:border-violet-500/20 dark:bg-violet-500/5">
+                    <div className="flex flex-col justify-between gap-3 md:flex-row md:items-start">
+                        <div>
+                            <h2 className="text-lg font-semibold text-violet-950 dark:text-violet-100">Enriquecimiento asistido con IA</h2>
+                            <p className="mt-1 text-sm text-violet-800 dark:text-violet-200">Modelo {ai.model ?? '—'} · prompt {ai.prompt_version ?? '—'} · {ai.daily_remaining ?? 0} disponibles hoy.</p>
+                            <p className="mt-1 text-xs text-violet-700 dark:text-violet-300">La IA solo prepara un borrador; una persona debe revisarlo y aprobarlo.</p>
+                            {ai.disabled_reason && <p className="mt-2 text-sm font-semibold text-rose-700 dark:text-rose-300">{ai.disabled_reason}</p>}
+                            {errors.ai && <p className="mt-2 text-sm font-semibold text-rose-700 dark:text-rose-300">{errors.ai}</p>}
+                        </div>
+                        <button type="button" onClick={queueAi} disabled={!ai.can_generate} title={ai.disabled_reason ?? ''} className="rounded-xl bg-violet-600 px-4 py-2 text-sm font-semibold text-white hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-50">
+                            {review.enrichment_source === 'openai' ? 'Regenerar con IA' : 'Generar con IA'}
+                        </button>
+                    </div>
+                    {latestAiRun && <div className="mt-4 grid gap-3 rounded-xl bg-white/70 p-4 text-sm dark:bg-neutral-900/70 sm:grid-cols-2 lg:grid-cols-4">
+                        <OriginalField label="Estado" value={latestAiRun.status} />
+                        <OriginalField label="Modelo / prompt" value={`${latestAiRun.model} / ${latestAiRun.prompt_version}`} />
+                        <OriginalField label="Tokens entrada / salida / total" value={`${latestAiRun.input_tokens ?? '—'} / ${latestAiRun.output_tokens ?? '—'} / ${latestAiRun.total_tokens ?? '—'}`} />
+                        <OriginalField label="Fecha" value={latestAiRun.completed_at ?? latestAiRun.created_at} />
+                        <OriginalField label="Confianza" value={latestAiRun.output_payload?.confidence} />
+                        <OriginalField label="Warnings" value={latestAiRun.output_payload?.warnings?.join('\n')} />
+                        <OriginalField label="Información faltante" value={latestAiRun.output_payload?.missing_facts?.join('\n')} />
+                        <OriginalField label="Error" value={latestAiRun.error_message} />
+                    </div>}
+                </section>
+
+                <section className="rounded-2xl border border-slate-200 bg-white p-5 dark:border-neutral-800 dark:bg-neutral-900">
+                    <h2 className="text-lg font-semibold text-slate-900 dark:text-white">Comparación de propuestas</h2>
+                    <p className="mt-1 text-xs text-slate-500">Los datos originales aparecen abajo; estos borradores nunca modifican directamente el catálogo.</p>
+                    <div className="mt-4 grid gap-4 lg:grid-cols-3">
+                        <ProposalCard title="Reglas" proposal={proposalComparison.rules} />
+                        <ProposalCard title="OpenAI" proposal={proposalComparison.ai} />
+                        <ProposalCard title="Manual" proposal={proposalComparison.manual} />
+                    </div>
+                </section>
 
                 <div className="grid gap-6 xl:grid-cols-2">
                     <section className="rounded-2xl border border-slate-200 bg-white p-5 dark:border-neutral-800 dark:bg-neutral-900">
@@ -68,6 +121,17 @@ export default function EnriquecimientoDetalle({ review, part }) {
                         </div>
                     </form>
                 </div>
+
+                <section className="rounded-2xl border border-slate-200 bg-white p-5 dark:border-neutral-800 dark:bg-neutral-900">
+                    <h2 className="text-lg font-semibold text-slate-900 dark:text-white">Historial de ejecuciones de IA</h2>
+                    <div className="mt-4 overflow-x-auto">
+                        <table className="min-w-full divide-y divide-slate-200 text-sm dark:divide-neutral-800">
+                            <thead><tr className="text-left text-xs uppercase text-slate-500"><th className="py-2 pr-4">Run</th><th className="py-2 pr-4">Estado</th><th className="py-2 pr-4">Modelo</th><th className="py-2 pr-4">Prompt</th><th className="py-2 pr-4">Tokens</th><th className="py-2">Fecha</th></tr></thead>
+                            <tbody className="divide-y divide-slate-100 dark:divide-neutral-800">{(review.ai_runs ?? []).map((run) => <tr key={run.id}><td className="py-2 pr-4">#{run.id}</td><td className="py-2 pr-4 font-semibold">{run.status}</td><td className="py-2 pr-4">{run.model}</td><td className="py-2 pr-4">{run.prompt_version}</td><td className="py-2 pr-4">{run.total_tokens ?? '—'}</td><td className="py-2">{run.completed_at ?? run.created_at}</td></tr>)}</tbody>
+                        </table>
+                        {(review.ai_runs ?? []).length === 0 && <p className="py-4 text-sm text-slate-500">Todavía no hay ejecuciones.</p>}
+                    </div>
+                </section>
             </div>
         </AppShell>
     )

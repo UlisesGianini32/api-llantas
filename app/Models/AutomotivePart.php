@@ -79,4 +79,9 @@ class AutomotivePart extends Model
     {
         return $this->hasOne(AutomotivePartEnrichmentReview::class, 'automotive_part_id');
     }
+
+    public function aiRuns(): HasMany
+    {
+        return $this->hasMany(AutomotivePartAiRun::class, 'automotive_part_id');
+    }
 }

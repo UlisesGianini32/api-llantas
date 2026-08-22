@@ -24,7 +24,7 @@ function Indicator({ label, ready }) {
     )
 }
 
-export default function Enriquecimiento({ reviews, filters = {}, statusTotals = {}, issueCodes = [], categories = [], vendors = [] }) {
+export default function Enriquecimiento({ reviews, filters = {}, statusTotals = {}, issueCodes = [], categories = [], vendors = [], ai = {} }) {
     const [form, setForm] = useState({
         q: filters.q ?? '',
         status: filters.status ?? '',
@@ -33,6 +33,7 @@ export default function Enriquecimiento({ reviews, filters = {}, statusTotals = 
         vendor: filters.vendor ?? '',
     })
     const [auditing, setAuditing] = useState(false)
+    const [queueing, setQueueing] = useState(false)
 
     const submit = (event) => {
         event.preventDefault()
@@ -44,6 +45,24 @@ export default function Enriquecimiento({ reviews, filters = {}, statusTotals = 
         router.post('/autopartes/enriquecimiento/auditar', { limit: 250 }, {
             preserveScroll: true,
             onFinish: () => setAuditing(false),
+        })
+    }
+
+    const aiDisabledReason = !ai.enabled
+        ? 'La integración de IA está deshabilitada.'
+        : (!ai.configured ? 'La credencial de OpenAI no está configurada.' : (ai.daily_remaining < 1 ? 'Se alcanzó el límite diario.' : null))
+
+    const queueBatch = () => {
+        const limit = Math.min(ai.max_batch ?? 10, ai.daily_remaining ?? 0)
+        if (limit < 1 || !window.confirm(`¿Encolar hasta ${limit} propuestas con IA? Cada resultado requerirá aprobación humana.`)) return
+
+        setQueueing(true)
+        router.post('/autopartes/enriquecimiento/ia/lote', {
+            limit,
+            issue: form.issue_code || null,
+        }, {
+            preserveScroll: true,
+            onFinish: () => setQueueing(false),
         })
     }
 
@@ -60,8 +79,16 @@ export default function Enriquecimiento({ reviews, filters = {}, statusTotals = 
                         <button type="button" onClick={runAudit} disabled={auditing} className="rounded-xl bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500 disabled:opacity-60">
                             {auditing ? 'Auditando…' : 'Auditar 250 productos'}
                         </button>
+                        <button type="button" onClick={queueBatch} disabled={queueing || Boolean(aiDisabledReason)} title={aiDisabledReason ?? ''} className="rounded-xl bg-violet-600 px-4 py-2 text-sm font-semibold text-white hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-50">
+                            {queueing ? 'Encolando…' : `Encolar IA (${Math.min(ai.max_batch ?? 10, ai.daily_remaining ?? 0)})`}
+                        </button>
                         <Link href="/autopartes" className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 dark:border-neutral-700 dark:bg-neutral-900 dark:text-slate-200">Catálogo</Link>
                     </div>
+                </div>
+
+                <div className="rounded-2xl border border-violet-200 bg-violet-50 p-4 text-sm text-violet-900 dark:border-violet-500/20 dark:bg-violet-500/5 dark:text-violet-200">
+                    <p className="font-semibold">IA: {ai.model ?? 'sin modelo'} · prompt {ai.prompt_version ?? '—'} · {ai.daily_remaining ?? 0} disponibles hoy</p>
+                    <p className="mt-1">{aiDisabledReason ?? 'Los jobs se procesan en la cola autopartes-ai y nunca aprueban una propuesta automáticamente.'}</p>
                 </div>
 
                 <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -109,11 +136,12 @@ export default function Enriquecimiento({ reviews, filters = {}, statusTotals = 
                                     <th className="px-4 py-3 text-left text-xs font-semibold uppercase text-slate-500">Problemas</th>
                                     <th className="px-4 py-3 text-left text-xs font-semibold uppercase text-slate-500">Cobertura</th>
                                     <th className="px-4 py-3 text-left text-xs font-semibold uppercase text-slate-500">Estado</th>
+                                    <th className="px-4 py-3 text-left text-xs font-semibold uppercase text-slate-500">IA</th>
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-slate-200 dark:divide-neutral-800">
                                 {reviews.data.length === 0 ? (
-                                    <tr><td colSpan={5} className="px-4 py-8 text-center text-sm text-slate-500">No hay revisiones con estos filtros.</td></tr>
+                                    <tr><td colSpan={6} className="px-4 py-8 text-center text-sm text-slate-500">No hay revisiones con estos filtros.</td></tr>
                                 ) : reviews.data.map((review) => {
                                     const part = review.automotive_part
                                     const hasYears = part.min_model_year !== null || part.average_model_year !== null || part.max_model_year !== null
@@ -131,6 +159,9 @@ export default function Enriquecimiento({ reviews, filters = {}, statusTotals = 
                                             <td className="max-w-sm px-4 py-3"><div className="flex flex-wrap gap-1">{(review.issue_codes ?? []).map((code) => <span key={code} className="rounded-full bg-amber-50 px-2 py-1 text-xs font-medium text-amber-800 dark:bg-amber-500/10 dark:text-amber-200">{code}</span>)}</div></td>
                                             <td className="px-4 py-3"><div className="flex max-w-xs flex-wrap gap-1"><Indicator label="Compat." ready={Boolean(part.applicable_models_text)} /><Indicator label="Medidas" ready={hasDimensions} /><Indicator label="Peso" ready={part.weight_pounds !== null} /><Indicator label="Años" ready={hasYears} /></div></td>
                                             <td className="px-4 py-3"><span className={`rounded-full px-2 py-1 text-xs font-semibold ${statusStyles[review.status]}`}>{statusLabels[review.status]}</span></td>
+                                            <td className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300">
+                                                {review.latest_ai_run ? <><p className="font-semibold">{review.latest_ai_run.status}</p><p>{review.latest_ai_run.model} · {review.latest_ai_run.prompt_version}</p><p>{review.latest_ai_run.total_tokens ?? '—'} tokens</p></> : 'Sin ejecuciones'}
+                                            </td>
                                         </tr>
                                     )
                                 })}

@@ -10,6 +10,9 @@ use App\Http\Requests\Autopartes\RunAutomotivePartEnrichmentAuditRequest;
 use App\Http\Requests\Autopartes\UpdateAutomotivePartEnrichmentRequest;
 use App\Models\AutomotivePart;
 use App\Models\AutomotivePartEnrichmentReview;
+use App\Services\Autopartes\Ai\AutomotivePartAiConfiguration;
+use App\Services\Autopartes\Ai\AutomotivePartAiDispatchService;
+use App\Services\Autopartes\Ai\AutomotivePartAiEligibility;
 use App\Services\Autopartes\AutomotivePartEnrichmentAuditService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -20,9 +23,12 @@ use Inertia\Response;
 
 class AutomotivePartEnrichmentController extends Controller
 {
-    public function index(IndexAutomotivePartEnrichmentRequest $request): Response
-    {
-        $query = AutomotivePartEnrichmentReview::query()->with('automotivePart');
+    public function index(
+        IndexAutomotivePartEnrichmentRequest $request,
+        AutomotivePartAiConfiguration $aiConfiguration,
+        AutomotivePartAiDispatchService $aiDispatcher,
+    ): Response {
+        $query = AutomotivePartEnrichmentReview::query()->with(['automotivePart', 'latestAiRun']);
 
         if ($request->filled('q')) {
             $search = $request->string('q')->toString();
@@ -68,16 +74,48 @@ class AutomotivePartEnrichmentController extends Controller
             'issueCodes' => AutomotivePartEnrichmentAuditService::ISSUE_CODES,
             'categories' => AutomotivePart::query()->whereHas('enrichmentReview')->whereNotNull('category')->distinct()->orderBy('category')->pluck('category'),
             'vendors' => AutomotivePart::query()->whereHas('enrichmentReview')->whereNotNull('vendor')->distinct()->orderBy('vendor')->pluck('vendor'),
+            'ai' => array_merge($aiConfiguration->publicSettings(), [
+                'daily_remaining' => $aiDispatcher->dailyRemaining(),
+            ]),
         ]);
     }
 
-    public function show(AutomotivePartEnrichmentReview $review): Response
-    {
-        $review->load(['automotivePart', 'reviewer']);
+    public function show(
+        AutomotivePartEnrichmentReview $review,
+        AutomotivePartAiConfiguration $aiConfiguration,
+        AutomotivePartAiEligibility $aiEligibility,
+        AutomotivePartAiDispatchService $aiDispatcher,
+    ): Response {
+        $review->load([
+            'automotivePart',
+            'reviewer',
+            'aiRuns' => fn ($query) => $query->latest()->limit(20),
+        ]);
+        $settings = $aiConfiguration->publicSettings();
+        $disabledReason = ! $settings['enabled']
+            ? 'La integración de IA está deshabilitada.'
+            : (! $settings['configured']
+                ? 'La credencial de OpenAI no está configurada.'
+                : $aiEligibility->reason($review));
+        $completedRun = $review->aiRuns->firstWhere('status', 'completed');
+        $rulesProposal = data_get($review->metadata, 'rules_snapshot');
+        if ($rulesProposal === null && $review->enrichment_source === 'rules') {
+            $rulesProposal = $this->reviewProposal($review);
+        }
 
         return Inertia::render('Autopartes/EnriquecimientoDetalle', [
             'review' => $review,
             'part' => $review->automotivePart,
+            'ai' => array_merge($settings, [
+                'daily_remaining' => $aiDispatcher->dailyRemaining(),
+                'disabled_reason' => $disabledReason,
+                'can_generate' => $disabledReason === null,
+            ]),
+            'proposalComparison' => [
+                'rules' => $rulesProposal,
+                'ai' => $completedRun?->output_payload,
+                'manual' => $review->enrichment_source === 'manual' ? $this->reviewProposal($review) : null,
+            ],
         ]);
     }
 
@@ -160,5 +198,17 @@ class AutomotivePartEnrichmentController extends Controller
     private function decodeJson(?string $value): ?array
     {
         return $value === null || $value === '' ? null : json_decode($value, true, 512, JSON_THROW_ON_ERROR);
+    }
+
+    private function reviewProposal(AutomotivePartEnrichmentReview $review): array
+    {
+        return [
+            'proposed_title' => $review->proposed_title,
+            'proposed_description' => $review->proposed_description,
+            'proposed_brand' => $review->proposed_brand,
+            'proposed_category' => $review->proposed_category,
+            'proposed_compatibility' => $review->proposed_compatibility,
+            'proposed_attributes' => $review->proposed_attributes,
+        ];
     }
 }

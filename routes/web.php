@@ -3,6 +3,7 @@
 use App\Http\Controllers\AmsPedidosController;
 use App\Http\Controllers\AmsSecondaryOrdersController;
 use App\Http\Controllers\Autopartes\AutomotivePartController;
+use App\Http\Controllers\Autopartes\AutomotivePartAiEnrichmentController;
 use App\Http\Controllers\Autopartes\AutomotivePartEnrichmentController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\DashboardController;
@@ -349,6 +350,10 @@ Route::get(
     Route::get('/autopartes/importaciones/{import}', [AutomotivePartController::class, 'importDetail'])->name('autopartes.imports.show');
     Route::get('/autopartes/enriquecimiento', [AutomotivePartEnrichmentController::class, 'index'])->name('autopartes.enrichment.index');
     Route::post('/autopartes/enriquecimiento/auditar', [AutomotivePartEnrichmentController::class, 'audit'])->name('autopartes.enrichment.audit');
+    Route::post('/autopartes/enriquecimiento/ia/lote', [AutomotivePartAiEnrichmentController::class, 'batch'])->name('autopartes.enrichment.ai.batch');
+    Route::post('/autopartes/enriquecimiento/{review}/ia/generar', [AutomotivePartAiEnrichmentController::class, 'generate'])->name('autopartes.enrichment.ai.generate');
+    Route::post('/autopartes/enriquecimiento/{review}/ia/regenerar', [AutomotivePartAiEnrichmentController::class, 'regenerate'])->name('autopartes.enrichment.ai.regenerate');
+    Route::get('/autopartes/enriquecimiento/{review}/ia/historial', [AutomotivePartAiEnrichmentController::class, 'history'])->name('autopartes.enrichment.ai.history');
     Route::get('/autopartes/enriquecimiento/{review}', [AutomotivePartEnrichmentController::class, 'show'])->name('autopartes.enrichment.show');
     Route::put('/autopartes/enriquecimiento/{review}', [AutomotivePartEnrichmentController::class, 'update'])->name('autopartes.enrichment.update');
     Route::post('/autopartes/enriquecimiento/{review}/aprobar', [AutomotivePartEnrichmentController::class, 'approve'])->name('autopartes.enrichment.approve');
