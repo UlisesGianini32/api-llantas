@@ -2,7 +2,9 @@
 
 namespace Tests\Unit;
 
+use App\Services\Autopartes\AutomotivePartImportService;
 use App\Services\Autopartes\AutomotivePartNormalizer;
+use Illuminate\Support\Collection;
 use PHPUnit\Framework\TestCase;
 
 class AutomotivePartNormalizerTest extends TestCase
@@ -37,5 +39,27 @@ class AutomotivePartNormalizerTest extends TestCase
         $normalizer = new AutomotivePartNormalizer();
 
         $this->assertSame('ABC-001', $normalizer->normalizePartNumber('  abc-001  '));
+    }
+
+    public function test_import_service_normalizes_collection_rows(): void
+    {
+        $service = new class(new AutomotivePartNormalizer()) extends AutomotivePartImportService
+        {
+            public function normalizeRow(mixed $row): array
+            {
+                return $this->normalizeRowValues($row);
+            }
+
+            public function findStartIndex(Collection $rows): int
+            {
+                return $this->findDataStartIndex($rows);
+            }
+        };
+
+        $header = collect(['Category', 'Subcategory', 'Item Number', 'Manufacturer Part Number', 'Vendor']);
+        $data = collect(['Brakes', 'Pads', 'ABC-001', 'MFG-01', 'ACME Auto']);
+
+        $this->assertSame(1, $service->findStartIndex(collect([$header, $data])));
+        $this->assertSame($data->all(), $service->normalizeRow($data));
     }
 }

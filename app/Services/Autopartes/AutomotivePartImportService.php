@@ -177,7 +177,8 @@ class AutomotivePartImportService
     protected function findDataStartIndex(Collection $rows): int
     {
         foreach ($rows as $index => $row) {
-            $joined = strtolower(implode(' ', array_map(static fn ($cell) => (string) $cell, (array) $row)));
+            $values = $this->normalizeRowValues($row);
+            $joined = strtolower(implode(' ', array_map(static fn ($cell) => (string) $cell, $values)));
 
             if (str_contains($joined, 'category')
                 && str_contains($joined, 'item')
@@ -191,11 +192,15 @@ class AutomotivePartImportService
 
     protected function normalizeRowValues(mixed $row): array
     {
-        if (! is_array($row)) {
+        if ($row instanceof Collection) {
+            $values = $row->all();
+        } elseif (is_array($row)) {
+            $values = $row;
+        } else {
             return [];
         }
 
-        return array_values(array_map(static fn ($value) => is_scalar($value) || $value === null ? $value : json_encode($value), $row));
+        return array_values(array_map(static fn ($value) => is_scalar($value) || $value === null ? $value : json_encode($value), $values));
     }
 
     protected function isEmptyRow(array $values): bool
