@@ -30,39 +30,6 @@ return new class extends Migration
             $table->timestamps();
         });
 
-        Schema::create('automotive_part_import_rows', function (Blueprint $table) {
-            $table->id();
-            $table->foreignId('automotive_part_import_id')->constrained('automotive_part_imports')->cascadeOnDelete();
-            $table->unsignedInteger('row_number');
-            $table->string('source_key')->nullable()->index();
-            $table->string('category_raw')->nullable();
-            $table->string('subcategory_raw')->nullable();
-            $table->string('item_number_raw')->nullable();
-            $table->string('manufacturer_part_number_raw')->nullable();
-            $table->string('vendor_raw')->nullable();
-            $table->text('description_raw')->nullable();
-            $table->string('quantity_raw')->nullable();
-            $table->string('retail_raw')->nullable();
-            $table->string('extended_retail_raw')->nullable();
-            $table->string('lifecycle_raw')->nullable();
-            $table->string('min_model_year_raw')->nullable();
-            $table->string('average_model_year_raw')->nullable();
-            $table->string('max_model_year_raw')->nullable();
-            $table->string('prevalent_model_raw')->nullable();
-            $table->text('applicable_models_raw')->nullable();
-            $table->string('length_raw')->nullable();
-            $table->string('width_raw')->nullable();
-            $table->string('height_raw')->nullable();
-            $table->string('cubic_inches_raw')->nullable();
-            $table->string('weight_raw')->nullable();
-            $table->string('extended_weight_raw')->nullable();
-            $table->json('normalized_payload')->nullable();
-            $table->json('validation_errors')->nullable();
-            $table->foreignId('duplicate_of_row_id')->nullable()->constrained('automotive_part_import_rows')->nullOnDelete();
-            $table->foreignId('automotive_part_id')->nullable()->constrained('automotive_parts')->nullOnDelete();
-            $table->timestamps();
-        });
-
         Schema::create('automotive_parts', function (Blueprint $table) {
             $table->id();
             $table->string('source_key')->unique();
@@ -102,6 +69,39 @@ return new class extends Migration
             $table->index(['data_status', 'quantity']);
         });
 
+        Schema::create('automotive_part_import_rows', function (Blueprint $table) {
+            $table->id();
+            $table->foreignId('automotive_part_import_id')->constrained('automotive_part_imports')->cascadeOnDelete();
+            $table->unsignedInteger('row_number');
+            $table->string('source_key')->nullable()->index();
+            $table->string('category_raw')->nullable();
+            $table->string('subcategory_raw')->nullable();
+            $table->string('item_number_raw')->nullable();
+            $table->string('manufacturer_part_number_raw')->nullable();
+            $table->string('vendor_raw')->nullable();
+            $table->text('description_raw')->nullable();
+            $table->string('quantity_raw')->nullable();
+            $table->string('retail_raw')->nullable();
+            $table->string('extended_retail_raw')->nullable();
+            $table->string('lifecycle_raw')->nullable();
+            $table->string('min_model_year_raw')->nullable();
+            $table->string('average_model_year_raw')->nullable();
+            $table->string('max_model_year_raw')->nullable();
+            $table->string('prevalent_model_raw')->nullable();
+            $table->text('applicable_models_raw')->nullable();
+            $table->string('length_raw')->nullable();
+            $table->string('width_raw')->nullable();
+            $table->string('height_raw')->nullable();
+            $table->string('cubic_inches_raw')->nullable();
+            $table->string('weight_raw')->nullable();
+            $table->string('extended_weight_raw')->nullable();
+            $table->json('normalized_payload')->nullable();
+            $table->json('validation_errors')->nullable();
+            $table->foreignId('duplicate_of_row_id')->nullable()->constrained('automotive_part_import_rows')->nullOnDelete();
+            $table->foreignId('automotive_part_id')->nullable()->constrained('automotive_parts')->nullOnDelete();
+            $table->timestamps();
+        });
+
         Schema::create('automotive_part_stock_movements', function (Blueprint $table) {
             $table->id();
             $table->foreignId('automotive_part_id')->constrained('automotive_parts')->cascadeOnDelete();
@@ -122,8 +122,8 @@ return new class extends Migration
     public function down(): void
     {
         Schema::dropIfExists('automotive_part_stock_movements');
-        Schema::dropIfExists('automotive_parts');
         Schema::dropIfExists('automotive_part_import_rows');
+        Schema::dropIfExists('automotive_parts');
         Schema::dropIfExists('automotive_part_imports');
     }
 };
