@@ -184,6 +184,13 @@ function SidebarNav({ currentPath, onNavigate, pendingQuestions = 0 }) {
                         Importar Excel
                     </NavItem>
                     <NavItem
+                        href="/autopartes"
+                        active={currentPath.startsWith('/autopartes')}
+                        onNavigate={onNavigate}
+                    >
+                        Autopartes
+                    </NavItem>
+                    <NavItem
                         href="/llantas/agotadas"
                         active={currentPath.startsWith('/llantas/agotadas')}
                         danger

@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\AmsPedidosController;
 use App\Http\Controllers\AmsSecondaryOrdersController;
+use App\Http\Controllers\Autopartes\AutomotivePartController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\ExcelImportController;
@@ -338,6 +339,14 @@ Route::get(
 
     Route::post('/productos/{compuesto}/price/recalc', [ProductoCompuestoController::class, 'recalcPrice'])
         ->name('productos.price.recalc');
+
+    // AUTOPARTES
+    Route::get('/autopartes', [AutomotivePartController::class, 'index'])->name('autopartes.index');
+    Route::get('/autopartes/upload', [AutomotivePartController::class, 'uploadForm'])->name('autopartes.upload');
+    Route::post('/autopartes/upload', [AutomotivePartController::class, 'store'])->name('autopartes.store');
+    Route::get('/autopartes/importaciones', [AutomotivePartController::class, 'imports'])->name('autopartes.imports.index');
+    Route::get('/autopartes/importaciones/{import}', [AutomotivePartController::class, 'importDetail'])->name('autopartes.imports.show');
+    Route::get('/autopartes/{automotivePart}', [AutomotivePartController::class, 'detail'])->name('autopartes.show');
 
     // EXCEL
     Route::get('/importar-excel', [ExcelImportController::class, 'vista'])->name('excel.vista');
