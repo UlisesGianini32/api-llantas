@@ -3,6 +3,7 @@
 use App\Http\Controllers\AmsPedidosController;
 use App\Http\Controllers\AmsSecondaryOrdersController;
 use App\Http\Controllers\Autopartes\AutomotivePartController;
+use App\Http\Controllers\Autopartes\AutomotivePartEnrichmentController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\ExcelImportController;
@@ -346,6 +347,13 @@ Route::get(
     Route::post('/autopartes/upload', [AutomotivePartController::class, 'store'])->name('autopartes.store');
     Route::get('/autopartes/importaciones', [AutomotivePartController::class, 'imports'])->name('autopartes.imports.index');
     Route::get('/autopartes/importaciones/{import}', [AutomotivePartController::class, 'importDetail'])->name('autopartes.imports.show');
+    Route::get('/autopartes/enriquecimiento', [AutomotivePartEnrichmentController::class, 'index'])->name('autopartes.enrichment.index');
+    Route::post('/autopartes/enriquecimiento/auditar', [AutomotivePartEnrichmentController::class, 'audit'])->name('autopartes.enrichment.audit');
+    Route::get('/autopartes/enriquecimiento/{review}', [AutomotivePartEnrichmentController::class, 'show'])->name('autopartes.enrichment.show');
+    Route::put('/autopartes/enriquecimiento/{review}', [AutomotivePartEnrichmentController::class, 'update'])->name('autopartes.enrichment.update');
+    Route::post('/autopartes/enriquecimiento/{review}/aprobar', [AutomotivePartEnrichmentController::class, 'approve'])->name('autopartes.enrichment.approve');
+    Route::post('/autopartes/enriquecimiento/{review}/rechazar', [AutomotivePartEnrichmentController::class, 'reject'])->name('autopartes.enrichment.reject');
+    Route::post('/autopartes/enriquecimiento/{review}/pendiente', [AutomotivePartEnrichmentController::class, 'pending'])->name('autopartes.enrichment.pending');
     Route::get('/autopartes/{automotivePart}', [AutomotivePartController::class, 'detail'])->name('autopartes.show');
 
     // EXCEL

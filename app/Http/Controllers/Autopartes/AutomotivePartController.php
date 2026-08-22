@@ -87,7 +87,7 @@ class AutomotivePartController extends Controller
 
     public function detail(AutomotivePart $automotivePart): Response
     {
-        $automotivePart->load(['lastImport', 'stockMovements' => fn ($query) => $query->latest()->take(20)]);
+        $automotivePart->load(['lastImport', 'enrichmentReview', 'stockMovements' => fn ($query) => $query->latest()->take(20)]);
 
         return Inertia::render('Autopartes/Detalle', [
             'part' => $automotivePart,

@@ -11,9 +11,10 @@ export default function Detalle({ part, stockMovements = [] }) {
                         <h1 className="text-2xl font-bold text-slate-900 dark:text-white">{part.item_number ?? 'Autoparte'}</h1>
                         <p className="text-sm text-slate-500 dark:text-slate-400">{part.manufacturer_part_number ?? '—'}</p>
                     </div>
-                    <Link href="/autopartes" className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 dark:border-neutral-700 dark:bg-neutral-900 dark:text-slate-200 dark:hover:bg-neutral-800">
-                        Volver
-                    </Link>
+                    <div className="flex gap-2">
+                        {part.enrichment_review && <Link href={`/autopartes/enriquecimiento/${part.enrichment_review.id}`} className="rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-2 text-sm font-semibold text-indigo-700 dark:border-indigo-500/30 dark:bg-indigo-500/10 dark:text-indigo-300">Ver revisión</Link>}
+                        <Link href="/autopartes" className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 dark:border-neutral-700 dark:bg-neutral-900 dark:text-slate-200 dark:hover:bg-neutral-800">Volver</Link>
+                    </div>
                 </div>
 
                 <div className="grid gap-4 lg:grid-cols-2">

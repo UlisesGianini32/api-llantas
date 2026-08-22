@@ -39,6 +39,9 @@ export default function Index({ parts, filters = {}, summary = {} }) {
                         </p>
                     </div>
                     <div className="flex gap-2">
+                        <Link href="/autopartes/enriquecimiento" className="rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-2 text-sm font-semibold text-indigo-700 hover:bg-indigo-100 dark:border-indigo-500/30 dark:bg-indigo-500/10 dark:text-indigo-300">
+                            Enriquecimiento
+                        </Link>
                         <Link href="/autopartes/upload" className="rounded-xl bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500">
                             Subir XLS/XLSX
                         </Link>

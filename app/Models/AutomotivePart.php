@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class AutomotivePart extends Model
 {
@@ -72,5 +73,10 @@ class AutomotivePart extends Model
     public function stockMovements(): HasMany
     {
         return $this->hasMany(AutomotivePartStockMovement::class, 'automotive_part_id');
+    }
+
+    public function enrichmentReview(): HasOne
+    {
+        return $this->hasOne(AutomotivePartEnrichmentReview::class, 'automotive_part_id');
     }
 }
