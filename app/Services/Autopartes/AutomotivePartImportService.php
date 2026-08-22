@@ -92,6 +92,7 @@ class AutomotivePartImportService
             $seenSourceKeys[$sourceKey] = $rowRecord->id;
 
             $automotivePart = AutomotivePart::query()->firstOrNew(['source_key' => $sourceKey]);
+            $wasCreated = ! $automotivePart->exists;
             $previousQuantity = (int) ($automotivePart->quantity ?? 0);
             $newQuantity = (int) ($payload['quantity'] ?? 0);
 
@@ -134,14 +135,14 @@ class AutomotivePartImportService
 
             $rowRecord->update(['automotive_part_id' => $automotivePart->id]);
 
-            if ($automotivePart->wasRecentlyCreated || $previousQuantity !== $newQuantity) {
+            if ($wasCreated || $previousQuantity !== $newQuantity) {
                 AutomotivePartStockMovement::query()->create([
                     'automotive_part_id' => $automotivePart->id,
                     'automotive_part_import_id' => $import->id,
                     'previous_quantity' => $previousQuantity,
                     'new_quantity' => $newQuantity,
                     'difference' => $newQuantity - $previousQuantity,
-                    'reason' => $automotivePart->wasRecentlyCreated ? 'initial_import' : 'import_update',
+                    'reason' => $wasCreated ? 'initial_import' : 'import_update',
                     'metadata' => [
                         'source_key' => $sourceKey,
                         'row_number' => $rowRecord->row_number,
@@ -149,8 +150,9 @@ class AutomotivePartImportService
                 ]);
             }
 
-            $stats['imported_rows']++;
-            if ($automotivePart->wasRecentlyCreated === false && $previousQuantity !== $newQuantity) {
+            if ($wasCreated) {
+                $stats['imported_rows']++;
+            } else {
                 $stats['updated_rows']++;
             }
         });
@@ -166,7 +168,7 @@ class AutomotivePartImportService
             'completed_at' => now(),
             'metadata' => [
                 'processed_rows' => $stats['total_rows'],
-                'unique_rows' => $stats['imported_rows'],
+                'unique_rows' => $stats['imported_rows'] + $stats['updated_rows'],
                 'duplicate_rows' => $stats['duplicate_rows'],
             ],
         ]);
