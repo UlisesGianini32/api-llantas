@@ -59,4 +59,9 @@ class AutomotivePartEnrichmentReview extends Model
     {
         return $this->hasOne(AutomotivePartAiRun::class, 'automotive_part_enrichment_review_id')->latestOfMany();
     }
+
+    public function meliCategoryCandidates(): HasMany
+    {
+        return $this->hasMany(AutomotivePartMeliCategoryCandidate::class);
+    }
 }

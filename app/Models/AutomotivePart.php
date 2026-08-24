@@ -84,4 +84,14 @@ class AutomotivePart extends Model
     {
         return $this->hasMany(AutomotivePartAiRun::class, 'automotive_part_id');
     }
+
+    public function meliCategoryCandidates(): HasMany
+    {
+        return $this->hasMany(AutomotivePartMeliCategoryCandidate::class);
+    }
+
+    public function meliReadiness(): HasOne
+    {
+        return $this->hasOne(AutomotivePartMeliReadiness::class);
+    }
 }

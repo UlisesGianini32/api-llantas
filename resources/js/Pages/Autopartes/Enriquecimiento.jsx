@@ -83,6 +83,7 @@ export default function Enriquecimiento({ reviews, filters = {}, statusTotals = 
                             {queueing ? 'Encolando…' : `Encolar IA (${Math.min(ai.max_batch ?? 10, ai.daily_remaining ?? 0)})`}
                         </button>
                         <Link href="/autopartes" className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 dark:border-neutral-700 dark:bg-neutral-900 dark:text-slate-200">Catálogo</Link>
+                        <Link href="/autopartes/mercado-libre/categorias" className="rounded-xl border border-sky-200 bg-white px-4 py-2 text-sm font-semibold text-sky-700 hover:bg-sky-50 dark:border-sky-500/30 dark:bg-neutral-900 dark:text-sky-300">Categorías ML</Link>
                     </div>
                 </div>
 

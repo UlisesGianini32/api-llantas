@@ -5,6 +5,8 @@ use App\Http\Controllers\AmsSecondaryOrdersController;
 use App\Http\Controllers\Autopartes\AutomotivePartController;
 use App\Http\Controllers\Autopartes\AutomotivePartAiEnrichmentController;
 use App\Http\Controllers\Autopartes\AutomotivePartEnrichmentController;
+use App\Http\Controllers\Autopartes\AutomotivePartMeliCategoryActionController;
+use App\Http\Controllers\Autopartes\AutomotivePartMeliCategoryController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\ExcelImportController;
@@ -359,6 +361,18 @@ Route::get(
     Route::post('/autopartes/enriquecimiento/{review}/aprobar', [AutomotivePartEnrichmentController::class, 'approve'])->name('autopartes.enrichment.approve');
     Route::post('/autopartes/enriquecimiento/{review}/rechazar', [AutomotivePartEnrichmentController::class, 'reject'])->name('autopartes.enrichment.reject');
     Route::post('/autopartes/enriquecimiento/{review}/pendiente', [AutomotivePartEnrichmentController::class, 'pending'])->name('autopartes.enrichment.pending');
+    Route::prefix('/autopartes/mercado-libre/categorias')->name('autopartes.meli.categories.')->group(function () {
+        Route::get('/', [AutomotivePartMeliCategoryController::class, 'index'])->name('index');
+        Route::post('/lote', [AutomotivePartMeliCategoryActionController::class, 'batch'])->middleware('throttle:10,1')->name('batch');
+        Route::get('/{automotivePart}', [AutomotivePartMeliCategoryController::class, 'show'])->name('show');
+        Route::post('/{automotivePart}/buscar', [AutomotivePartMeliCategoryActionController::class, 'search'])->middleware('throttle:10,1')->name('search');
+        Route::post('/{automotivePart}/manual', [AutomotivePartMeliCategoryActionController::class, 'manual'])->middleware('throttle:10,1')->name('manual');
+        Route::post('/{automotivePart}/recalcular', [AutomotivePartMeliCategoryActionController::class, 'recalculate'])->middleware('throttle:10,1')->name('recalculate');
+        Route::post('/{automotivePart}/confirmar', [AutomotivePartMeliCategoryActionController::class, 'confirm'])->middleware('throttle:10,1')->name('confirm');
+        Route::post('/candidatos/{candidate}/aprobar', [AutomotivePartMeliCategoryActionController::class, 'approve'])->middleware('throttle:10,1')->name('approve');
+        Route::post('/candidatos/{candidate}/rechazar', [AutomotivePartMeliCategoryActionController::class, 'reject'])->middleware('throttle:10,1')->name('reject');
+        Route::post('/candidatos/{candidate}/actualizar', [AutomotivePartMeliCategoryActionController::class, 'refresh'])->middleware('throttle:10,1')->name('refresh');
+    });
     Route::get('/autopartes/{automotivePart}', [AutomotivePartController::class, 'detail'])->name('autopartes.show');
 
     // EXCEL
