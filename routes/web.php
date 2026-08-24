@@ -5,6 +5,8 @@ use App\Http\Controllers\AmsSecondaryOrdersController;
 use App\Http\Controllers\Autopartes\AutomotivePartController;
 use App\Http\Controllers\Autopartes\AutomotivePartAiEnrichmentController;
 use App\Http\Controllers\Autopartes\AutomotivePartEnrichmentController;
+use App\Http\Controllers\Autopartes\AutomotivePartMeliDraftActionController;
+use App\Http\Controllers\Autopartes\AutomotivePartMeliDraftController;
 use App\Http\Controllers\Autopartes\AutomotivePartMeliCategoryActionController;
 use App\Http\Controllers\Autopartes\AutomotivePartMeliCategoryController;
 use App\Http\Controllers\AuthController;
@@ -372,6 +374,16 @@ Route::get(
         Route::post('/candidatos/{candidate}/aprobar', [AutomotivePartMeliCategoryActionController::class, 'approve'])->middleware('throttle:10,1')->name('approve');
         Route::post('/candidatos/{candidate}/rechazar', [AutomotivePartMeliCategoryActionController::class, 'reject'])->middleware('throttle:10,1')->name('reject');
         Route::post('/candidatos/{candidate}/actualizar', [AutomotivePartMeliCategoryActionController::class, 'refresh'])->middleware('throttle:10,1')->name('refresh');
+    });
+    Route::prefix('/autopartes/mercado-libre/borradores')->name('autopartes.meli.drafts.')->group(function () {
+        Route::get('/', [AutomotivePartMeliDraftController::class, 'index'])->name('index');
+        Route::get('/autopartes/{automotivePart}', [AutomotivePartMeliDraftController::class, 'show'])->name('show');
+        Route::post('/autopartes/{automotivePart}/generar', [AutomotivePartMeliDraftActionController::class, 'generate'])->middleware('throttle:20,1')->name('generate');
+        Route::get('/{draft}/historial', [AutomotivePartMeliDraftController::class, 'history'])->name('history');
+        Route::post('/{draft}/regenerar', [AutomotivePartMeliDraftActionController::class, 'regenerate'])->middleware('throttle:20,1')->name('regenerate');
+        Route::post('/{draft}/aprobar', [AutomotivePartMeliDraftActionController::class, 'approve'])->name('approve');
+        Route::post('/{draft}/rechazar', [AutomotivePartMeliDraftActionController::class, 'reject'])->name('reject');
+        Route::post('/{draft}/pendiente', [AutomotivePartMeliDraftActionController::class, 'pending'])->name('pending');
     });
     Route::get('/autopartes/{automotivePart}', [AutomotivePartController::class, 'detail'])->name('autopartes.show');
 

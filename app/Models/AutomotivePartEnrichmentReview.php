@@ -64,4 +64,9 @@ class AutomotivePartEnrichmentReview extends Model
     {
         return $this->hasMany(AutomotivePartMeliCategoryCandidate::class);
     }
+
+    public function meliDrafts(): HasMany
+    {
+        return $this->hasMany(AutomotivePartMeliDraft::class);
+    }
 }

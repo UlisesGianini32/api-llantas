@@ -94,4 +94,14 @@ class AutomotivePart extends Model
     {
         return $this->hasOne(AutomotivePartMeliReadiness::class);
     }
+
+    public function meliDrafts(): HasMany
+    {
+        return $this->hasMany(AutomotivePartMeliDraft::class);
+    }
+
+    public function latestMeliDraft(): HasOne
+    {
+        return $this->hasOne(AutomotivePartMeliDraft::class)->latestOfMany('version');
+    }
 }
