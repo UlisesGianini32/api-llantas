@@ -52,4 +52,9 @@ class MeliAccount extends Model
     {
         return $this->hasMany(MeliQuestion::class);
     }
+
+    public function automotivePartPublications(): HasMany
+    {
+        return $this->hasMany(AutomotivePartMeliPublication::class);
+    }
 }

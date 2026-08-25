@@ -114,4 +114,9 @@ class AutomotivePart extends Model
     {
         return $this->hasMany(AutomotivePartPriceCalculation::class);
     }
+
+    public function meliPublications(): HasMany
+    {
+        return $this->hasMany(AutomotivePartMeliPublication::class);
+    }
 }

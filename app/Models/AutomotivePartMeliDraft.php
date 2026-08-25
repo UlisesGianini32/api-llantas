@@ -67,6 +67,11 @@ class AutomotivePartMeliDraft extends Model
         return $this->hasMany(AutomotivePartMeliDraftEvent::class)->latest('id');
     }
 
+    public function publications(): HasMany
+    {
+        return $this->hasMany(AutomotivePartMeliPublication::class);
+    }
+
     public function hasBlockingErrors(): bool
     {
         return ($this->blocking_errors ?? []) !== [];

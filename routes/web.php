@@ -7,6 +7,8 @@ use App\Http\Controllers\Autopartes\AutomotivePartAiEnrichmentController;
 use App\Http\Controllers\Autopartes\AutomotivePartEnrichmentController;
 use App\Http\Controllers\Autopartes\AutomotivePartMeliDraftActionController;
 use App\Http\Controllers\Autopartes\AutomotivePartMeliDraftController;
+use App\Http\Controllers\Autopartes\AutomotivePartMeliPublicationActionController;
+use App\Http\Controllers\Autopartes\AutomotivePartMeliPublicationController;
 use App\Http\Controllers\Autopartes\AutomotivePartMeliCategoryActionController;
 use App\Http\Controllers\Autopartes\AutomotivePartMeliCategoryController;
 use App\Http\Controllers\Autopartes\AutomotivePartMediaActionController;
@@ -388,6 +390,20 @@ Route::get(
         Route::post('/{draft}/aprobar', [AutomotivePartMeliDraftActionController::class, 'approve'])->name('approve');
         Route::post('/{draft}/rechazar', [AutomotivePartMeliDraftActionController::class, 'reject'])->name('reject');
         Route::post('/{draft}/pendiente', [AutomotivePartMeliDraftActionController::class, 'pending'])->name('pending');
+    });
+    Route::prefix('/autopartes/mercado-libre/publicaciones')->name('autopartes.meli.publications.')->group(function () {
+        Route::get('/', [AutomotivePartMeliPublicationController::class, 'index'])->name('index');
+        Route::post('/preflight', [AutomotivePartMeliPublicationActionController::class, 'preflight'])->name('preflight');
+        Route::get('/{publication}', [AutomotivePartMeliPublicationController::class, 'show'])->name('show');
+        Route::post('/{publication}/regenerar', [AutomotivePartMeliPublicationActionController::class, 'regenerate'])->name('regenerate');
+        Route::post('/{publication}/imagenes', [AutomotivePartMeliPublicationActionController::class, 'upload'])->middleware('throttle:5,1')->name('pictures');
+        Route::post('/{publication}/validar', [AutomotivePartMeliPublicationActionController::class, 'validateRemote'])->middleware('throttle:5,1')->name('validate');
+        Route::post('/{publication}/aprobar', [AutomotivePartMeliPublicationActionController::class, 'approve'])->name('approve');
+        Route::post('/{publication}/revocar', [AutomotivePartMeliPublicationActionController::class, 'revoke'])->name('revoke');
+        Route::post('/{publication}/encolar', [AutomotivePartMeliPublicationActionController::class, 'enqueue'])->middleware('throttle:2,1')->name('enqueue');
+        Route::post('/{publication}/descripcion/reintentar', [AutomotivePartMeliPublicationActionController::class, 'retryDescription'])->middleware('throttle:2,1')->name('description.retry');
+        Route::post('/{publication}/reconciliar', [AutomotivePartMeliPublicationActionController::class, 'reconcile'])->middleware('throttle:2,1')->name('reconcile');
+        Route::post('/{publication}/cancelar', [AutomotivePartMeliPublicationActionController::class, 'cancel'])->name('cancel');
     });
     Route::prefix('/autopartes/medios')->name('autopartes.media.')->group(function () {
         Route::get('/', [AutomotivePartMediaController::class, 'index'])->name('index');
