@@ -9,6 +9,10 @@ use App\Http\Controllers\Autopartes\AutomotivePartMeliDraftActionController;
 use App\Http\Controllers\Autopartes\AutomotivePartMeliDraftController;
 use App\Http\Controllers\Autopartes\AutomotivePartMeliCategoryActionController;
 use App\Http\Controllers\Autopartes\AutomotivePartMeliCategoryController;
+use App\Http\Controllers\Autopartes\AutomotivePartMediaActionController;
+use App\Http\Controllers\Autopartes\AutomotivePartMediaController;
+use App\Http\Controllers\Autopartes\AutomotivePartPriceRuleActionController;
+use App\Http\Controllers\Autopartes\AutomotivePartPriceRuleController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\ExcelImportController;
@@ -384,6 +388,27 @@ Route::get(
         Route::post('/{draft}/aprobar', [AutomotivePartMeliDraftActionController::class, 'approve'])->name('approve');
         Route::post('/{draft}/rechazar', [AutomotivePartMeliDraftActionController::class, 'reject'])->name('reject');
         Route::post('/{draft}/pendiente', [AutomotivePartMeliDraftActionController::class, 'pending'])->name('pending');
+    });
+    Route::prefix('/autopartes/medios')->name('autopartes.media.')->group(function () {
+        Route::get('/', [AutomotivePartMediaController::class, 'index'])->name('index');
+        Route::get('/archivos/{media}/preview', [AutomotivePartMediaController::class, 'preview'])->name('preview');
+        Route::post('/archivos/{media}/aprobar', [AutomotivePartMediaActionController::class, 'approve'])->name('approve');
+        Route::post('/archivos/{media}/rechazar', [AutomotivePartMediaActionController::class, 'reject'])->name('reject');
+        Route::post('/archivos/{media}/archivar', [AutomotivePartMediaActionController::class, 'archive'])->name('archive');
+        Route::post('/archivos/{media}/principal', [AutomotivePartMediaActionController::class, 'primary'])->name('primary');
+        Route::get('/{automotivePart}', [AutomotivePartMediaController::class, 'show'])->name('show');
+        Route::post('/{automotivePart}', [AutomotivePartMediaActionController::class, 'store'])->name('store');
+        Route::put('/{automotivePart}/orden', [AutomotivePartMediaActionController::class, 'reorder'])->name('reorder');
+    });
+    Route::prefix('/autopartes/precios')->name('autopartes.prices.')->group(function () {
+        Route::get('/', [AutomotivePartPriceRuleController::class, 'index'])->name('index');
+        Route::post('/reglas', [AutomotivePartPriceRuleActionController::class, 'store'])->name('rules.store');
+        Route::get('/reglas/{rule}', [AutomotivePartPriceRuleController::class, 'show'])->name('rules.show');
+        Route::put('/reglas/{rule}', [AutomotivePartPriceRuleActionController::class, 'update'])->name('rules.update');
+        Route::post('/reglas/{rule}/previsualizar', [AutomotivePartPriceRuleController::class, 'preview'])->name('rules.preview');
+        Route::post('/reglas/{rule}/activar', [AutomotivePartPriceRuleActionController::class, 'activate'])->name('rules.activate');
+        Route::post('/reglas/{rule}/desactivar', [AutomotivePartPriceRuleActionController::class, 'deactivate'])->name('rules.deactivate');
+        Route::post('/reglas/{rule}/reemplazar', [AutomotivePartPriceRuleActionController::class, 'replace'])->name('rules.replace');
     });
     Route::get('/autopartes/{automotivePart}', [AutomotivePartController::class, 'detail'])->name('autopartes.show');
 

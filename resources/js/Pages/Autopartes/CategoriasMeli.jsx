@@ -46,6 +46,8 @@ export default function CategoriasMeli({ parts, filters = {}, internalCategories
                     <div className="flex flex-wrap gap-2">
                         <button type="button" disabled={queueing || Boolean(disabledReason)} title={disabledReason ?? ''} onClick={queueBatch} className="rounded-xl bg-sky-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">{queueing ? 'Encolando…' : 'Buscar lote pequeño'}</button>
                         <Link href="/autopartes/mercado-libre/borradores" className="rounded-xl border border-amber-200 px-4 py-2 text-sm font-semibold text-amber-700 dark:border-amber-500/30 dark:text-amber-300">Borradores ML</Link>
+                        <Link href="/autopartes/medios" className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-semibold dark:border-neutral-700">Medios</Link>
+                        <Link href="/autopartes/precios" className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-semibold dark:border-neutral-700">Precios</Link>
                         <Link href="/autopartes/enriquecimiento" className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-semibold dark:border-neutral-700">Enriquecimiento</Link>
                     </div>
                 </div>

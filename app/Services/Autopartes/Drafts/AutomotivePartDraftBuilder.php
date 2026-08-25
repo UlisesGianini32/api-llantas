@@ -4,12 +4,13 @@ namespace App\Services\Autopartes\Drafts;
 
 use App\Models\AutomotivePart;
 use App\Models\AutomotivePartMeliCategory;
+use App\Services\Autopartes\MediaPricing\AutomotivePartDraftMediaPricingSource;
 
 class AutomotivePartDraftBuilder
 {
     public function __construct(
         private AutomotivePartDraftConfiguration $configuration,
-        private AutomotivePartDraftPriceCalculator $prices,
+        private AutomotivePartDraftMediaPricingSource $mediaPricing,
         private AutomotivePartDraftFingerprint $fingerprints,
         private AutomotivePartDraftValidator $validator,
     ) {}
@@ -38,13 +39,9 @@ class AutomotivePartDraftBuilder
             ->where('category_id', $candidate->category_id)
             ->first();
         $requirements = $category?->attributeRequirements?->sortBy('attribute_id')->values() ?? collect();
-        $price = $this->prices->calculate($part);
+        $price = $this->mediaPricing->price($part);
         $contentRules = $this->configuration->contentRules();
-        $images = collect($this->configuration->imagesFor($part))
-            ->sort()
-            ->values()
-            ->map(fn (string $url) => ['url' => $url, 'source' => 'configured_source_key'])
-            ->all();
+        $images = $this->mediaPricing->images($part);
         $attributes = collect($readiness?->proposed_attributes ?? [])
             ->filter(fn ($attribute) => is_array($attribute) && filled($attribute['attribute_id'] ?? null) && filled($attribute['value'] ?? null))
             ->sortBy('attribute_id')
@@ -150,6 +147,15 @@ class AutomotivePartDraftBuilder
             'attribute_requirements' => $requirementSnapshot,
             'readiness' => $readinessSnapshot,
             'price' => $price,
+            'media_pricing' => [
+                'price_source' => $price['source'] ?? 'unknown',
+                'price_rule_id' => $price['rule_id'] ?? null,
+                'price_rule_version' => $price['rule_version'] ?? null,
+                'price_calculation_id' => $price['calculation_id'] ?? null,
+                'price_calculation_fingerprint' => $price['calculation_fingerprint'] ?? null,
+                'media_ids' => collect($images)->pluck('media_id')->filter()->values()->all(),
+                'media_fingerprints' => collect($images)->pluck('sha256')->filter()->values()->all(),
+            ],
             'configuration' => array_merge($contentRules, [
                 'pricing' => $price['rules'],
                 'images_for_source_key' => $images,

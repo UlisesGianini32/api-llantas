@@ -104,4 +104,14 @@ class AutomotivePart extends Model
     {
         return $this->hasOne(AutomotivePartMeliDraft::class)->latestOfMany('version');
     }
+
+    public function media(): HasMany
+    {
+        return $this->hasMany(AutomotivePartMedia::class);
+    }
+
+    public function priceCalculations(): HasMany
+    {
+        return $this->hasMany(AutomotivePartPriceCalculation::class);
+    }
 }
