@@ -239,10 +239,18 @@ function SidebarNav({ currentPath, onNavigate, pendingQuestions = 0 }) {
 
                     <NavItem
                         href="/meli-price-manager/brands"
-                        active={currentPath.startsWith('/meli-price-manager')}
+                        active={currentPath.startsWith('/meli-price-manager/brands')}
                         onNavigate={onNavigate}
                     >
-                        Meli Price Manager
+                        Marcas y alias
+                    </NavItem>
+
+                    <NavItem
+                        href="/meli-price-manager/uncategorized"
+                        active={currentPath.startsWith('/meli-price-manager/uncategorized')}
+                        onNavigate={onNavigate}
+                    >
+                        Pendientes de clasificación
                     </NavItem>
 
                     <NavItem
