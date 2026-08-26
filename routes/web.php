@@ -26,6 +26,8 @@ use App\Http\Controllers\MeliMessagingController;
 use App\Http\Controllers\MeliPriceManager\MeliBrandAliasController;
 use App\Http\Controllers\MeliPriceManager\MeliBrandGroupController;
 use App\Http\Controllers\MeliPriceManager\MeliBrandReclassificationController;
+use App\Http\Controllers\MeliPriceManager\MeliItemClassificationActionController;
+use App\Http\Controllers\MeliPriceManager\MeliUncategorizedItemController;
 use App\Http\Controllers\MeliQuestionController;
 use App\Http\Controllers\MeliPublishController;
 use App\Http\Controllers\MeliRepublishController;
@@ -247,6 +249,28 @@ Route::get(
             ->name('brands.reclassification.preview');
         Route::post('/brands/reclassification/apply', [MeliBrandReclassificationController::class, 'apply'])
             ->name('reclassification.apply');
+
+        Route::get('/uncategorized', [MeliUncategorizedItemController::class, 'index'])->name('uncategorized.index');
+        Route::post('/uncategorized/bulk', [MeliItemClassificationActionController::class, 'bulk'])
+            ->name('uncategorized.bulk');
+        Route::post('/items/{item}/suggestion/accept', [MeliItemClassificationActionController::class, 'accept'])
+            ->whereNumber('item')
+            ->name('items.suggestion.accept');
+        Route::post('/items/{item}/assign', [MeliItemClassificationActionController::class, 'assign'])
+            ->whereNumber('item')
+            ->name('items.assign');
+        Route::post('/items/{item}/alias-and-assign', [MeliItemClassificationActionController::class, 'alias'])
+            ->whereNumber('item')
+            ->name('items.alias-and-assign');
+        Route::post('/items/{item}/brand-and-assign', [MeliItemClassificationActionController::class, 'brand'])
+            ->whereNumber('item')
+            ->name('items.brand-and-assign');
+        Route::post('/items/{item}/ignore', [MeliItemClassificationActionController::class, 'ignore'])
+            ->whereNumber('item')
+            ->name('items.ignore');
+        Route::post('/items/{item}/restore', [MeliItemClassificationActionController::class, 'restore'])
+            ->whereNumber('item')
+            ->name('items.restore');
     });
 
     Route::post('/producto/ml/batch-republish', [MeliBatchRepublishController::class, 'store'])
