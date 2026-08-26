@@ -27,6 +27,7 @@ use App\Http\Controllers\MeliPriceManager\MeliBrandAliasController;
 use App\Http\Controllers\MeliPriceManager\MeliBrandGroupController;
 use App\Http\Controllers\MeliPriceManager\MeliBrandReclassificationController;
 use App\Http\Controllers\MeliPriceManager\MeliItemClassificationActionController;
+use App\Http\Controllers\MeliPriceManager\MeliPriceManagerDashboardController;
 use App\Http\Controllers\MeliPriceManager\MeliUncategorizedItemController;
 use App\Http\Controllers\MeliQuestionController;
 use App\Http\Controllers\MeliPublishController;
@@ -233,6 +234,9 @@ Route::get(
 
     // MERCADO LIBRE
     Route::prefix('/meli-price-manager')->name('meli-price-manager.')->group(function () {
+        Route::get('/', [MeliPriceManagerDashboardController::class, 'index'])->name('index');
+        Route::post('/sync', [MeliPriceManagerDashboardController::class, 'sync'])->name('sync');
+
         Route::get('/brands', [MeliBrandGroupController::class, 'index'])->name('brands.index');
         Route::post('/brands', [MeliBrandGroupController::class, 'store'])->name('brands.store');
         Route::put('/brands/{brand}', [MeliBrandGroupController::class, 'update'])->name('brands.update');
