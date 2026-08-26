@@ -27,6 +27,11 @@ class MeliBrandGroup extends Model
         return $this->hasMany(MeliPriceManagerItem::class, 'brand_group_id');
     }
 
+    public function suggestedItems(): HasMany
+    {
+        return $this->hasMany(MeliPriceManagerItem::class, 'suggested_brand_group_id');
+    }
+
     public function priceChangeBatches(): HasMany
     {
         return $this->hasMany(MeliPriceChangeBatch::class, 'brand_group_id');

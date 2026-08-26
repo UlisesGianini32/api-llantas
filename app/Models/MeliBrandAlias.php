@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class MeliBrandAlias extends Model
 {
@@ -22,5 +23,10 @@ class MeliBrandAlias extends Model
     public function brandGroup(): BelongsTo
     {
         return $this->belongsTo(MeliBrandGroup::class, 'brand_group_id');
+    }
+
+    public function matchedItems(): HasMany
+    {
+        return $this->hasMany(MeliPriceManagerItem::class, 'matched_brand_alias_id');
     }
 }
