@@ -23,6 +23,9 @@ use App\Http\Controllers\MeliBatchRepublishController;
 use App\Http\Controllers\MeliCompareController;
 use App\Http\Controllers\MeliFullStockController;
 use App\Http\Controllers\MeliMessagingController;
+use App\Http\Controllers\MeliPriceManager\MeliBrandAliasController;
+use App\Http\Controllers\MeliPriceManager\MeliBrandGroupController;
+use App\Http\Controllers\MeliPriceManager\MeliBrandReclassificationController;
 use App\Http\Controllers\MeliQuestionController;
 use App\Http\Controllers\MeliPublishController;
 use App\Http\Controllers\MeliRepublishController;
@@ -227,6 +230,25 @@ Route::get(
     ->name('qz.sign');
 
     // MERCADO LIBRE
+    Route::prefix('/meli-price-manager')->name('meli-price-manager.')->group(function () {
+        Route::get('/brands', [MeliBrandGroupController::class, 'index'])->name('brands.index');
+        Route::post('/brands', [MeliBrandGroupController::class, 'store'])->name('brands.store');
+        Route::put('/brands/{brand}', [MeliBrandGroupController::class, 'update'])->name('brands.update');
+        Route::patch('/brands/{brand}/status', [MeliBrandGroupController::class, 'status'])->name('brands.status');
+
+        Route::post('/brands/{brand}/aliases', [MeliBrandAliasController::class, 'store'])->name('aliases.store');
+        Route::put('/aliases/{alias}', [MeliBrandAliasController::class, 'update'])->name('aliases.update');
+        Route::patch('/aliases/{alias}/status', [MeliBrandAliasController::class, 'status'])->name('aliases.status');
+        Route::delete('/aliases/{alias}', [MeliBrandAliasController::class, 'destroy'])->name('aliases.destroy');
+
+        Route::post('/brands/reclassification/preview', [MeliBrandReclassificationController::class, 'preview'])
+            ->name('reclassification.preview');
+        Route::post('/brands/{brand}/reclassification/preview', [MeliBrandReclassificationController::class, 'previewBrand'])
+            ->name('brands.reclassification.preview');
+        Route::post('/brands/reclassification/apply', [MeliBrandReclassificationController::class, 'apply'])
+            ->name('reclassification.apply');
+    });
+
     Route::post('/producto/ml/batch-republish', [MeliBatchRepublishController::class, 'store'])
         ->name('producto.ml.batch-republish');
 
