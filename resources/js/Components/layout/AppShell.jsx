@@ -237,6 +237,13 @@ function SidebarNav({ currentPath, onNavigate, pendingQuestions = 0 }) {
                         Publicaciones Mercado Libre
                     </NavItem>
 
+                    <NavItem
+                        href="/meli-price-manager/brands"
+                        active={currentPath.startsWith('/meli-price-manager')}
+                        onNavigate={onNavigate}
+                    >
+                        Meli Price Manager
+                    </NavItem>
 
                     <NavItem
                         href="/meli/full"
