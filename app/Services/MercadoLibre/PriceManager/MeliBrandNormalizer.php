@@ -12,8 +12,10 @@ class MeliBrandNormalizer
             return null;
         }
 
-        $normalized = preg_replace('/\s+/u', ' ', trim(Str::ascii($brand))) ?? '';
+        $normalized = mb_strtoupper(Str::ascii(trim($brand)), 'UTF-8');
+        $normalized = preg_replace('/[^A-Z0-9]+/u', ' ', $normalized) ?? '';
+        $normalized = preg_replace('/\s+/u', ' ', trim($normalized)) ?? '';
 
-        return $normalized === '' ? null : mb_strtoupper($normalized, 'UTF-8');
+        return $normalized === '' ? null : $normalized;
     }
 }
