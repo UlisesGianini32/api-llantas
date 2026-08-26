@@ -2,12 +2,15 @@
 
 namespace App\Models;
 
+use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class MeliAccount extends Model
 {
+    use HasFactory;
+
     protected $fillable = [
         'user_id',
         'meli_user_id',
@@ -56,5 +59,15 @@ class MeliAccount extends Model
     public function automotivePartPublications(): HasMany
     {
         return $this->hasMany(AutomotivePartMeliPublication::class);
+    }
+
+    public function priceManagerItems(): HasMany
+    {
+        return $this->hasMany(MeliPriceManagerItem::class);
+    }
+
+    public function priceChangeBatches(): HasMany
+    {
+        return $this->hasMany(MeliPriceChangeBatch::class);
     }
 }
