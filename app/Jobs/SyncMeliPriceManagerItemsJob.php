@@ -10,6 +10,7 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Throwable;
@@ -42,22 +43,32 @@ class SyncMeliPriceManagerItemsJob implements ShouldBeUnique, ShouldQueue
 
     public function handle(MeliPriceManagerSyncService $service): void
     {
-        $account = MeliAccount::query()->findOrFail($this->meliAccountId);
-        $summary = $service->syncAccount($account);
+        try {
+            $account = MeliAccount::query()->findOrFail($this->meliAccountId);
+            $summary = $service->syncAccount($account);
 
-        Log::info('[MeliPriceManager] Job completed', [
-            'meli_account_id' => $this->meliAccountId,
-            'summary' => $summary,
-        ]);
+            Log::info('[MeliPriceManager] Job completed', [
+                'meli_account_id' => $this->meliAccountId,
+                'summary' => $summary,
+            ]);
+        } finally {
+            Cache::forget(self::statusCacheKey($this->meliAccountId));
+        }
     }
 
     public function failed(?Throwable $exception): void
     {
+        Cache::forget(self::statusCacheKey($this->meliAccountId));
         Log::error('[MeliPriceManager] Job failed', [
             'meli_account_id' => $this->meliAccountId,
             'exception_class' => $exception !== null ? $exception::class : null,
             'message' => $this->sanitizeMessage($exception?->getMessage()),
         ]);
+    }
+
+    public static function statusCacheKey(int $meliAccountId): string
+    {
+        return 'meli-price-manager:sync-status:'.$meliAccountId;
     }
 
     private function sanitizeMessage(?string $message): ?string

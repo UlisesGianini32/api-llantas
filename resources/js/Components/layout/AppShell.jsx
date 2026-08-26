@@ -238,6 +238,14 @@ function SidebarNav({ currentPath, onNavigate, pendingQuestions = 0 }) {
                     </NavItem>
 
                     <NavItem
+                        href="/meli-price-manager"
+                        active={currentPath === '/meli-price-manager'}
+                        onNavigate={onNavigate}
+                    >
+                        Meli Price Manager
+                    </NavItem>
+
+                    <NavItem
                         href="/meli-price-manager/brands"
                         active={currentPath.startsWith('/meli-price-manager/brands')}
                         onNavigate={onNavigate}
