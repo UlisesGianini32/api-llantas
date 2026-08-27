@@ -2,10 +2,12 @@
 
 namespace App\Models;
 
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Support\Facades\Schema;
 
 class MeliPriceManagerItem extends Model
 {
@@ -36,6 +38,59 @@ class MeliPriceManagerItem extends Model
             'raw_item' => 'array',
             'last_synced_at' => 'datetime',
         ];
+    }
+
+    public function scopeManagedCatalog(Builder $query): Builder
+    {
+        if (Schema::hasTable('llantas')) {
+            $query->whereNotExists(function ($subquery): void {
+                $subquery
+                    ->selectRaw('1')
+                    ->from('llantas as managed_llantas')
+                    ->whereColumn(
+                        'managed_llantas.MLM',
+                        'meli_price_manager_items.meli_item_id'
+                    );
+            });
+        }
+
+        if (Schema::hasTable('producto_compuestos')) {
+            $query->whereNotExists(function ($subquery): void {
+                $subquery
+                    ->selectRaw('1')
+                    ->from('producto_compuestos as managed_compuestos')
+                    ->whereColumn(
+                        'managed_compuestos.MLM',
+                        'meli_price_manager_items.meli_item_id'
+                    );
+            });
+        }
+
+        if (Schema::hasTable('syscom_meli_queues')) {
+            $query->whereNotExists(function ($subquery): void {
+                $subquery
+                    ->selectRaw('1')
+                    ->from('syscom_meli_queues as managed_syscom')
+                    ->whereColumn(
+                        'managed_syscom.mlm',
+                        'meli_price_manager_items.meli_item_id'
+                    );
+            });
+        }
+
+        if (Schema::hasTable('automotive_part_meli_publications')) {
+            $query->whereNotExists(function ($subquery): void {
+                $subquery
+                    ->selectRaw('1')
+                    ->from('automotive_part_meli_publications as managed_autopartes')
+                    ->whereColumn(
+                        'managed_autopartes.meli_item_id',
+                        'meli_price_manager_items.meli_item_id'
+                    );
+            });
+        }
+
+        return $query;
     }
 
     public function meliAccount(): BelongsTo

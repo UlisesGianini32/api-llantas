@@ -139,6 +139,7 @@ class MeliItemClassificationActionService
     ): array {
         return DB::transaction(function () use ($accountId, $itemIds, $action, $userId, $brand): array {
             $items = MeliPriceManagerItem::query()
+                ->managedCatalog()
                 ->where('meli_account_id', $accountId)
                 ->whereIn('id', $itemIds)
                 ->lockForUpdate()
@@ -146,7 +147,7 @@ class MeliItemClassificationActionService
 
             if ($items->count() !== count($itemIds)) {
                 throw ValidationException::withMessages([
-                    'item_ids' => 'La selección cambió o contiene publicaciones de otra cuenta.',
+                    'item_ids' => 'La selección cambió o contiene publicaciones excluidas del Price Manager o de otra cuenta.',
                 ]);
             }
 

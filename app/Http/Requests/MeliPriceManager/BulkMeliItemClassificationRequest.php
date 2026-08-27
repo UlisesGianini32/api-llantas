@@ -46,12 +46,13 @@ class BulkMeliItemClassificationRequest extends FormRequest
 
             $ids = array_map('intval', $this->input('item_ids', []));
             $items = MeliPriceManagerItem::query()
+                ->managedCatalog()
                 ->whereIn('id', $ids)
                 ->where('meli_account_id', $this->integer('meli_account_id'))
                 ->get(['id', 'classification_status', 'suggested_brand_group_id']);
 
             if ($items->count() !== count($ids)) {
-                $validator->errors()->add('item_ids', 'La selección contiene publicaciones inexistentes o de otra cuenta.');
+                $validator->errors()->add('item_ids', 'La selección contiene publicaciones inexistentes, excluidas del Price Manager o de otra cuenta.');
 
                 return;
             }

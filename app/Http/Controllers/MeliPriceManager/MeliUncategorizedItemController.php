@@ -27,6 +27,7 @@ class MeliUncategorizedItemController extends Controller
         }
 
         $query = MeliPriceManagerItem::query()
+            ->managedCatalog()
             ->select([
                 'id', 'meli_account_id', 'meli_item_id', 'sku', 'title', 'category_id', 'meli_brand',
                 'normalized_brand', 'brand_group_id', 'suggested_brand_group_id', 'matched_brand_alias_id',
@@ -80,6 +81,7 @@ class MeliUncategorizedItemController extends Controller
         $counts = ['pending' => 0, 'uncategorized' => 0, 'suggested' => 0, 'ignored' => 0];
         if ($accountId) {
             $byStatus = MeliPriceManagerItem::query()
+                ->managedCatalog()
                 ->where('meli_account_id', $accountId)
                 ->whereIn('classification_status', ['uncategorized', 'suggested', 'ignored'])
                 ->selectRaw('classification_status, COUNT(*) as aggregate')
