@@ -11,7 +11,7 @@ class MeliBrandAlias extends Model
 {
     use HasFactory;
 
-    public const MATCH_TYPES = ['exact', 'contains', 'starts_with', 'manual'];
+    public const MATCH_TYPES = ['exact', 'contains', 'starts_with', 'title_contains', 'manual'];
 
     protected $fillable = ['brand_group_id', 'alias', 'normalized_alias', 'match_type', 'priority', 'active'];
 

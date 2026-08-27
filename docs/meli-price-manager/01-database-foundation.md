@@ -97,7 +97,7 @@ MeliPriceChange
 
 El proyecto no tenía una convención de enums PHP en `app/Enums`; sus módulos recientes usan constantes de modelo y enums de base de datos. Para mantener esa convención no se crearon enums PHP. Los valores aceptados están centralizados como constantes y restringidos por la migración:
 
-- `MeliBrandAlias::MATCH_TYPES`: `exact`, `contains`, `starts_with`, `manual`.
+- `MeliBrandAlias::MATCH_TYPES`: `exact`, `contains`, `starts_with`, `title_contains`, `manual`.
 - `MeliPriceManagerItem::CLASSIFICATION_STATUSES`: `categorized`, `suggested`, `uncategorized`, `ignored`.
 - `MeliPriceChangeBatch::TYPES`: `individual`, `percentage`, `fixed`, `excel`.
 - `MeliPriceChangeBatch::STATUSES`: `draft`, `preview`, `processing`, `completed`, `partial`, `failed`, `cancelled`.

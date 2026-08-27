@@ -116,6 +116,7 @@ class MeliUncategorizedItemController extends Controller
                 'exact' => 'Coincidencia exacta',
                 'starts_with' => 'Comienza con',
                 'contains' => 'Contiene',
+                'title_contains' => 'Título contiene',
                 'manual' => 'Solo manual',
             ],
         ]);

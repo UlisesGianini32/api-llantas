@@ -14,6 +14,8 @@ La migración `2026_08_26_000002_add_brand_classification_audit_to_meli_price_ma
 
 Ambas FKs usan `nullOnDelete`. El JSON conserva los datos principales del alias incluso si posteriormente se elimina. La migración original de la Fase 1 no fue modificada.
 
+La migración aditiva `2026_08_27_000001_add_title_contains_to_meli_brand_aliases.php` amplía el enum MySQL de `match_type` con `title_contains`. No transforma reglas existentes ni reclasifica publicaciones. Al revertir, las reglas de título se conservan como `manual` antes de reducir el enum.
+
 ## Normalización
 
 `MeliBrandNormalizer` se reutiliza tanto al sincronizar como al clasificar. Aplica:
@@ -51,9 +53,11 @@ Las fuentes se evalúan por etapas. Una etapa posterior solo se consulta cuando 
 3. BRAND contra aliases `contains`:
    - source: `brand_contains`;
    - confidence: `0.9000`.
-4. Alias como frase completa dentro del título, cuando BRAND no coincidió:
-   - source: `title_alias`;
+4. TITLE contra aliases declarados explícitamente como `title_contains`, cuando BRAND no coincidió:
+   - source: `title_contains`;
    - confidence: `0.8500`.
+
+Los tipos `exact`, `starts_with` y `contains` se evalúan exclusivamente contra BRAND (`normalized_brand` o `meli_brand` normalizada). Nunca se reutilizan implícitamente sobre TITLE. Una coincidencia en el título solo existe cuando un operador crea o cambia una regla a `title_contains`; `manual` continúa fuera de toda clasificación automática.
 
 Dentro de la primera etapa que tenga candidatos, se ordenan por:
 
@@ -75,7 +79,7 @@ classification_confidence = confianza de la etapa
 
 ## Protección de aliases cortos
 
-No se usa `str_contains()` libre. Las comparaciones `contains` y de título requieren límites de frase sobre el texto ya normalizado. `OI` coincide con `SHAMPOO OI 250 ML`, pero no con `MOISTURE`.
+No se usa `str_contains()` libre. Las comparaciones `contains` y `title_contains` requieren límites de frase sobre el texto ya normalizado. `OI` coincide con `SHAMPOO OI 250 ML`, pero no con `MOISTURE`.
 
 `starts_with` también exige que después del alias termine el texto o exista un espacio normalizado. Esta protección se aplica a todos los aliases, por lo que los aliases de dos o tres caracteres reciben una garantía más fuerte que el mínimo requerido.
 

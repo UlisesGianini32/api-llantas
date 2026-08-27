@@ -160,7 +160,7 @@ class MeliBrandClassificationService
             ['source' => 'brand_exact', 'confidence' => '1.0000', 'input' => $brand, 'type' => 'exact'],
             ['source' => 'brand_starts_with', 'confidence' => '0.9500', 'input' => $brand, 'type' => 'starts_with'],
             ['source' => 'brand_contains', 'confidence' => '0.9000', 'input' => $brand, 'type' => 'contains'],
-            ['source' => 'title_alias', 'confidence' => '0.8500', 'input' => $title, 'type' => 'title'],
+            ['source' => 'title_contains', 'confidence' => '0.8500', 'input' => $title, 'type' => 'title_contains'],
         ];
 
         foreach ($stages as $stage) {
@@ -197,7 +197,7 @@ class MeliBrandClassificationService
                 'exact' => $rule['match_type'] === 'exact' && $input === $rule['normalized_alias'],
                 'starts_with' => $rule['match_type'] === 'starts_with' && $this->startsWithPhrase($input, $rule['normalized_alias']),
                 'contains' => $rule['match_type'] === 'contains' && $this->containsPhrase($input, $rule['normalized_alias']),
-                'title' => $this->containsPhrase($input, $rule['normalized_alias']),
+                'title_contains' => $rule['match_type'] === 'title_contains' && $this->containsPhrase($input, $rule['normalized_alias']),
                 default => false,
             };
 
@@ -209,7 +209,7 @@ class MeliBrandClassificationService
                 ...$rule,
                 'source' => $source,
                 'confidence' => $confidence,
-                'specificity' => $type === 'title' && $input === $rule['normalized_alias'] ? 2 : 1,
+                'specificity' => $type === 'title_contains' && $input === $rule['normalized_alias'] ? 2 : 1,
                 'alias_length' => mb_strlen($rule['normalized_alias']),
             ];
         }

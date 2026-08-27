@@ -20,6 +20,8 @@ class MeliBrandManagementTest extends TestCase
 
     private object $classificationMigration;
 
+    private object $titleContainsMigration;
+
     private User $user;
 
     protected function setUp(): void
@@ -62,6 +64,8 @@ class MeliBrandManagementTest extends TestCase
         $this->foundationMigration->up();
         $this->classificationMigration = require database_path('migrations/2026_08_26_000002_add_brand_classification_audit_to_meli_price_manager_items.php');
         $this->classificationMigration->up();
+        $this->titleContainsMigration = require database_path('migrations/2026_08_27_000001_add_title_contains_to_meli_brand_aliases.php');
+        $this->titleContainsMigration->up();
 
         $this->user = User::factory()->create();
         $this->actingAs($this->user);
@@ -69,6 +73,7 @@ class MeliBrandManagementTest extends TestCase
 
     protected function tearDown(): void
     {
+        $this->titleContainsMigration->down();
         $this->classificationMigration->down();
         $this->foundationMigration->down();
         Schema::dropIfExists('meli_accounts');
@@ -245,6 +250,24 @@ class MeliBrandManagementTest extends TestCase
         ])->assertSessionHasErrors('match_type');
 
         $this->assertDatabaseCount('meli_brand_aliases', 0);
+    }
+
+    public function test_explicit_title_contains_match_type_can_be_created(): void
+    {
+        $brand = MeliBrandGroup::factory()->create();
+
+        $this->post(route('meli-price-manager.aliases.store', $brand), [
+            'alias' => 'Semi Di Lino',
+            'match_type' => 'title_contains',
+            'priority' => 25,
+            'active' => true,
+        ])->assertRedirect()->assertSessionHas('success');
+
+        $this->assertDatabaseHas('meli_brand_aliases', [
+            'brand_group_id' => $brand->id,
+            'normalized_alias' => 'SEMI DI LINO',
+            'match_type' => 'title_contains',
+        ]);
     }
 
     public function test_alias_priority_must_be_an_integer_between_zero_and_one_thousand(): void

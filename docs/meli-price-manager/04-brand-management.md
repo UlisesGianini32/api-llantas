@@ -43,7 +43,10 @@ Los formularios permiten alias, tipo de coincidencia, prioridad entre 0 y 1000 y
 - `exact`: la marca normalizada debe ser idéntica.
 - `starts_with`: debe comenzar con el alias como frase completa.
 - `contains`: debe contener el alias como frase completa.
+- `title_contains`: el título debe contener el alias como frase completa; es la única regla automática que consulta el título.
 - `manual`: no participa en clasificación automática.
+
+El alcance del tipo es deliberado: `exact`, `starts_with` y `contains` consultan solo la marca reportada por Mercado Libre. Aunque el mismo texto aparezca en el título, esas reglas no coinciden. Para usar el título el operador debe elegir `title_contains` de forma explícita. Crear o editar cualquier regla solo la guarda; no reescribe clasificaciones existentes hasta ejecutar y confirmar una reclasificación.
 
 `normalized_alias` nunca se toma del formulario. Los Form Requests lo recalculan en el backend con `MeliBrandNormalizer`, tanto al crear como al editar. Esto evita que un valor manipulado por el cliente omita las reglas de normalización.
 
