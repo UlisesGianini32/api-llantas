@@ -29,7 +29,9 @@ class MeliBrandClassificationService
     /** @return array<string, int|bool> */
     public function classifyAccount(MeliAccount $account, bool $reclassifyAll = false, bool $dryRun = false): array
     {
-        $query = MeliPriceManagerItem::query()->where('meli_account_id', $account->id);
+        $query = MeliPriceManagerItem::query()
+            ->managedCatalog()
+            ->where('meli_account_id', $account->id);
 
         if (! $reclassifyAll) {
             $query->where(function (Builder $query): void {
@@ -45,6 +47,7 @@ class MeliBrandClassificationService
     public function classifyUncategorized(MeliAccount $account, bool $dryRun = false): array
     {
         $query = MeliPriceManagerItem::query()
+            ->managedCatalog()
             ->where('meli_account_id', $account->id)
             ->whereIn('classification_status', ['uncategorized', 'suggested']);
 
