@@ -13,7 +13,7 @@ class MeliPriceSimulationTokenService
     public const TTL_MINUTES = 10;
 
     /**
-     * @param  array<string, bool|float|int|string|null>  $simulation
+     * @param  array<string, mixed>  $simulation
      * @return array{token: string, expires_at: string}
      */
     public function issue(

@@ -6,6 +6,7 @@ use App\Models\MeliAccount;
 use App\Models\MeliPriceManagerItem;
 use App\Services\MercadoLibre\MeliAccountApiClient;
 use Illuminate\Auth\Access\AuthorizationException;
+use Illuminate\Support\Str;
 use InvalidArgumentException;
 use UnexpectedValueException;
 
@@ -18,7 +19,7 @@ class MeliPriceSimulationService
 
     public function __construct(private readonly MeliAccountApiClient $api) {}
 
-    /** @return array<string, bool|float|int|string|null> */
+    /** @return array<string, mixed> */
     public function simulate(MeliAccount $account, MeliPriceManagerItem $item, float $price): array
     {
         if (! is_finite($price) || $price <= 0) {
@@ -70,11 +71,20 @@ class MeliPriceSimulationService
         $listing = $this->listingPriceEntry($listingResponse->json(), $listingTypeId);
         $saleFee = $this->requiredNumber($listing['sale_fee_amount'] ?? null, 'Mercado Libre no devolvió un cargo por venta válido.');
         $percentageFee = $this->nullableNumber(data_get($listing, 'sale_fee_details.percentage_fee'));
-        $fixedFee = $this->nullableNumber(data_get($listing, 'sale_fee_details.fixed_fee')) ?? 0.0;
+        $meliPercentageFee = $this->nullableNumber(data_get($listing, 'sale_fee_details.meli_percentage_fee'));
+        $fixedFee = $this->nullableNumber(data_get($listing, 'sale_fee_details.fixed_fee'));
+        $financingAddOnFee = $this->nullableNumber(data_get($listing, 'sale_fee_details.financing_add_on_fee'));
+        $saleFeeGross = $this->nullableNumber(data_get($listing, 'sale_fee_details.gross_amount'));
+        $listingFee = $this->nullableNumber($listing['listing_fee_amount'] ?? null);
+        $listingFeeFixed = $this->nullableNumber(data_get($listing, 'listing_fee_details.fixed_fee'));
+        $listingFeeGross = $this->nullableNumber(data_get($listing, 'listing_fee_details.gross_amount'));
 
         $shippingCost = 0.0;
         $shippingOriginalCost = null;
         $shippingDiscountRate = null;
+        $shippingDiscountType = null;
+        $shippingBillableWeight = null;
+        $shippingCurrencyId = null;
 
         if ($freeShipping) {
             $sellerId = trim((string) $account->meli_user_id);
@@ -106,12 +116,61 @@ class MeliPriceSimulationService
             );
             $shippingOriginalCost = $this->nullableNumber(data_get($shippingData, 'coverage.all_country.discount.promoted_amount'));
             $shippingDiscountRate = $this->nullableNumber(data_get($shippingData, 'coverage.all_country.discount.rate'));
+            $shippingDiscountType = $this->nullableString(data_get($shippingData, 'coverage.all_country.discount.type'));
+            $shippingBillableWeight = $this->nullableNumber(data_get($shippingData, 'coverage.all_country.billable_weight'));
+            $shippingCurrencyId = $this->nullableString(data_get($shippingData, 'coverage.all_country.currency_id'));
         }
 
         $saleFee = round($saleFee, 2);
+        $listingFee = $listingFee !== null ? round($listingFee, 2) : null;
         $shippingCost = round($shippingCost, 2);
-        $totalCharges = round($saleFee + $shippingCost, 2);
+        $shippingOriginalCost = $shippingOriginalCost !== null ? round($shippingOriginalCost, 2) : null;
+        $shippingDiscountAmount = $shippingOriginalCost !== null
+            ? max(0, round($shippingOriginalCost - $shippingCost, 2))
+            : null;
+        $totalCharges = round($saleFee + ($listingFee ?? 0) + $shippingCost, 2);
         $estimatedReceivable = round($proposedPrice - $totalCharges, 2);
+        $otherListingPriceDetails = $this->additionalListingPriceDetails($listing);
+        $taxesMessage = 'Se determinan al procesarse la venta y no están incluidos en este estimado.';
+
+        $charges = [
+            'sale_fee' => [
+                'amount' => $saleFee,
+                'percentage' => $percentageFee,
+                'meli_percentage' => $meliPercentageFee,
+                'fixed_fee' => $fixedFee !== null ? round($fixedFee, 2) : null,
+                'financing_add_on_fee' => $financingAddOnFee,
+                'gross_amount' => $saleFeeGross !== null ? round($saleFeeGross, 2) : null,
+            ],
+            'listing_fee' => [
+                'available' => $listingFee !== null,
+                'amount' => $listingFee,
+                'fixed_fee' => $listingFeeFixed !== null ? round($listingFeeFixed, 2) : null,
+                'gross_amount' => $listingFeeGross !== null ? round($listingFeeGross, 2) : null,
+            ],
+            'shipping' => [
+                'seller_cost' => $shippingCost,
+                'original_cost' => $shippingOriginalCost,
+                'discount_rate' => $shippingDiscountRate,
+                'discount_amount' => $shippingDiscountAmount,
+                'discount_type' => $shippingDiscountType,
+                'billable_weight' => $shippingBillableWeight,
+                'currency_id' => $shippingCurrencyId,
+                'free_shipping' => $freeShipping,
+                'mode' => $shippingMode,
+                'logistic_type' => $logisticType,
+            ],
+            'taxes' => [
+                'available' => false,
+                'amount' => null,
+                'iva' => null,
+                'isr' => null,
+                'withholdings' => null,
+                'other' => null,
+                'message' => $taxesMessage,
+            ],
+            'other' => $otherListingPriceDetails,
+        ];
 
         return [
             'item_id' => (int) $item->id,
@@ -124,16 +183,31 @@ class MeliPriceSimulationService
             'listing_type_name' => $this->nullableString($listing['listing_type_name'] ?? null),
             'sale_fee' => $saleFee,
             'sale_fee_percentage' => $percentageFee,
-            'sale_fee_fixed' => round($fixedFee, 2),
+            'sale_fee_meli_percentage' => $meliPercentageFee,
+            'sale_fee_fixed' => $fixedFee !== null ? round($fixedFee, 2) : null,
+            'sale_fee_financing_add_on' => $financingAddOnFee,
+            'sale_fee_gross' => $saleFeeGross !== null ? round($saleFeeGross, 2) : null,
+            'listing_fee' => $listingFee,
+            'listing_fee_fixed' => $listingFeeFixed !== null ? round($listingFeeFixed, 2) : null,
+            'listing_fee_gross' => $listingFeeGross !== null ? round($listingFeeGross, 2) : null,
             'free_shipping' => $freeShipping,
             'shipping_mode' => $shippingMode,
             'logistic_type' => $logisticType,
             'shipping_cost' => $shippingCost,
-            'shipping_original_cost' => $shippingOriginalCost !== null ? round($shippingOriginalCost, 2) : null,
+            'shipping_original_cost' => $shippingOriginalCost,
             'shipping_discount_rate' => $shippingDiscountRate,
+            'shipping_discount_amount' => $shippingDiscountAmount,
+            'shipping_discount_type' => $shippingDiscountType,
+            'shipping_billable_weight' => $shippingBillableWeight,
+            'shipping_currency_id' => $shippingCurrencyId,
+            'charges' => $charges,
+            'confirmed_charges_total' => $totalCharges,
             'total_charges' => $totalCharges,
             'estimated_receivable' => $estimatedReceivable,
             'estimated_receivable_percentage' => round(($estimatedReceivable / $proposedPrice) * 100, 2),
+            'estimated_receivable_is_final' => false,
+            'estimated_receivable_label' => 'Recibes estimado antes de impuestos/retenciones',
+            'estimated_receivable_message' => 'El monto final puede variar si Mercado Libre aplica impuestos, retenciones u otros cargos al procesar la venta.',
             'calculated_at' => now()->toISOString(),
         ];
     }
@@ -217,7 +291,7 @@ class MeliPriceSimulationService
     }
 
     /** @param array<string, mixed> $values
-     *  @return array<string, mixed>
+     * @return array<string, mixed>
      */
     private function withoutEmpty(array $values): array
     {
@@ -247,5 +321,55 @@ class MeliPriceSimulationService
         $value = trim((string) $value);
 
         return $value === '' ? null : $value;
+    }
+
+    /**
+     * Preserve future fee-like numeric fields without assuming their unit or adding
+     * them to the seller total until Mercado Libre documents their semantics.
+     *
+     * @param  array<string, mixed>  $listing
+     * @return list<array{key: string, label: string, value: float, included_in_total: bool}>
+     */
+    private function additionalListingPriceDetails(array $listing): array
+    {
+        $knownPaths = [
+            'listing_fee_amount',
+            'listing_fee_details.fixed_fee',
+            'listing_fee_details.gross_amount',
+            'sale_fee_amount',
+            'sale_fee_details.financing_add_on_fee',
+            'sale_fee_details.fixed_fee',
+            'sale_fee_details.gross_amount',
+            'sale_fee_details.meli_percentage_fee',
+            'sale_fee_details.percentage_fee',
+        ];
+        $additional = [];
+
+        $walk = function (array $values, string $prefix = '') use (&$walk, &$additional, $knownPaths): void {
+            foreach ($values as $key => $value) {
+                $path = $prefix === '' ? (string) $key : $prefix.'.'.$key;
+                if (is_array($value)) {
+                    $walk($value, $path);
+
+                    continue;
+                }
+
+                if (in_array($path, $knownPaths, true)
+                    || ! is_numeric($value)
+                    || ! preg_match('/(?:fee|charge|cost|amount)/i', (string) $key)) {
+                    continue;
+                }
+
+                $additional[] = [
+                    'key' => $path,
+                    'label' => Str::headline((string) $key),
+                    'value' => round((float) $value, 2),
+                    'included_in_total' => false,
+                ];
+            }
+        };
+        $walk($listing);
+
+        return $additional;
     }
 }

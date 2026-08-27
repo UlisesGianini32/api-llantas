@@ -341,6 +341,13 @@ class MeliPriceUpdateService
     ): array {
         return DB::transaction(function () use ($userId, $account, $item, $snapshot, $simulationToken): array {
             $simulation = (array) ($snapshot['simulation'] ?? []);
+            $sellingFee = data_get($simulation, 'charges.sale_fee.amount', $simulation['sale_fee'] ?? null);
+            $shippingCost = data_get($simulation, 'charges.shipping.seller_cost', $simulation['shipping_cost'] ?? null);
+            $confirmedChargesTotal = $simulation['confirmed_charges_total'] ?? $simulation['total_charges'] ?? null;
+            $taxWithholding = data_get($simulation, 'charges.taxes.available') === true
+                && is_numeric(data_get($simulation, 'charges.taxes.amount'))
+                    ? (float) data_get($simulation, 'charges.taxes.amount')
+                    : null;
             $batch = MeliPriceChangeBatch::query()->create([
                 'meli_account_id' => $account->id,
                 'brand_group_id' => $item->brand_group_id,
@@ -351,7 +358,8 @@ class MeliPriceUpdateService
                     'source' => 'meli_price_manager_phase_7c',
                     'simulation_token_sha256' => hash('sha256', $simulationToken),
                     'simulation_calculated_at' => $simulation['calculated_at'] ?? null,
-                    'estimated_total_charges' => $simulation['total_charges'] ?? null,
+                    'estimated_total_charges' => $confirmedChargesTotal,
+                    'simulation_snapshot' => $simulation,
                 ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
                 'total_items' => 1,
                 'successful_items' => 0,
@@ -363,13 +371,13 @@ class MeliPriceUpdateService
                 'meli_item_id' => $item->meli_item_id,
                 'old_price' => $snapshot['current_price'],
                 'new_price' => $snapshot['proposed_price'],
-                'selling_fee' => $simulation['sale_fee'] ?? null,
-                'shipping_cost' => $simulation['shipping_cost'] ?? null,
-                'tax_withholding' => null,
+                'selling_fee' => $sellingFee,
+                'shipping_cost' => $shippingCost,
+                'tax_withholding' => $taxWithholding,
                 'other_charges' => max(0, round(
-                    (float) ($simulation['total_charges'] ?? 0)
-                    - (float) ($simulation['sale_fee'] ?? 0)
-                    - (float) ($simulation['shipping_cost'] ?? 0),
+                    (float) ($confirmedChargesTotal ?? 0)
+                    - (float) ($sellingFee ?? 0)
+                    - (float) ($shippingCost ?? 0),
                     2,
                 )),
                 'estimated_net' => $simulation['estimated_receivable'] ?? null,
