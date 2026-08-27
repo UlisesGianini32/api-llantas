@@ -47,10 +47,18 @@ class MeliPriceManagerItem extends Model
                 $subquery
                     ->selectRaw('1')
                     ->from('llantas as managed_llantas')
-                    ->whereColumn(
-                        'managed_llantas.MLM',
-                        'meli_price_manager_items.meli_item_id'
-                    );
+                    ->where(function ($ownership): void {
+                        $ownership
+                            ->whereColumn('managed_llantas.MLM', 'meli_price_manager_items.meli_item_id')
+                            ->orWhere(function ($skuMatch): void {
+                                $skuMatch
+                                    ->whereNotNull('managed_llantas.sku')
+                                    ->whereRaw("TRIM(managed_llantas.sku) <> ''")
+                                    ->whereNotNull('meli_price_manager_items.sku')
+                                    ->whereRaw("TRIM(meli_price_manager_items.sku) <> ''")
+                                    ->whereColumn('managed_llantas.sku', 'meli_price_manager_items.sku');
+                            });
+                    });
             });
         }
 
@@ -59,10 +67,18 @@ class MeliPriceManagerItem extends Model
                 $subquery
                     ->selectRaw('1')
                     ->from('producto_compuestos as managed_compuestos')
-                    ->whereColumn(
-                        'managed_compuestos.MLM',
-                        'meli_price_manager_items.meli_item_id'
-                    );
+                    ->where(function ($ownership): void {
+                        $ownership
+                            ->whereColumn('managed_compuestos.MLM', 'meli_price_manager_items.meli_item_id')
+                            ->orWhere(function ($skuMatch): void {
+                                $skuMatch
+                                    ->whereNotNull('managed_compuestos.sku')
+                                    ->whereRaw("TRIM(managed_compuestos.sku) <> ''")
+                                    ->whereNotNull('meli_price_manager_items.sku')
+                                    ->whereRaw("TRIM(meli_price_manager_items.sku) <> ''")
+                                    ->whereColumn('managed_compuestos.sku', 'meli_price_manager_items.sku');
+                            });
+                    });
             });
         }
 
