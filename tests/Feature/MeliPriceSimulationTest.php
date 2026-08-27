@@ -58,6 +58,7 @@ class MeliPriceSimulationTest extends TestCase
         });
         Schema::create('llantas', function (Blueprint $table): void {
             $table->id();
+            $table->string('sku')->nullable();
             $table->string('MLM')->nullable();
         });
 
@@ -286,6 +287,23 @@ class MeliPriceSimulationTest extends TestCase
         $ownItem = $this->item($this->account(), ['meli_item_id' => 'MLM-EXCLUDED']);
         DB::table('llantas')->insert(['MLM' => $ownItem->meli_item_id]);
         $this->postJson(route('meli-price-manager.items.price.simulate', $ownItem), ['price' => 1500])->assertNotFound();
+
+        Http::assertNothingSent();
+    }
+
+    public function test_simulation_endpoint_blocks_republished_tire_detected_only_by_sku(): void
+    {
+        $item = $this->item($this->account(), [
+            'meli_item_id' => 'MLM5201403642',
+            'sku' => '2056014MEMR166',
+        ]);
+        DB::table('llantas')->insert([
+            'MLM' => 'MLM2720548725',
+            'sku' => '2056014MEMR166',
+        ]);
+
+        $this->assertFalse(MeliPriceManagerItem::query()->managedCatalog()->whereKey($item)->exists());
+        $this->postJson(route('meli-price-manager.items.price.simulate', $item), ['price' => 1500])->assertNotFound();
 
         Http::assertNothingSent();
     }
