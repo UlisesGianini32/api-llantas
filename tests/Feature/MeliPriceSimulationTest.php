@@ -9,6 +9,7 @@ use App\Services\MercadoLibre\PriceManager\MeliPriceSimulationService;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Http\Client\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Schema;
@@ -26,10 +27,12 @@ class MeliPriceSimulationTest extends TestCase
         parent::setUp();
 
         config()->set('app.key', 'base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=');
+        config()->set('cache.default', 'array');
         config()->set('database.default', 'sqlite');
         config()->set('database.connections.sqlite.database', ':memory:');
         config()->set('database.connections.sqlite.foreign_key_constraints', true);
         DB::purge('sqlite');
+        Cache::flush();
 
         Schema::create('users', function (Blueprint $table): void {
             $table->id();
@@ -72,6 +75,7 @@ class MeliPriceSimulationTest extends TestCase
 
     protected function tearDown(): void
     {
+        Cache::flush();
         $this->foundationMigration->down();
         Schema::dropIfExists('llantas');
         Schema::dropIfExists('meli_accounts');
@@ -321,7 +325,8 @@ class MeliPriceSimulationTest extends TestCase
             ->assertJsonPath('data.shipping_cost', 74.5)
             ->assertJsonPath('data.total_charges', 311.84)
             ->assertJsonPath('data.estimated_receivable', 1288.16)
-            ->assertJsonPath('data.estimated_receivable_percentage', 80.51);
+            ->assertJsonPath('data.estimated_receivable_percentage', 80.51)
+            ->assertJsonStructure(['data' => ['simulation_token', 'simulation_expires_at']]);
 
         $this->assertSame('1531.20', $item->fresh()->current_price);
         foreach (Http::recorded() as [$request]) {
