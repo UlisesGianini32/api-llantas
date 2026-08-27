@@ -159,7 +159,7 @@ class MeliAccountApiClient
         return $this->sanitizeMessage((string) ($message ?? $response->body() ?: 'Sin respuesta'));
     }
 
-    private function sanitizeMessage(string $message): string
+    public function sanitizeMessage(string $message): string
     {
         $sanitized = preg_replace([
             '/Bearer\s+[A-Za-z0-9._~-]+/i',
