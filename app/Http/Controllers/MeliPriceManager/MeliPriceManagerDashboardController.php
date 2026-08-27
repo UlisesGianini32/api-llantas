@@ -13,6 +13,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Schema;
 use Inertia\Inertia;
 use Inertia\Response;
 use Throwable;
@@ -129,6 +130,7 @@ class MeliPriceManagerDashboardController extends Controller
         return Inertia::render('MeliPriceManager/Index', [
             'accounts' => $accounts,
             'selectedAccountId' => $accountId,
+            'taxProfile' => $this->taxProfile($selectedAccount),
             'summary' => $this->summary($accountId, $staleBefore),
             'syncStatus' => [
                 'queued' => $accountId ? $this->syncQueued($accountId) : false,
@@ -271,5 +273,27 @@ class MeliPriceManagerDashboardController extends Controller
         }
 
         return $accounts->firstWhere('is_default', true) ?? $accounts->first();
+    }
+
+    /** @return array<string, mixed>|null */
+    private function taxProfile(?MeliAccount $account): ?array
+    {
+        if ($account === null || ! Schema::hasTable('meli_account_tax_profiles')) {
+            return null;
+        }
+
+        $profile = $account->taxProfile()->first();
+        if ($profile === null) {
+            return null;
+        }
+
+        return [
+            'enabled' => (bool) $profile->enabled,
+            'vat_included_rate' => $profile->vat_included_rate !== null ? (float) $profile->vat_included_rate : null,
+            'vat_withholding_rate' => $profile->vat_withholding_rate !== null ? (float) $profile->vat_withholding_rate : null,
+            'income_tax_withholding_rate' => $profile->income_tax_withholding_rate !== null ? (float) $profile->income_tax_withholding_rate : null,
+            'effective_from' => $profile->effective_from?->toDateString(),
+            'notes' => $profile->notes,
+        ];
     }
 }

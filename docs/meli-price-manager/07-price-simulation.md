@@ -21,13 +21,24 @@ El resultado conserva una estructura `charges` estable y mantiene los campos pla
 - costo de publicación, detalle fijo y costo bruto;
 - costo de envío que paga el vendedor, tarifa original, tasa/tipo/monto del descuento, moneda, peso facturable y logística;
 - campos numéricos futuros relacionados con cargos como información no sumada hasta que Mercado Libre documente su semántica;
-- impuestos, IVA, ISR y retenciones como `null`, nunca como cero, porque no existe un cálculo oficial fiable previo a la venta para el vendedor.
+- retenciones fiscales estimadas únicamente cuando la cuenta tiene un perfil fiscal explícito, habilitado y vigente. Sin perfil, los importes permanecen `null`, nunca en cero.
 
-`confirmed_charges_total` suma una sola vez los importes que absorbe el vendedor: `sale_fee_amount`, `listing_fee_amount` cuando está disponible y `shipping.list_cost`. Los componentes de detalle, porcentajes, montos brutos y tarifa original de envío son informativos y no vuelven a sumarse.
+`meli_charges_total` suma una sola vez los importes que absorbe el vendedor informados por las APIs: `sale_fee_amount`, `listing_fee_amount` cuando está disponible y `shipping.list_cost`. `confirmed_charges_total` conserva el mismo subtotal por compatibilidad. Los componentes de detalle, porcentajes, montos brutos y tarifa original de envío son informativos y no vuelven a sumarse.
+
+La tabla `meli_account_tax_profiles` mantiene una configuración única por `meli_account_id`; no existen tasas globales ni valores fiscales predeterminados. Cuando está habilitada, `MeliSellerTaxSimulationService` calcula sobre la base sin IVA:
+
+```text
+base = price / (1 + vat_included_rate / 100)
+iva_retenido = round(base * vat_withholding_rate / 100, 2)
+isr_retenido = round(base * income_tax_withholding_rate / 100, 2)
+taxes_total = iva_retenido + isr_retenido
+```
+
+Cada retención se redondea por separado. `total_charges` suma `meli_charges_total + taxes_total`; el perfil completo, sus tasas, la base y los importes forman parte del snapshot server-side. Para $699 con tasas 16%, 8% y 2.5%, la base es $602.59, las retenciones son $48.21 y $15.06, y su total es $63.27.
 
 `financing_add_on_fee` se conserva con la unidad porcentual que devuelve el calculador —los ejemplos oficiales lo muestran como componente de `percentage_fee`— y no se interpreta como un segundo importe monetario. Su efecto ya está incluido en `sale_fee_amount`.
 
-El neto se presenta como **“Recibes estimado antes de impuestos/retenciones”** y advierte que el monto final puede variar al procesarse la venta.
+El neto se presenta como **“Recibes estimado”** cuando incluye un perfil fiscal aplicable. Sin perfil se identifica expresamente como un neto sin retenciones fiscales y se advierte que el monto recibido puede ser menor.
 
 ## Disponibilidad temporal de la información
 
@@ -48,4 +59,4 @@ Los reportes `GET /billing/integration/...` contienen cobros, bonificaciones y d
 
 `POST /meli-price-manager/items/{item}/simulate-price` requiere autenticación y un `price` numérico mayor que cero. Devuelve JSON y nunca modifica `current_price`.
 
-El Dashboard ofrece `Simular precio`. El modal muestra el desglose oficial disponible, separa datos informativos de cargos sumados y deja visibles las limitaciones fiscales. La simulación por sí sola nunca envía un `PUT` ni modifica `current_price`.
+El Dashboard ofrece `Simular precio` y una configuración fiscal mínima por cuenta. Los porcentajes deben corresponder a la situación real del vendedor y no se obtienen automáticamente de Mercado Libre. El modal separa cargos de ML, retenciones estimadas desde el perfil local, total estimado y neto. La simulación por sí sola nunca envía un `PUT` ni modifica `current_price`.

@@ -17,7 +17,10 @@ class MeliPriceSimulationService
         ['PACKAGE_HEIGHT', 'PACKAGE_WIDTH', 'PACKAGE_LENGTH', 'PACKAGE_WEIGHT'],
     ];
 
-    public function __construct(private readonly MeliAccountApiClient $api) {}
+    public function __construct(
+        private readonly MeliAccountApiClient $api,
+        private readonly MeliSellerTaxSimulationService $taxes,
+    ) {}
 
     /** @return array<string, mixed> */
     public function simulate(MeliAccount $account, MeliPriceManagerItem $item, float $price): array
@@ -128,11 +131,14 @@ class MeliPriceSimulationService
         $shippingDiscountAmount = $shippingOriginalCost !== null
             ? max(0, round($shippingOriginalCost - $shippingCost, 2))
             : null;
-        $totalCharges = round($saleFee + ($listingFee ?? 0) + $shippingCost, 2);
+        $meliChargesTotal = round($saleFee + ($listingFee ?? 0) + $shippingCost, 2);
+        $taxes = $this->taxes->simulate($account, $proposedPrice);
+        $taxesTotal = $taxes['available'] === true && is_numeric($taxes['amount'] ?? null)
+            ? round((float) $taxes['amount'], 2)
+            : null;
+        $totalCharges = round($meliChargesTotal + ($taxesTotal ?? 0), 2);
         $estimatedReceivable = round($proposedPrice - $totalCharges, 2);
         $otherListingPriceDetails = $this->additionalListingPriceDetails($listing);
-        $taxesMessage = 'Se determinan al procesarse la venta y no están incluidos en este estimado.';
-
         $charges = [
             'sale_fee' => [
                 'amount' => $saleFee,
@@ -160,15 +166,7 @@ class MeliPriceSimulationService
                 'mode' => $shippingMode,
                 'logistic_type' => $logisticType,
             ],
-            'taxes' => [
-                'available' => false,
-                'amount' => null,
-                'iva' => null,
-                'isr' => null,
-                'withholdings' => null,
-                'other' => null,
-                'message' => $taxesMessage,
-            ],
+            'taxes' => $taxes,
             'other' => $otherListingPriceDetails,
         ];
 
@@ -201,13 +199,19 @@ class MeliPriceSimulationService
             'shipping_billable_weight' => $shippingBillableWeight,
             'shipping_currency_id' => $shippingCurrencyId,
             'charges' => $charges,
-            'confirmed_charges_total' => $totalCharges,
+            'meli_charges_total' => $meliChargesTotal,
+            'confirmed_charges_total' => $meliChargesTotal,
+            'taxes_total' => $taxesTotal,
             'total_charges' => $totalCharges,
             'estimated_receivable' => $estimatedReceivable,
             'estimated_receivable_percentage' => round(($estimatedReceivable / $proposedPrice) * 100, 2),
             'estimated_receivable_is_final' => false,
-            'estimated_receivable_label' => 'Recibes estimado antes de impuestos/retenciones',
-            'estimated_receivable_message' => 'El monto final puede variar si Mercado Libre aplica impuestos, retenciones u otros cargos al procesar la venta.',
+            'estimated_receivable_label' => $taxesTotal !== null
+                ? 'Recibes estimado'
+                : 'Recibes estimado sin retenciones fiscales',
+            'estimated_receivable_message' => $taxesTotal !== null
+                ? 'Incluye las retenciones estimadas con el perfil fiscal de esta cuenta; el monto final puede variar al procesarse la venta.'
+                : (string) ($taxes['message'] ?? 'Las retenciones fiscales no están incluidas en este estimado.'),
             'calculated_at' => now()->toISOString(),
         ];
     }

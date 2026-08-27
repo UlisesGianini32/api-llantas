@@ -23,6 +23,8 @@ class MeliPriceUpdateTest extends TestCase
 {
     private object $foundationMigration;
 
+    private object $taxProfileMigration;
+
     private User $user;
 
     protected function setUp(): void
@@ -89,6 +91,8 @@ class MeliPriceUpdateTest extends TestCase
 
         $this->foundationMigration = require database_path('migrations/2026_08_26_000001_create_meli_price_manager_tables.php');
         $this->foundationMigration->up();
+        $this->taxProfileMigration = require database_path('migrations/2026_08_27_000002_create_meli_account_tax_profiles_table.php');
+        $this->taxProfileMigration->up();
 
         $this->user = User::factory()->create();
         $this->actingAs($this->user);
@@ -98,6 +102,7 @@ class MeliPriceUpdateTest extends TestCase
     protected function tearDown(): void
     {
         Cache::flush();
+        $this->taxProfileMigration->down();
         $this->foundationMigration->down();
         Schema::dropIfExists('automotive_part_meli_publications');
         Schema::dropIfExists('syscom_meli_queues');
@@ -156,6 +161,46 @@ class MeliPriceUpdateTest extends TestCase
             return $request->method() === 'PUT'
                 && str_ends_with($request->url(), '/items/MLM1343389489')
                 && $request->data() === ['price' => 1600.0];
+        });
+    }
+
+    public function test_audit_preserves_the_tax_profile_snapshot_and_the_699_net_amount(): void
+    {
+        $account = $this->account();
+        $item = $this->item($account, ['current_price' => 699]);
+        $simulation = $this->taxSimulation();
+        $token = app(MeliPriceSimulationTokenService::class)->issue(
+            $this->user->id,
+            $account,
+            $item,
+            $simulation,
+        )['token'];
+        $this->fakeSuccessfulUpdate(699, 699);
+
+        $this->putJson(route('meli-price-manager.items.price.update', $item), [
+            'simulation_token' => $token,
+            'price' => 699,
+        ])->assertOk();
+
+        $change = MeliPriceChange::query()->sole();
+        $this->assertSame('101.36', $change->selling_fee);
+        $this->assertSame('70.00', $change->shipping_cost);
+        $this->assertSame('63.27', $change->tax_withholding);
+        $this->assertSame('0.00', $change->other_charges);
+        $this->assertSame('464.37', $change->estimated_net);
+
+        $notes = json_decode((string) MeliPriceChangeBatch::query()->sole()->notes, true, flags: JSON_THROW_ON_ERROR);
+        $this->assertSame(234.63, $notes['estimated_total_charges']);
+        $this->assertSame(16, data_get($notes, 'tax_profile_snapshot.vat_included_rate'));
+        $this->assertSame(8, data_get($notes, 'tax_profile_snapshot.vat_withholding_rate'));
+        $this->assertSame(2.5, data_get($notes, 'tax_profile_snapshot.income_tax_withholding_rate'));
+        $this->assertSame(63.27, data_get($notes, 'simulation_snapshot.taxes_total'));
+        $this->assertSame(464.37, data_get($notes, 'simulation_snapshot.estimated_receivable'));
+
+        Http::assertSent(function (Request $request): bool {
+            return $request->method() === 'PUT'
+                && str_ends_with($request->url(), '/items/MLM1343389489')
+                && $request->data() === ['price' => 699.0];
         });
     }
 
@@ -648,6 +693,48 @@ class MeliPriceUpdateTest extends TestCase
             'confirmed_charges_total' => 329.75,
             'total_charges' => 329.75,
             'estimated_receivable' => 1270.25,
+            'estimated_receivable_is_final' => false,
+            'calculated_at' => now()->toISOString(),
+        ];
+    }
+
+    /** @return array<string, mixed> */
+    private function taxSimulation(): array
+    {
+        return [
+            'meli_item_id' => 'MLM1343389489',
+            'current_price' => 699,
+            'proposed_price' => 699,
+            'sale_fee' => 101.36,
+            'shipping_cost' => 70,
+            'listing_fee' => 0,
+            'charges' => [
+                'sale_fee' => ['amount' => 101.36, 'gross_amount' => 150],
+                'listing_fee' => ['available' => true, 'amount' => 0],
+                'shipping' => ['seller_cost' => 70, 'original_cost' => 140],
+                'taxes' => [
+                    'available' => true,
+                    'source' => 'account_tax_profile',
+                    'taxable_base' => 602.59,
+                    'vat' => ['included_rate' => 16, 'withholding_rate' => 8, 'amount' => 48.21],
+                    'income_tax' => ['withholding_rate' => 2.5, 'amount' => 15.06],
+                    'amount' => 63.27,
+                    'profile' => [
+                        'id' => 1,
+                        'meli_account_id' => 1,
+                        'enabled' => true,
+                        'vat_included_rate' => 16,
+                        'vat_withholding_rate' => 8,
+                        'income_tax_withholding_rate' => 2.5,
+                    ],
+                ],
+                'other' => [],
+            ],
+            'meli_charges_total' => 171.36,
+            'confirmed_charges_total' => 171.36,
+            'taxes_total' => 63.27,
+            'total_charges' => 234.63,
+            'estimated_receivable' => 464.37,
             'estimated_receivable_is_final' => false,
             'calculated_at' => now()->toISOString(),
         ];

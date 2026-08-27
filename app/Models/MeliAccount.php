@@ -6,6 +6,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class MeliAccount extends Model
 {
@@ -65,5 +66,10 @@ class MeliAccount extends Model
     public function priceChangeBatches(): HasMany
     {
         return $this->hasMany(MeliPriceChangeBatch::class);
+    }
+
+    public function taxProfile(): HasOne
+    {
+        return $this->hasOne(MeliAccountTaxProfile::class);
     }
 }

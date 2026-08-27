@@ -109,11 +109,22 @@ function ChargesBreakdown({ result, currency }) {
 
             <div className="space-y-3 border-t border-slate-200 pt-3 dark:border-neutral-700"><p className="text-xs font-extrabold uppercase tracking-wide text-slate-500">{shippingLabel}</p><ChargeRow label="Tú pagas" value={shipping.seller_cost ?? result.shipping_cost} currency={currency} negative={Number(shipping.seller_cost ?? result.shipping_cost) > 0} />{shipping.original_cost !== null && shipping.original_cost !== undefined && <ChargeRow label="Tarifa original" value={shipping.original_cost} currency={currency} />}{shipping.discount_rate !== null && shipping.discount_rate !== undefined && <div className="flex justify-between gap-4"><dt>Descuento Mercado Libre</dt><dd className="font-bold">{fractionalPercentage(shipping.discount_rate)}</dd></div>}{shipping.discount_amount !== null && shipping.discount_amount !== undefined && <ChargeRow label="Ahorro" value={shipping.discount_amount} currency={currency} />}{shipping.billable_weight !== null && shipping.billable_weight !== undefined && <div className="flex justify-between gap-4"><dt>Peso facturable</dt><dd className="font-bold">{number(shipping.billable_weight)} g</dd></div>}<div className="flex justify-between gap-4"><dt>Tipo de logística</dt><dd className="font-bold">{shipping.logistic_type || result.logistic_type || 'No informado'}</dd></div></div>
 
-            <div className="border-t border-slate-200 pt-3 dark:border-neutral-700"><p className="text-xs font-extrabold uppercase tracking-wide text-slate-500">Impuestos y retenciones</p><p className="mt-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs font-semibold text-amber-800 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-200">{taxes.message || 'No disponibles en la simulación previa a la venta.'}</p></div>
+            <div className="space-y-3 border-t border-slate-200 pt-3 dark:border-neutral-700">
+                <p className="text-xs font-extrabold uppercase tracking-wide text-slate-500">Impuestos y retenciones</p>
+                {taxes.available ? <>
+                    <ChargeRow label="Base gravable (sin IVA)" value={taxes.taxable_base} currency={currency} />
+                    <div className="flex justify-between gap-4"><dt>IVA incluido en precio</dt><dd className="font-bold">{percentagePoints(taxes.vat?.included_rate)}</dd></div>
+                    <ChargeRow label={`Retención de IVA (${percentagePoints(taxes.vat?.withholding_rate)})`} value={taxes.vat?.amount} currency={currency} negative />
+                    <ChargeRow label={`Retención de ISR (${percentagePoints(taxes.income_tax?.withholding_rate)})`} value={taxes.income_tax?.amount} currency={currency} negative />
+                    <p className="rounded-xl border border-indigo-200 bg-indigo-50 p-3 text-xs font-semibold text-indigo-800 dark:border-indigo-500/20 dark:bg-indigo-500/10 dark:text-indigo-200">Fuente: Perfil fiscal de la cuenta. {taxes.message}</p>
+                </> : <p className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs font-semibold text-amber-800 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-200">{taxes.message || 'No disponibles en la simulación previa a la venta.'}</p>}
+            </div>
 
             {other.length > 0 && <div className="space-y-3 border-t border-slate-200 pt-3 dark:border-neutral-700"><p className="text-xs font-extrabold uppercase tracking-wide text-slate-500">Otros datos de cargos reportados por ML</p>{other.map((charge) => <div key={charge.key} className="flex justify-between gap-4"><dt>{charge.label}<span className="block text-xs text-slate-500">{charge.key} · informativo, no sumado</span></dt><dd className="font-bold">{number(charge.value)}</dd></div>)}</div>}
 
-            <div className="flex justify-between gap-4 border-t border-slate-200 pt-3 dark:border-neutral-700"><dt className="font-bold">Cargos confirmados por ML</dt><dd className="font-bold text-rose-600">-{money(result.confirmed_charges_total ?? result.total_charges, currency)}</dd></div>
+            <div className="flex justify-between gap-4 border-t border-slate-200 pt-3 dark:border-neutral-700"><dt className="font-bold">Subtotal de cargos de ML</dt><dd className="font-bold text-rose-600">-{money(result.meli_charges_total ?? result.confirmed_charges_total, currency)}</dd></div>
+            {taxes.available && <ChargeRow label="Retenciones fiscales estimadas" value={result.taxes_total ?? taxes.amount} currency={currency} negative />}
+            <div className="flex justify-between gap-4 border-t border-slate-200 pt-3 dark:border-neutral-700"><dt className="font-extrabold">Total de cargos estimados</dt><dd className="font-extrabold text-rose-600">-{money(result.total_charges, currency)}</dd></div>
         </dl>
         <div className="rounded-2xl border-2 border-emerald-400 bg-emerald-50 p-5 text-center dark:bg-emerald-500/10"><p className="text-xs font-extrabold uppercase tracking-[0.14em] text-emerald-700 dark:text-emerald-300">{result.estimated_receivable_label || 'Recibes estimado con cargos disponibles'}</p><p className="mt-1 text-4xl font-black text-emerald-700 dark:text-emerald-300">{money(result.estimated_receivable, currency)}</p><p className="mt-1 text-lg font-bold text-emerald-700 dark:text-emerald-300">{number(result.estimated_receivable_percentage)}%</p><p className="mt-2 text-xs font-semibold text-emerald-800 dark:text-emerald-200">{result.estimated_receivable_message || 'El monto final puede variar al procesarse la venta.'}</p></div>
     </div>
@@ -178,6 +189,52 @@ function StatusBadge({ status, stock }) {
     return <span className={`rounded-full px-2.5 py-1 text-xs font-bold ${tone}`}>{label}</span>
 }
 
+function TaxProfileForm({ selectedAccountId, taxProfile }) {
+    const [data, setData] = useState({
+        enabled: Boolean(taxProfile?.enabled),
+        vat_included_rate: taxProfile?.vat_included_rate ?? '',
+        vat_withholding_rate: taxProfile?.vat_withholding_rate ?? '',
+        income_tax_withholding_rate: taxProfile?.income_tax_withholding_rate ?? '',
+        effective_from: taxProfile?.effective_from ?? '',
+        notes: taxProfile?.notes ?? '',
+    })
+    const [saving, setSaving] = useState(false)
+
+    const submit = (event) => {
+        event.preventDefault()
+        if (!selectedAccountId || saving) return
+
+        setSaving(true)
+        router.put('/meli-price-manager/tax-profile', {
+            meli_account_id: selectedAccountId,
+            enabled: data.enabled,
+            vat_included_rate: data.vat_included_rate === '' ? null : data.vat_included_rate,
+            vat_withholding_rate: data.vat_withholding_rate === '' ? null : data.vat_withholding_rate,
+            income_tax_withholding_rate: data.income_tax_withholding_rate === '' ? null : data.income_tax_withholding_rate,
+            effective_from: data.effective_from || null,
+            notes: data.notes || null,
+        }, {
+            preserveScroll: true,
+            onFinish: () => setSaving(false),
+        })
+    }
+
+    return <section className="rounded-2xl border border-slate-200 bg-white p-5 dark:border-neutral-800 dark:bg-neutral-900">
+        <div className="flex flex-col justify-between gap-3 lg:flex-row lg:items-start">
+            <div><h2 className="font-bold">Configuración fiscal</h2><p className="mt-1 max-w-3xl text-xs text-slate-500">Configuración exclusiva de esta cuenta. Las tasas se aplican a la base sin IVA y cada retención se redondea por separado.</p><p className="mt-2 max-w-3xl rounded-lg bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-800 dark:bg-amber-500/10 dark:text-amber-200">Estos porcentajes deben corresponder a la situación fiscal real del vendedor. No se obtienen automáticamente de Mercado Libre.</p></div>
+            <label className="flex items-center gap-2 text-sm font-bold"><input type="checkbox" checked={data.enabled} onChange={(event) => setData({ ...data, enabled: event.target.checked })} /> Usar estimación fiscal</label>
+        </div>
+        <form onSubmit={submit} className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+            <label><span className="mb-1 block text-xs font-bold">IVA incluido (%)</span><input type="number" min="0" max="100" step="0.0001" required={data.enabled} value={data.vat_included_rate} onChange={(event) => setData({ ...data, vat_included_rate: event.target.value })} className={fieldClass} /></label>
+            <label><span className="mb-1 block text-xs font-bold">Retención IVA (%)</span><input type="number" min="0" max="100" step="0.0001" required={data.enabled} value={data.vat_withholding_rate} onChange={(event) => setData({ ...data, vat_withholding_rate: event.target.value })} className={fieldClass} /></label>
+            <label><span className="mb-1 block text-xs font-bold">Retención ISR (%)</span><input type="number" min="0" max="100" step="0.0001" required={data.enabled} value={data.income_tax_withholding_rate} onChange={(event) => setData({ ...data, income_tax_withholding_rate: event.target.value })} className={fieldClass} /></label>
+            <label><span className="mb-1 block text-xs font-bold">Vigente desde</span><input type="date" value={data.effective_from} onChange={(event) => setData({ ...data, effective_from: event.target.value })} className={fieldClass} /></label>
+            <div className="flex items-end"><button type="submit" disabled={!selectedAccountId || saving} className={primaryButton}>{saving ? 'Guardando…' : 'Guardar perfil fiscal'}</button></div>
+            <label className="md:col-span-2 xl:col-span-5"><span className="mb-1 block text-xs font-bold">Notas internas</span><textarea maxLength="1000" rows="2" value={data.notes} onChange={(event) => setData({ ...data, notes: event.target.value })} className={fieldClass} /></label>
+        </form>
+    </section>
+}
+
 export default function Index({
     accounts = [],
     selectedAccountId = null,
@@ -189,6 +246,7 @@ export default function Index({
     availableStatuses = [],
     availableCategories = [],
     filters = {},
+    taxProfile = null,
 }) {
     const [filterData, setFilterData] = useState({
         search: filters.search ?? '',
@@ -301,6 +359,8 @@ export default function Index({
                         <button type="button" onClick={sync} disabled={!selectedAccountId || syncStatus.queued} className={primaryButton}>{syncStatus.queued ? 'Sincronización en cola' : 'Sincronizar Mercado Libre'}</button>
                     </div>
                 </section>
+
+                {selectedAccountId && <TaxProfileForm key={selectedAccountId} selectedAccountId={selectedAccountId} taxProfile={taxProfile} />}
 
                 <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
                     <Metric label="Total" value={summary.total} />

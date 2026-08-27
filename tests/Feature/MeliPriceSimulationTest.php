@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Models\MeliAccount;
+use App\Models\MeliAccountTaxProfile;
 use App\Models\MeliPriceManagerItem;
 use App\Models\User;
 use App\Services\MercadoLibre\PriceManager\MeliPriceSimulationService;
@@ -20,6 +21,8 @@ use Tests\TestCase;
 class MeliPriceSimulationTest extends TestCase
 {
     private object $foundationMigration;
+
+    private object $taxProfileMigration;
 
     private User $user;
 
@@ -68,6 +71,8 @@ class MeliPriceSimulationTest extends TestCase
 
         $this->foundationMigration = require database_path('migrations/2026_08_26_000001_create_meli_price_manager_tables.php');
         $this->foundationMigration->up();
+        $this->taxProfileMigration = require database_path('migrations/2026_08_27_000002_create_meli_account_tax_profiles_table.php');
+        $this->taxProfileMigration->up();
 
         $this->user = User::factory()->create();
         $this->actingAs($this->user);
@@ -77,6 +82,7 @@ class MeliPriceSimulationTest extends TestCase
     protected function tearDown(): void
     {
         Cache::flush();
+        $this->taxProfileMigration->down();
         $this->foundationMigration->down();
         Schema::dropIfExists('llantas');
         Schema::dropIfExists('meli_accounts');
@@ -118,6 +124,61 @@ class MeliPriceSimulationTest extends TestCase
             && $request->method() === 'GET'
             && $request['dimensions'] === '24x7x7,733'
             && $request['item_id'] === 'MLM1343389489');
+        foreach (Http::recorded() as [$request]) {
+            $this->assertSame('GET', $request->method());
+        }
+    }
+
+    public function test_account_tax_profile_reproduces_the_observed_699_receivable_without_double_counting(): void
+    {
+        $account = $this->account();
+        $item = $this->item($account, ['current_price' => 699]);
+        MeliAccountTaxProfile::query()->create([
+            'meli_account_id' => $account->id,
+            'enabled' => true,
+            'vat_included_rate' => 16,
+            'vat_withholding_rate' => 8,
+            'income_tax_withholding_rate' => 2.5,
+            'notes' => 'Caso fiscal validado',
+        ]);
+        Http::fake(function (Request $request) {
+            if (str_contains($request->url(), '/listing_prices')) {
+                return Http::response([[
+                    'listing_type_id' => 'gold_pro',
+                    'listing_type_name' => 'Premium',
+                    'listing_fee_amount' => 0,
+                    'sale_fee_amount' => 101.36,
+                    'sale_fee_details' => ['percentage_fee' => 14.5, 'fixed_fee' => 0, 'gross_amount' => 150],
+                ]]);
+            }
+
+            return Http::response(['coverage' => ['all_country' => [
+                'list_cost' => 70,
+                'discount' => ['rate' => 0.5, 'promoted_amount' => 140],
+            ]]]);
+        });
+
+        $result = $this->service()->simulate($account, $item, 699);
+
+        $this->assertSame(602.59, data_get($result, 'charges.taxes.taxable_base'));
+        $this->assertSame(48.21, data_get($result, 'charges.taxes.vat.amount'));
+        $this->assertSame(15.06, data_get($result, 'charges.taxes.income_tax.amount'));
+        $this->assertSame(63.27, data_get($result, 'charges.taxes.amount'));
+        $this->assertSame(171.36, $result['meli_charges_total']);
+        $this->assertSame(171.36, $result['confirmed_charges_total']);
+        $this->assertSame(63.27, $result['taxes_total']);
+        $this->assertSame(234.63, $result['total_charges']);
+        $this->assertSame(464.37, $result['estimated_receivable']);
+        $this->assertSame('account_tax_profile', data_get($result, 'charges.taxes.source'));
+
+        $issued = app(MeliPriceSimulationTokenService::class)->issue($this->user->id, $account, $item, $result);
+        $snapshot = app(MeliPriceSimulationTokenService::class)->resolve($issued['token']);
+        $this->assertSame(16.0, data_get($snapshot, 'simulation.charges.taxes.profile.vat_included_rate'));
+        $this->assertSame(8.0, data_get($snapshot, 'simulation.charges.taxes.profile.vat_withholding_rate'));
+        $this->assertSame(2.5, data_get($snapshot, 'simulation.charges.taxes.profile.income_tax_withholding_rate'));
+        $this->assertSame(464.37, data_get($snapshot, 'simulation.estimated_receivable'));
+
+        Http::assertSentCount(2);
         foreach (Http::recorded() as [$request]) {
             $this->assertSame('GET', $request->method());
         }
@@ -182,7 +243,7 @@ class MeliPriceSimulationTest extends TestCase
         $this->assertSame(188.03, $result['confirmed_charges_total']);
         $this->assertSame(606.97, $result['estimated_receivable']);
         $this->assertFalse($result['estimated_receivable_is_final']);
-        $this->assertStringContainsString('antes de impuestos/retenciones', $result['estimated_receivable_label']);
+        $this->assertStringContainsString('sin retenciones fiscales', $result['estimated_receivable_label']);
 
         $issued = app(MeliPriceSimulationTokenService::class)->issue($this->user->id, $account, $item, $result);
         $snapshot = app(MeliPriceSimulationTokenService::class)->resolve($issued['token']);
