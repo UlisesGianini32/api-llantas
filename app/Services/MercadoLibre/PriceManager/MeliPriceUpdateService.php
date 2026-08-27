@@ -343,11 +343,16 @@ class MeliPriceUpdateService
             $simulation = (array) ($snapshot['simulation'] ?? []);
             $sellingFee = data_get($simulation, 'charges.sale_fee.amount', $simulation['sale_fee'] ?? null);
             $shippingCost = data_get($simulation, 'charges.shipping.seller_cost', $simulation['shipping_cost'] ?? null);
-            $confirmedChargesTotal = $simulation['confirmed_charges_total'] ?? $simulation['total_charges'] ?? null;
+            $meliChargesTotal = $simulation['meli_charges_total']
+                ?? $simulation['confirmed_charges_total']
+                ?? $simulation['total_charges']
+                ?? null;
             $taxWithholding = data_get($simulation, 'charges.taxes.available') === true
                 && is_numeric(data_get($simulation, 'charges.taxes.amount'))
                     ? (float) data_get($simulation, 'charges.taxes.amount')
                     : null;
+            $totalCharges = $simulation['total_charges']
+                ?? ($meliChargesTotal !== null ? (float) $meliChargesTotal + (float) ($taxWithholding ?? 0) : null);
             $batch = MeliPriceChangeBatch::query()->create([
                 'meli_account_id' => $account->id,
                 'brand_group_id' => $item->brand_group_id,
@@ -358,7 +363,8 @@ class MeliPriceUpdateService
                     'source' => 'meli_price_manager_phase_7c',
                     'simulation_token_sha256' => hash('sha256', $simulationToken),
                     'simulation_calculated_at' => $simulation['calculated_at'] ?? null,
-                    'estimated_total_charges' => $confirmedChargesTotal,
+                    'estimated_total_charges' => $totalCharges,
+                    'tax_profile_snapshot' => data_get($simulation, 'charges.taxes.profile'),
                     'simulation_snapshot' => $simulation,
                 ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
                 'total_items' => 1,
@@ -375,7 +381,7 @@ class MeliPriceUpdateService
                 'shipping_cost' => $shippingCost,
                 'tax_withholding' => $taxWithholding,
                 'other_charges' => max(0, round(
-                    (float) ($confirmedChargesTotal ?? 0)
+                    (float) ($meliChargesTotal ?? 0)
                     - (float) ($sellingFee ?? 0)
                     - (float) ($shippingCost ?? 0),
                     2,

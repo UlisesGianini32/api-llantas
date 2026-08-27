@@ -23,6 +23,7 @@ use App\Http\Controllers\MeliBatchRepublishController;
 use App\Http\Controllers\MeliCompareController;
 use App\Http\Controllers\MeliFullStockController;
 use App\Http\Controllers\MeliMessagingController;
+use App\Http\Controllers\MeliPriceManager\MeliAccountTaxProfileController;
 use App\Http\Controllers\MeliPriceManager\MeliBrandAliasController;
 use App\Http\Controllers\MeliPriceManager\MeliBrandGroupController;
 use App\Http\Controllers\MeliPriceManager\MeliBrandReclassificationController;
@@ -238,6 +239,7 @@ Route::get(
     Route::prefix('/meli-price-manager')->name('meli-price-manager.')->group(function () {
         Route::get('/', [MeliPriceManagerDashboardController::class, 'index'])->name('index');
         Route::post('/sync', [MeliPriceManagerDashboardController::class, 'sync'])->name('sync');
+        Route::put('/tax-profile', [MeliAccountTaxProfileController::class, 'update'])->name('tax-profile.update');
         Route::post('/items/{item}/simulate-price', MeliPriceSimulationController::class)
             ->whereNumber('item')
             ->name('items.price.simulate');

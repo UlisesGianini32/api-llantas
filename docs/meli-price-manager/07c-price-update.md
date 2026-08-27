@@ -19,7 +19,7 @@ Esta fase permite modificar únicamente el precio standard de una publicación i
 
 ## Auditoría e idempotencia
 
-Cada intento que supera las barreras iniciales usa un `meli_price_change_batch` de tipo `individual` y un solo `meli_price_change`. Los cargos estimados provienen del snapshot server-side. `selling_fee`, `shipping_cost`, `tax_withholding`, `other_charges` y `estimated_net` reutilizan las columnas existentes; `tax_withholding` permanece `null` cuando es desconocido. El JSON completo de la simulación se conserva en `batch.notes.simulation_snapshot`, incluyendo costo de publicación, detalles, envío e indisponibilidad fiscal. Los errores se sanitizan antes de persistirse o devolverse.
+Cada intento que supera las barreras iniciales usa un `meli_price_change_batch` de tipo `individual` y un solo `meli_price_change`. Los cargos estimados provienen del snapshot server-side. `selling_fee` contiene el cargo por venta, `shipping_cost` el costo vendedor, `tax_withholding` el total fiscal estimado y `other_charges` solo otros cargos reales de ML; `tax_withholding` permanece `null` cuando no hay estimación disponible. `estimated_net` ya incluye las retenciones cuando aplican. El JSON completo se conserva en `batch.notes.simulation_snapshot` y el perfil aplicado se duplica explícitamente en `batch.notes.tax_profile_snapshot`, de modo que una modificación posterior de la configuración no altera el histórico. Los errores se sanitizan antes de persistirse o devolverse.
 
 Un `Cache::lock` de 60 segundos impide escrituras simultáneas sobre la misma publicación. El token se consume tras un éxito confirmado, por lo que no puede reutilizarse para un segundo PUT.
 
