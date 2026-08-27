@@ -142,9 +142,14 @@ class MeliPriceUpdateTest extends TestCase
         $this->assertSame('1600.00', $change->new_price);
         $this->assertSame('248.00', $change->selling_fee);
         $this->assertSame('74.50', $change->shipping_cost);
-        $this->assertSame('0.00', $change->other_charges);
-        $this->assertSame('1277.50', $change->estimated_net);
+        $this->assertNull($change->tax_withholding);
+        $this->assertSame('7.25', $change->other_charges);
+        $this->assertSame('1270.25', $change->estimated_net);
         $this->assertNotNull($change->changed_at);
+        $batchNotes = json_decode((string) $batch->notes, true, flags: JSON_THROW_ON_ERROR);
+        $this->assertSame(7.25, data_get($batchNotes, 'simulation_snapshot.charges.listing_fee.amount'));
+        $this->assertNull(data_get($batchNotes, 'simulation_snapshot.charges.taxes.amount'));
+        $this->assertSame(329.75, data_get($batchNotes, 'simulation_snapshot.confirmed_charges_total'));
 
         Http::assertSentCount(4);
         Http::assertSent(function (Request $request): bool {
@@ -597,7 +602,7 @@ class MeliPriceUpdateTest extends TestCase
         )['token'];
     }
 
-    /** @return array<string, bool|float|int|string|null> */
+    /** @return array<string, mixed> */
     private function simulation(float $currentPrice, float $proposedPrice): array
     {
         return [
@@ -606,8 +611,44 @@ class MeliPriceUpdateTest extends TestCase
             'proposed_price' => $proposedPrice,
             'sale_fee' => 248.00,
             'shipping_cost' => 74.50,
-            'total_charges' => 322.50,
-            'estimated_receivable' => 1277.50,
+            'listing_fee' => 7.25,
+            'charges' => [
+                'sale_fee' => [
+                    'amount' => 248.00,
+                    'percentage' => 15.5,
+                    'meli_percentage' => 14,
+                    'fixed_fee' => 0,
+                    'financing_add_on_fee' => 1.5,
+                    'gross_amount' => 248.00,
+                ],
+                'listing_fee' => [
+                    'available' => true,
+                    'amount' => 7.25,
+                    'fixed_fee' => 7.25,
+                    'gross_amount' => 7.25,
+                ],
+                'shipping' => [
+                    'seller_cost' => 74.50,
+                    'original_cost' => 149.00,
+                    'discount_rate' => 0.5,
+                    'discount_amount' => 74.50,
+                    'billable_weight' => 733,
+                ],
+                'taxes' => [
+                    'available' => false,
+                    'amount' => null,
+                    'iva' => null,
+                    'isr' => null,
+                    'withholdings' => null,
+                    'other' => null,
+                    'message' => 'Se determinan al procesarse la venta.',
+                ],
+                'other' => [],
+            ],
+            'confirmed_charges_total' => 329.75,
+            'total_charges' => 329.75,
+            'estimated_receivable' => 1270.25,
+            'estimated_receivable_is_final' => false,
             'calculated_at' => now()->toISOString(),
         ];
     }

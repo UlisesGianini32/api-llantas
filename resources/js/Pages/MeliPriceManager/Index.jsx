@@ -73,12 +73,56 @@ async function updatePrice(itemId, simulationToken, price) {
     return body.data
 }
 
+function ChargeRow({ label, value, currency, negative = false, detail = null }) {
+    return <div className="flex justify-between gap-4">
+        <dt><span>{label}</span>{detail && <span className="mt-0.5 block text-xs text-slate-500">{detail}</span>}</dt>
+        <dd className={`text-right font-bold ${negative ? 'text-rose-600' : ''}`}>{negative ? '-' : ''}{money(value, currency)}</dd>
+    </div>
+}
+
+function ChargesBreakdown({ result, currency }) {
+    const charges = result.charges || {}
+    const saleFee = charges.sale_fee || {}
+    const listingFee = charges.listing_fee || {}
+    const shipping = charges.shipping || {}
+    const taxes = charges.taxes || {}
+    const other = Array.isArray(charges.other) ? charges.other : []
+    const shippingLabel = shipping.logistic_type === 'fulfillment' || result.logistic_type === 'fulfillment' ? 'Envío Full' : 'Envío'
+    const percentagePoints = (value) => value === null || value === undefined ? '—' : `${number(value)}%`
+    const fractionalPercentage = (value) => value === null || value === undefined ? '—' : `${number(Number(value) * 100)}%`
+
+    return <div className="space-y-4">
+        <div><p className="text-xs font-bold uppercase tracking-[0.15em] text-slate-500">Resumen de cargos</p><p className="mt-1 font-bold">{result.listing_type_name || result.listing_type_id} {saleFee.percentage !== null && saleFee.percentage !== undefined && `· ${percentagePoints(saleFee.percentage)}`}</p></div>
+        <dl className="space-y-3 text-sm">
+            <ChargeRow label="Precio de venta" value={result.proposed_price} currency={currency} />
+
+            <div className="border-t border-slate-200 pt-3 dark:border-neutral-700"><p className="mb-2 text-xs font-extrabold uppercase tracking-wide text-slate-500">Cargo por venta</p></div>
+            <ChargeRow label="Cargo total por venta" value={saleFee.amount ?? result.sale_fee} currency={currency} negative />
+            {saleFee.percentage !== null && saleFee.percentage !== undefined && <div className="flex justify-between gap-4"><dt>Comisión total</dt><dd className="font-bold">{percentagePoints(saleFee.percentage)}</dd></div>}
+            {saleFee.meli_percentage !== null && saleFee.meli_percentage !== undefined && <div className="flex justify-between gap-4"><dt>Comisión de plataforma</dt><dd className="font-bold">{percentagePoints(saleFee.meli_percentage)}</dd></div>}
+            {saleFee.fixed_fee !== null && saleFee.fixed_fee !== undefined && <ChargeRow label="Cargo fijo" value={saleFee.fixed_fee} currency={currency} />}
+            {saleFee.financing_add_on_fee !== null && saleFee.financing_add_on_fee !== undefined && <div className="flex justify-between gap-4"><dt>Componente por cuotas</dt><dd className="font-bold">{percentagePoints(saleFee.financing_add_on_fee)}</dd></div>}
+            {saleFee.gross_amount !== null && saleFee.gross_amount !== undefined && <ChargeRow label="Cargo bruto antes de descuentos" value={saleFee.gross_amount} currency={currency} detail="Informativo; no se suma nuevamente." />}
+
+            {listingFee.available && <div className="space-y-3 border-t border-slate-200 pt-3 dark:border-neutral-700"><p className="text-xs font-extrabold uppercase tracking-wide text-slate-500">Publicación</p><ChargeRow label="Costo de publicación" value={listingFee.amount} currency={currency} negative={Number(listingFee.amount) > 0} />{listingFee.fixed_fee !== null && listingFee.fixed_fee !== undefined && <ChargeRow label="Detalle fijo de publicación" value={listingFee.fixed_fee} currency={currency} detail="Informativo; incluido en el costo de publicación." />}{listingFee.gross_amount !== null && listingFee.gross_amount !== undefined && <ChargeRow label="Costo bruto de publicación" value={listingFee.gross_amount} currency={currency} detail="Informativo; no se suma nuevamente." />}</div>}
+            {!listingFee.available && <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs font-semibold text-amber-800 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-200">Mercado Libre no informó un costo de publicación para esta simulación.</div>}
+
+            <div className="space-y-3 border-t border-slate-200 pt-3 dark:border-neutral-700"><p className="text-xs font-extrabold uppercase tracking-wide text-slate-500">{shippingLabel}</p><ChargeRow label="Tú pagas" value={shipping.seller_cost ?? result.shipping_cost} currency={currency} negative={Number(shipping.seller_cost ?? result.shipping_cost) > 0} />{shipping.original_cost !== null && shipping.original_cost !== undefined && <ChargeRow label="Tarifa original" value={shipping.original_cost} currency={currency} />}{shipping.discount_rate !== null && shipping.discount_rate !== undefined && <div className="flex justify-between gap-4"><dt>Descuento Mercado Libre</dt><dd className="font-bold">{fractionalPercentage(shipping.discount_rate)}</dd></div>}{shipping.discount_amount !== null && shipping.discount_amount !== undefined && <ChargeRow label="Ahorro" value={shipping.discount_amount} currency={currency} />}{shipping.billable_weight !== null && shipping.billable_weight !== undefined && <div className="flex justify-between gap-4"><dt>Peso facturable</dt><dd className="font-bold">{number(shipping.billable_weight)} g</dd></div>}<div className="flex justify-between gap-4"><dt>Tipo de logística</dt><dd className="font-bold">{shipping.logistic_type || result.logistic_type || 'No informado'}</dd></div></div>
+
+            <div className="border-t border-slate-200 pt-3 dark:border-neutral-700"><p className="text-xs font-extrabold uppercase tracking-wide text-slate-500">Impuestos y retenciones</p><p className="mt-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs font-semibold text-amber-800 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-200">{taxes.message || 'No disponibles en la simulación previa a la venta.'}</p></div>
+
+            {other.length > 0 && <div className="space-y-3 border-t border-slate-200 pt-3 dark:border-neutral-700"><p className="text-xs font-extrabold uppercase tracking-wide text-slate-500">Otros datos de cargos reportados por ML</p>{other.map((charge) => <div key={charge.key} className="flex justify-between gap-4"><dt>{charge.label}<span className="block text-xs text-slate-500">{charge.key} · informativo, no sumado</span></dt><dd className="font-bold">{number(charge.value)}</dd></div>)}</div>}
+
+            <div className="flex justify-between gap-4 border-t border-slate-200 pt-3 dark:border-neutral-700"><dt className="font-bold">Cargos confirmados por ML</dt><dd className="font-bold text-rose-600">-{money(result.confirmed_charges_total ?? result.total_charges, currency)}</dd></div>
+        </dl>
+        <div className="rounded-2xl border-2 border-emerald-400 bg-emerald-50 p-5 text-center dark:bg-emerald-500/10"><p className="text-xs font-extrabold uppercase tracking-[0.14em] text-emerald-700 dark:text-emerald-300">{result.estimated_receivable_label || 'Recibes estimado con cargos disponibles'}</p><p className="mt-1 text-4xl font-black text-emerald-700 dark:text-emerald-300">{money(result.estimated_receivable, currency)}</p><p className="mt-1 text-lg font-bold text-emerald-700 dark:text-emerald-300">{number(result.estimated_receivable_percentage)}%</p><p className="mt-2 text-xs font-semibold text-emerald-800 dark:text-emerald-200">{result.estimated_receivable_message || 'El monto final puede variar al procesarse la venta.'}</p></div>
+    </div>
+}
+
 function PriceSimulationModal({ item, price, result, loading, updating, confirming, success, error, onPriceChange, onSubmit, onContinue, onCancelConfirmation, onConfirm, onClose }) {
     if (!item) return null
 
     const currency = result?.currency_id || item.currency_id || 'MXN'
-    const shippingLabel = result?.logistic_type === 'fulfillment' ? 'Envío Full' : 'Envío'
-    const percentage = (value) => value === null || value === undefined ? '—' : `${number(Number(value) * 100)}%`
     const priceDifference = result ? Number(result.proposed_price) - Number(result.current_price) : 0
     const busy = loading || updating
 
@@ -101,20 +145,11 @@ function PriceSimulationModal({ item, price, result, loading, updating, confirmi
             </form>
 
             {result && !confirming && <div className="space-y-4 p-5">
-                <div><p className="text-xs font-bold uppercase tracking-[0.15em] text-slate-500">Resumen de cargos</p><p className="mt-1 font-bold">{result.listing_type_name || result.listing_type_id} {result.sale_fee_percentage !== null && `· ${number(result.sale_fee_percentage)}%`}</p></div>
-                <dl className="space-y-3 text-sm">
-                    <div className="flex justify-between gap-4"><dt>Precio</dt><dd className="font-bold">{money(result.proposed_price, currency)}</dd></div>
-                    <div className="flex justify-between gap-4"><dt>Cargo por venta</dt><dd className="font-bold text-rose-600">-{money(result.sale_fee, currency)}</dd></div>
-                    <div className="flex justify-between gap-4"><dt>{shippingLabel}</dt><dd className="font-bold text-rose-600">-{money(result.shipping_cost, currency)}</dd></div>
-                    {result.shipping_original_cost !== null && <div className="flex justify-between gap-4"><dt>Tarifa antes de descuento</dt><dd className="font-bold">{money(result.shipping_original_cost, currency)}</dd></div>}
-                    {result.shipping_discount_rate !== null && <div className="flex justify-between gap-4"><dt>Descuento de envío</dt><dd className="font-bold">{percentage(result.shipping_discount_rate)}</dd></div>}
-                    <div className="flex justify-between gap-4 border-t border-slate-200 pt-3 dark:border-neutral-700"><dt className="font-bold">Total cargos</dt><dd className="font-bold text-rose-600">-{money(result.total_charges, currency)}</dd></div>
-                </dl>
-                <div className="rounded-2xl border-2 border-emerald-400 bg-emerald-50 p-5 text-center dark:bg-emerald-500/10"><p className="text-xs font-extrabold uppercase tracking-[0.2em] text-emerald-700 dark:text-emerald-300">Recibes estimado</p><p className="mt-1 text-4xl font-black text-emerald-700 dark:text-emerald-300">{money(result.estimated_receivable, currency)}</p><p className="mt-1 text-lg font-bold text-emerald-700 dark:text-emerald-300">{number(result.estimated_receivable_percentage)}%</p></div>
+                <ChargesBreakdown result={result} currency={currency} />
                 <div className="flex justify-end"><button type="button" onClick={onContinue} className="rounded-xl bg-amber-500 px-4 py-2 text-sm font-extrabold text-slate-950 transition hover:bg-amber-400">Continuar con cambio</button></div>
             </div>}
 
-            {result && confirming && <div className="space-y-5 p-5"><div><p className="text-xs font-extrabold uppercase tracking-[0.18em] text-rose-600">Confirmar cambio de precio</p><h3 className="mt-1 text-lg font-bold">{item.title}</h3><p className="text-xs text-slate-500">Mercado Libre: {item.meli_item_id}</p></div><dl className="space-y-3 text-sm"><div className="flex justify-between"><dt>Precio actual</dt><dd className="font-bold">{money(result.current_price, currency)}</dd></div><div className="flex justify-between"><dt>Nuevo precio</dt><dd className="font-bold">{money(result.proposed_price, currency)}</dd></div><div className="flex justify-between"><dt>Diferencia</dt><dd className={`font-bold ${priceDifference >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{priceDifference >= 0 ? '+' : ''}{money(priceDifference, currency)}</dd></div><div className="flex justify-between"><dt>Cargo por venta</dt><dd className="font-bold text-rose-600">-{money(result.sale_fee, currency)}</dd></div><div className="flex justify-between"><dt>Envío</dt><dd className="font-bold text-rose-600">-{money(result.shipping_cost, currency)}</dd></div><div className="flex justify-between border-t border-slate-200 pt-3 dark:border-neutral-700"><dt>Recibes estimado</dt><dd className="font-extrabold text-emerald-700 dark:text-emerald-300">{money(result.estimated_receivable, currency)}</dd></div></dl><p className="rounded-xl border border-rose-300 bg-rose-50 p-3 text-sm font-bold text-rose-800 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-200">Este cambio modificará el precio real en Mercado Libre.</p><div className="flex flex-wrap justify-end gap-2"><button type="button" onClick={onCancelConfirmation} disabled={updating} className={secondaryButton}>Cancelar</button><button type="button" onClick={onConfirm} disabled={updating} className="rounded-xl bg-rose-600 px-4 py-2 text-sm font-extrabold text-white transition hover:bg-rose-700 disabled:opacity-40">{updating ? 'Verificando y actualizando…' : `Confirmar cambio a ${money(result.proposed_price, currency)}`}</button></div></div>}
+            {result && confirming && <div className="space-y-5 p-5"><div><p className="text-xs font-extrabold uppercase tracking-[0.18em] text-rose-600">Confirmar cambio de precio</p><h3 className="mt-1 text-lg font-bold">{item.title}</h3><p className="text-xs text-slate-500">Mercado Libre: {item.meli_item_id}</p></div><dl className="space-y-3 text-sm"><div className="flex justify-between"><dt>Precio actual</dt><dd className="font-bold">{money(result.current_price, currency)}</dd></div><div className="flex justify-between"><dt>Nuevo precio</dt><dd className="font-bold">{money(result.proposed_price, currency)}</dd></div><div className="flex justify-between"><dt>Diferencia</dt><dd className={`font-bold ${priceDifference >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{priceDifference >= 0 ? '+' : ''}{money(priceDifference, currency)}</dd></div></dl><ChargesBreakdown result={result} currency={currency} /><p className="rounded-xl border border-rose-300 bg-rose-50 p-3 text-sm font-bold text-rose-800 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-200">Este cambio modificará el precio real en Mercado Libre.</p><div className="flex flex-wrap justify-end gap-2"><button type="button" onClick={onCancelConfirmation} disabled={updating} className={secondaryButton}>Cancelar</button><button type="button" onClick={onConfirm} disabled={updating} className="rounded-xl bg-rose-600 px-4 py-2 text-sm font-extrabold text-white transition hover:bg-rose-700 disabled:opacity-40">{updating ? 'Verificando y actualizando…' : `Confirmar cambio a ${money(result.proposed_price, currency)}`}</button></div></div>}
 
             <p className="border-t border-slate-200 px-5 py-4 text-xs font-semibold text-slate-500 dark:border-neutral-800">Esta es una simulación consultada con Mercado Libre. No se ha modificado el precio de la publicación.</p>
             </>}

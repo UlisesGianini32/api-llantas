@@ -6,6 +6,7 @@ use App\Models\MeliAccount;
 use App\Models\MeliPriceManagerItem;
 use App\Models\User;
 use App\Services\MercadoLibre\PriceManager\MeliPriceSimulationService;
+use App\Services\MercadoLibre\PriceManager\MeliPriceSimulationTokenService;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Http\Client\Request;
@@ -117,6 +118,78 @@ class MeliPriceSimulationTest extends TestCase
             && $request->method() === 'GET'
             && $request['dimensions'] === '24x7x7,733'
             && $request['item_id'] === 'MLM1343389489');
+        foreach (Http::recorded() as [$request]) {
+            $this->assertSame('GET', $request->method());
+        }
+    }
+
+    public function test_complete_charge_summary_preserves_official_details_without_counting_informational_values(): void
+    {
+        $account = $this->account();
+        $item = $this->item($account);
+        Http::fake(function (Request $request) {
+            if (str_contains($request->url(), '/listing_prices')) {
+                return Http::response([[
+                    'listing_type_id' => 'gold_pro',
+                    'listing_type_name' => 'Premium',
+                    'listing_fee_amount' => 7.25,
+                    'listing_fee_details' => ['fixed_fee' => 7.25, 'gross_amount' => 10],
+                    'sale_fee_amount' => 115.28,
+                    'sale_fee_details' => [
+                        'percentage_fee' => 14.5,
+                        'meli_percentage_fee' => 13,
+                        'financing_add_on_fee' => 1.5,
+                        'fixed_fee' => 0,
+                        'gross_amount' => 120,
+                    ],
+                    'service_charge_amount' => 999,
+                ]]);
+            }
+
+            return Http::response([
+                'coverage' => [
+                    'all_country' => [
+                        'list_cost' => 65.5,
+                        'currency_id' => 'MXN',
+                        'billable_weight' => 733,
+                        'discount' => ['rate' => 0.5, 'type' => 'loyalty', 'promoted_amount' => 131],
+                    ],
+                ],
+            ]);
+        });
+
+        $result = $this->service()->simulate($account, $item, 795);
+
+        $this->assertSame(115.28, data_get($result, 'charges.sale_fee.amount'));
+        $this->assertSame(14.5, data_get($result, 'charges.sale_fee.percentage'));
+        $this->assertSame(13.0, data_get($result, 'charges.sale_fee.meli_percentage'));
+        $this->assertSame(0.0, data_get($result, 'charges.sale_fee.fixed_fee'));
+        $this->assertSame(1.5, data_get($result, 'charges.sale_fee.financing_add_on_fee'));
+        $this->assertSame(120.0, data_get($result, 'charges.sale_fee.gross_amount'));
+        $this->assertSame(7.25, data_get($result, 'charges.listing_fee.amount'));
+        $this->assertSame(10.0, data_get($result, 'charges.listing_fee.gross_amount'));
+        $this->assertSame(65.5, data_get($result, 'charges.shipping.seller_cost'));
+        $this->assertSame(131.0, data_get($result, 'charges.shipping.original_cost'));
+        $this->assertSame(0.5, data_get($result, 'charges.shipping.discount_rate'));
+        $this->assertSame(65.5, data_get($result, 'charges.shipping.discount_amount'));
+        $this->assertSame(733.0, data_get($result, 'charges.shipping.billable_weight'));
+        $this->assertFalse(data_get($result, 'charges.taxes.available'));
+        $this->assertNull(data_get($result, 'charges.taxes.amount'));
+        $this->assertNull(data_get($result, 'charges.taxes.iva'));
+        $this->assertNull(data_get($result, 'charges.taxes.isr'));
+        $this->assertSame(999.0, data_get($result, 'charges.other.0.value'));
+        $this->assertFalse(data_get($result, 'charges.other.0.included_in_total'));
+        $this->assertSame(188.03, $result['confirmed_charges_total']);
+        $this->assertSame(606.97, $result['estimated_receivable']);
+        $this->assertFalse($result['estimated_receivable_is_final']);
+        $this->assertStringContainsString('antes de impuestos/retenciones', $result['estimated_receivable_label']);
+
+        $issued = app(MeliPriceSimulationTokenService::class)->issue($this->user->id, $account, $item, $result);
+        $snapshot = app(MeliPriceSimulationTokenService::class)->resolve($issued['token']);
+        $this->assertSame($result['charges'], data_get($snapshot, 'simulation.charges'));
+        $this->assertSame(188.03, data_get($snapshot, 'simulation.confirmed_charges_total'));
+
+        Http::assertSentCount(2);
         foreach (Http::recorded() as [$request]) {
             $this->assertSame('GET', $request->method());
         }
