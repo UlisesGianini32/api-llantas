@@ -28,6 +28,7 @@ use App\Http\Controllers\MeliPriceManager\MeliBrandGroupController;
 use App\Http\Controllers\MeliPriceManager\MeliBrandReclassificationController;
 use App\Http\Controllers\MeliPriceManager\MeliItemClassificationActionController;
 use App\Http\Controllers\MeliPriceManager\MeliPriceManagerDashboardController;
+use App\Http\Controllers\MeliPriceManager\MeliPriceSimulationController;
 use App\Http\Controllers\MeliPriceManager\MeliUncategorizedItemController;
 use App\Http\Controllers\MeliQuestionController;
 use App\Http\Controllers\MeliPublishController;
@@ -236,6 +237,9 @@ Route::get(
     Route::prefix('/meli-price-manager')->name('meli-price-manager.')->group(function () {
         Route::get('/', [MeliPriceManagerDashboardController::class, 'index'])->name('index');
         Route::post('/sync', [MeliPriceManagerDashboardController::class, 'sync'])->name('sync');
+        Route::post('/items/{item}/simulate-price', MeliPriceSimulationController::class)
+            ->whereNumber('item')
+            ->name('items.price.simulate');
 
         Route::get('/brands', [MeliBrandGroupController::class, 'index'])->name('brands.index');
         Route::post('/brands', [MeliBrandGroupController::class, 'store'])->name('brands.store');

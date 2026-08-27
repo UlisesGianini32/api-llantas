@@ -23,6 +23,71 @@ function dateTime(value) {
     return new Intl.DateTimeFormat('es-MX', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value))
 }
 
+function csrfToken() {
+    return document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') ?? ''
+}
+
+async function simulatePrice(itemId, price) {
+    const response = await fetch(`/meli-price-manager/items/${itemId}/simulate-price`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+            'X-CSRF-TOKEN': csrfToken(),
+            'X-Requested-With': 'XMLHttpRequest',
+        },
+        body: JSON.stringify({ price }),
+    })
+    const body = await response.json().catch(() => ({}))
+
+    if (!response.ok) {
+        const validation = body?.errors ? Object.values(body.errors).flat().join('\n') : ''
+        throw new Error(validation || body?.message || `Error HTTP ${response.status}`)
+    }
+
+    return body.data
+}
+
+function PriceSimulationModal({ item, price, result, loading, error, onPriceChange, onSubmit, onClose }) {
+    if (!item) return null
+
+    const currency = result?.currency_id || item.currency_id || 'MXN'
+    const shippingLabel = result?.logistic_type === 'fulfillment' ? 'Envío Full' : 'Envío'
+    const percentage = (value) => value === null || value === undefined ? '—' : `${number(Number(value) * 100)}%`
+
+    return <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4" role="dialog" aria-modal="true" aria-labelledby="price-simulation-title">
+        <div className="max-h-[95vh] w-full max-w-2xl overflow-y-auto rounded-2xl bg-white shadow-2xl dark:bg-neutral-900">
+            <div className="flex items-start justify-between gap-4 border-b border-slate-200 p-5 dark:border-neutral-800">
+                <div><p className="text-xs font-bold uppercase tracking-wide text-indigo-600">Simulación de precio</p><h2 id="price-simulation-title" className="mt-1 text-xl font-bold">{item.title}</h2><p className="mt-1 text-xs text-slate-500">{item.meli_item_id} · SKU: {item.sku || '—'}</p></div>
+                <button type="button" onClick={onClose} disabled={loading} className={secondaryButton}>Cerrar</button>
+            </div>
+
+            <form onSubmit={onSubmit} className="grid gap-4 border-b border-slate-200 p-5 sm:grid-cols-2 dark:border-neutral-800">
+                <div><p className="text-xs font-bold text-slate-500">Precio actual</p><p className="mt-1 text-2xl font-bold">{money(item.current_price, currency)}</p></div>
+                <label><span className="mb-1 block text-xs font-bold">Nuevo precio</span><input type="number" min="0.01" max="999999999.99" step="0.01" required autoFocus value={price} onChange={(event) => onPriceChange(event.target.value)} className={fieldClass} /></label>
+                {error && <p className="sm:col-span-2 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm font-semibold text-rose-700 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-200">{error}</p>}
+                <div className="sm:col-span-2 flex justify-end"><button type="submit" disabled={loading || !price || Number(price) <= 0} className={primaryButton}>{loading ? 'Consultando Mercado Libre…' : 'Calcular cargos'}</button></div>
+            </form>
+
+            {result && <div className="space-y-4 p-5">
+                <div><p className="text-xs font-bold uppercase tracking-[0.15em] text-slate-500">Resumen de cargos</p><p className="mt-1 font-bold">{result.listing_type_name || result.listing_type_id} {result.sale_fee_percentage !== null && `· ${number(result.sale_fee_percentage)}%`}</p></div>
+                <dl className="space-y-3 text-sm">
+                    <div className="flex justify-between gap-4"><dt>Precio</dt><dd className="font-bold">{money(result.proposed_price, currency)}</dd></div>
+                    <div className="flex justify-between gap-4"><dt>Cargo por venta</dt><dd className="font-bold text-rose-600">-{money(result.sale_fee, currency)}</dd></div>
+                    <div className="flex justify-between gap-4"><dt>{shippingLabel}</dt><dd className="font-bold text-rose-600">-{money(result.shipping_cost, currency)}</dd></div>
+                    {result.shipping_original_cost !== null && <div className="flex justify-between gap-4"><dt>Tarifa antes de descuento</dt><dd className="font-bold">{money(result.shipping_original_cost, currency)}</dd></div>}
+                    {result.shipping_discount_rate !== null && <div className="flex justify-between gap-4"><dt>Descuento de envío</dt><dd className="font-bold">{percentage(result.shipping_discount_rate)}</dd></div>}
+                    <div className="flex justify-between gap-4 border-t border-slate-200 pt-3 dark:border-neutral-700"><dt className="font-bold">Total cargos</dt><dd className="font-bold text-rose-600">-{money(result.total_charges, currency)}</dd></div>
+                </dl>
+                <div className="rounded-2xl border-2 border-emerald-400 bg-emerald-50 p-5 text-center dark:bg-emerald-500/10"><p className="text-xs font-extrabold uppercase tracking-[0.2em] text-emerald-700 dark:text-emerald-300">Recibes estimado</p><p className="mt-1 text-4xl font-black text-emerald-700 dark:text-emerald-300">{money(result.estimated_receivable, currency)}</p><p className="mt-1 text-lg font-bold text-emerald-700 dark:text-emerald-300">{number(result.estimated_receivable_percentage)}%</p></div>
+            </div>}
+
+            <p className="border-t border-slate-200 px-5 py-4 text-xs font-semibold text-slate-500 dark:border-neutral-800">Esta es una simulación consultada con Mercado Libre. No se ha modificado el precio de la publicación.</p>
+        </div>
+    </div>
+}
+
 function Metric({ label, value, tone = 'slate', detail = null }) {
     const tones = {
         slate: 'border-slate-200 bg-white dark:border-neutral-800 dark:bg-neutral-900',
@@ -69,6 +134,11 @@ export default function Index({
         per_page: filters.per_page ?? 50,
     })
     const [selectedIds, setSelectedIds] = useState([])
+    const [simulationItem, setSimulationItem] = useState(null)
+    const [simulationPrice, setSimulationPrice] = useState('')
+    const [simulationResult, setSimulationResult] = useState(null)
+    const [simulationLoading, setSimulationLoading] = useState(false)
+    const [simulationError, setSimulationError] = useState('')
     const allSelected = items.data.length > 0 && items.data.every((item) => selectedIds.includes(item.id))
     const selectedAccount = useMemo(() => accounts.find((account) => Number(account.id) === Number(selectedAccountId)), [accounts, selectedAccountId])
 
@@ -84,6 +154,29 @@ export default function Index({
     }
 
     const stale = (item) => !item.last_synced_at || new Date(item.last_synced_at) < new Date(syncStatus.stale_before)
+
+    const openSimulation = (item) => {
+        setSimulationItem(item)
+        setSimulationPrice(item.current_price ?? '')
+        setSimulationResult(null)
+        setSimulationError('')
+    }
+
+    const calculateSimulation = async (event) => {
+        event.preventDefault()
+        if (!simulationItem || simulationLoading) return
+
+        setSimulationLoading(true)
+        setSimulationError('')
+        try {
+            setSimulationResult(await simulatePrice(simulationItem.id, simulationPrice))
+        } catch (requestError) {
+            setSimulationResult(null)
+            setSimulationError(requestError instanceof Error ? requestError.message : 'No fue posible calcular los cargos.')
+        } finally {
+            setSimulationLoading(false)
+        }
+    }
 
     return (
         <AppShell title="Meli Price Manager">
@@ -151,13 +244,14 @@ export default function Index({
                             <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500 dark:bg-neutral-950"><tr><th className="px-3 py-3"><input type="checkbox" checked={allSelected} onChange={() => setSelectedIds(allSelected ? [] : items.data.map((item) => item.id))} /></th><th className="px-3 py-3">Imagen</th><th className="px-3 py-3">Producto</th><th className="px-3 py-3">Marca ML</th><th className="px-3 py-3">Marca interna</th><th className="px-3 py-3">Precio</th><th className="px-3 py-3">Stock</th><th className="px-3 py-3">Estado ML</th><th className="px-3 py-3">Sincronización</th><th className="px-3 py-3">Acción</th></tr></thead>
                             <tbody className="divide-y divide-slate-100 dark:divide-neutral-800">
                                 {!items.data.length && <tr><td colSpan="10" className="px-5 py-12 text-center text-slate-500">No hay publicaciones categorizadas para estos filtros.</td></tr>}
-                                {items.data.map((item) => <tr key={item.id}><td className="px-3 py-4"><input type="checkbox" checked={selectedIds.includes(item.id)} onChange={() => setSelectedIds((current) => current.includes(item.id) ? current.filter((id) => id !== item.id) : [...current, item.id])} /></td><td className="px-3 py-4">{item.thumbnail ? <img src={item.thumbnail} alt="" className="h-12 w-12 rounded-lg object-cover" referrerPolicy="no-referrer" /> : <div className="flex h-12 w-12 items-center justify-center rounded-lg bg-slate-100 text-[10px] text-slate-400 dark:bg-neutral-800">Sin imagen</div>}</td><td className="max-w-sm px-3 py-4"><p className="font-semibold">{item.title}</p><p className="mt-1 text-xs text-slate-500">SKU: {item.sku || '—'} · {item.meli_item_id}</p><p className="text-xs text-slate-500">Categoría: {item.category_id || '—'}</p></td><td className="px-3 py-4">{item.meli_brand || 'Sin marca'}</td><td className="px-3 py-4 font-bold text-indigo-700 dark:text-indigo-300">{item.brand_group?.name || '—'}</td><td className="px-3 py-4 font-semibold">{money(item.current_price, item.currency_id)}</td><td className="px-3 py-4">{item.available_quantity ?? '—'}</td><td className="px-3 py-4"><StatusBadge status={item.status} stock={item.available_quantity} /></td><td className="px-3 py-4"><p>{dateTime(item.last_synced_at)}</p>{stale(item) && <span className="mt-1 inline-block rounded-full bg-amber-100 px-2 py-0.5 text-xs font-bold text-amber-800">Desactualizada</span>}</td><td className="px-3 py-4">{item.permalink ? <a href={item.permalink} target="_blank" rel="noreferrer" className={secondaryButton}>Abrir en Mercado Libre</a> : '—'}</td></tr>)}
+                                {items.data.map((item) => <tr key={item.id}><td className="px-3 py-4"><input type="checkbox" checked={selectedIds.includes(item.id)} onChange={() => setSelectedIds((current) => current.includes(item.id) ? current.filter((id) => id !== item.id) : [...current, item.id])} /></td><td className="px-3 py-4">{item.thumbnail ? <img src={item.thumbnail} alt="" className="h-12 w-12 rounded-lg object-cover" referrerPolicy="no-referrer" /> : <div className="flex h-12 w-12 items-center justify-center rounded-lg bg-slate-100 text-[10px] text-slate-400 dark:bg-neutral-800">Sin imagen</div>}</td><td className="max-w-sm px-3 py-4"><p className="font-semibold">{item.title}</p><p className="mt-1 text-xs text-slate-500">SKU: {item.sku || '—'} · {item.meli_item_id}</p><p className="text-xs text-slate-500">Categoría: {item.category_id || '—'}</p></td><td className="px-3 py-4">{item.meli_brand || 'Sin marca'}</td><td className="px-3 py-4 font-bold text-indigo-700 dark:text-indigo-300">{item.brand_group?.name || '—'}</td><td className="px-3 py-4 font-semibold">{money(item.current_price, item.currency_id)}</td><td className="px-3 py-4">{item.available_quantity ?? '—'}</td><td className="px-3 py-4"><StatusBadge status={item.status} stock={item.available_quantity} /></td><td className="px-3 py-4"><p>{dateTime(item.last_synced_at)}</p>{stale(item) && <span className="mt-1 inline-block rounded-full bg-amber-100 px-2 py-0.5 text-xs font-bold text-amber-800">Desactualizada</span>}</td><td className="px-3 py-4"><div className="flex flex-col items-start gap-2"><button type="button" onClick={() => openSimulation(item)} className={primaryButton}>Simular precio</button>{item.permalink && <a href={item.permalink} target="_blank" rel="noreferrer" className={secondaryButton}>Abrir en Mercado Libre</a>}</div></td></tr>)}
                             </tbody>
                         </table>
                     </div>
                     {items.links?.length > 0 && <div className="flex flex-wrap gap-2 border-t border-slate-200 p-4 dark:border-neutral-800">{items.links.map((link, index) => <Link key={index} href={link.url ?? '#'} preserveScroll className={`rounded-lg px-3 py-2 text-sm ${link.active ? 'bg-indigo-600 text-white' : 'border border-slate-200 dark:border-neutral-700'} ${!link.url ? 'pointer-events-none opacity-40' : ''}`} dangerouslySetInnerHTML={{ __html: link.label }} />)}</div>}
                 </section>
             </div>
+            <PriceSimulationModal item={simulationItem} price={simulationPrice} result={simulationResult} loading={simulationLoading} error={simulationError} onPriceChange={(value) => { setSimulationPrice(value); setSimulationResult(null); setSimulationError('') }} onSubmit={calculateSimulation} onClose={() => { if (!simulationLoading) setSimulationItem(null) }} />
         </AppShell>
     )
 }
