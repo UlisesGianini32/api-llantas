@@ -58,6 +58,7 @@ class MeliBrandGroupController extends Controller
                 'exact' => ['label' => 'Coincidencia exacta', 'help' => 'La marca normalizada debe ser idéntica al alias.'],
                 'starts_with' => ['label' => 'Comienza con', 'help' => 'La marca debe iniciar con el alias como frase completa.'],
                 'contains' => ['label' => 'Contiene', 'help' => 'Busca el alias como frase completa dentro de la marca.'],
+                'title_contains' => ['label' => 'Título contiene', 'help' => 'Busca el alias como frase completa únicamente en el título.'],
                 'manual' => ['label' => 'Solo manual', 'help' => 'Este alias no participa en clasificación automática.'],
             ],
             'preview' => $preview,

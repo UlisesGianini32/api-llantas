@@ -20,6 +20,8 @@ class MeliBrandClassificationTest extends TestCase
 
     private object $classificationMigration;
 
+    private object $titleContainsMigration;
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -59,10 +61,13 @@ class MeliBrandClassificationTest extends TestCase
         $this->foundationMigration->up();
         $this->classificationMigration = require database_path('migrations/2026_08_26_000002_add_brand_classification_audit_to_meli_price_manager_items.php');
         $this->classificationMigration->up();
+        $this->titleContainsMigration = require database_path('migrations/2026_08_27_000001_add_title_contains_to_meli_brand_aliases.php');
+        $this->titleContainsMigration->up();
     }
 
     protected function tearDown(): void
     {
+        $this->titleContainsMigration->down();
         $this->classificationMigration->down();
         $this->foundationMigration->down();
         Schema::dropIfExists('meli_accounts');
@@ -76,8 +81,8 @@ class MeliBrandClassificationTest extends TestCase
     {
         $account = $this->account();
         $group = MeliBrandGroup::factory()->create();
-        $alias = $this->alias($group, 'ALFAPARF MILANO', 'exact');
-        $item = $this->item($account, brand: 'Alfaparf Milano');
+        $alias = $this->alias($group, 'ALFAPARF', 'exact');
+        $item = $this->item($account, brand: 'Alfaparf');
 
         $result = $this->service()->classifyItem($item);
         $item->refresh();
@@ -101,6 +106,19 @@ class MeliBrandClassificationTest extends TestCase
             $this->service()->classifyItem($item);
             $this->assertSame($group->id, $item->fresh()->brand_group_id);
         }
+    }
+
+    public function test_exact_alfaparf_milano_alias_classifies_that_exact_brand(): void
+    {
+        $account = $this->account();
+        $group = MeliBrandGroup::factory()->create();
+        $this->alias($group, 'ALFAPARF MILANO', 'exact');
+        $item = $this->item($account, brand: 'Alfaparf Milano');
+
+        $this->service()->classifyItem($item);
+
+        $this->assertSame($group->id, $item->fresh()->brand_group_id);
+        $this->assertSame('brand_exact', $item->classification_source);
     }
 
     public function test_starts_with_alias_matches_brand_prefix(): void
@@ -133,18 +151,55 @@ class MeliBrandClassificationTest extends TestCase
         $this->assertSame('0.9000', $item->classification_confidence);
     }
 
-    public function test_alias_in_title_is_used_when_brand_has_no_match(): void
+    public function test_exact_alias_does_not_match_title_when_brand_is_different(): void
     {
         $account = $this->account();
         $group = MeliBrandGroup::factory()->create();
-        $this->alias($group, 'SEMI DI LINO', 'exact');
+        $this->alias($group, 'ALFAPARF', 'exact');
+        $item = $this->item($account, brand: 'Yellow', title: 'Alfaparf Semi Di Lino Moisture Shampoo');
+
+        $this->service()->classifyItem($item);
+
+        $this->assertSame('uncategorized', $item->fresh()->classification_status);
+        $this->assertNull($item->brand_group_id);
+    }
+
+    public function test_starts_with_alias_does_not_match_title_when_brand_has_no_match(): void
+    {
+        $account = $this->account();
+        $group = MeliBrandGroup::factory()->create();
+        $this->alias($group, 'DAVINES', 'starts_with');
+        $item = $this->item($account, brand: 'Unknown', title: 'Davines OI Shampoo');
+
+        $this->service()->classifyItem($item);
+
+        $this->assertSame('uncategorized', $item->fresh()->classification_status);
+    }
+
+    public function test_contains_alias_does_not_match_title_when_brand_has_no_match(): void
+    {
+        $account = $this->account();
+        $group = MeliBrandGroup::factory()->create();
+        $this->alias($group, 'SEMI DI LINO', 'contains');
+        $item = $this->item($account, brand: 'Unknown', title: 'Alfaparf Semi Di Lino Moisture Shampoo');
+
+        $this->service()->classifyItem($item);
+
+        $this->assertSame('uncategorized', $item->fresh()->classification_status);
+    }
+
+    public function test_explicit_title_contains_alias_is_used_when_brand_has_no_match(): void
+    {
+        $account = $this->account();
+        $group = MeliBrandGroup::factory()->create();
+        $this->alias($group, 'SEMI DI LINO', 'title_contains');
         $item = $this->item($account, title: 'Semi Di Lino Moisture Shampoo 250ml');
 
         $this->service()->classifyItem($item);
         $item->refresh();
 
         $this->assertSame($group->id, $item->brand_group_id);
-        $this->assertSame('title_alias', $item->classification_source);
+        $this->assertSame('title_contains', $item->classification_source);
         $this->assertSame('0.8500', $item->classification_confidence);
     }
 
@@ -152,7 +207,7 @@ class MeliBrandClassificationTest extends TestCase
     {
         $account = $this->account();
         $group = MeliBrandGroup::factory()->create();
-        $this->alias($group, 'OI', 'contains');
+        $this->alias($group, 'OI', 'title_contains');
         $falsePositive = $this->item($account, title: 'Moisture Shampoo', overrides: ['meli_item_id' => 'MLM-SHORT-1']);
         $realToken = $this->item($account, title: 'Shampoo OI 250 ml', overrides: ['meli_item_id' => 'MLM-SHORT-2']);
 
