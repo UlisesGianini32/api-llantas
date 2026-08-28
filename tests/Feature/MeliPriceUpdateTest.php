@@ -164,7 +164,7 @@ class MeliPriceUpdateTest extends TestCase
         });
     }
 
-    public function test_audit_preserves_the_tax_profile_snapshot_and_the_699_net_amount(): void
+    public function test_audit_preserves_the_historical_tax_rule_snapshot_and_the_699_net_amount(): void
     {
         $account = $this->account();
         $item = $this->item($account, ['current_price' => 699]);
@@ -191,9 +191,14 @@ class MeliPriceUpdateTest extends TestCase
 
         $notes = json_decode((string) MeliPriceChangeBatch::query()->sole()->notes, true, flags: JSON_THROW_ON_ERROR);
         $this->assertSame(234.63, $notes['estimated_total_charges']);
-        $this->assertSame(16, data_get($notes, 'tax_profile_snapshot.vat_included_rate'));
-        $this->assertSame(8, data_get($notes, 'tax_profile_snapshot.vat_withholding_rate'));
-        $this->assertSame(2.5, data_get($notes, 'tax_profile_snapshot.income_tax_withholding_rate'));
+        $this->assertNull($notes['tax_profile_snapshot']);
+        $this->assertSame('historical_account_tax_rule', data_get($notes, 'tax_rule_snapshot.source'));
+        $this->assertSame('high', data_get($notes, 'tax_rule_snapshot.confidence'));
+        $this->assertSame(7, data_get($notes, 'tax_rule_snapshot.sample_count'));
+        $this->assertSame(16, data_get($notes, 'tax_rule_snapshot.vat_included_rate'));
+        $this->assertSame(8, data_get($notes, 'tax_rule_snapshot.vat_withholding_rate'));
+        $this->assertSame(2.5, data_get($notes, 'tax_rule_snapshot.income_tax_withholding_rate'));
+        $this->assertSame(7, data_get($notes, 'tax_rule_snapshot.evidence.distinct_items'));
         $this->assertSame(63.27, data_get($notes, 'simulation_snapshot.taxes_total'));
         $this->assertSame(464.37, data_get($notes, 'simulation_snapshot.estimated_receivable'));
 
@@ -714,18 +719,24 @@ class MeliPriceUpdateTest extends TestCase
                 'shipping' => ['seller_cost' => 70, 'original_cost' => 140],
                 'taxes' => [
                     'available' => true,
-                    'source' => 'account_tax_profile',
+                    'source' => 'historical_account_tax_rule',
+                    'confidence' => 'high',
+                    'sample_count' => 7,
                     'taxable_base' => 602.59,
                     'vat' => ['included_rate' => 16, 'withholding_rate' => 8, 'amount' => 48.21],
                     'income_tax' => ['withholding_rate' => 2.5, 'amount' => 15.06],
                     'amount' => 63.27,
-                    'profile' => [
-                        'id' => 1,
-                        'meli_account_id' => 1,
-                        'enabled' => true,
+                    'profile' => null,
+                    'rule' => [
+                        'source' => 'historical_account_tax_rule',
+                        'confidence' => 'high',
+                        'sample_count' => 7,
                         'vat_included_rate' => 16,
                         'vat_withholding_rate' => 8,
                         'income_tax_withholding_rate' => 2.5,
+                        'first_observed_at' => '2026-08-10T18:00:00.000000Z',
+                        'last_observed_at' => '2026-08-16T18:00:00.000000Z',
+                        'evidence' => ['distinct_items' => 7, 'money_tolerance_cents' => 1],
                     ],
                 ],
                 'other' => [],

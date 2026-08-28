@@ -6,10 +6,12 @@ use App\Models\MeliAccount;
 use App\Models\MeliAccountTaxProfile;
 use App\Models\User;
 use App\Services\MercadoLibre\PriceManager\MeliSellerTaxSimulationService;
+use App\Services\MercadoLibre\PriceManager\MeliHistoricalTaxRuleService;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Schema;
+use Mockery;
 use Tests\TestCase;
 use UnexpectedValueException;
 
@@ -88,6 +90,32 @@ class MeliSellerTaxSimulationTest extends TestCase
         $this->assertSame(63.27, $result['amount']);
         $this->assertSame($profile->id, data_get($result, 'profile.id'));
         $this->assertSame(16.0, data_get($result, 'profile.vat_included_rate'));
+        Http::assertNothingSent();
+    }
+
+    public function test_high_confidence_historical_rule_has_priority_over_the_manual_profile(): void
+    {
+        $account = $this->account();
+        $this->profile($account, [
+            'vat_included_rate' => 8,
+            'vat_withholding_rate' => 4,
+            'income_tax_withholding_rate' => 1,
+        ]);
+        $rules = Mockery::mock(MeliHistoricalTaxRuleService::class);
+        $rules->shouldReceive('forAccount')->once()->with($account)->andReturn($this->historicalRule());
+        $this->app->instance(MeliHistoricalTaxRuleService::class, $rules);
+
+        $result = app(MeliSellerTaxSimulationService::class)->simulate($account, 699);
+
+        $this->assertSame('historical_account_tax_rule', $result['source']);
+        $this->assertSame('high', $result['confidence']);
+        $this->assertSame(602.59, $result['taxable_base']);
+        $this->assertSame(48.21, $result['vat']['amount']);
+        $this->assertSame(15.06, $result['income_tax']['amount']);
+        $this->assertSame(63.27, $result['amount']);
+        $this->assertNull($result['profile']);
+        $this->assertSame(7, $result['rule']['sample_count']);
+        $this->assertSame(7, $result['rule']['evidence']['distinct_items']);
         Http::assertNothingSent();
     }
 
@@ -193,5 +221,26 @@ class MeliSellerTaxSimulationTest extends TestCase
             'income_tax_withholding_rate' => 2.5,
             ...$overrides,
         ]);
+    }
+
+    /** @return array<string, mixed> */
+    private function historicalRule(): array
+    {
+        return [
+            'available' => true,
+            'source' => 'historical_account_tax_rule',
+            'confidence' => 'high',
+            'sample_count' => 7,
+            'vat_included_rate' => 16.0,
+            'vat_withholding_rate' => 8.0,
+            'income_tax_withholding_rate' => 2.5,
+            'first_observed_at' => '2026-08-10T18:00:00.000000Z',
+            'last_observed_at' => '2026-08-16T18:00:00.000000Z',
+            'evidence' => [
+                'distinct_items' => 7,
+                'money_tolerance_cents' => 1,
+                'derived_from' => 'historical_mercadolibre_billing',
+            ],
+        ];
     }
 }

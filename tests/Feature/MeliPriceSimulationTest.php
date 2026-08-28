@@ -8,6 +8,7 @@ use App\Models\MeliPriceManagerItem;
 use App\Models\User;
 use App\Services\MercadoLibre\PriceManager\MeliPriceSimulationService;
 use App\Services\MercadoLibre\PriceManager\MeliPriceSimulationTokenService;
+use App\Services\MercadoLibre\PriceManager\MeliHistoricalTaxRuleService;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Http\Client\Request;
@@ -16,6 +17,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Schema;
 use InvalidArgumentException;
+use Mockery;
 use Tests\TestCase;
 
 class MeliPriceSimulationTest extends TestCase
@@ -177,6 +179,66 @@ class MeliPriceSimulationTest extends TestCase
         $this->assertSame(8.0, data_get($snapshot, 'simulation.charges.taxes.profile.vat_withholding_rate'));
         $this->assertSame(2.5, data_get($snapshot, 'simulation.charges.taxes.profile.income_tax_withholding_rate'));
         $this->assertSame(464.37, data_get($snapshot, 'simulation.estimated_receivable'));
+
+        Http::assertSentCount(2);
+        foreach (Http::recorded() as [$request]) {
+            $this->assertSame('GET', $request->method());
+        }
+    }
+
+    public function test_historical_rule_reproduces_the_699_benchmark_and_is_preserved_in_the_token(): void
+    {
+        $account = $this->account();
+        $item = $this->item($account, ['current_price' => 699]);
+        $rules = Mockery::mock(MeliHistoricalTaxRuleService::class);
+        $rules->shouldReceive('forAccount')->once()->with($account)->andReturn([
+            'available' => true,
+            'source' => 'historical_account_tax_rule',
+            'confidence' => 'high',
+            'sample_count' => 7,
+            'vat_included_rate' => 16.0,
+            'vat_withholding_rate' => 8.0,
+            'income_tax_withholding_rate' => 2.5,
+            'first_observed_at' => '2026-08-10T18:00:00.000000Z',
+            'last_observed_at' => '2026-08-16T18:00:00.000000Z',
+            'evidence' => ['distinct_items' => 7, 'money_tolerance_cents' => 1],
+        ]);
+        $this->app->instance(MeliHistoricalTaxRuleService::class, $rules);
+        Http::fake(function (Request $request) {
+            if (str_contains($request->url(), '/listing_prices')) {
+                return Http::response([[
+                    'listing_type_id' => 'gold_pro',
+                    'listing_type_name' => 'Premium',
+                    'listing_fee_amount' => 0,
+                    'sale_fee_amount' => 101.36,
+                ]]);
+            }
+
+            return Http::response(['coverage' => ['all_country' => [
+                'list_cost' => 70,
+                'discount' => ['rate' => 0.5, 'promoted_amount' => 140],
+            ]]]);
+        });
+
+        $result = $this->service()->simulate($account, $item, 699);
+
+        $this->assertSame('historical_account_tax_rule', data_get($result, 'charges.taxes.source'));
+        $this->assertSame('high', data_get($result, 'charges.taxes.confidence'));
+        $this->assertSame(48.21, data_get($result, 'charges.taxes.vat.amount'));
+        $this->assertSame(15.06, data_get($result, 'charges.taxes.income_tax.amount'));
+        $this->assertSame(63.27, $result['taxes_total']);
+        $this->assertSame(234.63, $result['total_charges']);
+        $this->assertSame(464.37, $result['estimated_receivable']);
+
+        $issued = app(MeliPriceSimulationTokenService::class)->issue($this->user->id, $account, $item, $result);
+        $snapshot = app(MeliPriceSimulationTokenService::class)->resolve($issued['token']);
+        $this->assertSame(7, data_get($snapshot, 'simulation.charges.taxes.rule.sample_count'));
+        $this->assertSame(7, data_get($snapshot, 'simulation.charges.taxes.rule.evidence.distinct_items'));
+        $this->assertSame(16.0, data_get($snapshot, 'simulation.charges.taxes.rule.vat_included_rate'));
+        $snapshotJson = json_encode($snapshot, JSON_THROW_ON_ERROR);
+        foreach (['buyer', 'email', 'phone', 'address', 'rfc', 'document', 'access_token', 'refresh_token'] as $piiKey) {
+            $this->assertStringNotContainsString($piiKey, strtolower($snapshotJson));
+        }
 
         Http::assertSentCount(2);
         foreach (Http::recorded() as [$request]) {

@@ -1,110 +1,45 @@
-# Fase 7E: investigación de impuestos dinámicos
+# Fase 7E: investigación fiscal histórica read-only
 
-Fecha de investigación: 2026-08-27.
+Fecha de investigación: 2026-08-27. Evidencia real validada en servidor: 2026-08-28.
 
-## Resultado y límite de esta ejecución
+## Evidencia validada
 
-No se realizaron consultas autenticadas contra una cuenta real. El worktree y el repositorio principal no contienen `.env`, base SQLite, configuración cacheada ni variables `DB_*`/`MELI_*`; por ello no existe una forma segura de cargar un `MeliAccount` o su token desde este entorno. No se intentó una petición sin credenciales y no se imprimieron secretos.
-
-La muestra real de esta ejecución es, por tanto:
-
-- orders analizadas: 0;
-- item_ids distintos: 0;
-- categorías y precios comparados: 0;
-- reglas fiscales derivadas: 0.
-
-Este límite impide afirmar cómo responde MLM para la cuenta del proyecto, si los impuestos varían por producto o si una relación observada puede extrapolarse a otro precio. No se creó un detector de reglas ni se conectó historial fiscal al neto preventa.
-
-## Endpoints oficiales revisados
-
-La documentación oficial vigente describe los siguientes GET read-only relevantes:
-
-- `GET /orders/search?seller={SELLER_ID}&order.status=paid&sort=date_desc` para localizar ventas recientes;
-- `GET /orders/{ORDER_ID}` para los datos de una orden;
-- `GET /billing/integration/group/ML/order/details?order_ids={ORDER_IDS}` para facturación por hasta 60 orders;
-- `GET /billing/integration/periods/key/{KEY}/group/ML/details?document_type=BILL` para detalles por período;
-- `GET /orders/{ORDER_ID}/discounts` y `GET /shipments/{SHIPMENT_ID}` para conciliación de descuentos y envío.
-
-Fuentes:
-
-- `https://developers.mercadolibre.com.mx/es_mx/provisiones`
-- `https://developers.mercadolibre.com.mx/es_ar/api-docs-es/gestiona-ventas`
-- `https://developers.mercadolibre.com.mx/es_ar/administra-proyectos-aplicaciones/buenas-practicas-para-el-consumo-de-las-apis-de-reportes-de-facturacion`
-
-Ninguno de esos endpoints fue llamado contra la cuenta real durante esta ejecución. En particular, no se utilizó ningún POST requerido para generar reportes descargables.
-
-## Estructura documentada de `tax_details`
-
-El ejemplo oficial de `GET /billing/integration/group/ML/order/details` presenta:
+La infraestructura estrictamente read-only se ejecutó en servidor contra la cuenta MLM real. La única ruta de billing utilizada fue:
 
 ```text
-results[]
-  order_id
-  payment_info[]
-    payment_id
-    date_approved
-    status
-    tax_details[]
-      from
-      to
-      original_amount
-      refunded_amount
-      mov_detail
-      mov_financial_entity
-      tax_id
-      tax_status
-  details[]
-    items_info
+GET /billing/integration/group/ML/order/details
 ```
 
-Los identificadores mostrados por el ejemplo oficial incluyen valores como `tax_withholding`, `tax_withholding_collector`, `retencion_ganancias`, `retencion_iva`, `debitos_creditos` y `cordoba`. Estos valores pertenecen al ejemplo publicado y no se consideran hallazgos de la cuenta MLM.
+La respuesta normalizada produjo 7 orders útiles, 14 detalles fiscales y 7 publicaciones distintas. Cada order de esta muestra fue mono-item. Los movimientos observados fueron `mov_detail=tax_withholding`, con `mov_financial_entity=iva` o `isr`.
 
-En esa estructura documentada:
+No se guardaron respuestas crudas, credenciales ni datos del comprador. Los fixtures conservan exclusivamente importes e identificadores ficticios.
 
-- sí existe importe mediante `original_amount` y un importe reembolsado separado;
-- no aparece un porcentaje o alícuota dentro de `tax_details`;
-- no aparece una base gravable dentro de `tax_details`;
-- el impuesto está asociado al pago de la order, no inequívocamente a cada item de una order con varios productos.
+| Venta bruta | IVA observado | ISR observado | IVA/base | ISR/base |
+| ---: | ---: | ---: | ---: | ---: |
+| 1001.28 | 69.05 | 21.58 | 7.9996% | 2.5001% |
+| 199.00 | 13.72 | 4.29 | 7.9976% | 2.5007% |
+| 356.00 | 24.55 | 7.67 | 7.9994% | 2.4992% |
+| 298.00 | 20.55 | 6.42 | 7.9993% | 2.4991% |
+| 229.00 | 15.79 | 4.94 | 7.9984% | 2.5024% |
+| 660.00 | 45.52 | 14.22 | 8.0005% | 2.4993% |
+| 735.00 | 50.69 | 15.84 | 8.0001% | 2.4999% |
 
-Otra sección de facturación documenta `perception_info.aliquot` y `perception_info.taxable_amount`, pero no se debe asumir que esos campos aparecen en `payment_info.tax_details` ni que aplican a esta cuenta o a MLM sin observar una respuesta real.
+La relación consistente para esta cuenta fue una base `venta bruta / 1.16`, IVA retenido de 8% sobre esa base e ISR retenido de 2.5%. Es una regla derivada de billing histórico, no una tasa oficial devuelta por Mercado Libre ni una constante global.
 
-## Base read-only implementada
+## Estructura y límites del dato
 
-`MeliHistoricalTaxDataService` consulta exclusivamente `GET /billing/integration/group/ML/order/details`, limita cada llamada a 60 orders, elimina duplicados de entrada y usa cache temporal separada por cuenta y conjunto de orders. Usa la entrada `getReadOnly()` de `MeliAccountApiClient`, que no intenta renovar el token mediante OAuth ante un 401; así una investigación con token vencido falla sin emitir un POST.
+`payment_info.tax_details` documenta identificadores e importes (`original_amount`, `refunded_amount`, `mov_detail`, `mov_financial_entity` y, en algunas respuestas, `tax_status`), pero no entrega una tasa ni una base gravable. La respuesta real de MLM no incluyó `tax_status`; por eso su ausencia es válida. Un estado presente que indique cancelación, rechazo, reembolso, reversa o anulación invalida la observación. El normalizador no inventa campos ausentes y conserva `attribution_scope=order_payment`.
 
-`MeliTaxDetailsNormalizer`:
+La capa de observaciones cruza billing con `meli_orders.raw`, siempre por `meli_account_id`. La documentación oficial de Orders define `gross_price` como el total bruto original de todas las unidades, mediante `(unit_price + discounts.full) × quantity`; nunca se multiplica nuevamente por `quantity`. Para inferencia fiscal sólo se acepta cuando es consistente, dentro de un centavo, con `unit_price × quantity` y con `total_amount` si está disponible. Una diferencia por descuento o un payload inconsistente se excluye hasta validar qué importe constituye la base de retención para ese caso. Si falta `gross_price`, se usa `unit_price × quantity`. No se usa `payment.shipping_cost` ni `payments.taxes_amount`.
 
-- conserva únicamente keys fiscales documentados que realmente existan;
-- no crea tasas, bases, nombres fiscales ni totales ausentes;
-- omite `payer_id`, método de pago, títulos y otros datos innecesarios del comprador/producto;
-- conserva la agrupación por order y payment;
-- declara `attribution_scope = order_payment` para evitar atribuir impuestos de una order multi-item a una publicación concreta;
-- devuelve `available = false`, `source = null` y `confidence = unknown` cuando billing no contiene detalles fiscales.
+Referencia oficial: `https://developers.mercadolibre.com.mx/gestiona-ventas`.
 
-Esta capa no persiste historial, no requiere migración, no modifica Mercado Libre y no participa todavía en `MeliPriceSimulationService`.
+## Garantía de lectura
 
-## Inferencia y jerarquía de fuentes
+`MeliHistoricalTaxDataService` usa `MeliAccountApiClient::getReadOnly()`. Esa vía no hace refresh OAuth preventivo ni posterior a 401. Todas las consultas fiscales son GET y fallan de forma segura si el token no es utilizable. No hay persistencia fiscal nueva ni migraciones.
 
-La jerarquía objetivo se mantiene:
+## Alcance pendiente
 
-1. dato exacto de Mercado Libre para una operación;
-2. regla estable de varias ventas de la misma publicación;
-3. historial comparable, solo con evidencia adicional;
-4. perfil manual de la cuenta;
-5. desconocido.
+La regla detectada sólo se habilita para la cuenta cuya muestra la sustenta. No demuestra que las tasas sean universales ni que apliquen a otra cuenta, jurisdicción o contexto fiscal.
 
-La ejecución actual no permite habilitar los niveles 1 a 3 en una simulación futura. El perfil manual existente permanece sin cambios y no se autoactiva. Implementar una media global, una tasa por categoría o el benchmark 16%/8%/2.5% como regla automática sería inseguro.
-
-## Siguiente investigación recomendada
-
-En un entorno temporal con acceso seguro a la cuenta y token vigente:
-
-1. consultar 10 orders pagadas recientes mediante `GET /orders/search`;
-2. excluir de la muestra analítica cualquier item que pertenezca a catálogos externos;
-3. consultar una sola vez billing para esos order_ids;
-4. registrar únicamente order_id, item_id, categoría, precio y keys fiscales sanitizados;
-5. comprobar si las orders son mono-item o multi-item antes de atribuir impuestos;
-6. buscar al menos tres ventas del mismo item sin resultados contradictorios;
-7. no extrapolar hasta observar tasa y relación de base estables dentro de tolerancia monetaria.
-
-Si `tax_details` real continúa sin tasa ni base, los importes solo servirán para conciliación exacta de la venta histórica. Una tasa efectiva podría mostrarse como dato analítico `derived`, pero no como tasa oficial ni como regla preventa sin evidencia repetida.
+Durante la investigación se observó además una venta de 699 con `sale_fee=97.86`, mientras una simulación posterior de `listing_prices` reportó aproximadamente 101.36. Esa diferencia queda pendiente de investigación y no cambia esta fase: la comisión preventiva continúa viniendo de `listing_prices`.

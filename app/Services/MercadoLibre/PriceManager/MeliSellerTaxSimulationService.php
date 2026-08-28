@@ -10,11 +10,29 @@ use UnexpectedValueException;
 
 class MeliSellerTaxSimulationService
 {
+    public function __construct(private readonly MeliHistoricalTaxRuleService $historicalRules) {}
+
     /** @return array<string, mixed> */
     public function simulate(MeliAccount $account, float $price): array
     {
         if (! is_finite($price) || $price <= 0) {
             throw new InvalidArgumentException('El precio debe ser mayor que cero para estimar retenciones.');
+        }
+
+        $historicalRule = $this->historicalRules->forAccount($account);
+        if (($historicalRule['available'] ?? false) === true
+            && ($historicalRule['confidence'] ?? null) === 'high') {
+            return $this->calculate(
+                $price,
+                (float) $historicalRule['vat_included_rate'],
+                (float) $historicalRule['vat_withholding_rate'],
+                (float) $historicalRule['income_tax_withholding_rate'],
+                'historical_account_tax_rule',
+                'high',
+                'Retenciones estimadas según el historial real de Mercado Libre.',
+                null,
+                $this->ruleSnapshot($historicalRule),
+            );
         }
 
         if (! Schema::hasTable('meli_account_tax_profiles')) {
@@ -51,9 +69,34 @@ class MeliSellerTaxSimulationService
             );
         }
 
-        $vatIncludedRate = $this->validRate($profile->vat_included_rate, 'IVA incluido');
-        $vatWithholdingRate = $this->validRate($profile->vat_withholding_rate, 'IVA retenido');
-        $incomeTaxRate = $this->validRate($profile->income_tax_withholding_rate, 'ISR retenido');
+        return $this->calculate(
+            $price,
+            $profile->vat_included_rate,
+            $profile->vat_withholding_rate,
+            $profile->income_tax_withholding_rate,
+            'account_tax_profile',
+            'configured',
+            'Retenciones fiscales estimadas según el perfil configurado para esta cuenta.',
+            $profileSnapshot,
+            null,
+        );
+    }
+
+    /** @return array<string, mixed> */
+    private function calculate(
+        float $price,
+        mixed $vatIncluded,
+        mixed $vatWithholding,
+        mixed $incomeTaxWithholding,
+        string $source,
+        string $confidence,
+        string $message,
+        ?array $profile,
+        ?array $rule,
+    ): array {
+        $vatIncludedRate = $this->validRate($vatIncluded, 'IVA incluido');
+        $vatWithholdingRate = $this->validRate($vatWithholding, 'IVA retenido');
+        $incomeTaxRate = $this->validRate($incomeTaxWithholding, 'ISR retenido');
         $denominator = 1 + ($vatIncludedRate / 100);
         if ($denominator <= 0) {
             throw new UnexpectedValueException('El perfil fiscal produciría una base fiscal inválida.');
@@ -66,8 +109,13 @@ class MeliSellerTaxSimulationService
 
         return [
             'available' => true,
-            'source' => 'account_tax_profile',
-            'message' => 'Retenciones fiscales estimadas según el perfil configurado para esta cuenta.',
+            'source' => $source,
+            'confidence' => $confidence,
+            'sample_count' => $rule['sample_count'] ?? null,
+            'first_observed_at' => $rule['first_observed_at'] ?? null,
+            'last_observed_at' => $rule['last_observed_at'] ?? null,
+            'evidence' => $rule['evidence'] ?? null,
+            'message' => $message,
             'taxable_base' => round($rawTaxableBase, 2),
             'vat' => [
                 'included_rate' => $vatIncludedRate,
@@ -81,7 +129,8 @@ class MeliSellerTaxSimulationService
             'iva' => $vatAmount,
             'isr' => $incomeTaxAmount,
             'amount' => $total,
-            'profile' => $profileSnapshot,
+            'profile' => $profile,
+            'rule' => $rule,
         ];
     }
 
@@ -110,12 +159,35 @@ class MeliSellerTaxSimulationService
         ];
     }
 
+    /** @param array<string, mixed> $rule
+     * @return array<string, mixed>
+     */
+    private function ruleSnapshot(array $rule): array
+    {
+        return [
+            'source' => 'historical_account_tax_rule',
+            'confidence' => 'high',
+            'sample_count' => (int) $rule['sample_count'],
+            'vat_included_rate' => (float) $rule['vat_included_rate'],
+            'vat_withholding_rate' => (float) $rule['vat_withholding_rate'],
+            'income_tax_withholding_rate' => (float) $rule['income_tax_withholding_rate'],
+            'first_observed_at' => $rule['first_observed_at'] ?? null,
+            'last_observed_at' => $rule['last_observed_at'] ?? null,
+            'evidence' => is_array($rule['evidence'] ?? null) ? $rule['evidence'] : [],
+        ];
+    }
+
     /** @return array<string, mixed> */
     private function unavailable(?string $source, ?array $profile, string $message): array
     {
         return [
             'available' => false,
             'source' => $source,
+            'confidence' => $source === 'account_tax_profile' ? 'configured' : 'insufficient',
+            'sample_count' => null,
+            'first_observed_at' => null,
+            'last_observed_at' => null,
+            'evidence' => null,
             'message' => $message,
             'taxable_base' => null,
             'vat' => [
@@ -133,6 +205,7 @@ class MeliSellerTaxSimulationService
             'other' => null,
             'amount' => null,
             'profile' => $profile,
+            'rule' => null,
         ];
     }
 }
