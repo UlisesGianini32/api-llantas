@@ -365,6 +365,7 @@ class MeliPriceUpdateService
                     'simulation_calculated_at' => $simulation['calculated_at'] ?? null,
                     'estimated_total_charges' => $totalCharges,
                     'tax_profile_snapshot' => data_get($simulation, 'charges.taxes.profile'),
+                    'tax_rule_snapshot' => data_get($simulation, 'charges.taxes.rule'),
                     'simulation_snapshot' => $simulation,
                 ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
                 'total_items' => 1,

@@ -210,7 +210,7 @@ class MeliPriceSimulationService
                 ? 'Recibes estimado'
                 : 'Recibes estimado sin retenciones fiscales',
             'estimated_receivable_message' => $taxesTotal !== null
-                ? 'Incluye las retenciones estimadas con el perfil fiscal de esta cuenta; el monto final puede variar al procesarse la venta.'
+                ? (string) ($taxes['message'] ?? 'Incluye retenciones fiscales estimadas; el monto final puede variar al procesarse la venta.')
                 : (string) ($taxes['message'] ?? 'Las retenciones fiscales no están incluidas en este estimado.'),
             'calculated_at' => now()->toISOString(),
         ];

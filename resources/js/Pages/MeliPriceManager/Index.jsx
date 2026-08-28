@@ -86,6 +86,7 @@ function ChargesBreakdown({ result, currency }) {
     const listingFee = charges.listing_fee || {}
     const shipping = charges.shipping || {}
     const taxes = charges.taxes || {}
+    const historicalTaxes = taxes.source === 'historical_account_tax_rule'
     const other = Array.isArray(charges.other) ? charges.other : []
     const shippingLabel = shipping.logistic_type === 'fulfillment' || result.logistic_type === 'fulfillment' ? 'Envío Full' : 'Envío'
     const percentagePoints = (value) => value === null || value === undefined ? '—' : `${number(value)}%`
@@ -116,7 +117,17 @@ function ChargesBreakdown({ result, currency }) {
                     <div className="flex justify-between gap-4"><dt>IVA incluido en precio</dt><dd className="font-bold">{percentagePoints(taxes.vat?.included_rate)}</dd></div>
                     <ChargeRow label={`Retención de IVA (${percentagePoints(taxes.vat?.withholding_rate)})`} value={taxes.vat?.amount} currency={currency} negative />
                     <ChargeRow label={`Retención de ISR (${percentagePoints(taxes.income_tax?.withholding_rate)})`} value={taxes.income_tax?.amount} currency={currency} negative />
-                    <p className="rounded-xl border border-indigo-200 bg-indigo-50 p-3 text-xs font-semibold text-indigo-800 dark:border-indigo-500/20 dark:bg-indigo-500/10 dark:text-indigo-200">Fuente: Perfil fiscal de la cuenta. {taxes.message}</p>
+                    <div className="rounded-xl border border-indigo-200 bg-indigo-50 p-3 text-xs font-semibold text-indigo-800 dark:border-indigo-500/20 dark:bg-indigo-500/10 dark:text-indigo-200">
+                        <p>{historicalTaxes ? 'Retenciones estimadas según el historial real de Mercado Libre.' : taxes.message}</p>
+                        <p className="mt-2">Fuente: {historicalTaxes ? 'ventas históricas de esta cuenta' : 'perfil fiscal de la cuenta'}.</p>
+                        {historicalTaxes && <div className="mt-1 space-y-0.5 font-medium">
+                            <p>Confianza: alta</p>
+                            <p>Muestra: {number(taxes.sample_count)} ventas</p>
+                            <p>Publicaciones distintas: {number(taxes.evidence?.distinct_items)}</p>
+                            <p>Última observación: {dateTime(taxes.last_observed_at)}</p>
+                            <p>Regla fiscal estimada a partir de retenciones reales observadas en Mercado Libre.</p>
+                        </div>}
+                    </div>
                 </> : <p className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs font-semibold text-amber-800 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-200">{taxes.message || 'No disponibles en la simulación previa a la venta.'}</p>}
             </div>
 
@@ -189,7 +200,7 @@ function StatusBadge({ status, stock }) {
     return <span className={`rounded-full px-2.5 py-1 text-xs font-bold ${tone}`}>{label}</span>
 }
 
-function TaxProfileForm({ selectedAccountId, taxProfile }) {
+function TaxProfileForm({ selectedAccountId, taxProfile, historicalTaxRule }) {
     const [data, setData] = useState({
         enabled: Boolean(taxProfile?.enabled),
         vat_included_rate: taxProfile?.vat_included_rate ?? '',
@@ -220,6 +231,7 @@ function TaxProfileForm({ selectedAccountId, taxProfile }) {
     }
 
     return <section className="rounded-2xl border border-slate-200 bg-white p-5 dark:border-neutral-800 dark:bg-neutral-900">
+        {historicalTaxRule?.available && historicalTaxRule?.confidence === 'high' && <div className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm font-semibold text-emerald-800 dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-200">Actualmente se está utilizando automáticamente una regla derivada del historial de Mercado Libre. El perfil manual se utilizará solamente como respaldo.</div>}
         <div className="flex flex-col justify-between gap-3 lg:flex-row lg:items-start">
             <div><h2 className="font-bold">Configuración fiscal</h2><p className="mt-1 max-w-3xl text-xs text-slate-500">Configuración exclusiva de esta cuenta. Las tasas se aplican a la base sin IVA y cada retención se redondea por separado.</p><p className="mt-2 max-w-3xl rounded-lg bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-800 dark:bg-amber-500/10 dark:text-amber-200">Estos porcentajes deben corresponder a la situación fiscal real del vendedor. No se obtienen automáticamente de Mercado Libre.</p></div>
             <label className="flex items-center gap-2 text-sm font-bold"><input type="checkbox" checked={data.enabled} onChange={(event) => setData({ ...data, enabled: event.target.checked })} /> Usar estimación fiscal</label>
@@ -247,6 +259,7 @@ export default function Index({
     availableCategories = [],
     filters = {},
     taxProfile = null,
+    historicalTaxRule = null,
 }) {
     const [filterData, setFilterData] = useState({
         search: filters.search ?? '',
@@ -360,7 +373,7 @@ export default function Index({
                     </div>
                 </section>
 
-                {selectedAccountId && <TaxProfileForm key={selectedAccountId} selectedAccountId={selectedAccountId} taxProfile={taxProfile} />}
+                {selectedAccountId && <TaxProfileForm key={selectedAccountId} selectedAccountId={selectedAccountId} taxProfile={taxProfile} historicalTaxRule={historicalTaxRule} />}
 
                 <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
                     <Metric label="Total" value={summary.total} />

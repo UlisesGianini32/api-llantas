@@ -8,6 +8,7 @@ use App\Jobs\SyncMeliPriceManagerItemsJob;
 use App\Models\MeliAccount;
 use App\Models\MeliBrandGroup;
 use App\Models\MeliPriceManagerItem;
+use App\Services\MercadoLibre\PriceManager\MeliHistoricalTaxRuleService;
 use Illuminate\Bus\UniqueLock;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\RedirectResponse;
@@ -29,7 +30,7 @@ class MeliPriceManagerDashboardController extends Controller
         'last_synced_at' => 'last_synced_at',
     ];
 
-    public function index(Request $request): Response
+    public function index(Request $request, MeliHistoricalTaxRuleService $historicalTaxRules): Response
     {
         $accounts = $request->user()->meliAccounts()
             ->orderByDesc('is_default')
@@ -131,6 +132,9 @@ class MeliPriceManagerDashboardController extends Controller
             'accounts' => $accounts,
             'selectedAccountId' => $accountId,
             'taxProfile' => $this->taxProfile($selectedAccount),
+            'historicalTaxRule' => $selectedAccount !== null
+                ? $historicalTaxRules->forAccount($selectedAccount)
+                : null,
             'summary' => $this->summary($accountId, $staleBefore),
             'syncStatus' => [
                 'queued' => $accountId ? $this->syncQueued($accountId) : false,
