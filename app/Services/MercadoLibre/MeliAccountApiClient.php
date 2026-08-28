@@ -61,7 +61,13 @@ class MeliAccountApiClient
     }
 
     /** @param array<string, mixed> $payload */
-    public function request(MeliAccount $account, string $method, string $path, array $payload = []): Response
+    public function request(
+        MeliAccount $account,
+        string $method,
+        string $path,
+        array $payload = [],
+        bool $refreshAfterUnauthorized = true,
+    ): Response
     {
         $lastResponse = null;
         $lastException = null;
@@ -98,7 +104,7 @@ class MeliAccountApiClient
                 return $response;
             }
 
-            if ($response->status() === 401 && ! $refreshedAfterUnauthorized) {
+            if ($response->status() === 401 && $refreshAfterUnauthorized && ! $refreshedAfterUnauthorized) {
                 $this->ensureFreshAccessToken($account, true);
                 $refreshedAfterUnauthorized = true;
 
@@ -124,6 +130,12 @@ class MeliAccountApiClient
             $status,
             $lastException,
         );
+    }
+
+    /** @param array<string, mixed> $query */
+    public function getReadOnly(MeliAccount $account, string $path, array $query = []): Response
+    {
+        return $this->request($account, 'get', $path, $query, false);
     }
 
     private function retryDelaySeconds(Response $response, int $attempt): int
