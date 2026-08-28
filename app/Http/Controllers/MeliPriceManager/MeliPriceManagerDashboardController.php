@@ -7,6 +7,7 @@ use App\Http\Requests\MeliPriceManager\DispatchMeliPriceManagerSyncRequest;
 use App\Jobs\SyncMeliPriceManagerItemsJob;
 use App\Models\MeliAccount;
 use App\Models\MeliBrandGroup;
+use App\Models\MeliCategory;
 use App\Models\MeliPriceManagerItem;
 use App\Services\MercadoLibre\PriceManager\MeliHistoricalTaxRuleService;
 use Illuminate\Bus\UniqueLock;
@@ -43,13 +44,13 @@ class MeliPriceManagerDashboardController extends Controller
 
         $availableStatuses = $accountId
             ? MeliPriceManagerItem::query()
-                ->managedCatalog()
+                ->focusedCatalog()
                 ->where('meli_account_id', $accountId)
                 ->whereNotNull('status')->where('status', '!=', '')->distinct()->orderBy('status')->pluck('status')->values()
             : collect();
         $availableCategories = $accountId
             ? MeliPriceManagerItem::query()
-                ->managedCatalog()
+                ->focusedCatalog()
                 ->where('meli_account_id', $accountId)
                 ->where('classification_status', 'categorized')
                 ->whereNotNull('category_id')->where('category_id', '!=', '')->distinct()->orderBy('category_id')->pluck('category_id')->values()
@@ -85,13 +86,13 @@ class MeliPriceManagerDashboardController extends Controller
         $categoryId = trim($request->string('category_id')->toString());
 
         $itemsQuery = MeliPriceManagerItem::query()
-            ->managedCatalog()
+            ->focusedCatalog()
             ->select([
                 'id', 'meli_account_id', 'meli_item_id', 'sku', 'title', 'category_id', 'meli_brand',
                 'brand_group_id', 'classification_status', 'current_price', 'available_quantity',
                 'currency_id', 'status', 'permalink', 'thumbnail', 'last_synced_at',
             ])
-            ->with('brandGroup:id,name')
+            ->with(['brandGroup:id,name', 'category:id,category_id,name'])
             ->when($accountId, fn (Builder $query, int $id) => $query->where('meli_account_id', $id))
             ->when(! $accountId, fn (Builder $query) => $query->whereRaw('1 = 0'))
             ->where('classification_status', 'categorized')
@@ -127,6 +128,13 @@ class MeliPriceManagerDashboardController extends Controller
             ->orderBy('id')
             ->paginate($perPage)
             ->withQueryString();
+        $categoryNames = Schema::hasTable('meli_categories')
+            ? MeliCategory::query()->whereIn('category_id', $availableCategories)->pluck('name', 'category_id')
+            : collect();
+        $categoryOptions = $availableCategories
+            ->map(fn (string $id): array => ['category_id' => $id, 'name' => $categoryNames[$id] ?? $id])
+            ->sortBy('name')
+            ->values();
 
         return Inertia::render('MeliPriceManager/Index', [
             'accounts' => $accounts,
@@ -145,7 +153,7 @@ class MeliPriceManagerDashboardController extends Controller
             'selectedBrandId' => $selectedBrandId,
             'items' => $items,
             'availableStatuses' => $availableStatuses,
-            'availableCategories' => $availableCategories,
+            'availableCategories' => $categoryOptions,
             'filters' => [
                 'search' => $search,
                 'status' => $status,
@@ -195,23 +203,23 @@ class MeliPriceManagerDashboardController extends Controller
 
     private function summary(?int $accountId, $staleBefore): array
     {
-        $activeBrands = MeliBrandGroup::query()->where('active', true)->count();
         if ($accountId === null) {
             return [
                 'total' => 0, 'categorized' => 0, 'suggested' => 0, 'uncategorized' => 0,
-                'ignored' => 0, 'active_brands' => $activeBrands, 'pending' => 0,
+                'ignored' => 0, 'active_brands' => 0, 'pending' => 0,
                 'last_synced_at' => null, 'recently_synced' => 0, 'never_synced' => 0, 'stale' => 0,
             ];
         }
 
         $row = MeliPriceManagerItem::query()
-            ->managedCatalog()
+            ->focusedCatalog()
             ->where('meli_account_id', $accountId)
             ->selectRaw('COUNT(*) as total')
             ->selectRaw("SUM(CASE WHEN classification_status = 'categorized' THEN 1 ELSE 0 END) as categorized")
             ->selectRaw("SUM(CASE WHEN classification_status = 'suggested' THEN 1 ELSE 0 END) as suggested")
             ->selectRaw("SUM(CASE WHEN classification_status = 'uncategorized' THEN 1 ELSE 0 END) as uncategorized")
             ->selectRaw("SUM(CASE WHEN classification_status = 'ignored' THEN 1 ELSE 0 END) as ignored")
+            ->selectRaw("COUNT(DISTINCT CASE WHEN classification_status = 'categorized' THEN brand_group_id END) as active_brands")
             ->selectRaw('MAX(last_synced_at) as last_synced_at')
             ->selectRaw('SUM(CASE WHEN last_synced_at >= ? THEN 1 ELSE 0 END) as recently_synced', [$staleBefore])
             ->selectRaw('SUM(CASE WHEN last_synced_at IS NULL THEN 1 ELSE 0 END) as never_synced')
@@ -224,7 +232,7 @@ class MeliPriceManagerDashboardController extends Controller
             'suggested' => (int) $row->suggested,
             'uncategorized' => (int) $row->uncategorized,
             'ignored' => (int) $row->ignored,
-            'active_brands' => $activeBrands,
+            'active_brands' => (int) $row->active_brands,
             'pending' => (int) $row->suggested + (int) $row->uncategorized,
             'last_synced_at' => $row->last_synced_at,
             'recently_synced' => (int) $row->recently_synced,
@@ -237,28 +245,33 @@ class MeliPriceManagerDashboardController extends Controller
     {
         return MeliBrandGroup::query()
             ->where('active', true)
+            ->whereHas('items', fn (Builder $query) => $query
+                ->focusedCatalog()
+                ->when($accountId, fn (Builder $query, int $id) => $query->where('meli_account_id', $id))
+                ->when(! $accountId, fn (Builder $query) => $query->whereRaw('1 = 0'))
+                ->where('classification_status', 'categorized'))
             ->withCount(['items as categorized_items_count' => fn (Builder $query) => $query
-                ->managedCatalog()
+                ->focusedCatalog()
                 ->when($accountId, fn (Builder $query, int $id) => $query->where('meli_account_id', $id))
                 ->when(! $accountId, fn (Builder $query) => $query->whereRaw('1 = 0'))
                 ->where('classification_status', 'categorized')])
             ->withCount(['suggestedItems as suggested_items_count' => fn (Builder $query) => $query
-                ->managedCatalog()
+                ->focusedCatalog()
                 ->when($accountId, fn (Builder $query, int $id) => $query->where('meli_account_id', $id))
                 ->when(! $accountId, fn (Builder $query) => $query->whereRaw('1 = 0'))
                 ->where('classification_status', 'suggested')])
             ->withMin(['items as min_price' => fn (Builder $query) => $query
-                ->managedCatalog()
+                ->focusedCatalog()
                 ->when($accountId, fn (Builder $query, int $id) => $query->where('meli_account_id', $id))
                 ->when(! $accountId, fn (Builder $query) => $query->whereRaw('1 = 0'))
                 ->where('classification_status', 'categorized')], 'current_price')
             ->withMax(['items as max_price' => fn (Builder $query) => $query
-                ->managedCatalog()
+                ->focusedCatalog()
                 ->when($accountId, fn (Builder $query, int $id) => $query->where('meli_account_id', $id))
                 ->when(! $accountId, fn (Builder $query) => $query->whereRaw('1 = 0'))
                 ->where('classification_status', 'categorized')], 'current_price')
             ->withSum(['items as total_stock' => fn (Builder $query) => $query
-                ->managedCatalog()
+                ->focusedCatalog()
                 ->when($accountId, fn (Builder $query, int $id) => $query->where('meli_account_id', $id))
                 ->when(! $accountId, fn (Builder $query) => $query->whereRaw('1 = 0'))
                 ->where('classification_status', 'categorized')], 'available_quantity')

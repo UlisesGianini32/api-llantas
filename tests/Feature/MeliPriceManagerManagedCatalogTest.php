@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Models\MeliAccount;
+use App\Models\MeliCategory;
 use App\Models\MeliPriceManagerItem;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\DB;
@@ -67,6 +68,8 @@ class MeliPriceManagerManagedCatalogTest extends TestCase
 
     protected function tearDown(): void
     {
+        Schema::dropIfExists('meli_categories');
+        Schema::dropIfExists('syscom_meli_queues');
         $this->foundationMigration->down();
         Schema::dropIfExists('producto_compuestos');
         Schema::dropIfExists('llantas');
@@ -163,6 +166,133 @@ class MeliPriceManagerManagedCatalogTest extends TestCase
         $this->assertManaged($item);
     }
 
+    public function test_focused_catalog_includes_configured_beauty_and_supplement_roots(): void
+    {
+        $this->createCategoryCatalog();
+        config()->set('meli_price_manager.focused_catalog.allowed_root_category_ids', [
+            'MLM-TEST-BEAUTY-ROOT', 'MLM-TEST-SUPPLEMENTS-ROOT',
+        ]);
+        $beauty = $this->focusedItem('MLM-TEST-BEAUTY-ITEM', 'MLM-TEST-SHAMPOO', 'MLM-TEST-BEAUTY-ROOT', 'Shampoo');
+        $supplement = $this->focusedItem('MLM-TEST-SUPPLEMENT-ITEM', 'MLM-TEST-VITAMINS', 'MLM-TEST-SUPPLEMENTS-ROOT', 'Vitaminas');
+
+        $this->assertTrue(MeliPriceManagerItem::query()->focusedCatalog()->whereKey($beauty)->exists());
+        $this->assertTrue(MeliPriceManagerItem::query()->focusedCatalog()->whereKey($supplement)->exists());
+        $this->assertSame('Shampoo', $beauty->category()->firstOrFail()->name);
+    }
+
+    public function test_exact_allowed_category_is_included_and_unresolved_name_falls_back_to_its_id(): void
+    {
+        $this->createCategoryCatalog();
+        config()->set('meli_price_manager.focused_catalog.allowed_category_ids', ['MLM-TEST-UNRESOLVED']);
+        $item = $this->item('MLM-TEST-UNRESOLVED-ITEM', null);
+        $item->forceFill(['category_id' => 'MLM-TEST-UNRESOLVED'])->save();
+
+        $this->assertTrue(MeliPriceManagerItem::query()->focusedCatalog()->whereKey($item)->exists());
+        $this->assertNull($item->category()->first());
+        $this->assertSame('MLM-TEST-UNRESOLVED', $item->category_id);
+    }
+
+    public function test_descendant_of_allowed_category_is_included_from_path(): void
+    {
+        $this->createCategoryCatalog();
+        config()->set('meli_price_manager.focused_catalog.allowed_category_ids', ['MLM-TEST-SUPPLEMENTS']);
+        $item = $this->focusedItem(
+            'MLM-TEST-VITAMIN-ITEM',
+            'MLM-TEST-VITAMINS',
+            'MLM-TEST-HEALTH-ROOT',
+            'Vitaminas',
+            [
+                ['id' => 'MLM-TEST-HEALTH-ROOT', 'name' => 'Salud'],
+                ['id' => 'MLM-TEST-SUPPLEMENTS', 'name' => 'Suplementos'],
+                ['id' => 'MLM-TEST-VITAMINS', 'name' => 'Vitaminas'],
+            ],
+        );
+
+        $this->assertTrue(MeliPriceManagerItem::query()->focusedCatalog()->whereKey($item)->exists());
+    }
+
+    public function test_sibling_of_allowed_category_is_not_included(): void
+    {
+        $this->createCategoryCatalog();
+        config()->set('meli_price_manager.focused_catalog.allowed_category_ids', ['MLM-TEST-SUPPLEMENTS']);
+        $item = $this->focusedItem(
+            'MLM-TEST-ORTHOPEDICS-ITEM',
+            'MLM-TEST-ORTHOPEDICS',
+            'MLM-TEST-HEALTH-ROOT',
+            'Ortopedia',
+            [
+                ['id' => 'MLM-TEST-HEALTH-ROOT', 'name' => 'Salud'],
+                ['id' => 'MLM-TEST-ORTHOPEDICS', 'name' => 'Ortopedia'],
+            ],
+        );
+
+        $this->assertFalse(MeliPriceManagerItem::query()->focusedCatalog()->whereKey($item)->exists());
+    }
+
+    public function test_category_below_allowed_root_is_included(): void
+    {
+        $this->createCategoryCatalog();
+        config()->set('meli_price_manager.focused_catalog.allowed_root_category_ids', ['MLM-TEST-BEAUTY-ROOT']);
+        $item = $this->focusedItem('MLM-TEST-HAIR-ITEM', 'MLM-TEST-HAIR', 'MLM-TEST-BEAUTY-ROOT', 'Cuidado capilar');
+
+        $this->assertTrue(MeliPriceManagerItem::query()->focusedCatalog()->whereKey($item)->exists());
+    }
+
+    public function test_category_below_non_allowed_root_is_not_included(): void
+    {
+        $this->createCategoryCatalog();
+        config()->set('meli_price_manager.focused_catalog.allowed_root_category_ids', ['MLM-TEST-BEAUTY-ROOT']);
+        $item = $this->focusedItem('MLM-TEST-MEDICAL-ITEM', 'MLM-TEST-MEDICAL', 'MLM-TEST-HEALTH-ROOT', 'Equipos médicos');
+
+        $this->assertFalse(MeliPriceManagerItem::query()->focusedCatalog()->whereKey($item)->exists());
+    }
+
+    public function test_focused_catalog_falls_back_to_managed_catalog_when_both_allowlists_are_empty(): void
+    {
+        $this->createCategoryCatalog();
+        config()->set('meli_price_manager.focused_catalog.allowed_root_category_ids', []);
+        config()->set('meli_price_manager.focused_catalog.allowed_category_ids', []);
+        $item = $this->focusedItem('MLM-TEST-FALLBACK', 'MLM-TEST-ANY-CATEGORY', 'MLM-TEST-ANY-ROOT', 'Cualquiera');
+
+        $this->assertTrue(MeliPriceManagerItem::query()->focusedCatalog()->whereKey($item)->exists());
+        $this->assertTrue(MeliPriceManagerItem::query()->managedCatalog()->whereKey($item)->exists());
+    }
+
+    public function test_focused_catalog_excludes_pool_and_beer_categories(): void
+    {
+        $this->createCategoryCatalog();
+        config()->set('meli_price_manager.focused_catalog.allowed_root_category_ids', ['MLM-TEST-BEAUTY-ROOT']);
+        $pool = $this->focusedItem('MLM-TEST-POOL-ITEM', 'MLM-TEST-POOLS', 'MLM-TEST-HOME-ROOT', 'Albercas');
+        $beer = $this->focusedItem('MLM-TEST-BEER-ITEM', 'MLM-TEST-BEER', 'MLM-TEST-DRINKS-ROOT', 'Cervezas');
+
+        $this->assertFalse(MeliPriceManagerItem::query()->focusedCatalog()->whereKey($pool)->exists());
+        $this->assertFalse(MeliPriceManagerItem::query()->focusedCatalog()->whereKey($beer)->exists());
+    }
+
+    public function test_focused_catalog_still_applies_managed_catalog_exclusions(): void
+    {
+        $this->createCategoryCatalog();
+        config()->set('meli_price_manager.focused_catalog.allowed_root_category_ids', ['MLM-TEST-BEAUTY-ROOT']);
+        $tire = $this->focusedItem('MLM-TEST-TIRE', 'MLM-TEST-SHAMPOO', 'MLM-TEST-BEAUTY-ROOT', 'Shampoo');
+        DB::table('llantas')->insert(['MLM' => $tire->meli_item_id, 'sku' => null]);
+
+        $this->assertFalse(MeliPriceManagerItem::query()->focusedCatalog()->whereKey($tire)->exists());
+    }
+
+    public function test_focused_catalog_still_excludes_syscom_items(): void
+    {
+        $this->createCategoryCatalog();
+        Schema::create('syscom_meli_queues', function (Blueprint $table): void {
+            $table->id();
+            $table->string('mlm')->nullable();
+        });
+        config()->set('meli_price_manager.focused_catalog.allowed_root_category_ids', ['MLM-TEST-BEAUTY-ROOT']);
+        $item = $this->focusedItem('MLM-TEST-SYSCOM', 'MLM-TEST-SHAMPOO', 'MLM-TEST-BEAUTY-ROOT', 'Shampoo');
+        DB::table('syscom_meli_queues')->insert(['mlm' => $item->meli_item_id]);
+
+        $this->assertFalse(MeliPriceManagerItem::query()->focusedCatalog()->whereKey($item)->exists());
+    }
+
     private function assertExcluded(MeliPriceManagerItem $item): void
     {
         $this->assertFalse(MeliPriceManagerItem::query()->managedCatalog()->whereKey($item)->exists());
@@ -179,5 +309,35 @@ class MeliPriceManagerManagedCatalogTest extends TestCase
             'meli_item_id' => $meliItemId,
             'sku' => $sku,
         ]);
+    }
+
+    private function createCategoryCatalog(): void
+    {
+        if (Schema::hasTable('meli_categories')) {
+            return;
+        }
+
+        $migration = require database_path('migrations/2026_08_28_000002_create_meli_categories_table.php');
+        $migration->up();
+    }
+
+    /** @param list<array{id: string, name: string}> $path */
+    private function focusedItem(
+        string $itemId,
+        string $categoryId,
+        string $rootId,
+        string $name,
+        array $path = [],
+    ): MeliPriceManagerItem
+    {
+        MeliCategory::query()->firstOrCreate(
+            ['category_id' => $categoryId],
+            ['name' => $name, 'root_category_id' => $rootId, 'path_from_root' => $path],
+        );
+
+        $item = $this->item($itemId, null);
+        $item->forceFill(['category_id' => $categoryId])->save();
+
+        return $item;
     }
 }

@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Models\MeliAccount;
 use App\Models\MeliPriceChange;
 use App\Models\MeliPriceChangeBatch;
+use App\Models\MeliCategory;
 use App\Models\MeliPriceManagerItem;
 use App\Models\User;
 use App\Services\MercadoLibre\PriceManager\MeliPriceSimulationTokenService;
@@ -163,6 +164,27 @@ class MeliPriceUpdateTest extends TestCase
                 && str_ends_with($request->url(), '/items/MLM1343389489')
                 && $request->data() === ['price' => 1600.0];
         });
+    }
+
+    public function test_price_update_rejects_item_outside_focused_catalog_before_calling_mercado_libre(): void
+    {
+        $migration = require database_path('migrations/2026_08_28_000002_create_meli_categories_table.php');
+        $migration->up();
+        config()->set('meli_price_manager.focused_catalog.allowed_root_category_ids', ['MLM-TEST-BEAUTY-ROOT']);
+        MeliCategory::query()->create([
+            'category_id' => 'MLM-TEST-POOL',
+            'name' => 'Albercas',
+            'root_category_id' => 'MLM-TEST-HOME-ROOT',
+        ]);
+        $account = $this->account();
+        $item = $this->item($account, ['category_id' => 'MLM-TEST-POOL']);
+
+        $this->putJson(route('meli-price-manager.items.price.update', $item), [
+            'simulation_token' => str_repeat('x', 64),
+            'price' => 1600,
+        ])->assertNotFound();
+
+        Http::assertNothingSent();
     }
 
     public function test_real_single_standard_without_context_resolves_599_and_update_sends_only_price_600(): void

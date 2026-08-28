@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Jobs\SyncMeliPriceManagerItemsJob;
 use App\Models\MeliAccount;
 use App\Models\MeliBrandGroup;
+use App\Models\MeliCategory;
 use App\Models\MeliPriceManagerItem;
 use App\Models\User;
 use Illuminate\Database\Schema\Blueprint;
@@ -132,6 +133,35 @@ class MeliPriceManagerDashboardTest extends TestCase
                 ->where('summary.pending', 2));
     }
 
+    public function test_dashboard_counts_only_items_from_the_focused_catalog_and_exposes_category_labels(): void
+    {
+        $account = $this->account();
+        $migration = require database_path('migrations/2026_08_28_000002_create_meli_categories_table.php');
+        $migration->up();
+        config()->set('meli_price_manager.focused_catalog.allowed_root_category_ids', ['MLM-TEST-BEAUTY-ROOT']);
+        MeliCategory::query()->create([
+            'category_id' => 'MLM-TEST-SHAMPOO',
+            'name' => 'Shampoo y acondicionadores',
+            'root_category_id' => 'MLM-TEST-BEAUTY-ROOT',
+        ]);
+        MeliCategory::query()->create([
+            'category_id' => 'MLM-TEST-BEER',
+            'name' => 'Cervezas',
+            'root_category_id' => 'MLM-TEST-DRINKS-ROOT',
+        ]);
+        $included = $this->item($account, ['classification_status' => 'categorized', 'category_id' => 'MLM-TEST-SHAMPOO']);
+        $this->item($account, ['classification_status' => 'categorized', 'category_id' => 'MLM-TEST-BEER']);
+
+        $this->get(route('meli-price-manager.index', ['account' => $account->id]))
+            ->assertInertia(fn (Assert $page) => $page
+                ->where('summary.total', 1)
+                ->has('items.data', 1)
+                ->where('items.data.0.id', $included->id)
+                ->where('items.data.0.category.name', 'Shampoo y acondicionadores')
+                ->where('availableCategories.0.category_id', 'MLM-TEST-SHAMPOO')
+                ->where('availableCategories.0.name', 'Shampoo y acondicionadores'));
+    }
+
     public function test_counts_from_another_account_are_never_mixed(): void
     {
         $selected = $this->account();
@@ -147,7 +177,7 @@ class MeliPriceManagerDashboardTest extends TestCase
                 ->where('summary.suggested', 0));
     }
 
-    public function test_brand_summary_uses_selected_account_and_includes_empty_active_brands(): void
+    public function test_brand_summary_uses_selected_account_and_excludes_empty_active_brands(): void
     {
         $account = $this->account();
         $foreign = MeliAccount::factory()->create();
@@ -160,15 +190,13 @@ class MeliPriceManagerDashboardTest extends TestCase
 
         $this->get(route('meli-price-manager.index', ['account' => $account->id]))
             ->assertInertia(fn (Assert $page) => $page
-                ->has('brands', 2)
+                ->has('brands', 1)
                 ->where('brands.0.name', 'ALFAPARF')
                 ->where('brands.0.categorized_items_count', 2)
                 ->where('brands.0.suggested_items_count', 1)
                 ->where('brands.0.min_price', 100)
                 ->where('brands.0.max_price', 250)
-                ->where('brands.0.total_stock', 10)
-                ->where('brands.1.name', 'VACÍA')
-                ->where('brands.1.categorized_items_count', 0));
+                ->where('brands.0.total_stock', 10));
     }
 
     public function test_selected_brand_filters_categorized_items(): void

@@ -232,7 +232,7 @@ class MeliPriceUpdateService
         }
 
         $managed = MeliPriceManagerItem::query()
-            ->managedCatalog()
+            ->focusedCatalog()
             ->whereKey($item->id)
             ->where('meli_account_id', $account->id)
             ->exists();

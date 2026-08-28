@@ -21,7 +21,7 @@ class MeliPriceSimulationController extends Controller
         MeliPriceSimulationTokenService $tokens,
     ): JsonResponse {
         $publication = MeliPriceManagerItem::query()
-            ->managedCatalog()
+            ->focusedCatalog()
             ->whereKey($item)
             ->firstOrFail();
         $account = $request->user()

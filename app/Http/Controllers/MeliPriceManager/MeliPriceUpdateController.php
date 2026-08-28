@@ -17,7 +17,7 @@ class MeliPriceUpdateController extends Controller
         MeliPriceUpdateService $service,
     ): JsonResponse {
         $publication = MeliPriceManagerItem::query()
-            ->managedCatalog()
+            ->focusedCatalog()
             ->whereKey($item)
             ->firstOrFail();
         $account = $request->user()

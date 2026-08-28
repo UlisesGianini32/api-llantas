@@ -36,6 +36,10 @@ abstract class MeliItemAccountRequest extends FormRequest
             if ($item !== null && $item->meli_account_id !== $this->integer('meli_account_id')) {
                 $validator->errors()->add('item', 'La publicación no pertenece a la cuenta seleccionada.');
             }
+
+            if ($item !== null && ! MeliPriceManagerItem::query()->focusedCatalog()->whereKey($item)->exists()) {
+                $validator->errors()->add('item', 'La publicación está fuera del catálogo enfocado de Meli Price Manager.');
+            }
         }];
     }
 

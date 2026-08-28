@@ -139,7 +139,7 @@ class MeliItemClassificationActionService
     ): array {
         return DB::transaction(function () use ($accountId, $itemIds, $action, $userId, $brand): array {
             $items = MeliPriceManagerItem::query()
-                ->managedCatalog()
+                ->focusedCatalog()
                 ->where('meli_account_id', $accountId)
                 ->whereIn('id', $itemIds)
                 ->lockForUpdate()

@@ -38,7 +38,7 @@ class MeliPriceSimulationService
         }
 
         $isManaged = MeliPriceManagerItem::query()
-            ->managedCatalog()
+            ->focusedCatalog()
             ->whereKey($item->getKey())
             ->where('meli_account_id', $account->id)
             ->exists();

@@ -7,6 +7,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 
 class MeliPriceManagerItem extends Model
@@ -109,6 +110,66 @@ class MeliPriceManagerItem extends Model
         return $query;
     }
 
+    public function scopeFocusedCatalog(Builder $query): Builder
+    {
+        $query->managedCatalog();
+
+        $allowedRoots = array_values(array_filter(array_map(
+            static fn (mixed $id): string => trim((string) $id),
+            (array) config('meli_price_manager.focused_catalog.allowed_root_category_ids', []),
+        )));
+        $allowedCategories = array_values(array_filter(array_map(
+            static fn (mixed $id): string => trim((string) $id),
+            (array) config('meli_price_manager.focused_catalog.allowed_category_ids', []),
+        )));
+
+        if ($allowedRoots === [] && $allowedCategories === []) {
+            return $query;
+        }
+
+        return $query->where(function (Builder $focused) use ($allowedCategories, $allowedRoots): void {
+            if ($allowedCategories !== []) {
+                $focused->whereIn('meli_price_manager_items.category_id', $allowedCategories);
+            }
+
+            if (Schema::hasTable('meli_categories') && ($allowedRoots !== [] || $allowedCategories !== [])) {
+                $focused->orWhereExists(function ($subquery) use ($allowedCategories, $allowedRoots): void {
+                    $subquery->selectRaw('1')
+                        ->from('meli_categories as focused_categories')
+                        ->whereColumn('focused_categories.category_id', 'meli_price_manager_items.category_id')
+                        ->where(function ($category) use ($allowedCategories, $allowedRoots): void {
+                            if ($allowedRoots !== []) {
+                                $category->whereIn('focused_categories.root_category_id', $allowedRoots);
+                            }
+
+                            if ($allowedCategories !== []) {
+                                $method = $allowedRoots === [] ? 'whereRaw' : 'orWhereRaw';
+                                $category->{$method}($this->ancestorCategorySql($allowedCategories), $allowedCategories);
+                            }
+                        });
+                });
+            }
+        });
+    }
+
+    /** @param list<string> $categoryIds */
+    private function ancestorCategorySql(array $categoryIds): string
+    {
+        $placeholders = implode(', ', array_fill(0, count($categoryIds), '?'));
+
+        if (DB::connection()->getDriverName() === 'sqlite') {
+            return "EXISTS (SELECT 1 FROM json_each(focused_categories.path_from_root) AS path_node WHERE json_extract(path_node.value, '$.id') IN ({$placeholders}))";
+        }
+
+        $checks = array_fill(
+            0,
+            count($categoryIds),
+            "JSON_CONTAINS(focused_categories.path_from_root, JSON_OBJECT('id', ?))",
+        );
+
+        return '('.implode(' OR ', $checks).')';
+    }
+
     public function meliAccount(): BelongsTo
     {
         return $this->belongsTo(MeliAccount::class);
@@ -117,6 +178,11 @@ class MeliPriceManagerItem extends Model
     public function brandGroup(): BelongsTo
     {
         return $this->belongsTo(MeliBrandGroup::class, 'brand_group_id');
+    }
+
+    public function category(): BelongsTo
+    {
+        return $this->belongsTo(MeliCategory::class, 'category_id', 'category_id');
     }
 
     public function suggestedBrandGroup(): BelongsTo

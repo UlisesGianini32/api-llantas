@@ -5,7 +5,9 @@ namespace Tests\Feature;
 use App\Jobs\SyncMeliPriceManagerItemsJob;
 use App\Models\MeliAccount;
 use App\Models\MeliBrandGroup;
+use App\Models\MeliCategory;
 use App\Models\MeliPriceManagerItem;
+use App\Services\MercadoLibre\PriceManager\MeliCategorySyncService;
 use App\Services\MercadoLibre\PriceManager\MeliPriceManagerSyncService;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Http\Client\Request;
@@ -363,6 +365,42 @@ class MeliPriceManagerSyncTest extends TestCase
 
         Bus::assertDispatched(SyncMeliPriceManagerItemsJob::class, static fn (SyncMeliPriceManagerItemsJob $job): bool => $job->meliAccountId === $account->id && $job->queue === 'meli'
         );
+    }
+
+    public function test_category_sync_fetches_each_distinct_stale_category_once_and_persists_its_path(): void
+    {
+        $migration = require database_path('migrations/2026_08_28_000002_create_meli_categories_table.php');
+        $migration->up();
+        $account = $this->account();
+        MeliPriceManagerItem::factory()->count(2)->for($account, 'meliAccount')->create([
+            'category_id' => 'MLM-TEST-SHAMPOO',
+        ]);
+        Http::fake([
+            'api.mercadolibre.com/categories/MLM-TEST-SHAMPOO' => Http::response([
+                'id' => 'MLM-TEST-SHAMPOO',
+                'name' => 'Shampoo y acondicionadores',
+                'path_from_root' => [
+                    ['id' => 'MLM-TEST-BEAUTY-ROOT', 'name' => 'Belleza'],
+                    ['id' => 'MLM-TEST-SHAMPOO', 'name' => 'Shampoo y acondicionadores'],
+                ],
+            ]),
+        ]);
+
+        $this->assertSame(1, app(MeliCategorySyncService::class)->sync($account));
+        $this->assertDatabaseHas('meli_categories', [
+            'category_id' => 'MLM-TEST-SHAMPOO',
+            'name' => 'Shampoo y acondicionadores',
+            'root_category_id' => 'MLM-TEST-BEAUTY-ROOT',
+        ]);
+        Http::assertSentCount(1);
+
+        $this->assertSame(0, app(MeliCategorySyncService::class)->sync($account));
+        Http::assertSentCount(1);
+        $this->assertSame('Shampoo y acondicionadores', MeliCategory::query()->firstOrFail()->name);
+        $this->assertSame([
+            ['id' => 'MLM-TEST-BEAUTY-ROOT', 'name' => 'Belleza'],
+            ['id' => 'MLM-TEST-SHAMPOO', 'name' => 'Shampoo y acondicionadores'],
+        ], MeliCategory::query()->firstOrFail()->path_from_root);
     }
 
     private function service(): MeliPriceManagerSyncService

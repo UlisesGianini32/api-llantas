@@ -30,7 +30,7 @@ class MeliBrandClassificationService
     public function classifyAccount(MeliAccount $account, bool $reclassifyAll = false, bool $dryRun = false): array
     {
         $query = MeliPriceManagerItem::query()
-            ->managedCatalog()
+            ->focusedCatalog()
             ->where('meli_account_id', $account->id);
 
         if (! $reclassifyAll) {
@@ -47,7 +47,7 @@ class MeliBrandClassificationService
     public function classifyUncategorized(MeliAccount $account, bool $dryRun = false): array
     {
         $query = MeliPriceManagerItem::query()
-            ->managedCatalog()
+            ->focusedCatalog()
             ->where('meli_account_id', $account->id)
             ->whereIn('classification_status', ['uncategorized', 'suggested']);
 
