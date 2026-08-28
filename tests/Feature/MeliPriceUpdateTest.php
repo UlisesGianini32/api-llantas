@@ -194,6 +194,8 @@ class MeliPriceUpdateTest extends TestCase
         $this->assertNull($notes['tax_profile_snapshot']);
         $this->assertSame('historical_account_tax_rule', data_get($notes, 'tax_rule_snapshot.source'));
         $this->assertSame('high', data_get($notes, 'tax_rule_snapshot.confidence'));
+        $this->assertTrue(data_get($notes, 'tax_rule_snapshot.stale'));
+        $this->assertSame('last_valid_historical_rule', data_get($notes, 'tax_rule_snapshot.fallback'));
         $this->assertSame(7, data_get($notes, 'tax_rule_snapshot.sample_count'));
         $this->assertSame(16, data_get($notes, 'tax_rule_snapshot.vat_included_rate'));
         $this->assertSame(8, data_get($notes, 'tax_rule_snapshot.vat_withholding_rate'));
@@ -721,6 +723,8 @@ class MeliPriceUpdateTest extends TestCase
                     'available' => true,
                     'source' => 'historical_account_tax_rule',
                     'confidence' => 'high',
+                    'stale' => true,
+                    'fallback' => 'last_valid_historical_rule',
                     'sample_count' => 7,
                     'taxable_base' => 602.59,
                     'vat' => ['included_rate' => 16, 'withholding_rate' => 8, 'amount' => 48.21],
@@ -730,6 +734,8 @@ class MeliPriceUpdateTest extends TestCase
                     'rule' => [
                         'source' => 'historical_account_tax_rule',
                         'confidence' => 'high',
+                        'stale' => true,
+                        'fallback' => 'last_valid_historical_rule',
                         'sample_count' => 7,
                         'vat_included_rate' => 16,
                         'vat_withholding_rate' => 8,

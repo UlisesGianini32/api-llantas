@@ -195,6 +195,8 @@ class MeliPriceSimulationTest extends TestCase
             'available' => true,
             'source' => 'historical_account_tax_rule',
             'confidence' => 'high',
+            'stale' => true,
+            'fallback' => 'last_valid_historical_rule',
             'sample_count' => 7,
             'vat_included_rate' => 16.0,
             'vat_withholding_rate' => 8.0,
@@ -224,6 +226,8 @@ class MeliPriceSimulationTest extends TestCase
 
         $this->assertSame('historical_account_tax_rule', data_get($result, 'charges.taxes.source'));
         $this->assertSame('high', data_get($result, 'charges.taxes.confidence'));
+        $this->assertTrue(data_get($result, 'charges.taxes.stale'));
+        $this->assertSame('last_valid_historical_rule', data_get($result, 'charges.taxes.fallback'));
         $this->assertSame(48.21, data_get($result, 'charges.taxes.vat.amount'));
         $this->assertSame(15.06, data_get($result, 'charges.taxes.income_tax.amount'));
         $this->assertSame(63.27, $result['taxes_total']);
@@ -235,6 +239,8 @@ class MeliPriceSimulationTest extends TestCase
         $this->assertSame(7, data_get($snapshot, 'simulation.charges.taxes.rule.sample_count'));
         $this->assertSame(7, data_get($snapshot, 'simulation.charges.taxes.rule.evidence.distinct_items'));
         $this->assertSame(16.0, data_get($snapshot, 'simulation.charges.taxes.rule.vat_included_rate'));
+        $this->assertTrue(data_get($snapshot, 'simulation.charges.taxes.rule.stale'));
+        $this->assertSame('last_valid_historical_rule', data_get($snapshot, 'simulation.charges.taxes.rule.fallback'));
         $snapshotJson = json_encode($snapshot, JSON_THROW_ON_ERROR);
         foreach (['buyer', 'email', 'phone', 'address', 'rfc', 'document', 'access_token', 'refresh_token'] as $piiKey) {
             $this->assertStringNotContainsString($piiKey, strtolower($snapshotJson));

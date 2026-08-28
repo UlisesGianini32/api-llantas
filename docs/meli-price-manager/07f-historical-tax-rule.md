@@ -7,9 +7,19 @@ La resolución se divide en cuatro responsabilidades:
 1. `MeliHistoricalTaxDataService` consulta billing mediante GET-only y normaliza la respuesta.
 2. `MeliHistoricalTaxObservationService` cruza hasta 60 orders locales recientes de la misma cuenta con billing, excluye atribuciones ambiguas y produce observaciones sanitizadas.
 3. `MeliHistoricalTaxRuleDetector` prueba combinaciones candidatas y sólo acepta una coincidencia única y consistente.
-4. `MeliHistoricalTaxRuleService` cachea el resultado seis horas por `meli_account_id`.
+4. `MeliHistoricalTaxRuleService` administra por `meli_account_id` una regla actual y la última regla válida conocida.
 
 No existe tabla nueva ni persistencia del historial fiscal.
+
+## Política de caché y resiliencia
+
+Una regla fresca de alta confianza se guarda seis horas en `meli-price-manager:tax-rule:{account_id}` y, simultáneamente, durante un máximo de siete días en `meli-price-manager:tax-rule:last-valid:{account_id}`. La segunda entrada incluye la hora en que se almacenó para verificar explícitamente su antigüedad, además del TTL del cache store.
+
+Una excepción de billing o una muestra temporal insuficiente no se guarda como current. Si existe una regla `last-valid` menor de siete días, se devuelve con `stale=true` y `fallback=last_valid_historical_rule`, conservando las tasas y fechas de evidencia originales. Si nunca existió o ya venció, el resultado es `available=false` y `confidence=insufficient`.
+
+Una muestra suficiente que no coincide con ninguna regla o admite varias reglas se considera evidencia contradictoria o ambigua, no un fallo temporal. En ese caso no se aplica el fallback: la regla anterior se invalida, el resultado no confiable se cachea seis horas y la simulación usa el perfil manual si está disponible.
+
+Los resultados `insufficient` de versiones anteriores encontrados en la clave current se descartan y recalculan para que no oculten observaciones nuevas durante seis horas.
 
 ## Regla de aceptación
 
