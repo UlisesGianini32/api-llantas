@@ -309,16 +309,29 @@ class MeliPriceUpdateService
             '/items/'.rawurlencode((string) $item->meli_item_id).'/prices',
         );
         $payload = $response->json();
-        $prices = is_array($payload) && is_array($payload['prices'] ?? null) ? $payload['prices'] : [];
-        $standardPrices = array_values(array_filter($prices, static function (mixed $price): bool {
-            if (! is_array($price) || strtolower((string) ($price['type'] ?? '')) !== 'standard') {
-                return false;
-            }
+        $prices = is_array($payload) && array_is_list($payload)
+            ? $payload
+            : (is_array($payload) && is_array($payload['prices'] ?? null) ? $payload['prices'] : []);
+        $standardPrices = array_values(array_filter(
+            $prices,
+            static fn (mixed $price): bool => is_array($price)
+                && strtolower(trim((string) ($price['type'] ?? ''))) === 'standard',
+        ));
+        $selected = count($standardPrices) === 1 ? $standardPrices[0] : null;
 
-            return in_array('channel_marketplace', (array) data_get($price, 'conditions.context_restrictions', []), true);
-        }));
+        if (count($standardPrices) > 1) {
+            $marketplacePrices = array_values(array_filter(
+                $standardPrices,
+                static fn (array $price): bool => in_array(
+                    'channel_marketplace',
+                    (array) data_get($price, 'conditions.context_restrictions', []),
+                    true,
+                ),
+            ));
+            $selected = count($marketplacePrices) === 1 ? $marketplacePrices[0] : null;
+        }
 
-        if (count($standardPrices) !== 1 || ! is_numeric($standardPrices[0]['amount'] ?? null)) {
+        if ($selected === null || ! is_numeric($selected['amount'] ?? null)) {
             throw new MeliPriceUpdateException(
                 'No fue posible determinar de forma inequívoca el precio standard de marketplace. No se realizó ningún cambio.',
                 'ambiguous_standard_price',
@@ -326,7 +339,7 @@ class MeliPriceUpdateService
             );
         }
 
-        return round((float) $standardPrices[0]['amount'], 2);
+        return round((float) $selected['amount'], 2);
     }
 
     /** @param array<string, mixed> $snapshot
