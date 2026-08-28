@@ -184,13 +184,6 @@ function SidebarNav({ currentPath, onNavigate, pendingQuestions = 0 }) {
                         Importar Excel
                     </NavItem>
                     <NavItem
-                        href="/autopartes"
-                        active={currentPath.startsWith('/autopartes')}
-                        onNavigate={onNavigate}
-                    >
-                        Autopartes
-                    </NavItem>
-                    <NavItem
                         href="/llantas/agotadas"
                         active={currentPath.startsWith('/llantas/agotadas')}
                         danger
@@ -244,29 +237,6 @@ function SidebarNav({ currentPath, onNavigate, pendingQuestions = 0 }) {
                         Publicaciones Mercado Libre
                     </NavItem>
 
-                    <NavItem
-                        href="/meli-price-manager"
-                        active={currentPath === '/meli-price-manager'}
-                        onNavigate={onNavigate}
-                    >
-                        Meli Price Manager
-                    </NavItem>
-
-                    <NavItem
-                        href="/meli-price-manager/brands"
-                        active={currentPath.startsWith('/meli-price-manager/brands')}
-                        onNavigate={onNavigate}
-                    >
-                        Marcas y alias
-                    </NavItem>
-
-                    <NavItem
-                        href="/meli-price-manager/uncategorized"
-                        active={currentPath.startsWith('/meli-price-manager/uncategorized')}
-                        onNavigate={onNavigate}
-                    >
-                        Pendientes de clasificación
-                    </NavItem>
 
                     <NavItem
                         href="/meli/full"

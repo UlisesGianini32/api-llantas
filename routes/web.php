@@ -2,19 +2,6 @@
 
 use App\Http\Controllers\AmsPedidosController;
 use App\Http\Controllers\AmsSecondaryOrdersController;
-use App\Http\Controllers\Autopartes\AutomotivePartController;
-use App\Http\Controllers\Autopartes\AutomotivePartAiEnrichmentController;
-use App\Http\Controllers\Autopartes\AutomotivePartEnrichmentController;
-use App\Http\Controllers\Autopartes\AutomotivePartMeliDraftActionController;
-use App\Http\Controllers\Autopartes\AutomotivePartMeliDraftController;
-use App\Http\Controllers\Autopartes\AutomotivePartMeliPublicationActionController;
-use App\Http\Controllers\Autopartes\AutomotivePartMeliPublicationController;
-use App\Http\Controllers\Autopartes\AutomotivePartMeliCategoryActionController;
-use App\Http\Controllers\Autopartes\AutomotivePartMeliCategoryController;
-use App\Http\Controllers\Autopartes\AutomotivePartMediaActionController;
-use App\Http\Controllers\Autopartes\AutomotivePartMediaController;
-use App\Http\Controllers\Autopartes\AutomotivePartPriceRuleActionController;
-use App\Http\Controllers\Autopartes\AutomotivePartPriceRuleController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\ExcelImportController;
@@ -23,15 +10,6 @@ use App\Http\Controllers\MeliBatchRepublishController;
 use App\Http\Controllers\MeliCompareController;
 use App\Http\Controllers\MeliFullStockController;
 use App\Http\Controllers\MeliMessagingController;
-use App\Http\Controllers\MeliPriceManager\MeliAccountTaxProfileController;
-use App\Http\Controllers\MeliPriceManager\MeliBrandAliasController;
-use App\Http\Controllers\MeliPriceManager\MeliBrandGroupController;
-use App\Http\Controllers\MeliPriceManager\MeliBrandReclassificationController;
-use App\Http\Controllers\MeliPriceManager\MeliItemClassificationActionController;
-use App\Http\Controllers\MeliPriceManager\MeliPriceManagerDashboardController;
-use App\Http\Controllers\MeliPriceManager\MeliPriceSimulationController;
-use App\Http\Controllers\MeliPriceManager\MeliPriceUpdateController;
-use App\Http\Controllers\MeliPriceManager\MeliUncategorizedItemController;
 use App\Http\Controllers\MeliQuestionController;
 use App\Http\Controllers\MeliPublishController;
 use App\Http\Controllers\MeliRepublishController;
@@ -236,57 +214,6 @@ Route::get(
     ->name('qz.sign');
 
     // MERCADO LIBRE
-    Route::prefix('/meli-price-manager')->name('meli-price-manager.')->group(function () {
-        Route::get('/', [MeliPriceManagerDashboardController::class, 'index'])->name('index');
-        Route::post('/sync', [MeliPriceManagerDashboardController::class, 'sync'])->name('sync');
-        Route::put('/tax-profile', [MeliAccountTaxProfileController::class, 'update'])->name('tax-profile.update');
-        Route::post('/items/{item}/simulate-price', MeliPriceSimulationController::class)
-            ->whereNumber('item')
-            ->name('items.price.simulate');
-        Route::put('/items/{item}/price', MeliPriceUpdateController::class)
-            ->whereNumber('item')
-            ->name('items.price.update');
-
-        Route::get('/brands', [MeliBrandGroupController::class, 'index'])->name('brands.index');
-        Route::post('/brands', [MeliBrandGroupController::class, 'store'])->name('brands.store');
-        Route::put('/brands/{brand}', [MeliBrandGroupController::class, 'update'])->name('brands.update');
-        Route::patch('/brands/{brand}/status', [MeliBrandGroupController::class, 'status'])->name('brands.status');
-
-        Route::post('/brands/{brand}/aliases', [MeliBrandAliasController::class, 'store'])->name('aliases.store');
-        Route::put('/aliases/{alias}', [MeliBrandAliasController::class, 'update'])->name('aliases.update');
-        Route::patch('/aliases/{alias}/status', [MeliBrandAliasController::class, 'status'])->name('aliases.status');
-        Route::delete('/aliases/{alias}', [MeliBrandAliasController::class, 'destroy'])->name('aliases.destroy');
-
-        Route::post('/brands/reclassification/preview', [MeliBrandReclassificationController::class, 'preview'])
-            ->name('reclassification.preview');
-        Route::post('/brands/{brand}/reclassification/preview', [MeliBrandReclassificationController::class, 'previewBrand'])
-            ->name('brands.reclassification.preview');
-        Route::post('/brands/reclassification/apply', [MeliBrandReclassificationController::class, 'apply'])
-            ->name('reclassification.apply');
-
-        Route::get('/uncategorized', [MeliUncategorizedItemController::class, 'index'])->name('uncategorized.index');
-        Route::post('/uncategorized/bulk', [MeliItemClassificationActionController::class, 'bulk'])
-            ->name('uncategorized.bulk');
-        Route::post('/items/{item}/suggestion/accept', [MeliItemClassificationActionController::class, 'accept'])
-            ->whereNumber('item')
-            ->name('items.suggestion.accept');
-        Route::post('/items/{item}/assign', [MeliItemClassificationActionController::class, 'assign'])
-            ->whereNumber('item')
-            ->name('items.assign');
-        Route::post('/items/{item}/alias-and-assign', [MeliItemClassificationActionController::class, 'alias'])
-            ->whereNumber('item')
-            ->name('items.alias-and-assign');
-        Route::post('/items/{item}/brand-and-assign', [MeliItemClassificationActionController::class, 'brand'])
-            ->whereNumber('item')
-            ->name('items.brand-and-assign');
-        Route::post('/items/{item}/ignore', [MeliItemClassificationActionController::class, 'ignore'])
-            ->whereNumber('item')
-            ->name('items.ignore');
-        Route::post('/items/{item}/restore', [MeliItemClassificationActionController::class, 'restore'])
-            ->whereNumber('item')
-            ->name('items.restore');
-    });
-
     Route::post('/producto/ml/batch-republish', [MeliBatchRepublishController::class, 'store'])
         ->name('producto.ml.batch-republish');
 
@@ -411,82 +338,6 @@ Route::get(
 
     Route::post('/productos/{compuesto}/price/recalc', [ProductoCompuestoController::class, 'recalcPrice'])
         ->name('productos.price.recalc');
-
-    // AUTOPARTES
-    Route::get('/autopartes', [AutomotivePartController::class, 'index'])->name('autopartes.index');
-    Route::get('/autopartes/upload', [AutomotivePartController::class, 'uploadForm'])->name('autopartes.upload');
-    Route::post('/autopartes/upload', [AutomotivePartController::class, 'store'])->name('autopartes.store');
-    Route::get('/autopartes/importaciones', [AutomotivePartController::class, 'imports'])->name('autopartes.imports.index');
-    Route::get('/autopartes/importaciones/{import}', [AutomotivePartController::class, 'importDetail'])->name('autopartes.imports.show');
-    Route::get('/autopartes/enriquecimiento', [AutomotivePartEnrichmentController::class, 'index'])->name('autopartes.enrichment.index');
-    Route::post('/autopartes/enriquecimiento/auditar', [AutomotivePartEnrichmentController::class, 'audit'])->name('autopartes.enrichment.audit');
-    Route::post('/autopartes/enriquecimiento/ia/lote', [AutomotivePartAiEnrichmentController::class, 'batch'])->name('autopartes.enrichment.ai.batch');
-    Route::post('/autopartes/enriquecimiento/{review}/ia/generar', [AutomotivePartAiEnrichmentController::class, 'generate'])->name('autopartes.enrichment.ai.generate');
-    Route::post('/autopartes/enriquecimiento/{review}/ia/regenerar', [AutomotivePartAiEnrichmentController::class, 'regenerate'])->name('autopartes.enrichment.ai.regenerate');
-    Route::get('/autopartes/enriquecimiento/{review}/ia/historial', [AutomotivePartAiEnrichmentController::class, 'history'])->name('autopartes.enrichment.ai.history');
-    Route::get('/autopartes/enriquecimiento/{review}', [AutomotivePartEnrichmentController::class, 'show'])->name('autopartes.enrichment.show');
-    Route::put('/autopartes/enriquecimiento/{review}', [AutomotivePartEnrichmentController::class, 'update'])->name('autopartes.enrichment.update');
-    Route::post('/autopartes/enriquecimiento/{review}/aprobar', [AutomotivePartEnrichmentController::class, 'approve'])->name('autopartes.enrichment.approve');
-    Route::post('/autopartes/enriquecimiento/{review}/rechazar', [AutomotivePartEnrichmentController::class, 'reject'])->name('autopartes.enrichment.reject');
-    Route::post('/autopartes/enriquecimiento/{review}/pendiente', [AutomotivePartEnrichmentController::class, 'pending'])->name('autopartes.enrichment.pending');
-    Route::prefix('/autopartes/mercado-libre/categorias')->name('autopartes.meli.categories.')->group(function () {
-        Route::get('/', [AutomotivePartMeliCategoryController::class, 'index'])->name('index');
-        Route::post('/lote', [AutomotivePartMeliCategoryActionController::class, 'batch'])->middleware('throttle:10,1')->name('batch');
-        Route::get('/{automotivePart}', [AutomotivePartMeliCategoryController::class, 'show'])->name('show');
-        Route::post('/{automotivePart}/buscar', [AutomotivePartMeliCategoryActionController::class, 'search'])->middleware('throttle:10,1')->name('search');
-        Route::post('/{automotivePart}/manual', [AutomotivePartMeliCategoryActionController::class, 'manual'])->middleware('throttle:10,1')->name('manual');
-        Route::post('/{automotivePart}/recalcular', [AutomotivePartMeliCategoryActionController::class, 'recalculate'])->middleware('throttle:10,1')->name('recalculate');
-        Route::post('/{automotivePart}/confirmar', [AutomotivePartMeliCategoryActionController::class, 'confirm'])->middleware('throttle:10,1')->name('confirm');
-        Route::post('/candidatos/{candidate}/aprobar', [AutomotivePartMeliCategoryActionController::class, 'approve'])->middleware('throttle:10,1')->name('approve');
-        Route::post('/candidatos/{candidate}/rechazar', [AutomotivePartMeliCategoryActionController::class, 'reject'])->middleware('throttle:10,1')->name('reject');
-        Route::post('/candidatos/{candidate}/actualizar', [AutomotivePartMeliCategoryActionController::class, 'refresh'])->middleware('throttle:10,1')->name('refresh');
-    });
-    Route::prefix('/autopartes/mercado-libre/borradores')->name('autopartes.meli.drafts.')->group(function () {
-        Route::get('/', [AutomotivePartMeliDraftController::class, 'index'])->name('index');
-        Route::get('/autopartes/{automotivePart}', [AutomotivePartMeliDraftController::class, 'show'])->name('show');
-        Route::post('/autopartes/{automotivePart}/generar', [AutomotivePartMeliDraftActionController::class, 'generate'])->middleware('throttle:20,1')->name('generate');
-        Route::get('/{draft}/historial', [AutomotivePartMeliDraftController::class, 'history'])->name('history');
-        Route::post('/{draft}/regenerar', [AutomotivePartMeliDraftActionController::class, 'regenerate'])->middleware('throttle:20,1')->name('regenerate');
-        Route::post('/{draft}/aprobar', [AutomotivePartMeliDraftActionController::class, 'approve'])->name('approve');
-        Route::post('/{draft}/rechazar', [AutomotivePartMeliDraftActionController::class, 'reject'])->name('reject');
-        Route::post('/{draft}/pendiente', [AutomotivePartMeliDraftActionController::class, 'pending'])->name('pending');
-    });
-    Route::prefix('/autopartes/mercado-libre/publicaciones')->name('autopartes.meli.publications.')->group(function () {
-        Route::get('/', [AutomotivePartMeliPublicationController::class, 'index'])->name('index');
-        Route::post('/preflight', [AutomotivePartMeliPublicationActionController::class, 'preflight'])->name('preflight');
-        Route::get('/{publication}', [AutomotivePartMeliPublicationController::class, 'show'])->name('show');
-        Route::post('/{publication}/regenerar', [AutomotivePartMeliPublicationActionController::class, 'regenerate'])->name('regenerate');
-        Route::post('/{publication}/imagenes', [AutomotivePartMeliPublicationActionController::class, 'upload'])->middleware('throttle:5,1')->name('pictures');
-        Route::post('/{publication}/validar', [AutomotivePartMeliPublicationActionController::class, 'validateRemote'])->middleware('throttle:5,1')->name('validate');
-        Route::post('/{publication}/aprobar', [AutomotivePartMeliPublicationActionController::class, 'approve'])->name('approve');
-        Route::post('/{publication}/revocar', [AutomotivePartMeliPublicationActionController::class, 'revoke'])->name('revoke');
-        Route::post('/{publication}/encolar', [AutomotivePartMeliPublicationActionController::class, 'enqueue'])->middleware('throttle:2,1')->name('enqueue');
-        Route::post('/{publication}/descripcion/reintentar', [AutomotivePartMeliPublicationActionController::class, 'retryDescription'])->middleware('throttle:2,1')->name('description.retry');
-        Route::post('/{publication}/reconciliar', [AutomotivePartMeliPublicationActionController::class, 'reconcile'])->middleware('throttle:2,1')->name('reconcile');
-        Route::post('/{publication}/cancelar', [AutomotivePartMeliPublicationActionController::class, 'cancel'])->name('cancel');
-    });
-    Route::prefix('/autopartes/medios')->name('autopartes.media.')->group(function () {
-        Route::get('/', [AutomotivePartMediaController::class, 'index'])->name('index');
-        Route::get('/archivos/{media}/preview', [AutomotivePartMediaController::class, 'preview'])->name('preview');
-        Route::post('/archivos/{media}/aprobar', [AutomotivePartMediaActionController::class, 'approve'])->name('approve');
-        Route::post('/archivos/{media}/rechazar', [AutomotivePartMediaActionController::class, 'reject'])->name('reject');
-        Route::post('/archivos/{media}/archivar', [AutomotivePartMediaActionController::class, 'archive'])->name('archive');
-        Route::post('/archivos/{media}/principal', [AutomotivePartMediaActionController::class, 'primary'])->name('primary');
-        Route::get('/{automotivePart}', [AutomotivePartMediaController::class, 'show'])->name('show');
-        Route::post('/{automotivePart}', [AutomotivePartMediaActionController::class, 'store'])->name('store');
-        Route::put('/{automotivePart}/orden', [AutomotivePartMediaActionController::class, 'reorder'])->name('reorder');
-    });
-    Route::prefix('/autopartes/precios')->name('autopartes.prices.')->group(function () {
-        Route::get('/', [AutomotivePartPriceRuleController::class, 'index'])->name('index');
-        Route::post('/reglas', [AutomotivePartPriceRuleActionController::class, 'store'])->name('rules.store');
-        Route::get('/reglas/{rule}', [AutomotivePartPriceRuleController::class, 'show'])->name('rules.show');
-        Route::put('/reglas/{rule}', [AutomotivePartPriceRuleActionController::class, 'update'])->name('rules.update');
-        Route::post('/reglas/{rule}/previsualizar', [AutomotivePartPriceRuleController::class, 'preview'])->name('rules.preview');
-        Route::post('/reglas/{rule}/activar', [AutomotivePartPriceRuleActionController::class, 'activate'])->name('rules.activate');
-        Route::post('/reglas/{rule}/desactivar', [AutomotivePartPriceRuleActionController::class, 'deactivate'])->name('rules.deactivate');
-        Route::post('/reglas/{rule}/reemplazar', [AutomotivePartPriceRuleActionController::class, 'replace'])->name('rules.replace');
-    });
-    Route::get('/autopartes/{automotivePart}', [AutomotivePartController::class, 'detail'])->name('autopartes.show');
 
     // EXCEL
     Route::get('/importar-excel', [ExcelImportController::class, 'vista'])->name('excel.vista');

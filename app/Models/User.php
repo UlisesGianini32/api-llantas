@@ -59,11 +59,6 @@ class User extends Authenticatable
         return $this->hasMany(MeliAccount::class);
     }
 
-    public function automotivePartEnrichmentReviews(): HasMany
-    {
-        return $this->hasMany(AutomotivePartEnrichmentReview::class, 'reviewed_by');
-    }
-
     /**
      * Mantiene users.meli_id / tokens alineados con la cuenta MeLi marcada como default (compatibilidad con jobs y APIs).
      */
