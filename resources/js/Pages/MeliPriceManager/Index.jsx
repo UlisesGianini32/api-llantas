@@ -109,7 +109,7 @@ function ChargesBreakdown({ result, currency }) {
             <div className="flex justify-between gap-4 border-t border-slate-200 pt-2.5 dark:border-neutral-700"><dt className="font-extrabold">Total de cargos estimados</dt><dd className="font-extrabold text-rose-600">-{money(result.total_charges, currency)}</dd></div>
         </dl>
 
-        {taxes.available && <p className="text-[11px] font-medium text-slate-500">Fuente fiscal: {historicalTaxes ? 'historial real de Mercado Libre' : 'perfil de la cuenta'}.</p>}
+        {taxes.available && <p className="text-[11px] font-medium text-slate-500">Fuente fiscal: {historicalTaxes ? (taxes.stale ? 'última regla histórica válida' : 'historial real de Mercado Libre') : 'perfil de la cuenta'}.</p>}
         {!taxes.available && <p className="text-[11px] font-medium text-amber-700 dark:text-amber-300">{taxes.message || 'Retenciones fiscales no disponibles en esta simulación.'}</p>}
 
         <div className="rounded-2xl border-2 border-emerald-400 bg-emerald-50 p-4 text-center dark:bg-emerald-500/10"><p className="text-xs font-extrabold uppercase tracking-[0.14em] text-emerald-700 dark:text-emerald-300">{result.estimated_receivable_label || 'Recibes estimado'}</p><p className="mt-1 text-4xl font-black text-emerald-700 dark:text-emerald-300">{money(result.estimated_receivable, currency)}</p><p className="mt-1 text-xs font-semibold text-emerald-800 dark:text-emerald-200">{result.estimated_receivable_message || 'El monto final puede variar al procesarse la venta.'}</p></div>

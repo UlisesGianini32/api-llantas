@@ -28,7 +28,12 @@ class MeliHistoricalTaxRuleDetector
         $distinctItems = count(array_unique(array_column($valid, 'item_id')));
 
         if (count($valid) < self::MINIMUM_ORDERS || $distinctItems < self::MINIMUM_DISTINCT_ITEMS) {
-            return $this->insufficient(count($valid), $distinctItems, 'La muestra histórica válida es insuficiente.');
+            return $this->insufficient(
+                count($valid),
+                $distinctItems,
+                'insufficient_sample',
+                'La muestra histórica válida es insuficiente.',
+            );
         }
 
         $matchingRules = [];
@@ -46,6 +51,7 @@ class MeliHistoricalTaxRuleDetector
             return $this->insufficient(
                 count($valid),
                 $distinctItems,
+                $matchingRules === [] ? 'contradictory_evidence' : 'ambiguous_evidence',
                 $matchingRules === []
                     ? 'El historial contiene resultados contradictorios o ninguna regla candidata consistente.'
                     : 'El historial admite más de una regla candidata y no puede resolverse de forma inequívoca.',
@@ -59,6 +65,7 @@ class MeliHistoricalTaxRuleDetector
             'available' => true,
             'source' => 'historical_account_tax_rule',
             'confidence' => 'high',
+            'failure_reason' => null,
             'sample_count' => count($valid),
             'vat_included_rate' => $vatIncludedRate,
             'vat_withholding_rate' => $vatWithholdingRate,
@@ -160,12 +167,13 @@ class MeliHistoricalTaxRuleDetector
     }
 
     /** @return array<string, mixed> */
-    private function insufficient(int $sampleCount, int $distinctItems, string $message): array
+    private function insufficient(int $sampleCount, int $distinctItems, string $failureReason, string $message): array
     {
         return [
             'available' => false,
             'source' => null,
             'confidence' => 'insufficient',
+            'failure_reason' => $failureReason,
             'sample_count' => $sampleCount,
             'vat_included_rate' => null,
             'vat_withholding_rate' => null,

@@ -109,6 +109,8 @@ class MeliSellerTaxSimulationTest extends TestCase
 
         $this->assertSame('historical_account_tax_rule', $result['source']);
         $this->assertSame('high', $result['confidence']);
+        $this->assertTrue($result['stale']);
+        $this->assertSame('last_valid_historical_rule', $result['fallback']);
         $this->assertSame(602.59, $result['taxable_base']);
         $this->assertSame(48.21, $result['vat']['amount']);
         $this->assertSame(15.06, $result['income_tax']['amount']);
@@ -230,6 +232,8 @@ class MeliSellerTaxSimulationTest extends TestCase
             'available' => true,
             'source' => 'historical_account_tax_rule',
             'confidence' => 'high',
+            'stale' => true,
+            'fallback' => 'last_valid_historical_rule',
             'sample_count' => 7,
             'vat_included_rate' => 16.0,
             'vat_withholding_rate' => 8.0,
