@@ -17,6 +17,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Sleep;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 class MeliPriceUpdateTest extends TestCase
@@ -162,6 +163,115 @@ class MeliPriceUpdateTest extends TestCase
                 && str_ends_with($request->url(), '/items/MLM1343389489')
                 && $request->data() === ['price' => 1600.0];
         });
+    }
+
+    public function test_real_single_standard_without_context_resolves_599_and_update_sends_only_price_600(): void
+    {
+        $account = $this->account();
+        $item = $this->item($account, [
+            'meli_item_id' => 'MLM1577724953',
+            'sku' => 'REAL-STANDARD-PRICE',
+            'current_price' => 599,
+        ]);
+        $priceReads = 0;
+        Http::fake(function (Request $request) use (&$priceReads) {
+            if (str_contains($request->url(), '/pricing-automation/')) {
+                return Http::response(['message' => 'automation_not_found'], 404);
+            }
+            if (str_ends_with($request->url(), '/prices')) {
+                $priceReads++;
+
+                return Http::response([[
+                    'id' => '2',
+                    'type' => 'standard',
+                    'amount' => $priceReads === 1 ? 599 : 600,
+                    'regular_amount' => null,
+                    'currency_id' => 'MXN',
+                    'conditions' => ['context_restrictions' => []],
+                ]]);
+            }
+            if ($request->method() === 'PUT') {
+                return Http::response(['price' => $request['price'], 'warnings' => []]);
+            }
+
+            return Http::response(['message' => 'Unexpected test request'], 500);
+        });
+
+        $this->putJson(route('meli-price-manager.items.price.update', $item), [
+            'simulation_token' => $this->token($account, $item, 600),
+            'price' => 600,
+        ])->assertOk()->assertJsonPath('data.old_price', 599)->assertJsonPath('data.new_price', 600);
+
+        $this->assertSame(2, $priceReads);
+        $this->assertSame('600.00', $item->fresh()->current_price);
+        $puts = collect(Http::recorded())->filter(fn (array $pair): bool => $pair[0]->method() === 'PUT');
+        $this->assertCount(1, $puts);
+        $this->assertSame(['price' => 600.0], $puts->first()[0]->data());
+    }
+
+    #[DataProvider('remoteStandardPricePayloadProvider')]
+    public function test_remote_standard_price_selection_is_conservative(array $payload, ?float $expected): void
+    {
+        $account = $this->account();
+        $item = $this->item($account);
+        Http::fake([
+            'https://api.mercadolibre.com/items/*/prices' => Http::response($payload),
+        ]);
+        $method = new \ReflectionMethod(MeliPriceUpdateService::class, 'remoteStandardPrice');
+
+        try {
+            $resolved = $method->invoke(app(MeliPriceUpdateService::class), $account, $item);
+            if ($expected === null) {
+                $this->fail('La respuesta ambigua debió bloquearse.');
+            }
+
+            $this->assertSame($expected, $resolved);
+        } catch (MeliPriceUpdateException $exception) {
+            if ($expected !== null) {
+                throw $exception;
+            }
+
+            $this->assertSame('ambiguous_standard_price', $exception->errorCode());
+        }
+
+        Http::assertSentCount(1);
+        Http::assertSent(fn (Request $request): bool => $request->method() === 'GET'
+            && str_ends_with($request->url(), '/items/MLM1343389489/prices'));
+    }
+
+    /** @return iterable<string, array{array<string|int, mixed>, float|null}> */
+    public static function remoteStandardPricePayloadProvider(): iterable
+    {
+        yield 'unique standard with marketplace context' => [[
+            'prices' => [[
+                'type' => 'standard',
+                'amount' => 599,
+                'conditions' => ['context_restrictions' => ['channel_marketplace']],
+            ]],
+        ], 599.0];
+
+        yield 'multiple standards with exactly one marketplace price' => [[
+            ['type' => 'standard', 'amount' => 580, 'conditions' => ['context_restrictions' => []]],
+            ['type' => 'standard', 'amount' => 599, 'conditions' => ['context_restrictions' => ['channel_marketplace']]],
+        ], 599.0];
+
+        yield 'multiple standards with two marketplace prices' => [[
+            ['type' => 'standard', 'amount' => 580, 'conditions' => ['context_restrictions' => ['channel_marketplace']]],
+            ['type' => 'standard', 'amount' => 599, 'conditions' => ['context_restrictions' => ['channel_marketplace']]],
+        ], null];
+
+        yield 'multiple standards without marketplace price' => [[
+            ['type' => 'standard', 'amount' => 580, 'conditions' => ['context_restrictions' => []]],
+            ['type' => 'standard', 'amount' => 599, 'conditions' => ['context_restrictions' => []]],
+        ], null];
+
+        yield 'no standard price' => [[
+            ['type' => 'promotion', 'amount' => 499, 'conditions' => ['context_restrictions' => ['channel_marketplace']]],
+        ], null];
+
+        yield 'unique standard with non numeric amount does not use regular amount' => [[
+            ['type' => 'standard', 'amount' => 'not-numeric', 'regular_amount' => 599, 'conditions' => ['context_restrictions' => []]],
+        ], null];
     }
 
     public function test_audit_preserves_the_historical_tax_rule_snapshot_and_the_699_net_amount(): void
