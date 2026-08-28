@@ -4,10 +4,8 @@ namespace App\Services;
 
 use App\Models\MeliAccount;
 use App\Models\MeliPublication;
-use Carbon\Carbon;
-use Illuminate\Http\Client\Response;
+use App\Services\MercadoLibre\MeliAccountApiClient;
 use Illuminate\Support\Facades\Cache;
-use Illuminate\Support\Facades\Http;
 use RuntimeException;
 use Throwable;
 
@@ -16,7 +14,7 @@ class MeliAccountPublicationSyncService
     private const SEARCH_LIMIT = 100;
     private const MULTIGET_LIMIT = 20;
 
-    public function __construct(private readonly MeliOAuthService $oauth)
+    public function __construct(private readonly MeliAccountApiClient $api)
     {
     }
 
@@ -40,7 +38,7 @@ class MeliAccountPublicationSyncService
             throw new RuntimeException('La cuenta de Mercado Libre no tiene usuario propietario o meli_user_id.');
         }
 
-        $this->ensureFreshAccessToken($account);
+        $this->api->ensureFreshAccessToken($account);
 
         $startedAt = now();
         $ids = $this->discoverAllItemIds($account, function (int $found) use ($progress): void {
@@ -171,7 +169,7 @@ class MeliAccountPublicationSyncService
                 $params['scroll_id'] = $scrollId;
             }
 
-            $response = $this->request($account, 'get', "/users/{$account->meli_user_id}/items/search", $params);
+            $response = $this->api->request($account, 'get', "/users/{$account->meli_user_id}/items/search", $params);
             $batch = array_values(array_filter(
                 array_map(static fn ($id) => strtoupper(trim((string) $id)), (array) $response->json('results', [])),
                 static fn (string $id) => $id !== '',
@@ -200,7 +198,7 @@ class MeliAccountPublicationSyncService
             return [];
         }
 
-        $response = $this->request($account, 'get', '/items', [
+        $response = $this->api->request($account, 'get', '/items', [
             'ids' => implode(',', $ids),
         ]);
 
@@ -327,85 +325,4 @@ class MeliAccountPublicationSyncService
         ], true);
     }
 
-    private function ensureFreshAccessToken(MeliAccount $account, bool $force = false): void
-    {
-        $usable = filled($account->access_token)
-            && ($account->expires_at === null || $account->expires_at->greaterThan(now()->addMinutes(5)));
-
-        if (! $force && $usable) {
-            return;
-        }
-
-        if (! filled($account->refresh_token)) {
-            if (filled($account->access_token)) {
-                return;
-            }
-
-            throw new RuntimeException('La cuenta no tiene access_token ni refresh_token.');
-        }
-
-        $clientId = (string) config('services.meli.client_id', config('services.meli.app_id', ''));
-        $clientSecret = (string) config('services.meli.client_secret', '');
-
-        if ($clientId === '' || $clientSecret === '') {
-            throw new RuntimeException('Faltan MELI_CLIENT_ID/MELI_APP_ID o MELI_CLIENT_SECRET.');
-        }
-
-        $data = $this->oauth->refreshAccessToken(
-            $clientId,
-            $clientSecret,
-            (string) $account->refresh_token,
-        );
-
-        $account->forceFill([
-            'access_token' => $data['access_token'],
-            'refresh_token' => $data['refresh_token'] ?? $account->refresh_token,
-            'expires_at' => Carbon::now()->addSeconds((int) ($data['expires_in'] ?? 21600))->subMinutes(2),
-        ])->save();
-
-        $account->refresh();
-        $account->user?->syncMeliColumnsFromDefaultAccount();
-    }
-
-    /** @param array<string, mixed> $payload */
-    private function request(MeliAccount $account, string $method, string $path, array $payload = []): Response
-    {
-        $lastResponse = null;
-
-        for ($attempt = 1; $attempt <= 5; $attempt++) {
-            $client = Http::withToken((string) $account->access_token)
-                ->acceptJson()
-                ->timeout(60);
-
-            $url = 'https://api.mercadolibre.com'.$path;
-            $response = match (strtolower($method)) {
-                'post' => $client->post($url, $payload),
-                'put' => $client->put($url, $payload),
-                'delete' => $client->delete($url, $payload),
-                default => $client->get($url, $payload),
-            };
-            $lastResponse = $response;
-
-            if ($response->successful()) {
-                return $response;
-            }
-
-            if ($response->status() === 401 && $attempt === 1) {
-                $this->ensureFreshAccessToken($account, true);
-                continue;
-            }
-
-            if ($response->status() === 429 || $response->serverError()) {
-                sleep(min(8, 2 ** ($attempt - 1)));
-                continue;
-            }
-
-            break;
-        }
-
-        $status = $lastResponse?->status() ?? 0;
-        $message = (string) data_get($lastResponse?->json(), 'message', $lastResponse?->body() ?? 'Sin respuesta');
-
-        throw new RuntimeException("Mercado Libre HTTP {$status}: {$message}");
-    }
 }
