@@ -5,7 +5,9 @@ namespace App\Services\MercadoLibre\PriceManager;
 use App\Models\MeliAccount;
 use App\Models\MeliPriceManagerItem;
 use App\Services\MercadoLibre\MeliAccountApiClient;
+use App\Services\MercadoLibre\MeliApiRequestException;
 use Illuminate\Auth\Access\AuthorizationException;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use InvalidArgumentException;
 use UnexpectedValueException;
@@ -82,19 +84,20 @@ class MeliPriceSimulationService
         $listingFeeFixed = $this->nullableNumber(data_get($listing, 'listing_fee_details.fixed_fee'));
         $listingFeeGross = $this->nullableNumber(data_get($listing, 'listing_fee_details.gross_amount'));
 
-        $shippingCost = 0.0;
-        $shippingOriginalCost = null;
+        $shippingAvailable = false;
+        $shippingCost = null;
+        $shippingPromotedAmount = null;
         $shippingDiscountRate = null;
         $shippingDiscountType = null;
+        $shippingDiscountAmount = null;
         $shippingBillableWeight = null;
         $shippingCurrencyId = null;
+        $shippingError = null;
 
-        if ($freeShipping) {
-            $sellerId = trim((string) $account->meli_user_id);
-            if ($sellerId === '') {
-                throw new InvalidArgumentException('La cuenta no tiene meli_user_id para consultar el envío.');
-            }
-
+        $sellerId = trim((string) $account->meli_user_id);
+        if ($sellerId === '') {
+            $shippingError = 'La cuenta no tiene identificador de vendedor para cotizar el envío.';
+        } else {
             $shippingParameters = $this->withoutEmpty([
                 'dimensions' => $this->dimensions($item, $rawItem),
                 'verbose' => true,
@@ -103,40 +106,55 @@ class MeliPriceSimulationService
                 'mode' => $shippingMode,
                 'condition' => $this->nullableString($rawItem['condition'] ?? null),
                 'logistic_type' => $logisticType,
-                'free_shipping' => true,
+                'free_shipping' => $freeShipping ? 'true' : 'false',
                 'item_id' => (string) $item->meli_item_id,
             ]);
-            $shippingResponse = $this->api->request(
-                $account,
-                'get',
-                '/users/'.rawurlencode($sellerId).'/shipping_options/free',
-                $shippingParameters,
-            );
-            $shippingData = $shippingResponse->json();
-            $shippingCost = $this->requiredNumber(
-                data_get($shippingData, 'coverage.all_country.list_cost'),
-                'Mercado Libre no devolvió un costo de envío válido.',
-            );
-            $shippingOriginalCost = $this->nullableNumber(data_get($shippingData, 'coverage.all_country.discount.promoted_amount'));
-            $shippingDiscountRate = $this->nullableNumber(data_get($shippingData, 'coverage.all_country.discount.rate'));
-            $shippingDiscountType = $this->nullableString(data_get($shippingData, 'coverage.all_country.discount.type'));
-            $shippingBillableWeight = $this->nullableNumber(data_get($shippingData, 'coverage.all_country.billable_weight'));
-            $shippingCurrencyId = $this->nullableString(data_get($shippingData, 'coverage.all_country.currency_id'));
+            try {
+                $shippingResponse = $this->api->request(
+                    $account,
+                    'get',
+                    '/users/'.rawurlencode($sellerId).'/shipping_options/free',
+                    $shippingParameters,
+                );
+                $shippingData = $shippingResponse->json();
+                $quotedCost = $this->nullableNumber(data_get($shippingData, 'coverage.all_country.list_cost'));
+                $shippingCurrencyId = $this->nullableString(data_get($shippingData, 'coverage.all_country.currency_id')) ?? $currencyId;
+                $shippingPromotedAmount = $this->nullableNumber(data_get($shippingData, 'coverage.all_country.discount.promoted_amount'));
+                $shippingDiscountRate = $this->nullableNumber(data_get($shippingData, 'coverage.all_country.discount.rate'));
+                $shippingDiscountType = $this->nullableString(data_get($shippingData, 'coverage.all_country.discount.type'));
+                $shippingDiscountAmount = $this->nullableNumber(data_get($shippingData, 'coverage.all_country.discount.save'));
+                $shippingBillableWeight = $this->nullableNumber(data_get($shippingData, 'coverage.all_country.billable_weight'));
+
+                if ($quotedCost === null) {
+                    $shippingError = 'Mercado Libre no devolvió un costo de envío para esta simulación.';
+                } elseif (strcasecmp($shippingCurrencyId, $currencyId) !== 0) {
+                    $shippingError = 'La moneda de la cotización de envío no coincide con la moneda de la publicación.';
+                } else {
+                    $shippingAvailable = true;
+                    $shippingCost = round($quotedCost, 2);
+                }
+            } catch (MeliApiRequestException $exception) {
+                $shippingError = 'Costo de envío no disponible para esta simulación.';
+                Log::warning('No fue posible cotizar el envío de una simulación de precio.', [
+                    'meli_account_id' => (int) $account->id,
+                    'meli_item_id' => (string) $item->meli_item_id,
+                    'http_status' => $exception->httpStatus(),
+                    'message' => $shippingError,
+                ]);
+            }
         }
 
         $saleFee = round($saleFee, 2);
         $listingFee = $listingFee !== null ? round($listingFee, 2) : null;
-        $shippingCost = round($shippingCost, 2);
-        $shippingOriginalCost = $shippingOriginalCost !== null ? round($shippingOriginalCost, 2) : null;
-        $shippingDiscountAmount = $shippingOriginalCost !== null
-            ? max(0, round($shippingOriginalCost - $shippingCost, 2))
-            : null;
-        $meliChargesTotal = round($saleFee + ($listingFee ?? 0) + $shippingCost, 2);
+        $shippingPromotedAmount = $shippingPromotedAmount !== null ? round($shippingPromotedAmount, 2) : null;
+        $shippingDiscountAmount = $shippingDiscountAmount !== null ? round($shippingDiscountAmount, 2) : null;
+        $platformChargesTotal = round($saleFee + ($listingFee ?? 0), 2);
+        $meliChargesTotal = round($platformChargesTotal + ($shippingCost ?? 0), 2);
         $taxes = $this->taxes->simulate($account, $proposedPrice);
         $taxesTotal = $taxes['available'] === true && is_numeric($taxes['amount'] ?? null)
             ? round((float) $taxes['amount'], 2)
             : null;
-        $totalCharges = round($meliChargesTotal + ($taxesTotal ?? 0), 2);
+        $totalCharges = round($platformChargesTotal + ($shippingCost ?? 0) + ($taxesTotal ?? 0), 2);
         $estimatedReceivable = round($proposedPrice - $totalCharges, 2);
         $otherListingPriceDetails = $this->additionalListingPriceDetails($listing);
         $charges = [
@@ -155,8 +173,13 @@ class MeliPriceSimulationService
                 'gross_amount' => $listingFeeGross !== null ? round($listingFeeGross, 2) : null,
             ],
             'shipping' => [
+                'available' => $shippingAvailable,
+                'cost' => $shippingCost,
                 'seller_cost' => $shippingCost,
-                'original_cost' => $shippingOriginalCost,
+                'source' => 'meli_shipping_options_free',
+                'error' => $shippingError,
+                'promoted_amount' => $shippingPromotedAmount,
+                'original_cost' => $shippingPromotedAmount,
                 'discount_rate' => $shippingDiscountRate,
                 'discount_amount' => $shippingDiscountAmount,
                 'discount_type' => $shippingDiscountType,
@@ -192,13 +215,16 @@ class MeliPriceSimulationService
             'shipping_mode' => $shippingMode,
             'logistic_type' => $logisticType,
             'shipping_cost' => $shippingCost,
-            'shipping_original_cost' => $shippingOriginalCost,
+            'shipping_available' => $shippingAvailable,
+            'shipping_error' => $shippingError,
+            'shipping_original_cost' => $shippingPromotedAmount,
             'shipping_discount_rate' => $shippingDiscountRate,
             'shipping_discount_amount' => $shippingDiscountAmount,
             'shipping_discount_type' => $shippingDiscountType,
             'shipping_billable_weight' => $shippingBillableWeight,
             'shipping_currency_id' => $shippingCurrencyId,
             'charges' => $charges,
+            'platform_charges_total' => $platformChargesTotal,
             'meli_charges_total' => $meliChargesTotal,
             'confirmed_charges_total' => $meliChargesTotal,
             'taxes_total' => $taxesTotal,
@@ -206,12 +232,14 @@ class MeliPriceSimulationService
             'estimated_receivable' => $estimatedReceivable,
             'estimated_receivable_percentage' => round(($estimatedReceivable / $proposedPrice) * 100, 2),
             'estimated_receivable_is_final' => false,
-            'estimated_receivable_label' => $taxesTotal !== null
-                ? 'Recibes estimado'
-                : 'Recibes estimado sin retenciones fiscales',
-            'estimated_receivable_message' => $taxesTotal !== null
-                ? (string) ($taxes['message'] ?? 'Incluye retenciones fiscales estimadas; el monto final puede variar al procesarse la venta.')
-                : (string) ($taxes['message'] ?? 'Las retenciones fiscales no están incluidas en este estimado.'),
+            'estimated_receivable_label' => ! $shippingAvailable
+                ? 'Recibes antes de envío'
+                : ($taxesTotal !== null ? 'Recibes estimado' : 'Recibes estimado sin retenciones fiscales'),
+            'estimated_receivable_message' => ! $shippingAvailable
+                ? 'No fue posible estimar el costo de envío. Este monto todavía no descuenta el envío.'
+                : ($taxesTotal !== null
+                    ? (string) ($taxes['message'] ?? 'Incluye el envío y las retenciones fiscales estimadas; el monto final puede variar al procesarse la venta.')
+                    : (string) ($taxes['message'] ?? 'Incluye el envío; las retenciones fiscales no están incluidas en este estimado.')),
             'calculated_at' => now()->toISOString(),
         ];
     }
@@ -253,10 +281,10 @@ class MeliPriceSimulationService
 
         foreach (self::DIMENSION_ATTRIBUTE_SETS as [$heightId, $widthId, $lengthId, $weightId]) {
             $values = [
-                $this->attributeNumber($attributes, $heightId),
-                $this->attributeNumber($attributes, $widthId),
-                $this->attributeNumber($attributes, $lengthId),
-                $this->attributeNumber($attributes, $weightId),
+                $this->attributeMeasurement($attributes, $heightId, 'length'),
+                $this->attributeMeasurement($attributes, $widthId, 'length'),
+                $this->attributeMeasurement($attributes, $lengthId, 'length'),
+                $this->attributeMeasurement($attributes, $weightId, 'weight'),
             ];
 
             if (! in_array(null, $values, true)) {
@@ -268,30 +296,66 @@ class MeliPriceSimulationService
     }
 
     /** @param list<array<string, mixed>> $attributes */
-    private function attributeNumber(array $attributes, string $attributeId): ?int
+    private function attributeMeasurement(array $attributes, string $attributeId, string $kind): ?int
     {
         foreach ($attributes as $attribute) {
             if (strcasecmp((string) ($attribute['id'] ?? ''), $attributeId) !== 0) {
                 continue;
             }
 
-            $value = data_get($attribute, 'value_struct.number')
-                ?? data_get($attribute, 'values.0.struct.number')
-                ?? ($attribute['value_name'] ?? null);
-
-            if (! is_numeric($value)) {
-                preg_match('/-?\d+(?:[.,]\d+)?/', (string) $value, $matches);
-                $value = isset($matches[0]) ? str_replace(',', '.', $matches[0]) : null;
+            foreach ([
+                [data_get($attribute, 'value_struct.number'), data_get($attribute, 'value_struct.unit')],
+                [data_get($attribute, 'values.0.struct.number'), data_get($attribute, 'values.0.struct.unit')],
+            ] as [$number, $unit]) {
+                $normalized = $this->normalizeMeasurement($number, $unit, $kind);
+                if ($normalized !== null) {
+                    return $normalized;
+                }
             }
 
-            if (! is_numeric($value) || (float) $value <= 0) {
-                continue;
+            $valueName = trim((string) ($attribute['value_name'] ?? ''));
+            if (preg_match('/(-?\d+(?:[.,]\d+)?)\s*([\p{L}µ]+)/u', $valueName, $matches) === 1) {
+                $normalized = $this->normalizeMeasurement(str_replace(',', '.', $matches[1]), $matches[2], $kind);
+                if ($normalized !== null) {
+                    return $normalized;
+                }
             }
-
-            return (int) ceil((float) $value);
         }
 
         return null;
+    }
+
+    private function normalizeMeasurement(mixed $number, mixed $unit, string $kind): ?int
+    {
+        if (! is_numeric($number) || (float) $number <= 0 || ! is_string($unit)) {
+            return null;
+        }
+
+        $unit = mb_strtolower(trim($unit), 'UTF-8');
+        $value = (float) $number;
+        $normalized = match ($kind) {
+            'length' => match ($unit) {
+                'mm', 'milímetro', 'milímetros', 'millimeter', 'millimeters' => $value / 10,
+                'cm', 'centímetro', 'centímetros', 'centimeter', 'centimeters' => $value,
+                'm', 'metro', 'metros', 'meter', 'meters' => $value * 100,
+                default => null,
+            },
+            'weight' => match ($unit) {
+                'mg', 'miligramo', 'miligramos', 'milligram', 'milligrams' => $value / 1000,
+                'g', 'gr', 'gramo', 'gramos', 'gram', 'grams' => $value,
+                'kg', 'kilogramo', 'kilogramos', 'kilogram', 'kilograms' => $value * 1000,
+                default => null,
+            },
+            default => null,
+        };
+
+        if ($normalized === null || ! is_finite($normalized) || $normalized <= 0) {
+            return null;
+        }
+
+        return $kind === 'weight'
+            ? (int) round($normalized, 0, PHP_ROUND_HALF_UP)
+            : (int) ceil($normalized);
     }
 
     /** @param array<string, mixed> $values

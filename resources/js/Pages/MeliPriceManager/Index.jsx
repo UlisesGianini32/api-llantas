@@ -1,5 +1,5 @@
 import AppShell from '@/Components/layout/AppShell'
-import { canContinueWithSimulation, simulationMatchesDraft } from '@/lib/meliPriceSimulation'
+import { canContinueWithSimulation, shippingPresentation, simulationMatchesDraft } from '@/lib/meliPriceSimulation'
 import { Head, Link, router } from '@inertiajs/react'
 import { useMemo, useState } from 'react'
 
@@ -87,6 +87,12 @@ function ChargesBreakdown({ result, currency }) {
     const listingFee = charges.listing_fee || {}
     const shipping = charges.shipping || {}
     const taxes = charges.taxes || {}
+    const shippingView = shippingPresentation(result, currency)
+    const legacyMeliCharges = result.meli_charges_total ?? result.confirmed_charges_total
+    const platformCharges = result.platform_charges_total
+        ?? (legacyMeliCharges === null || legacyMeliCharges === undefined
+            ? null
+            : Math.max(0, Number(legacyMeliCharges) - Number(shippingView.cost ?? 0)))
     const historicalTaxes = taxes.source === 'historical_account_tax_rule'
     const other = Array.isArray(charges.other) ? charges.other : []
     const isPositive = (value) => Number.isFinite(Number(value)) && Number(value) > 0
@@ -100,18 +106,19 @@ function ChargesBreakdown({ result, currency }) {
         <dl className="space-y-2.5 text-sm">
             <ChargeRow label="Cargo por venta" value={saleFee.amount ?? result.sale_fee} currency={currency} negative />
             {isPositive(listingFee.amount) && <ChargeRow label="Costo de publicación" value={listingFee.amount} currency={currency} negative />}
-            {isPositive(shipping.seller_cost ?? result.shipping_cost) && <ChargeRow label="Envío / Tú pagas" value={shipping.seller_cost ?? result.shipping_cost} currency={currency} negative />}
             {isPositive(taxes.vat?.amount ?? taxes.iva) && <ChargeRow label="Retención de IVA" value={taxes.vat?.amount ?? taxes.iva} currency={currency} negative />}
             {isPositive(taxes.income_tax?.amount ?? taxes.isr) && <ChargeRow label="Retención de ISR" value={taxes.income_tax?.amount ?? taxes.isr} currency={currency} negative />}
             {otherDeductions.map((charge) => <ChargeRow key={charge.key} label={charge.label || charge.key} value={charge.value} currency={currency} negative />)}
 
-            <div className="flex justify-between gap-4 border-t border-slate-200 pt-2.5 dark:border-neutral-700"><dt className="font-bold">Subtotal de cargos de ML</dt><dd className="font-bold text-rose-600">-{money(result.meli_charges_total ?? result.confirmed_charges_total, currency)}</dd></div>
+            <div className="flex justify-between gap-4 border-t border-slate-200 pt-2.5 dark:border-neutral-700"><dt className="font-bold">Subtotal de cargos de plataforma</dt><dd className="font-bold text-rose-600">-{money(platformCharges, currency)}</dd></div>
+            {shippingView.available && <ChargeRow label="Costo de envío estimado" value={shippingView.cost} currency={shippingView.currency} negative={Number(shippingView.cost) > 0} />}
             {isPositive(result.taxes_total ?? taxes.amount) && <ChargeRow label="Retenciones fiscales estimadas" value={result.taxes_total ?? taxes.amount} currency={currency} negative />}
             <div className="flex justify-between gap-4 border-t border-slate-200 pt-2.5 dark:border-neutral-700"><dt className="font-extrabold">Total de cargos estimados</dt><dd className="font-extrabold text-rose-600">-{money(result.total_charges, currency)}</dd></div>
         </dl>
 
         {taxes.available && <p className="text-[11px] font-medium text-slate-500">Fuente fiscal: {historicalTaxes ? (taxes.stale ? 'última regla histórica válida' : 'historial real de Mercado Libre') : 'perfil de la cuenta'}.</p>}
         {!taxes.available && <p className="text-[11px] font-medium text-amber-700 dark:text-amber-300">{taxes.message || 'Retenciones fiscales no disponibles en esta simulación.'}</p>}
+        {!shippingView.available && <p className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs font-semibold text-amber-800 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-200">{shippingView.warning} Este monto todavía no descuenta el envío.</p>}
 
         <div className="rounded-2xl border-2 border-emerald-400 bg-emerald-50 p-4 text-center dark:bg-emerald-500/10"><p className="text-xs font-extrabold uppercase tracking-[0.14em] text-emerald-700 dark:text-emerald-300">{result.estimated_receivable_label || 'Recibes estimado'}</p><p className="mt-1 text-4xl font-black text-emerald-700 dark:text-emerald-300">{money(result.estimated_receivable, currency)}</p><p className="mt-1 text-xs font-semibold text-emerald-800 dark:text-emerald-200">{result.estimated_receivable_message || 'El monto final puede variar al procesarse la venta.'}</p></div>
 
@@ -127,11 +134,14 @@ function ChargesBreakdown({ result, currency }) {
                 {saleFee.gross_amount !== null && saleFee.gross_amount !== undefined && <ChargeRow label="Cargo bruto antes de descuentos" value={saleFee.gross_amount} currency={currency} detail="Informativo; no se suma nuevamente." />}
                 {listingFee.fixed_fee !== null && listingFee.fixed_fee !== undefined && <ChargeRow label="Detalle fijo de publicación" value={listingFee.fixed_fee} currency={currency} />}
                 {listingFee.gross_amount !== null && listingFee.gross_amount !== undefined && <ChargeRow label="Costo bruto de publicación" value={listingFee.gross_amount} currency={currency} detail="Informativo; no se suma nuevamente." />}
-                {shipping.original_cost !== null && shipping.original_cost !== undefined && <ChargeRow label="Tarifa original de envío" value={shipping.original_cost} currency={currency} />}
+                {shipping.promoted_amount !== null && shipping.promoted_amount !== undefined && <ChargeRow label="Monto promovido informativo" value={shipping.promoted_amount} currency={shipping.currency_id || currency} />}
                 {shipping.discount_rate !== null && shipping.discount_rate !== undefined && <div className="flex justify-between gap-4"><dt>Descuento Mercado Libre</dt><dd className="font-bold">{fractionalPercentage(shipping.discount_rate)}</dd></div>}
-                {shipping.discount_amount !== null && shipping.discount_amount !== undefined && <ChargeRow label="Ahorro en envío" value={shipping.discount_amount} currency={currency} />}
+                {shipping.discount_amount !== null && shipping.discount_amount !== undefined && <ChargeRow label="Descuento informado" value={shipping.discount_amount} currency={shipping.currency_id || currency} />}
                 {shipping.billable_weight !== null && shipping.billable_weight !== undefined && <div className="flex justify-between gap-4"><dt>Peso facturable</dt><dd className="font-bold">{number(shipping.billable_weight)} g</dd></div>}
                 <div className="flex justify-between gap-4"><dt>Tipo de logística</dt><dd className="font-bold">{shipping.logistic_type || result.logistic_type || shippingLabel}</dd></div>
+                <div className="flex justify-between gap-4"><dt>Modo de envío</dt><dd className="font-bold">{shipping.mode || result.shipping_mode || 'No informado'}</dd></div>
+                <div className="flex justify-between gap-4"><dt>Envío gratis</dt><dd className="font-bold">{shipping.free_shipping ? 'Sí' : 'No'}</dd></div>
+                <div className="flex justify-between gap-4"><dt>Moneda del envío</dt><dd className="font-bold">{shipping.currency_id || 'No informada'}</dd></div>
                 {taxes.available && <>
                     <ChargeRow label="Base gravable (sin IVA)" value={taxes.taxable_base} currency={currency} />
                     <div className="flex justify-between gap-4"><dt>IVA incluido en precio</dt><dd className="font-bold">{percentagePoints(taxes.vat?.included_rate)}</dd></div>
