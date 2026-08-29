@@ -181,6 +181,12 @@ class MeliPriceManagerDashboardController extends Controller
                 'stale_before' => $staleBefore->toISOString(),
             ],
             'brands' => $this->brandSummary($accountId),
+            'brandOptions' => MeliBrandGroup::query()
+                ->where('active', true)
+                ->orderByRaw('LOWER(name)')
+                ->orderBy('name')
+                ->orderBy('id')
+                ->get(['id', 'name']),
             'selectedBrandId' => $selectedBrandId,
             'items' => $items,
             'availableStatuses' => $availableStatuses,
@@ -306,8 +312,9 @@ class MeliPriceManagerDashboardController extends Controller
                 ->when($accountId, fn (Builder $query, int $id) => $query->where('meli_account_id', $id))
                 ->when(! $accountId, fn (Builder $query) => $query->whereRaw('1 = 0'))
                 ->where('classification_status', 'categorized')], 'available_quantity')
-            ->orderBy('sort_order')
+            ->orderByRaw('LOWER(name)')
             ->orderBy('name')
+            ->orderBy('id')
             ->get(['id', 'name', 'slug', 'active', 'sort_order']);
     }
 

@@ -12,6 +12,7 @@ use App\Http\Controllers\MeliClaimController;
 use App\Http\Controllers\MeliFullStockController;
 use App\Http\Controllers\MeliMessagingController;
 use App\Http\Controllers\MeliPriceManager\MeliAccountTaxProfileController;
+use App\Http\Controllers\MeliPriceManager\MeliCategorizedItemBrandController;
 use App\Http\Controllers\MeliPriceManager\MeliBrandAliasController;
 use App\Http\Controllers\MeliPriceManager\MeliBrandGroupController;
 use App\Http\Controllers\MeliPriceManager\MeliBrandReclassificationController;
@@ -238,6 +239,9 @@ Route::get(
         Route::put('/items/{item}/price', MeliPriceUpdateController::class)
             ->whereNumber('item')
             ->name('items.price.update');
+        Route::post('/items/{item}/brand', MeliCategorizedItemBrandController::class)
+            ->whereNumber('item')
+            ->name('items.brand.update');
 
         Route::get('/brands', [MeliBrandGroupController::class, 'index'])->name('brands.index');
         Route::post('/brands', [MeliBrandGroupController::class, 'store'])->name('brands.store');
