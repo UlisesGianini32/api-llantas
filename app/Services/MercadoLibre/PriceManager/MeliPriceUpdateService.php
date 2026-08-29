@@ -8,6 +8,7 @@ use App\Models\MeliPriceChangeBatch;
 use App\Models\MeliPriceManagerItem;
 use App\Services\MercadoLibre\MeliAccountApiClient;
 use App\Services\MercadoLibre\MeliApiRequestException;
+use App\Services\MercadoLibre\LinkedPublications\MeliLinkedPublicationService;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Cache\Lock;
 use Illuminate\Support\Facades\Cache;
@@ -21,6 +22,7 @@ class MeliPriceUpdateService
     public function __construct(
         private readonly MeliAccountApiClient $api,
         private readonly MeliPriceSimulationTokenService $tokens,
+        private readonly MeliLinkedPublicationService $linkedPublications,
     ) {}
 
     /** @return array<string, float|int|string> */
@@ -74,6 +76,7 @@ class MeliPriceUpdateService
         try {
             $this->api->ensureFreshAccessToken($account);
             $this->assertNoPricingAutomation($account, $item);
+            $priceRelation = $this->linkedPublications->refreshPriceRelations($account, $item);
 
             $remoteOldPrice = $this->remoteStandardPrice($account, $item);
             if (! $this->samePrice($remoteOldPrice, (float) $snapshot['current_price'])) {
@@ -131,8 +134,44 @@ class MeliPriceUpdateService
             }
 
             $remoteConfirmed = true;
-            DB::transaction(function () use ($item, $confirmedPrice, $change, $batch): void {
+            $relatedPrices = [];
+            if ($priceRelation['linked'] ?? false) {
+                foreach ((array) ($priceRelation['items'] ?? []) as $member) {
+                    $snapshotItem = MeliPriceManagerItem::query()
+                        ->where('meli_account_id', $account->id)
+                        ->where('meli_item_id', (string) ($member['meli_item_id'] ?? ''))
+                        ->first();
+                    if ($snapshotItem !== null) {
+                        $this->refreshItemSnapshot($account, $snapshotItem);
+                    }
+                }
+            }
+            foreach (($priceRelation['linked'] ?? false) ? (array) ($priceRelation['items'] ?? []) : [] as $member) {
+                $relatedId = (string) ($member['meli_item_id'] ?? '');
+                if ($relatedId === '' || $relatedId === (string) $item->meli_item_id) {
+                    continue;
+                }
+                $relatedItem = MeliPriceManagerItem::query()
+                    ->where('meli_account_id', $account->id)
+                    ->where('meli_item_id', $relatedId)
+                    ->first();
+                if ($relatedItem !== null) {
+                    $relatedPrices[$relatedId] = $this->remoteStandardPrice($account, $relatedItem);
+                }
+            }
+            $priceRelation = $this->linkedPublications->refreshPriceRelations($account, $item);
+            $pricePropagated = collect($relatedPrices)->every(
+                fn (float $price): bool => $this->samePrice($price, $requestedPrice),
+            );
+
+            DB::transaction(function () use ($item, $confirmedPrice, $relatedPrices, $account, $change, $batch): void {
                 $item->forceFill(['current_price' => $confirmedPrice])->save();
+                foreach ($relatedPrices as $relatedId => $relatedPrice) {
+                    MeliPriceManagerItem::query()
+                        ->where('meli_account_id', $account->id)
+                        ->where('meli_item_id', $relatedId)
+                        ->update(['current_price' => $relatedPrice]);
+                }
                 $change->forceFill([
                     'status' => 'success',
                     'error_message' => null,
@@ -154,6 +193,8 @@ class MeliPriceUpdateService
                 'old_price' => round((float) $snapshot['current_price'], 2),
                 'new_price' => round($confirmedPrice, 2),
                 'updated_at' => now()->toISOString(),
+                'price_propagated' => $pricePropagated,
+                'price_relations' => $priceRelation,
             ];
         } catch (Throwable $exception) {
             if ($remoteConfirmed) {
@@ -307,6 +348,7 @@ class MeliPriceUpdateService
             $account,
             'get',
             '/items/'.rawurlencode((string) $item->meli_item_id).'/prices',
+            ['display_version' => 'true'],
         );
         $payload = $response->json();
         $prices = is_array($payload) && array_is_list($payload)
@@ -317,19 +359,21 @@ class MeliPriceUpdateService
             static fn (mixed $price): bool => is_array($price)
                 && strtolower(trim((string) ($price['type'] ?? ''))) === 'standard',
         ));
-        $selected = count($standardPrices) === 1 ? $standardPrices[0] : null;
-
-        if (count($standardPrices) > 1) {
-            $marketplacePrices = array_values(array_filter(
-                $standardPrices,
-                static fn (array $price): bool => in_array(
-                    'channel_marketplace',
-                    (array) data_get($price, 'conditions.context_restrictions', []),
-                    true,
-                ),
-            ));
-            $selected = count($marketplacePrices) === 1 ? $marketplacePrices[0] : null;
-        }
+        $marketplacePrices = array_values(array_filter(
+            $standardPrices,
+            static fn (array $price): bool => in_array(
+                'channel_marketplace',
+                (array) data_get($price, 'conditions.context_restrictions', []),
+                true,
+            ),
+        ));
+        $generalPrices = array_values(array_filter(
+            $standardPrices,
+            static fn (array $price): bool => (array) data_get($price, 'conditions.context_restrictions', []) === [],
+        ));
+        $selected = count($marketplacePrices) === 1
+            ? $marketplacePrices[0]
+            : (count($marketplacePrices) === 0 && count($generalPrices) === 1 ? $generalPrices[0] : null);
 
         if ($selected === null || ! is_numeric($selected['amount'] ?? null)) {
             throw new MeliPriceUpdateException(
@@ -340,6 +384,25 @@ class MeliPriceUpdateService
         }
 
         return round((float) $selected['amount'], 2);
+    }
+
+    private function refreshItemSnapshot(MeliAccount $account, MeliPriceManagerItem $item): void
+    {
+        $remote = (array) $this->api->request(
+            $account,
+            'get',
+            '/items/'.rawurlencode((string) $item->meli_item_id),
+        )->json();
+
+        $item->forceFill([
+            'current_price' => is_numeric($remote['price'] ?? null) ? (float) $remote['price'] : $item->current_price,
+            'available_quantity' => is_numeric($remote['available_quantity'] ?? null) ? (int) $remote['available_quantity'] : $item->available_quantity,
+            'user_product_id' => filled($remote['user_product_id'] ?? null) ? (string) $remote['user_product_id'] : $item->user_product_id,
+            'inventory_id' => filled($remote['inventory_id'] ?? null) ? (string) $remote['inventory_id'] : $item->inventory_id,
+            'catalog_listing' => (bool) ($remote['catalog_listing'] ?? $item->catalog_listing),
+            'raw_item' => $remote,
+            'last_synced_at' => now(),
+        ])->save();
     }
 
     /** @param array<string, mixed> $snapshot

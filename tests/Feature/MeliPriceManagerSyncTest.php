@@ -22,6 +22,8 @@ class MeliPriceManagerSyncTest extends TestCase
 {
     private object $migration;
 
+    private object $linkedPublicationsMigration;
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -64,6 +66,8 @@ class MeliPriceManagerSyncTest extends TestCase
 
         $this->migration = require database_path('migrations/2026_08_26_000001_create_meli_price_manager_tables.php');
         $this->migration->up();
+        $this->linkedPublicationsMigration = require database_path('migrations/2026_08_29_000001_add_linked_publication_fields_to_meli_price_manager_items.php');
+        $this->linkedPublicationsMigration->up();
 
         Http::preventStrayRequests();
         Sleep::fake();
@@ -72,6 +76,7 @@ class MeliPriceManagerSyncTest extends TestCase
     protected function tearDown(): void
     {
         Sleep::fake(false);
+        $this->linkedPublicationsMigration->down();
         $this->migration->down();
         Schema::dropIfExists('meli_accounts');
         Schema::dropIfExists('users');
@@ -108,6 +113,41 @@ class MeliPriceManagerSyncTest extends TestCase
         $this->assertSame('MLM1000', $saved->category_id);
         $this->assertSame('MLM123', $saved->raw_item['id']);
         $this->assertNotNull($saved->last_synced_at);
+    }
+
+    public function test_sync_refreshes_buybox_status_only_for_items_with_declared_relations(): void
+    {
+        $account = $this->account();
+        $items = [
+            $this->item('MLM100', ['item_relations' => [['id' => 'MLM200']]]),
+            $this->item('MLM200'),
+        ];
+        $itemsById = collect($items)->keyBy('id')->all();
+        Http::fake(function (Request $request) use ($itemsById) {
+            if (str_contains($request->url(), '/items/search')) {
+                return Http::response(['results' => array_keys($itemsById)]);
+            }
+            if (str_contains($request->url(), '/items?')) {
+                return Http::response(collect($itemsById)->map(fn (array $item): array => ['code' => 200, 'body' => $item])->values()->all());
+            }
+            if (str_contains($request->url(), '/public/buybox/sync/MLM100')) {
+                return Http::response(['status' => 'SYNC', 'relations' => [['id' => 'MLM200']]]);
+            }
+
+            return Http::response(['message' => 'unexpected'], 500);
+        });
+
+        $this->service()->syncAccount($account);
+
+        $linked = MeliPriceManagerItem::query()->where('meli_item_id', 'MLM100')->firstOrFail();
+        $plain = MeliPriceManagerItem::query()->where('meli_item_id', 'MLM200')->firstOrFail();
+        $this->assertSame('SYNC', $linked->price_sync_status);
+        $this->assertSame(['MLM200'], $linked->price_relation_ids);
+        $this->assertNotNull($linked->linked_synced_at);
+        $this->assertNull($plain->price_sync_status);
+        Http::assertSentCount(3);
+        Http::assertSent(fn (Request $request): bool => str_contains($request->url(), '/public/buybox/sync/MLM100')
+            && $request->hasHeader('x-public', 'True'));
     }
 
     public function test_existing_publication_is_updated_without_creating_a_duplicate(): void

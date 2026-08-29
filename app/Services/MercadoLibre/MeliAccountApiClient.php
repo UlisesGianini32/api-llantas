@@ -67,6 +67,7 @@ class MeliAccountApiClient
         string $path,
         array $payload = [],
         bool $refreshAfterUnauthorized = true,
+        array $headers = [],
     ): Response
     {
         $lastResponse = null;
@@ -77,6 +78,7 @@ class MeliAccountApiClient
             try {
                 $client = Http::withToken((string) $account->access_token)
                     ->acceptJson()
+                    ->withHeaders($headers)
                     ->timeout(60);
 
                 $url = self::API_BASE_URL.'/'.ltrim($path, '/');
