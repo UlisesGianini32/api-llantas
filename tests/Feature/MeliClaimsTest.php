@@ -50,6 +50,10 @@ class MeliClaimsTest extends TestCase
             $table->string('sku')->nullable(); $table->string('title')->nullable(); $table->unsignedInteger('quantity')->default(1);
             $table->decimal('unit_price', 14, 2)->nullable(); $table->timestamps();
         });
+        Schema::create('meli_publications', function (Blueprint $table): void {
+            $table->id(); $table->foreignId('user_id')->nullable(); $table->foreignId('meli_account_id')->nullable();
+            $table->string('sku')->nullable(); $table->string('mlm'); $table->json('raw')->nullable(); $table->timestamps();
+        });
         $this->migration = require database_path('migrations/2026_08_29_000001_create_meli_claim_tables.php');
         $this->migration->up();
         $this->user = User::factory()->create();
@@ -60,7 +64,7 @@ class MeliClaimsTest extends TestCase
     protected function tearDown(): void
     {
         $this->migration->down();
-        foreach (['meli_order_items', 'meli_orders', 'meli_accounts', 'users'] as $table) Schema::dropIfExists($table);
+        foreach (['meli_publications', 'meli_order_items', 'meli_orders', 'meli_accounts', 'users'] as $table) Schema::dropIfExists($table);
         DB::purge('sqlite');
         parent::tearDown();
     }
@@ -131,8 +135,54 @@ class MeliClaimsTest extends TestCase
         $foreignClaim = $this->claim($foreign, ['claim_id' => '999']);
 
         $this->get(route('meli.claims.index', ['account' => $account->id, 'status' => 'open', 'stage' => 'claim', 'reputation' => 'yes', 'search' => 'SKU-CLAIM']))
-            ->assertInertia(fn (Assert $page) => $page->has('claims.data', 1)->where('claims.data.0.id', $own->id)->where('stats.open', 1));
+            ->assertInertia(fn (Assert $page) => $page->has('claims.data', 1)->where('claims.data.0.id', $own->id)
+                ->where('claims.data.0.products.0.mlm', 'MLM123')->where('claims.data.0.products.0.sku', 'SKU-CLAIM')
+                ->where('claims.data.0.products.0.title', 'Producto reclamado')->where('stats.open', 1));
         $this->get(route('meli.claims.show', $foreignClaim))->assertNotFound();
+    }
+
+    public function test_claim_ui_uses_local_multi_item_order_and_sanitizes_participant_ids(): void
+    {
+        $account = $this->account(['meli_user_id' => 'PRIMARY', 'nickname' => null, 'is_default' => true]);
+        $secondary = $this->account(['meli_user_id' => 'SECONDARY', 'nickname' => null, 'is_default' => false]);
+        $orderId = DB::table('meli_orders')->insertGetId(['meli_account_id' => $account->id, 'order_id' => 'ORDER-UI', 'created_at' => now(), 'updated_at' => now()]);
+        DB::table('meli_order_items')->insert([
+            ['meli_order_id' => $orderId, 'item_id' => 'MLM-A', 'sku' => 'SKU-A', 'title' => 'Producto A', 'quantity' => 2, 'unit_price' => 100, 'created_at' => now(), 'updated_at' => now()],
+            ['meli_order_id' => $orderId, 'item_id' => 'MLM-B', 'sku' => 'SKU-B', 'title' => 'Producto B', 'quantity' => 1, 'unit_price' => 50, 'created_at' => now(), 'updated_at' => now()],
+        ]);
+        DB::table('meli_publications')->insert([
+            'user_id' => $this->user->id, 'meli_account_id' => $account->id, 'mlm' => 'MLM-A', 'sku' => 'SKU-A',
+            'raw' => json_encode(['thumbnail' => 'https://local.test/product-a.jpg']), 'created_at' => now(), 'updated_at' => now(),
+        ]);
+        DB::table('meli_claim_reasons')->insert(['reason_id' => 'missing_accessories', 'name' => 'Missing accessories', 'detail' => 'Faltan accesorios del producto', 'created_at' => now(), 'updated_at' => now()]);
+        $claim = $this->claim($account, [
+            'meli_order_id' => $orderId, 'order_id' => 'ORDER-UI', 'reason_id' => 'missing_accessories',
+            'status' => 'open', 'stage' => 'claim', 'type' => 'mediations', 'action_responsible' => 'respondent',
+            'available_actions' => [['action' => 'allow_return']],
+            'actions_history' => ['data' => [['action_name' => 'open_claim', 'player_role' => 'complainant']]],
+            'expected_resolutions' => ['data' => [['type' => 'return_product', 'player_role' => 'complainant', 'user_id' => 123, 'player' => ['user_id' => 456]]]],
+        ]);
+
+        Http::fake();
+        $this->get(route('meli.claims.show', $claim))->assertInertia(fn (Assert $page) => $page
+            ->where('claim.reason', 'Faltan accesorios del producto')
+            ->where('claim.reason_id', 'missing_accessories')
+            ->where('claim.account.is_default', true)
+            ->has('claim.products', 2)
+            ->where('claim.products.0.mlm', 'MLM-A')->where('claim.products.0.sku', 'SKU-A')
+            ->where('claim.products.0.thumbnail', 'https://local.test/product-a.jpg')
+            ->where('claim.products.1.mlm', 'MLM-B')->where('claim.order_amount', 250)
+            ->where('claim.expected_resolutions.data.0.type', 'return_product')
+            ->missing('claim.expected_resolutions.data.0.user_id')
+            ->missing('claim.expected_resolutions.data.0.player.user_id'));
+        $this->assertCount(0, Http::recorded());
+
+        $foreignOrderId = DB::table('meli_orders')->insertGetId(['meli_account_id' => $secondary->id, 'order_id' => 'ORDER-FOREIGN', 'created_at' => now(), 'updated_at' => now()]);
+        DB::table('meli_order_items')->insert(['meli_order_id' => $foreignOrderId, 'item_id' => 'MLM-FOREIGN', 'sku' => 'SECRET', 'title' => 'Producto ajeno', 'quantity' => 1, 'unit_price' => 999, 'created_at' => now(), 'updated_at' => now()]);
+        $crossAccountClaim = $this->claim($account, ['claim_id' => 'CROSS', 'meli_order_id' => $foreignOrderId, 'order_id' => 'ORDER-FOREIGN']);
+        $this->get(route('meli.claims.show', $crossAccountClaim))->assertInertia(fn (Assert $page) => $page->has('claim.products', 0)->where('claim.order_amount', null));
+        $this->get(route('meli.claims.index', ['account' => $account->id, 'search' => 'SECRET']))
+            ->assertInertia(fn (Assert $page) => $page->has('claims.data', 0));
     }
 
     public function test_post_purchase_claims_dispatches_without_leading_resource_slash(): void

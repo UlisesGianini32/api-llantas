@@ -3,7 +3,9 @@
 namespace App\Http\Controllers;
 
 use App\Models\MeliClaim;
+use App\Models\MeliPublication;
 use App\Services\MercadoLibre\Claims\MeliClaimsService;
+use Illuminate\Support\Collection;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -24,7 +26,7 @@ class MeliClaimController extends Controller
         $base = MeliClaim::query()->whereIn('meli_account_id', $accounts->pluck('id'))
             ->when($account, fn (Builder $q) => $q->where('meli_account_id', $account->id))
             ->when(! $account, fn (Builder $q) => $q->whereRaw('1 = 0'));
-        $query = (clone $base)->with(['meliAccount:id,nickname,meli_user_id', 'reason:reason_id,name', 'order.items'])
+        $query = (clone $base)->with(['meliAccount:id,nickname,meli_user_id,is_default', 'reason:reason_id,name,detail', 'order.items'])
             ->when($filters['status'] !== '', fn (Builder $q) => $q->where('status', $filters['status']))
             ->when($filters['stage'] !== '', fn (Builder $q) => $q->where('stage', $filters['stage']))
             ->when($filters['type'] !== '', fn (Builder $q) => $q->where('type', $filters['type']))
@@ -36,11 +38,14 @@ class MeliClaimController extends Controller
                 $like = '%'.$search.'%';
                 $q->where(fn (Builder $q) => $q->where('claim_id', 'like', $like)
                     ->orWhere('order_id', 'like', $like)->orWhere('pack_id', 'like', $like)
-                    ->orWhereHas('order.items', fn (Builder $items) => $items->where('item_id', 'like', $like)->orWhere('sku', 'like', $like)->orWhere('title', 'like', $like)));
+                    ->orWhereHas('order', fn (Builder $orders) => $orders
+                        ->whereColumn('meli_orders.meli_account_id', 'meli_claims.meli_account_id')
+                        ->whereHas('items', fn (Builder $items) => $items->where('item_id', 'like', $like)->orWhere('sku', 'like', $like)->orWhere('title', 'like', $like))));
             });
 
-        $claims = $query->orderByRaw('due_date IS NULL')->orderBy('due_date')->orderByDesc('last_updated')->paginate(25)->withQueryString()
-            ->through(fn (MeliClaim $claim) => $this->claimData($claim));
+        $claims = $query->orderByRaw('due_date IS NULL')->orderBy('due_date')->orderByDesc('last_updated')->paginate(25)->withQueryString();
+        $publications = $this->publicationMap($claims->getCollection());
+        $claims->through(fn (MeliClaim $claim) => $this->claimData($claim, $publications));
         $stats = (clone $base)->selectRaw("SUM(CASE WHEN status NOT IN ('closed','resolved') THEN 1 ELSE 0 END) as open_count")
             ->selectRaw("SUM(CASE WHEN status NOT IN ('closed','resolved') AND action_responsible IN ('seller','respondent') THEN 1 ELSE 0 END) as action_count")
             ->selectRaw("SUM(CASE WHEN status NOT IN ('closed','resolved') AND due_date IS NOT NULL AND due_date <= ? THEN 1 ELSE 0 END) as due_count", [now()->addDay()])
@@ -59,10 +64,11 @@ class MeliClaimController extends Controller
     public function show(Request $request, MeliClaim $claim): Response
     {
         abort_unless($request->user()->meliAccounts()->whereKey($claim->meli_account_id)->exists(), 404);
-        $claim->load(['meliAccount:id,nickname,meli_user_id', 'reason:reason_id,name,detail', 'order.items']);
-        return Inertia::render('MeliClaims/Show', ['claim' => [...$this->claimData($claim),
+        $claim->load(['meliAccount:id,nickname,meli_user_id,is_default', 'reason:reason_id,name,detail', 'order.items']);
+        $publications = $this->publicationMap(collect([$claim]));
+        return Inertia::render('MeliClaims/Show', ['claim' => [...$this->claimData($claim, $publications),
             'raw_detail' => $claim->raw_detail, 'status_history' => $claim->status_history ?? [],
-            'actions_history' => $claim->actions_history ?? [], 'expected_resolutions' => $claim->expected_resolutions ?? [],
+            'actions_history' => $claim->actions_history ?? [], 'expected_resolutions' => $this->withoutParticipantIds($claim->expected_resolutions ?? []),
             'available_actions' => $claim->available_actions ?? [], 'reputation_has_incentive' => $claim->reputation_has_incentive,
             'reputation_due_date' => $claim->reputation_due_date?->toISOString(), 'resolution_reason' => $claim->resolution_reason,
         ]]);
@@ -75,22 +81,82 @@ class MeliClaimController extends Controller
         catch (\Throwable $e) { report($e); return back()->with('err', 'No fue posible sincronizar reclamos: '.$e->getMessage()); }
     }
 
-    private function claimData(MeliClaim $claim): array
+    private function claimData(MeliClaim $claim, Collection $publications): array
     {
-        $item = $claim->order?->items?->first();
+        $order = $claim->order && (int) $claim->order->meli_account_id === (int) $claim->meli_account_id
+            ? $claim->order
+            : null;
+        $products = $order?->items?->map(function ($item) use ($claim, $publications): array {
+            $publication = $publications->get($claim->meli_account_id.'|'.$item->item_id);
+            $publicationItem = MeliPublication::itemArrayFromRaw($publication?->raw);
+            $unitPrice = $item->unit_price !== null ? (float) $item->unit_price : null;
+
+            return [
+                'mlm' => $item->item_id,
+                'sku' => $item->sku ?: $publication?->sku,
+                'title' => $item->title ?: ($publicationItem['title'] ?? null),
+                'thumbnail' => $this->publicationThumbnail($publication),
+                'quantity' => (int) $item->quantity,
+                'unit_price' => $unitPrice,
+                'amount' => $unitPrice !== null ? $unitPrice * (int) $item->quantity : null,
+            ];
+        })->values()->all() ?? [];
         $sellerActs = in_array($claim->action_responsible, ['seller', 'respondent'], true);
         $open = ! in_array($claim->status, ['closed', 'resolved'], true);
         $critical = $open && (($sellerActs && $claim->due_date?->lte(now()->addDay())) || ($claim->affects_reputation && $claim->reputation_due_date?->lte(now()->addDay())));
         return [
             'id' => $claim->id, 'claim_id' => $claim->claim_id, 'order_id' => $claim->order_id, 'pack_id' => $claim->pack_id,
-            'type' => $claim->type, 'stage' => $claim->stage, 'status' => $claim->status, 'reason' => $claim->reason?->name ?? $claim->reason_id,
+            'type' => $claim->type, 'stage' => $claim->stage, 'status' => $claim->status,
+            'reason' => $claim->reason?->detail ?: ($claim->reason?->name ?: $claim->reason_id), 'reason_id' => $claim->reason_id,
             'detail_title' => $claim->detail_title, 'detail_description' => $claim->detail_description, 'problem' => $claim->problem,
             'action_responsible' => $claim->action_responsible, 'due_date' => $claim->due_date?->toISOString(),
             'affects_reputation' => $claim->affects_reputation, 'date_created' => $claim->date_created?->toISOString(),
             'last_updated' => $claim->last_updated?->toISOString(), 'last_synced_at' => $claim->last_synced_at?->toISOString(), 'sync_error' => $claim->sync_error,
             'urgency' => $critical ? 'critical' : ($open && $sellerActs ? 'attention' : 'waiting'),
-            'account' => $claim->meliAccount, 'product' => $item ? ['mlm' => $item->item_id, 'sku' => $item->sku, 'title' => $item->title, 'quantity' => $item->quantity] : null,
-            'order_amount' => $claim->order?->items?->sum(fn ($item) => (float) $item->unit_price * $item->quantity),
+            'account' => $claim->meliAccount ? ['id' => $claim->meliAccount->id, 'nickname' => $claim->meliAccount->nickname, 'meli_user_id' => $claim->meliAccount->meli_user_id, 'is_default' => (bool) $claim->meliAccount->is_default] : null,
+            'products' => $products, 'product' => $products[0] ?? null,
+            'order_amount' => collect($products)->contains(fn (array $product) => $product['amount'] !== null)
+                ? collect($products)->sum(fn (array $product) => $product['amount'] ?? 0)
+                : null,
         ];
+    }
+
+    private function publicationMap(Collection $claims): Collection
+    {
+        $pairs = $claims->filter(fn (MeliClaim $claim) => $claim->order && (int) $claim->order->meli_account_id === (int) $claim->meli_account_id)
+            ->flatMap(fn (MeliClaim $claim) => $claim->order->items->map(fn ($item) => ['account' => $claim->meli_account_id, 'mlm' => $item->item_id]))
+            ->filter(fn (array $pair) => filled($pair['mlm']))->unique(fn (array $pair) => $pair['account'].'|'.$pair['mlm']);
+
+        if ($pairs->isEmpty()) {
+            return collect();
+        }
+
+        return MeliPublication::query()
+            ->where(function (Builder $query) use ($pairs): void {
+                foreach ($pairs as $pair) {
+                    $query->orWhere(fn (Builder $candidate) => $candidate->where('meli_account_id', $pair['account'])->where('mlm', $pair['mlm']));
+                }
+            })
+            ->orderByDesc('id')->get(['id', 'meli_account_id', 'mlm', 'sku', 'raw'])
+            ->unique(fn (MeliPublication $publication) => $publication->meli_account_id.'|'.$publication->mlm)
+            ->keyBy(fn (MeliPublication $publication) => $publication->meli_account_id.'|'.$publication->mlm);
+    }
+
+    private function publicationThumbnail(?MeliPublication $publication): ?string
+    {
+        $item = MeliPublication::itemArrayFromRaw($publication?->raw);
+        $picture = is_array($item['pictures'][0] ?? null) ? $item['pictures'][0] : [];
+
+        return $item['secure_thumbnail'] ?? $item['thumbnail'] ?? $picture['secure_url'] ?? $picture['url'] ?? null;
+    }
+
+    private function withoutParticipantIds(mixed $value): mixed
+    {
+        if (! is_array($value)) {
+            return $value;
+        }
+
+        return collect($value)->reject(fn (mixed $_, string|int $key) => $key === 'user_id')
+            ->map(fn (mixed $item) => $this->withoutParticipantIds($item))->all();
     }
 }
