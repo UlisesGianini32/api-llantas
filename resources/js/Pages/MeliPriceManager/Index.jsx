@@ -1,4 +1,5 @@
 import AppShell from '@/Components/layout/AppShell'
+import { canContinueWithSimulation, simulationMatchesDraft } from '@/lib/meliPriceSimulation'
 import { Head, Link, router } from '@inertiajs/react'
 import { useMemo, useState } from 'react'
 
@@ -149,12 +150,14 @@ function ChargesBreakdown({ result, currency }) {
     </div>
 }
 
-function PriceSimulationModal({ item, price, result, loading, updating, confirming, success, error, onPriceChange, onSubmit, onContinue, onCancelConfirmation, onConfirm, onClose }) {
+function PriceSimulationModal({ item, price, simulatedPrice, result, loading, updating, confirming, success, error, onPriceChange, onSubmit, onContinue, onCancelConfirmation, onConfirm, onClose }) {
     if (!item) return null
 
     const currency = result?.currency_id || item.currency_id || 'MXN'
     const priceDifference = result ? Number(result.proposed_price) - Number(result.current_price) : 0
     const busy = loading || updating
+    const priceMatchesSimulation = Boolean(result) && simulationMatchesDraft(price, simulatedPrice)
+    const currentSimulation = canContinueWithSimulation(price, simulatedPrice, { hasResult: Boolean(result), error, loading, updating })
 
     return <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4" role="dialog" aria-modal="true" aria-labelledby="price-simulation-title">
         <div className="max-h-[95vh] w-full max-w-2xl overflow-y-auto rounded-2xl bg-white shadow-2xl dark:bg-neutral-900">
@@ -169,17 +172,19 @@ function PriceSimulationModal({ item, price, result, loading, updating, confirmi
             </div> : <>
             <form onSubmit={onSubmit} className="grid gap-4 border-b border-slate-200 p-5 sm:grid-cols-2 dark:border-neutral-800">
                 <div><p className="text-xs font-bold text-slate-500">Precio actual</p><p className="mt-1 text-2xl font-bold">{money(item.current_price, currency)}</p></div>
-                <label><span className="mb-1 block text-xs font-bold">Nuevo precio</span><input type="number" min="0.01" max="999999999.99" step="0.01" required autoFocus disabled={confirming || busy} value={price} onChange={(event) => onPriceChange(event.target.value)} className={fieldClass} /></label>
+                <label><span className="mb-1 block text-xs font-bold">Nuevo precio</span><input type="number" min="0.01" max="999999999.99" step="0.01" required autoFocus disabled={confirming || updating} value={price} onChange={(event) => onPriceChange(event.target.value)} className={fieldClass} /></label>
                 {error && <p className="sm:col-span-2 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm font-semibold text-rose-700 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-200">{error}</p>}
-                <div className="sm:col-span-2 flex justify-end"><button type="submit" disabled={confirming || busy || !price || Number(price) <= 0} className={primaryButton}>{loading ? 'Consultando Mercado Libre…' : 'Calcular cargos'}</button></div>
+                <div className="sm:col-span-2 flex justify-end"><button type="submit" disabled={confirming || busy || !price || Number(price) <= 0} className={primaryButton}>{loading ? 'Calculando…' : 'Calcular cargos'}</button></div>
             </form>
 
-            {result && !confirming && <div className="space-y-4 p-5">
+            {result && <div className="space-y-4 p-5">
+                <p className="text-xs font-bold text-slate-500">Resultados calculados para {money(simulatedPrice, currency)}</p>
                 <ChargesBreakdown result={result} currency={currency} />
-                <div className="flex justify-end"><button type="button" onClick={onContinue} className="rounded-xl bg-amber-500 px-4 py-2 text-sm font-extrabold text-slate-950 transition hover:bg-amber-400">Continuar con cambio</button></div>
+                {!priceMatchesSimulation && <p className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-800 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-200">El precio cambió. Calcula nuevamente los cargos para continuar.</p>}
+                {!confirming && <div className="flex justify-end"><button type="button" onClick={onContinue} disabled={!currentSimulation} className="rounded-xl bg-amber-500 px-4 py-2 text-sm font-extrabold text-slate-950 transition hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-40">Continuar con cambio</button></div>}
             </div>}
 
-            {result && confirming && <div className="space-y-5 p-5"><div><p className="text-xs font-extrabold uppercase tracking-[0.18em] text-rose-600">Confirmar cambio de precio</p><h3 className="mt-1 text-lg font-bold">{item.title}</h3><p className="text-xs text-slate-500">Mercado Libre: {item.meli_item_id}</p></div><dl className="space-y-3 text-sm"><div className="flex justify-between"><dt>Precio actual</dt><dd className="font-bold">{money(result.current_price, currency)}</dd></div><div className="flex justify-between"><dt>Nuevo precio</dt><dd className="font-bold">{money(result.proposed_price, currency)}</dd></div><div className="flex justify-between"><dt>Diferencia</dt><dd className={`font-bold ${priceDifference >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{priceDifference >= 0 ? '+' : ''}{money(priceDifference, currency)}</dd></div></dl><ChargesBreakdown result={result} currency={currency} /><p className="rounded-xl border border-rose-300 bg-rose-50 p-3 text-sm font-bold text-rose-800 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-200">Este cambio modificará el precio real en Mercado Libre.</p><div className="flex flex-wrap justify-end gap-2"><button type="button" onClick={onCancelConfirmation} disabled={updating} className={secondaryButton}>Cancelar</button><button type="button" onClick={onConfirm} disabled={updating} className="rounded-xl bg-rose-600 px-4 py-2 text-sm font-extrabold text-white transition hover:bg-rose-700 disabled:opacity-40">{updating ? 'Verificando y actualizando…' : `Confirmar cambio a ${money(result.proposed_price, currency)}`}</button></div></div>}
+            {result && confirming && <div className="space-y-5 border-t border-slate-200 p-5 dark:border-neutral-800"><div><p className="text-xs font-extrabold uppercase tracking-[0.18em] text-rose-600">Confirmar cambio de precio</p><dl className="mt-3 space-y-3 text-sm"><div className="flex justify-between"><dt>Precio actual</dt><dd className="font-bold">{money(result.current_price, currency)}</dd></div><div className="flex justify-between"><dt>Nuevo precio</dt><dd className="font-bold">{money(simulatedPrice, currency)}</dd></div><div className="flex justify-between"><dt>Diferencia</dt><dd className={`font-bold ${priceDifference >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{priceDifference >= 0 ? '+' : ''}{money(priceDifference, currency)}</dd></div></dl></div><p className="rounded-xl border border-rose-300 bg-rose-50 p-3 text-sm font-bold text-rose-800 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-200">Este cambio modificará el precio real en Mercado Libre.</p><div className="flex flex-wrap justify-end gap-2"><button type="button" onClick={onCancelConfirmation} disabled={updating} className={secondaryButton}>Cancelar</button><button type="button" onClick={onConfirm} disabled={updating || !currentSimulation} className="rounded-xl bg-rose-600 px-4 py-2 text-sm font-extrabold text-white transition hover:bg-rose-700 disabled:opacity-40">{updating ? 'Verificando y actualizando…' : `Confirmar cambio a ${money(simulatedPrice, currency)}`}</button></div></div>}
 
             <p className="border-t border-slate-200 px-5 py-4 text-xs font-semibold text-slate-500 dark:border-neutral-800">Esta es una simulación consultada con Mercado Libre. No se ha modificado el precio de la publicación.</p>
             </>}
@@ -284,6 +289,7 @@ export default function Index({
     const [selectedIds, setSelectedIds] = useState([])
     const [simulationItem, setSimulationItem] = useState(null)
     const [simulationPrice, setSimulationPrice] = useState('')
+    const [simulatedPrice, setSimulatedPrice] = useState(null)
     const [simulationResult, setSimulationResult] = useState(null)
     const [simulationLoading, setSimulationLoading] = useState(false)
     const [priceUpdating, setPriceUpdating] = useState(false)
@@ -312,6 +318,7 @@ export default function Index({
         setSimulationItem({ ...item, current_price: currentPrice })
         setSimulationPrice(currentPrice ?? '')
         setSimulationResult(null)
+        setSimulatedPrice(null)
         setSimulationConfirming(false)
         setUpdateSuccess(null)
         setSimulationError('')
@@ -326,9 +333,10 @@ export default function Index({
         setSimulationConfirming(false)
         setUpdateSuccess(null)
         try {
-            setSimulationResult(await simulatePrice(simulationItem.id, simulationPrice))
+            const result = await simulatePrice(simulationItem.id, simulationPrice)
+            setSimulationResult(result)
+            setSimulatedPrice(result.proposed_price)
         } catch (requestError) {
-            setSimulationResult(null)
             setSimulationError(requestError instanceof Error ? requestError.message : 'No fue posible calcular los cargos.')
         } finally {
             setSimulationLoading(false)
@@ -336,7 +344,7 @@ export default function Index({
     }
 
     const confirmPriceUpdate = async () => {
-        if (!simulationItem || !simulationResult || priceUpdating) return
+        if (!simulationItem || !canContinueWithSimulation(simulationPrice, simulatedPrice, { hasResult: Boolean(simulationResult), error: simulationError, loading: simulationLoading, updating: priceUpdating })) return
 
         setPriceUpdating(true)
         setSimulationError('')
@@ -432,7 +440,7 @@ export default function Index({
                     {items.links?.length > 0 && <div className="flex flex-wrap gap-2 border-t border-slate-200 p-4 dark:border-neutral-800">{items.links.map((link, index) => <Link key={index} href={link.url ?? '#'} preserveScroll className={`rounded-lg px-3 py-2 text-sm ${link.active ? 'bg-indigo-600 text-white' : 'border border-slate-200 dark:border-neutral-700'} ${!link.url ? 'pointer-events-none opacity-40' : ''}`} dangerouslySetInnerHTML={{ __html: link.label }} />)}</div>}
                 </section>
             </div>
-            <PriceSimulationModal item={simulationItem} price={simulationPrice} result={simulationResult} loading={simulationLoading} updating={priceUpdating} confirming={simulationConfirming} success={updateSuccess} error={simulationError} onPriceChange={(value) => { setSimulationPrice(value); setSimulationResult(null); setSimulationConfirming(false); setUpdateSuccess(null); setSimulationError('') }} onSubmit={calculateSimulation} onContinue={() => { setSimulationConfirming(true); setSimulationError('') }} onCancelConfirmation={() => setSimulationConfirming(false)} onConfirm={confirmPriceUpdate} onClose={() => { if (!simulationLoading && !priceUpdating) setSimulationItem(null) }} />
+            <PriceSimulationModal item={simulationItem} price={simulationPrice} simulatedPrice={simulatedPrice} result={simulationResult} loading={simulationLoading} updating={priceUpdating} confirming={simulationConfirming} success={updateSuccess} error={simulationError} onPriceChange={(value) => { setSimulationPrice(value); setSimulationConfirming(false); setUpdateSuccess(null) }} onSubmit={calculateSimulation} onContinue={() => { if (simulationMatchesDraft(simulationPrice, simulatedPrice) && !simulationError) setSimulationConfirming(true) }} onCancelConfirmation={() => setSimulationConfirming(false)} onConfirm={confirmPriceUpdate} onClose={() => { if (!simulationLoading && !priceUpdating) setSimulationItem(null) }} />
         </AppShell>
     )
 }
