@@ -69,7 +69,7 @@ class MeliClaimsService
             'reputation' => '/affects-reputation',
             'status_history' => '/status-history',
             'actions_history' => '/actions-history',
-            'expected_resolutions' => '/expected_resolutions',
+            'expected_resolutions' => '/expected-resolutions',
         ];
         $updates = [];
         foreach ($resources as $key => $suffix) {

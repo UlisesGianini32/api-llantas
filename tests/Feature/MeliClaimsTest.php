@@ -88,8 +88,8 @@ class MeliClaimsTest extends TestCase
         $this->assertArrayNotHasKey('user_id', $claim->raw_claim['players'][0]);
         $requests = collect(Http::recorded())->pluck(0);
         $this->assertTrue($requests->every(fn (Request $request): bool => $request->method() === 'GET'));
-        $this->assertTrue($requests->contains(fn (Request $request): bool => str_ends_with(parse_url($request->url(), PHP_URL_PATH), '/expected_resolutions')));
-        $this->assertFalse($requests->contains(fn (Request $request): bool => str_ends_with(parse_url($request->url(), PHP_URL_PATH), '/expected-resolutions')));
+        $this->assertTrue($requests->contains(fn (Request $request): bool => str_ends_with(parse_url($request->url(), PHP_URL_PATH), '/expected-resolutions')));
+        $this->assertFalse($requests->contains(fn (Request $request): bool => str_ends_with(parse_url($request->url(), PHP_URL_PATH), '/expected_resolutions')));
         $reasonRequests = collect(Http::recorded())
             ->filter(fn (array $pair): bool => str_contains($pair[0]->url(), '/reasons/'))
             ->count();
@@ -171,7 +171,7 @@ class MeliClaimsTest extends TestCase
             if (str_ends_with($path, '/affects-reputation')) return Http::response(['affects_reputation' => 'affected', 'has_incentive' => false]);
             if (str_ends_with($path, '/status-history')) return Http::response(['data' => [['status' => $status, 'date' => now()->toISOString()]]]);
             if (str_ends_with($path, '/actions-history')) return Http::response(['data' => [['action' => 'claim_opened']]]);
-            if (str_ends_with($path, '/expected_resolutions')) return Http::response(['data' => [['type' => 'return']]]);
+            if (str_ends_with($path, '/expected-resolutions')) return Http::response(['data' => [['type' => 'return']]]);
             return Http::response(['id' => 123, 'resource' => 'order', 'resource_id' => 'ORDER-1', 'status' => $status, 'stage' => 'claim', 'type' => 'mediations', 'reason_id' => 'PDD', 'players' => [['role' => 'respondent', 'type' => 'seller', 'available_actions' => [['action' => 'allow_return', 'due_date' => now()->addHours(4)->toISOString()]]]], 'date_created' => now()->subDay()->toISOString(), 'last_updated' => now()->toISOString()]);
         });
     }
