@@ -21,6 +21,8 @@ class MeliUncategorizedReviewTest extends TestCase
 
     private object $classificationMigration;
 
+    private object $categoriesMigration;
+
     private User $user;
 
     protected function setUp(): void
@@ -28,6 +30,8 @@ class MeliUncategorizedReviewTest extends TestCase
         parent::setUp();
 
         config()->set('app.key', 'base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=');
+        config()->set('meli_price_manager.focused_catalog.allowed_root_category_ids', []);
+        config()->set('meli_price_manager.focused_catalog.allowed_category_ids', []);
         config()->set('database.default', 'sqlite');
         config()->set('database.connections.sqlite.database', ':memory:');
         config()->set('database.connections.sqlite.foreign_key_constraints', true);
@@ -63,6 +67,8 @@ class MeliUncategorizedReviewTest extends TestCase
         $this->foundationMigration->up();
         $this->classificationMigration = require database_path('migrations/2026_08_26_000002_add_brand_classification_audit_to_meli_price_manager_items.php');
         $this->classificationMigration->up();
+        $this->categoriesMigration = require database_path('migrations/2026_08_28_000002_create_meli_categories_table.php');
+        $this->categoriesMigration->up();
 
         $this->user = User::factory()->create();
         $this->actingAs($this->user);
@@ -71,6 +77,7 @@ class MeliUncategorizedReviewTest extends TestCase
     protected function tearDown(): void
     {
         $this->classificationMigration->down();
+        $this->categoriesMigration->down();
         $this->foundationMigration->down();
         Schema::dropIfExists('meli_accounts');
         Schema::dropIfExists('users');
@@ -95,6 +102,46 @@ class MeliUncategorizedReviewTest extends TestCase
                 ->has('items.data', 1)
                 ->where('items.data.0.id', $pending->id)
                 ->where('counts.pending', 1));
+    }
+
+    public function test_brand_options_have_one_global_case_insensitive_order_and_keep_their_ids(): void
+    {
+        $account = $this->account(['is_default' => true]);
+        $item = $this->item($account);
+        $namesByBlock = [
+            0 => ['Rasasi', 'Rohto', 'Sebastian', 'SKIN1004', 'SUAVECITO', 'The Ordinary', 'Walmart', 'Zep'],
+            50 => ['ALFAPARF', 'AccessPRO', 'Agate', 'Alea', 'Atlas'],
+        ];
+        $brandsByName = collect();
+        foreach ($namesByBlock as $sortOrder => $names) {
+            foreach ($names as $name) {
+                $brandsByName[$name] = MeliBrandGroup::factory()->create([
+                    'name' => $name,
+                    'sort_order' => $sortOrder,
+                ]);
+            }
+        }
+        MeliBrandGroup::factory()->create(['name' => 'Agate', 'active' => false, 'sort_order' => -1]);
+        $expectedNames = [
+            'AccessPRO', 'Agate', 'Alea', 'ALFAPARF', 'Atlas', 'Rasasi', 'Rohto',
+            'Sebastian', 'SKIN1004', 'SUAVECITO', 'The Ordinary', 'Walmart', 'Zep',
+        ];
+
+        $this->get(route('meli-price-manager.uncategorized.index', ['account' => $account->id]))
+            ->assertInertia(fn (Assert $page) => $page->where('brands', function ($brands) use ($expectedNames, $brandsByName): bool {
+                $options = collect($brands);
+
+                return $options->pluck('name')->all() === $expectedNames
+                    && $options->pluck('id')->unique()->count() === count($expectedNames)
+                    && $options->firstWhere('name', 'AccessPRO')['id'] === $brandsByName['AccessPRO']->id
+                    && $options->firstWhere('name', 'ALFAPARF')['id'] === $brandsByName['ALFAPARF']->id;
+            }));
+
+        $this->post(route('meli-price-manager.items.assign', $item), [
+            'meli_account_id' => $account->id,
+            'brand_group_id' => $brandsByName['AccessPRO']->id,
+        ])->assertRedirect();
+        $this->assertSame($brandsByName['AccessPRO']->id, $item->fresh()->brand_group_id);
     }
 
     public function test_unauthenticated_user_cannot_view_or_operate_the_review_inbox(): void

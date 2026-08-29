@@ -100,8 +100,9 @@ class MeliUncategorizedItemController extends Controller
             'items' => $items,
             'brands' => MeliBrandGroup::query()
                 ->where('active', true)
-                ->orderBy('sort_order')
+                ->orderByRaw('LOWER(name)')
                 ->orderBy('name')
+                ->orderBy('id')
                 ->get(['id', 'name', 'slug']),
             'counts' => $counts,
             'filters' => [
