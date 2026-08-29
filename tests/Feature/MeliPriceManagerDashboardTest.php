@@ -29,6 +29,8 @@ class MeliPriceManagerDashboardTest extends TestCase
 
     private object $receivableSnapshotMigration;
 
+    private object $categoriesMigration;
+
     private User $user;
 
     protected function setUp(): void
@@ -73,6 +75,8 @@ class MeliPriceManagerDashboardTest extends TestCase
 
         $this->foundationMigration = require database_path('migrations/2026_08_26_000001_create_meli_price_manager_tables.php');
         $this->foundationMigration->up();
+        $this->categoriesMigration = require database_path('migrations/2026_08_28_000002_create_meli_categories_table.php');
+        $this->categoriesMigration->up();
         $this->classificationMigration = require database_path('migrations/2026_08_26_000002_add_brand_classification_audit_to_meli_price_manager_items.php');
         $this->classificationMigration->up();
         $this->dashboardIndexMigration = require database_path('migrations/2026_08_26_000003_add_dashboard_index_to_meli_price_manager_items.php');
@@ -91,6 +95,7 @@ class MeliPriceManagerDashboardTest extends TestCase
         Cache::flush();
         $this->receivableSnapshotMigration->down();
         $this->linkedPublicationsMigration->down();
+        $this->categoriesMigration->down();
         $this->dashboardIndexMigration->down();
         $this->classificationMigration->down();
         $this->foundationMigration->down();
