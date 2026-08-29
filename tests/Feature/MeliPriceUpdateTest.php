@@ -37,6 +37,8 @@ class MeliPriceUpdateTest extends TestCase
 
         config()->set('app.key', 'base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=');
         config()->set('cache.default', 'array');
+        config()->set('meli_price_manager.focused_catalog.allowed_root_category_ids', []);
+        config()->set('meli_price_manager.focused_catalog.allowed_category_ids', []);
         config()->set('database.default', 'sqlite');
         config()->set('database.connections.sqlite.database', ':memory:');
         config()->set('database.connections.sqlite.foreign_key_constraints', true);
@@ -242,7 +244,7 @@ class MeliPriceUpdateTest extends TestCase
         $account = $this->account();
         $item = $this->item($account);
         Http::fake([
-            'https://api.mercadolibre.com/items/*/prices' => Http::response($payload),
+            'https://api.mercadolibre.com/items/*/prices*' => Http::response($payload),
         ]);
         $method = new \ReflectionMethod(MeliPriceUpdateService::class, 'remoteStandardPrice');
 
