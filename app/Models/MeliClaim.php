@@ -25,5 +25,5 @@ class MeliClaim extends Model
 
     public function reason(): BelongsTo { return $this->belongsTo(MeliClaimReason::class, 'reason_id', 'reason_id'); }
 
-    public function order(): BelongsTo { return $this->belongsTo(MeliOrder::class); }
+    public function order(): BelongsTo { return $this->belongsTo(MeliOrder::class, 'meli_order_id'); }
 }

@@ -4,6 +4,7 @@ const labels = {
     type: { mediations: 'Mediación' },
     role: { respondent: 'Vendedor', seller: 'Vendedor', complainant: 'Comprador', mediator: 'Mercado Libre / Mediador' },
     action: {
+        send_message_to_respondent: 'Enviar mensaje al vendedor',
         send_message_to_complainant: 'Enviar mensaje al comprador',
         send_message_to_mediator: 'Enviar mensaje al mediador',
         refund: 'Reembolsar',
@@ -16,7 +17,17 @@ const labels = {
         return_review_unified_ok: 'Confirmar revisión de devolución',
     },
     resolution: { return_product: 'Devolver producto', return: 'Devolver producto', change_product: 'Cambiar producto', refund: 'Reembolso', partial_refund: 'Reembolso parcial' },
-    historyAction: { open_claim: 'Reclamo abierto', claim_opened: 'Reclamo abierto', send_message: 'Mensaje enviado', open_dispute: 'Mediación abierta', refund: 'Reembolso', allow_return: 'Devolución permitida' },
+    historyAction: {
+        open_claim: 'Reclamo abierto',
+        claim_opened: 'Reclamo abierto',
+        send_message: 'Mensaje enviado',
+        send_message_to_respondent: 'Mensaje enviado al vendedor',
+        send_message_to_complainant: 'Mensaje enviado al comprador',
+        send_message_to_mediator: 'Mensaje enviado al mediador',
+        open_dispute: 'Mediación abierta',
+        refund: 'Reembolso',
+        allow_return: 'Devolución permitida',
+    },
 }
 
 export const readable = (value) => {

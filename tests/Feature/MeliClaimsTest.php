@@ -163,6 +163,11 @@ class MeliClaimsTest extends TestCase
             'expected_resolutions' => ['data' => [['type' => 'return_product', 'player_role' => 'complainant', 'user_id' => 123, 'player' => ['user_id' => 456]]]],
         ]);
 
+        $claim->load('order.items');
+        $this->assertSame($orderId, $claim->order?->id);
+        $this->assertSame('ORDER-UI', $claim->order?->order_id);
+        $this->assertCount(2, $claim->order?->items ?? []);
+
         Http::fake();
         $this->get(route('meli.claims.show', $claim))->assertInertia(fn (Assert $page) => $page
             ->where('claim.reason', 'Faltan accesorios del producto')
@@ -170,6 +175,8 @@ class MeliClaimsTest extends TestCase
             ->where('claim.account.is_default', true)
             ->has('claim.products', 2)
             ->where('claim.products.0.mlm', 'MLM-A')->where('claim.products.0.sku', 'SKU-A')
+            ->where('claim.products.0.title', 'Producto A')->where('claim.products.0.quantity', 2)
+            ->where('claim.products.0.unit_price', 100.0)->where('claim.products.0.amount', 200.0)
             ->where('claim.products.0.thumbnail', 'https://local.test/product-a.jpg')
             ->where('claim.products.1.mlm', 'MLM-B')->where('claim.order_amount', 250)
             ->where('claim.expected_resolutions.data.0.type', 'return_product')
