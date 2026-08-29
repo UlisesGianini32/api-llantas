@@ -9,6 +9,7 @@ use App\Models\User;
 use App\Services\MercadoLibre\PriceManager\MeliPriceSimulationService;
 use App\Services\MercadoLibre\PriceManager\MeliPriceSimulationTokenService;
 use App\Services\MercadoLibre\PriceManager\MeliHistoricalTaxRuleService;
+use App\Services\MercadoLibre\PriceManager\MeliEstimatedReceivableSnapshotService;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Http\Client\Request;
@@ -26,6 +27,8 @@ class MeliPriceSimulationTest extends TestCase
 
     private object $taxProfileMigration;
 
+    private object $receivableSnapshotMigration;
+
     private User $user;
 
     protected function setUp(): void
@@ -34,6 +37,8 @@ class MeliPriceSimulationTest extends TestCase
 
         config()->set('app.key', 'base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=');
         config()->set('cache.default', 'array');
+        config()->set('meli_price_manager.focused_catalog.allowed_root_category_ids', []);
+        config()->set('meli_price_manager.focused_catalog.allowed_category_ids', []);
         config()->set('database.default', 'sqlite');
         config()->set('database.connections.sqlite.database', ':memory:');
         config()->set('database.connections.sqlite.foreign_key_constraints', true);
@@ -73,6 +78,8 @@ class MeliPriceSimulationTest extends TestCase
 
         $this->foundationMigration = require database_path('migrations/2026_08_26_000001_create_meli_price_manager_tables.php');
         $this->foundationMigration->up();
+        $this->receivableSnapshotMigration = require database_path('migrations/2026_08_29_000002_add_estimated_receivable_snapshot_to_meli_price_manager_items.php');
+        $this->receivableSnapshotMigration->up();
         $this->taxProfileMigration = require database_path('migrations/2026_08_27_000002_create_meli_account_tax_profiles_table.php');
         $this->taxProfileMigration->up();
 
@@ -85,6 +92,7 @@ class MeliPriceSimulationTest extends TestCase
     {
         Cache::flush();
         $this->taxProfileMigration->down();
+        $this->receivableSnapshotMigration->down();
         $this->foundationMigration->down();
         Schema::dropIfExists('llantas');
         Schema::dropIfExists('meli_accounts');
@@ -708,6 +716,52 @@ class MeliPriceSimulationTest extends TestCase
         foreach (Http::recorded() as [$request]) {
             $this->assertSame('GET', $request->method());
         }
+    }
+
+    public function test_current_price_simulation_persists_the_exact_complete_receivable_without_put(): void
+    {
+        $item = $this->item($this->account());
+        $this->fakeSuccessfulResponses();
+
+        $response = $this->postJson(route('meli-price-manager.items.price.simulate', $item), ['price' => 1531.20])
+            ->assertOk();
+        $receivable = (float) $response->json('data.estimated_receivable');
+
+        $item->refresh();
+        $this->assertSame('1531.20', $item->current_price);
+        $this->assertSame($receivable, (float) $item->estimated_receivable);
+        $this->assertSame('1531.20', $item->estimated_receivable_price);
+        $this->assertNotNull($item->estimated_receivable_calculated_at);
+        $this->assertSame($receivable, (float) $response->json('data.receivable_snapshot.amount'));
+        foreach (Http::recorded() as [$request]) {
+            $this->assertSame('GET', $request->method());
+        }
+    }
+
+    public function test_receivable_snapshot_is_stale_at_a_different_price_and_rejects_missing_shipping(): void
+    {
+        $item = $this->item($this->account(), [
+            'estimated_receivable' => 113.90,
+            'estimated_receivable_price' => 200,
+        ]);
+        $snapshots = app(MeliEstimatedReceivableSnapshotService::class);
+
+        $this->assertNull($snapshots->currentAmount($item));
+        $item->forceFill(['current_price' => 200])->save();
+        $this->assertSame(113.90, $snapshots->currentAmount($item->refresh()));
+        $this->assertNull($snapshots->storeForCurrentPrice($item, [
+            'proposed_price' => 200,
+            'estimated_receivable' => 150,
+            'charges' => ['shipping' => ['available' => false, 'cost' => null]],
+        ]));
+        $this->assertSame('113.90', $item->fresh()->estimated_receivable);
+        $stored = $snapshots->storeForCurrentPrice($item, [
+            'proposed_price' => 200,
+            'estimated_receivable' => 120,
+            'charges' => ['shipping' => ['available' => true, 'cost' => 0]],
+        ]);
+        $this->assertSame(120.0, $stored['amount']);
+        $this->assertSame('120.00', $item->fresh()->estimated_receivable);
     }
 
     private function service(): MeliPriceSimulationService

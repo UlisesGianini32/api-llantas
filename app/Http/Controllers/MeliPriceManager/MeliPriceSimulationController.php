@@ -7,6 +7,7 @@ use App\Http\Requests\MeliPriceManager\SimulateMeliItemPriceRequest;
 use App\Models\MeliPriceManagerItem;
 use App\Services\MercadoLibre\MeliApiRequestException;
 use App\Services\MercadoLibre\PriceManager\MeliPriceSimulationService;
+use App\Services\MercadoLibre\PriceManager\MeliEstimatedReceivableSnapshotService;
 use App\Services\MercadoLibre\PriceManager\MeliPriceSimulationTokenService;
 use App\Services\MercadoLibre\LinkedPublications\MeliLinkedPublicationService;
 use Illuminate\Http\JsonResponse;
@@ -21,6 +22,7 @@ class MeliPriceSimulationController extends Controller
         MeliPriceSimulationService $service,
         MeliPriceSimulationTokenService $tokens,
         MeliLinkedPublicationService $linkedPublications,
+        MeliEstimatedReceivableSnapshotService $receivableSnapshots,
     ): JsonResponse {
         $publication = MeliPriceManagerItem::query()
             ->focusedCatalog()
@@ -33,6 +35,7 @@ class MeliPriceSimulationController extends Controller
 
         try {
             $simulation = $service->simulate($account, $publication, (float) $request->validated('price'));
+            $simulation['receivable_snapshot'] = $receivableSnapshots->storeForCurrentPrice($publication, $simulation);
             $issuedToken = $tokens->issue((int) $request->user()->id, $account, $publication, $simulation);
             $simulation['simulation_token'] = $issuedToken['token'];
             $simulation['simulation_expires_at'] = $issuedToken['expires_at'];

@@ -10,6 +10,7 @@ use App\Models\MeliBrandGroup;
 use App\Models\MeliCategory;
 use App\Models\MeliPriceManagerItem;
 use App\Services\MercadoLibre\PriceManager\MeliHistoricalTaxRuleService;
+use App\Services\MercadoLibre\PriceManager\MeliEstimatedReceivableSnapshotService;
 use App\Services\MercadoLibre\LinkedPublications\MeliLinkedPublicationService;
 use Illuminate\Bus\UniqueLock;
 use Illuminate\Database\Eloquent\Builder;
@@ -36,6 +37,7 @@ class MeliPriceManagerDashboardController extends Controller
         Request $request,
         MeliHistoricalTaxRuleService $historicalTaxRules,
         MeliLinkedPublicationService $linkedPublications,
+        MeliEstimatedReceivableSnapshotService $receivableSnapshots,
     ): Response
     {
         $accounts = $request->user()->meliAccounts()
@@ -95,6 +97,7 @@ class MeliPriceManagerDashboardController extends Controller
             ->select([
                 'id', 'meli_account_id', 'meli_item_id', 'sku', 'title', 'category_id', 'meli_brand',
                 'brand_group_id', 'classification_status', 'current_price', 'available_quantity',
+                'estimated_receivable', 'estimated_receivable_price', 'estimated_receivable_calculated_at',
                 'currency_id', 'status', 'permalink', 'thumbnail', 'last_synced_at',
                 'user_product_id', 'inventory_id', 'catalog_listing', 'price_sync_status',
                 'price_relation_ids', 'linked_synced_at',
@@ -149,9 +152,10 @@ class MeliPriceManagerDashboardController extends Controller
                 ->concat($pageItems)
                 ->unique('id')
             : $pageItems;
-        $items->through(function (MeliPriceManagerItem $item) use ($linkedPublications, $linkedPool): MeliPriceManagerItem {
+        $items->through(function (MeliPriceManagerItem $item) use ($linkedPublications, $linkedPool, $receivableSnapshots): MeliPriceManagerItem {
             $item->setAttribute('price_relations', $linkedPublications->priceRelations($item, $linkedPool));
             $item->setAttribute('stock_relations', $linkedPublications->stockRelations($item, $linkedPool));
+            $item->setAttribute('current_estimated_receivable', $receivableSnapshots->currentAmount($item));
 
             return $item;
         });

@@ -13,6 +13,7 @@ use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Facades\Http;
 use Inertia\Testing\AssertableInertia as Assert;
 use Tests\TestCase;
 
@@ -24,6 +25,10 @@ class MeliPriceManagerDashboardTest extends TestCase
 
     private object $dashboardIndexMigration;
 
+    private object $linkedPublicationsMigration;
+
+    private object $receivableSnapshotMigration;
+
     private User $user;
 
     protected function setUp(): void
@@ -32,6 +37,8 @@ class MeliPriceManagerDashboardTest extends TestCase
 
         config()->set('app.key', 'base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=');
         config()->set('cache.default', 'array');
+        config()->set('meli_price_manager.focused_catalog.allowed_root_category_ids', []);
+        config()->set('meli_price_manager.focused_catalog.allowed_category_ids', []);
         config()->set('database.default', 'sqlite');
         config()->set('database.connections.sqlite.database', ':memory:');
         config()->set('database.connections.sqlite.foreign_key_constraints', true);
@@ -70,6 +77,10 @@ class MeliPriceManagerDashboardTest extends TestCase
         $this->classificationMigration->up();
         $this->dashboardIndexMigration = require database_path('migrations/2026_08_26_000003_add_dashboard_index_to_meli_price_manager_items.php');
         $this->dashboardIndexMigration->up();
+        $this->linkedPublicationsMigration = require database_path('migrations/2026_08_29_000001_add_linked_publication_fields_to_meli_price_manager_items.php');
+        $this->linkedPublicationsMigration->up();
+        $this->receivableSnapshotMigration = require database_path('migrations/2026_08_29_000002_add_estimated_receivable_snapshot_to_meli_price_manager_items.php');
+        $this->receivableSnapshotMigration->up();
 
         $this->user = User::factory()->create();
         $this->actingAs($this->user);
@@ -78,6 +89,8 @@ class MeliPriceManagerDashboardTest extends TestCase
     protected function tearDown(): void
     {
         Cache::flush();
+        $this->receivableSnapshotMigration->down();
+        $this->linkedPublicationsMigration->down();
         $this->dashboardIndexMigration->down();
         $this->classificationMigration->down();
         $this->foundationMigration->down();
@@ -94,6 +107,29 @@ class MeliPriceManagerDashboardTest extends TestCase
 
         $this->get(route('meli-price-manager.index'))->assertRedirect(route('login'));
         $this->post(route('meli-price-manager.sync'), [])->assertRedirect(route('login'));
+    }
+
+    public function test_dashboard_exposes_only_receivable_snapshots_matching_current_price_without_http(): void
+    {
+        Http::fake();
+        $account = $this->account();
+        $current = $this->categorized($account, [
+            'current_price' => 200,
+            'estimated_receivable' => 113.90,
+            'estimated_receivable_price' => 200,
+        ]);
+        $stale = $this->categorized($account, [
+            'current_price' => 220,
+            'estimated_receivable' => 113.90,
+            'estimated_receivable_price' => 200,
+        ]);
+
+        $this->get(route('meli-price-manager.index', ['account' => $account->id]))
+            ->assertInertia(fn (Assert $page) => $page
+                ->where('items.data', fn ($items): bool => collect($items)->firstWhere('id', $current->id)['current_estimated_receivable'] === 113.9
+                    && collect($items)->firstWhere('id', $stale->id)['current_estimated_receivable'] === null));
+
+        Http::assertNothingSent();
     }
 
     public function test_dashboard_exposes_only_authenticated_users_accounts(): void

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { canContinueWithSimulation, initialSimulationPrice, priceInCents, shippingPresentation, simulationMatchesDraft, simulationResultPresentation } from '../../resources/js/lib/meliPriceSimulation.js'
+import { canContinueWithSimulation, currentReceivableForItem, initialSimulationPrice, priceInCents, shippingPresentation, simulationMatchesDraft, simulationResultPresentation } from '../../resources/js/lib/meliPriceSimulation.js'
 
 test('la apertura usa el precio actual o el último precio confirmado localmente', () => {
     const item = { id: 7, current_price: '200.00' }
@@ -14,6 +14,15 @@ test('cambiar el draft conserva visible el resultado anterior y lo marca desactu
     assert.deepEqual(simulationResultPresentation(200, 200, true), { visible: true, stale: false })
     assert.deepEqual(simulationResultPresentation(220, 200, true), { visible: true, stale: true })
     assert.deepEqual(simulationResultPresentation(220, null, false), { visible: false, stale: false })
+})
+
+test('un snapshot local inválido reemplaza la cifra inicial por pendiente', () => {
+    const item = { id: 7, current_estimated_receivable: 113.90 }
+
+    assert.equal(currentReceivableForItem(item), 113.90)
+    assert.equal(currentReceivableForItem(item, { 7: { amount: 120, price: 200 } }, 200), 120)
+    assert.equal(currentReceivableForItem(item, { 7: { amount: 120, price: 200 } }, 220), null)
+    assert.equal(currentReceivableForItem(item, { 7: null }), null)
 })
 
 test('habilita continuar sólo para el precio de la última simulación', () => {

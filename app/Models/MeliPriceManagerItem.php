@@ -24,7 +24,8 @@ class MeliPriceManagerItem extends Model
         'suggested_brand_group_id', 'matched_brand_alias_id',
         'classification_status', 'classification_source', 'classification_confidence',
         'classification_metadata',
-        'current_price', 'original_price', 'available_quantity', 'sold_quantity', 'currency_id',
+        'current_price', 'estimated_receivable', 'estimated_receivable_price',
+        'estimated_receivable_calculated_at', 'original_price', 'available_quantity', 'sold_quantity', 'currency_id',
         'status', 'permalink', 'thumbnail', 'raw_attributes', 'raw_item', 'last_synced_at',
     ];
 
@@ -34,6 +35,9 @@ class MeliPriceManagerItem extends Model
             'classification_confidence' => 'decimal:4',
             'classification_metadata' => 'array',
             'current_price' => 'decimal:2',
+            'estimated_receivable' => 'decimal:2',
+            'estimated_receivable_price' => 'decimal:2',
+            'estimated_receivable_calculated_at' => 'datetime',
             'original_price' => 'decimal:2',
             'available_quantity' => 'integer',
             'sold_quantity' => 'integer',

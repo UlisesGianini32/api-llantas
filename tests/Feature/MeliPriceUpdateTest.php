@@ -29,6 +29,8 @@ class MeliPriceUpdateTest extends TestCase
 
     private object $linkedPublicationsMigration;
 
+    private object $receivableSnapshotMigration;
+
     private User $user;
 
     protected function setUp(): void
@@ -99,6 +101,8 @@ class MeliPriceUpdateTest extends TestCase
         $this->foundationMigration->up();
         $this->linkedPublicationsMigration = require database_path('migrations/2026_08_29_000001_add_linked_publication_fields_to_meli_price_manager_items.php');
         $this->linkedPublicationsMigration->up();
+        $this->receivableSnapshotMigration = require database_path('migrations/2026_08_29_000002_add_estimated_receivable_snapshot_to_meli_price_manager_items.php');
+        $this->receivableSnapshotMigration->up();
         $this->taxProfileMigration = require database_path('migrations/2026_08_27_000002_create_meli_account_tax_profiles_table.php');
         $this->taxProfileMigration->up();
 
@@ -111,6 +115,7 @@ class MeliPriceUpdateTest extends TestCase
     {
         Cache::flush();
         $this->taxProfileMigration->down();
+        $this->receivableSnapshotMigration->down();
         $this->linkedPublicationsMigration->down();
         $this->foundationMigration->down();
         Schema::dropIfExists('automotive_part_meli_publications');
@@ -141,6 +146,9 @@ class MeliPriceUpdateTest extends TestCase
             ->assertJsonPath('data.new_price', 1600);
 
         $this->assertSame('1600.00', $item->fresh()->current_price);
+        $this->assertSame('1270.25', $item->fresh()->estimated_receivable);
+        $this->assertSame('1600.00', $item->fresh()->estimated_receivable_price);
+        $this->assertNotNull($item->fresh()->estimated_receivable_calculated_at);
         $this->assertFalse(Cache::has(app(MeliPriceSimulationTokenService::class)->cacheKey($token)));
 
         $batch = MeliPriceChangeBatch::query()->sole();
@@ -931,6 +939,7 @@ class MeliPriceUpdateTest extends TestCase
                     'gross_amount' => 7.25,
                 ],
                 'shipping' => [
+                    'available' => true,
                     'seller_cost' => 74.50,
                     'original_cost' => 149.00,
                     'discount_rate' => 0.5,
@@ -969,7 +978,7 @@ class MeliPriceUpdateTest extends TestCase
             'charges' => [
                 'sale_fee' => ['amount' => 101.36, 'gross_amount' => 150],
                 'listing_fee' => ['available' => true, 'amount' => 0],
-                'shipping' => ['seller_cost' => 70, 'original_cost' => 140],
+                'shipping' => ['available' => true, 'seller_cost' => 70, 'original_cost' => 140],
                 'taxes' => [
                     'available' => true,
                     'source' => 'historical_account_tax_rule',
