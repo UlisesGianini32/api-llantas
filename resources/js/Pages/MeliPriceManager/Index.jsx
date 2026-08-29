@@ -219,6 +219,20 @@ function Metric({ label, value, tone = 'slate', detail = null }) {
     return <div className={`rounded-2xl border p-4 ${tones[tone]}`}><p className="text-xs font-bold uppercase tracking-wide text-slate-500">{label}</p><p className="mt-1 text-3xl font-bold">{number(value)}</p>{detail && <p className="mt-1 text-xs text-slate-500">{detail}</p>}</div>
 }
 
+function BrandChangeModal({ item, brands, brandId, processing, error, onBrandChange, onConfirm, onClose }) {
+    if (!item) return null
+
+    return <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4" role="dialog" aria-modal="true" aria-labelledby="brand-change-title">
+        <div className="w-full max-w-lg rounded-2xl bg-white p-5 shadow-2xl dark:bg-neutral-900">
+            <div className="flex items-start justify-between gap-4"><div><p className="text-xs font-bold uppercase tracking-wide text-indigo-600">Clasificación interna</p><h2 id="brand-change-title" className="mt-1 text-xl font-bold">Cambiar marca</h2></div><button type="button" onClick={onClose} disabled={processing} className={secondaryButton}>Cerrar</button></div>
+            <dl className="mt-5 space-y-3 text-sm"><div><dt className="font-bold text-slate-500">Producto</dt><dd>{item.title}</dd></div><div><dt className="font-bold text-slate-500">Marca actual</dt><dd>{item.brand_group?.name || 'Sin marca'}</dd></div></dl>
+            <label className="mt-4 block"><span className="mb-1 block text-sm font-bold">Nueva marca</span><select value={brandId} onChange={(event) => onBrandChange(event.target.value)} disabled={processing} className={fieldClass}><option value="">Seleccionar</option>{brands.map((brand) => <option key={brand.id} value={brand.id}>{brand.name}</option>)}</select></label>
+            {error && <p className="mt-3 rounded-xl bg-rose-50 p-3 text-sm font-semibold text-rose-700">{error}</p>}
+            <div className="mt-5 flex justify-end gap-2"><button type="button" onClick={onClose} disabled={processing} className={secondaryButton}>Cancelar</button><button type="button" onClick={onConfirm} disabled={processing || !brandId} className={primaryButton}>{processing ? 'Cambiando…' : 'Cambiar marca'}</button></div>
+        </div>
+    </div>
+}
+
 function StatusBadge({ status, stock }) {
     const label = stock !== null && stock <= 0 ? 'Sin stock' : ({ active: 'Activo', paused: 'Pausado', closed: 'Cerrado', under_review: 'En revisión' }[status] || status || 'Sin estado')
     const tone = stock !== null && stock <= 0
@@ -282,6 +296,7 @@ export default function Index({
     summary = {},
     syncStatus = {},
     brands = [],
+    brandOptions = [],
     selectedBrandId = null,
     items = { data: [], links: [] },
     availableStatuses = [],
@@ -315,6 +330,10 @@ export default function Index({
     const [simulationError, setSimulationError] = useState('')
     const [updatedPrices, setUpdatedPrices] = useState({})
     const [updatedReceivables, setUpdatedReceivables] = useState({})
+    const [brandChangeItem, setBrandChangeItem] = useState(null)
+    const [brandChangeId, setBrandChangeId] = useState('')
+    const [brandChangeProcessing, setBrandChangeProcessing] = useState(false)
+    const [brandChangeError, setBrandChangeError] = useState('')
     const simulationRequestId = useRef(0)
     const allSelected = items.data.length > 0 && items.data.every((item) => selectedIds.includes(item.id))
     const selectedAccount = useMemo(() => accounts.find((account) => Number(account.id) === Number(selectedAccountId)), [accounts, selectedAccountId])
@@ -328,6 +347,27 @@ export default function Index({
     const sync = () => {
         if (!selectedAccountId || syncStatus.queued) return
         router.post('/meli-price-manager/sync', { meli_account_id: selectedAccountId }, { preserveScroll: true })
+    }
+
+    const openBrandChange = (item) => {
+        setBrandChangeItem(item)
+        setBrandChangeId(item.brand_group_id ?? '')
+        setBrandChangeError('')
+    }
+
+    const confirmBrandChange = () => {
+        if (!brandChangeItem || !brandChangeId || brandChangeProcessing) return
+        setBrandChangeProcessing(true)
+        setBrandChangeError('')
+        router.post(`/meli-price-manager/items/${brandChangeItem.id}/brand`, {
+            meli_account_id: selectedAccountId,
+            brand_group_id: brandChangeId,
+        }, {
+            preserveScroll: true,
+            onSuccess: () => setBrandChangeItem(null),
+            onError: (errors) => setBrandChangeError(errors.brand_group_id || errors.item || 'No fue posible cambiar la marca.'),
+            onFinish: () => setBrandChangeProcessing(false),
+        })
     }
 
     const stale = (item) => !item.last_synced_at || new Date(item.last_synced_at) < new Date(syncStatus.stale_before)
@@ -486,7 +526,7 @@ export default function Index({
                             <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500 dark:bg-neutral-950"><tr><th className="px-3 py-3"><input type="checkbox" checked={allSelected} onChange={() => setSelectedIds(allSelected ? [] : items.data.map((item) => item.id))} /></th><th className="px-3 py-3">Imagen</th><th className="px-3 py-3">Producto</th><th className="px-3 py-3">Marca ML</th><th className="px-3 py-3">Marca interna</th><th className="px-3 py-3">Precio</th><th className="px-3 py-3">Recibes</th><th className="px-3 py-3">Stock</th><th className="px-3 py-3">Estado ML</th><th className="px-3 py-3">Sincronización</th><th className="px-3 py-3">Acción</th></tr></thead>
                             <tbody className="divide-y divide-slate-100 dark:divide-neutral-800">
                                 {!items.data.length && <tr><td colSpan="11" className="px-5 py-12 text-center text-slate-500">No hay publicaciones categorizadas para estos filtros.</td></tr>}
-                                {items.data.map((item) => <tr key={item.id}><td className="px-3 py-4"><input type="checkbox" checked={selectedIds.includes(item.id)} onChange={() => setSelectedIds((current) => current.includes(item.id) ? current.filter((id) => id !== item.id) : [...current, item.id])} /></td><td className="px-3 py-4">{item.thumbnail ? <img src={item.thumbnail} alt="" className="h-12 w-12 rounded-lg object-cover" referrerPolicy="no-referrer" /> : <div className="flex h-12 w-12 items-center justify-center rounded-lg bg-slate-100 text-[10px] text-slate-400 dark:bg-neutral-800">Sin imagen</div>}</td><td className="max-w-sm px-3 py-4"><p className="font-semibold">{item.title}</p><p className="mt-1 text-xs text-slate-500">SKU: {item.sku || '—'} · {item.meli_item_id}</p><p className="text-xs text-slate-500">Categoría: {item.category?.name || item.category_id || '—'}{item.category?.name && <span className="ml-1 text-[10px]">({item.category_id})</span>}</p></td><td className="px-3 py-4">{item.meli_brand || 'Sin marca'}</td><td className="px-3 py-4 font-bold text-indigo-700 dark:text-indigo-300">{item.brand_group?.name || '—'}</td><td className="px-3 py-4 font-semibold">{money(updatedPrices[item.id] ?? item.current_price, item.currency_id)}</td><td className="px-3 py-4 font-bold text-emerald-700 dark:text-emerald-300">{money(currentReceivableForItem(item, updatedReceivables, updatedPrices[item.id] ?? item.current_price), item.currency_id)}{currentReceivableForItem(item, updatedReceivables, updatedPrices[item.id] ?? item.current_price) == null && <span className="block text-[10px] font-normal text-slate-400">Pendiente</span>}</td><td className="px-3 py-4">{item.available_quantity ?? '—'}</td><td className="px-3 py-4"><StatusBadge status={item.status} stock={item.available_quantity} /></td><td className="px-3 py-4"><p>{dateTime(item.last_synced_at)}</p>{stale(item) && <span className="mt-1 inline-block rounded-full bg-amber-100 px-2 py-0.5 text-xs font-bold text-amber-800">Desactualizada</span>}</td><td className="px-3 py-4"><div className="flex flex-col items-start gap-2"><button type="button" onClick={() => openSimulation(item)} className={primaryButton}>Simular precio</button>{item.permalink && <a href={item.permalink} target="_blank" rel="noreferrer" className={secondaryButton}>Abrir en Mercado Libre</a>}</div></td></tr>)}
+                                {items.data.map((item) => <tr key={item.id}><td className="px-3 py-4"><input type="checkbox" checked={selectedIds.includes(item.id)} onChange={() => setSelectedIds((current) => current.includes(item.id) ? current.filter((id) => id !== item.id) : [...current, item.id])} /></td><td className="px-3 py-4">{item.thumbnail ? <img src={item.thumbnail} alt="" className="h-12 w-12 rounded-lg object-cover" referrerPolicy="no-referrer" /> : <div className="flex h-12 w-12 items-center justify-center rounded-lg bg-slate-100 text-[10px] text-slate-400 dark:bg-neutral-800">Sin imagen</div>}</td><td className="max-w-sm px-3 py-4"><p className="font-semibold">{item.title}</p><p className="mt-1 text-xs text-slate-500">SKU: {item.sku || '—'} · {item.meli_item_id}</p><p className="text-xs text-slate-500">Categoría: {item.category?.name || item.category_id || '—'}{item.category?.name && <span className="ml-1 text-[10px]">({item.category_id})</span>}</p></td><td className="px-3 py-4">{item.meli_brand || 'Sin marca'}</td><td className="px-3 py-4 font-bold text-indigo-700 dark:text-indigo-300">{item.brand_group?.name || '—'}</td><td className="px-3 py-4 font-semibold">{money(updatedPrices[item.id] ?? item.current_price, item.currency_id)}</td><td className="px-3 py-4 font-bold text-emerald-700 dark:text-emerald-300">{money(currentReceivableForItem(item, updatedReceivables, updatedPrices[item.id] ?? item.current_price), item.currency_id)}{currentReceivableForItem(item, updatedReceivables, updatedPrices[item.id] ?? item.current_price) == null && <span className="block text-[10px] font-normal text-slate-400">Pendiente</span>}</td><td className="px-3 py-4">{item.available_quantity ?? '—'}</td><td className="px-3 py-4"><StatusBadge status={item.status} stock={item.available_quantity} /></td><td className="px-3 py-4"><p>{dateTime(item.last_synced_at)}</p>{stale(item) && <span className="mt-1 inline-block rounded-full bg-amber-100 px-2 py-0.5 text-xs font-bold text-amber-800">Desactualizada</span>}</td><td className="px-3 py-4"><div className="flex flex-col items-start gap-2"><button type="button" onClick={() => openSimulation(item)} className={primaryButton}>Simular precio</button><button type="button" onClick={() => openBrandChange(item)} className={secondaryButton}>Cambiar marca</button>{item.permalink && <a href={item.permalink} target="_blank" rel="noreferrer" className={secondaryButton}>Abrir en Mercado Libre</a>}</div></td></tr>)}
                                 {items.data.map((item) => (item.price_relations?.linked || item.stock_relations?.shared) && <tr key={`links-${item.id}`} className="bg-slate-50/70 dark:bg-neutral-950/40"><td colSpan="2" /><td colSpan="8" className="px-3 pb-3 text-xs"><div className="flex flex-wrap gap-3">{item.price_relations?.linked && <details><summary className="cursor-pointer rounded-full bg-indigo-100 px-3 py-1 font-bold text-indigo-800">Precio vinculado · {item.price_relations.items.length}</summary><div className="mt-1 rounded-lg border bg-white p-2 dark:bg-neutral-900">{item.price_relations.items.map((member) => <p key={member.meli_item_id}>{member.meli_item_id} · {money(member.price, item.currency_id)} · {member.catalog_listing ? 'Catálogo' : 'No catálogo'}</p>)}</div></details>}{item.stock_relations?.shared && <details><summary className="cursor-pointer rounded-full bg-emerald-100 px-3 py-1 font-bold text-emerald-800">Stock compartido · {item.stock_relations.items.length}</summary><div className="mt-1 rounded-lg border bg-white p-2 dark:bg-neutral-900"><p className="font-bold">Inventario {item.stock_relations.inventory_id}</p>{item.stock_relations.items.map((member) => <p key={member.meli_item_id}>{member.meli_item_id} · {member.stock ?? '—'}</p>)}</div></details>}</div></td></tr>)}
                             </tbody>
                         </table>
@@ -495,6 +535,7 @@ export default function Index({
                 </section>
             </div>
             <PriceSimulationModal item={simulationItem} price={simulationPrice} simulatedPrice={simulatedPrice} result={simulationResult} loading={simulationLoading} initialLoading={initialSimulationLoading} updating={priceUpdating} confirming={simulationConfirming} success={updateSuccess} error={simulationError} onPriceChange={(value) => { setSimulationPrice(value); setSimulationConfirming(false); setUpdateSuccess(null) }} onSubmit={calculateSimulation} onContinue={() => { if (simulationMatchesDraft(simulationPrice, simulatedPrice) && !simulationError) setSimulationConfirming(true) }} onCancelConfirmation={() => setSimulationConfirming(false)} onConfirm={confirmPriceUpdate} onClose={closeSimulation} />
+            <BrandChangeModal item={brandChangeItem} brands={brandOptions} brandId={brandChangeId} processing={brandChangeProcessing} error={brandChangeError} onBrandChange={setBrandChangeId} onConfirm={confirmBrandChange} onClose={() => { if (!brandChangeProcessing) setBrandChangeItem(null) }} />
         </AppShell>
     )
 }

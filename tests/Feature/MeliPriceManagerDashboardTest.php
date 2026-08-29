@@ -137,6 +137,100 @@ class MeliPriceManagerDashboardTest extends TestCase
         Http::assertNothingSent();
     }
 
+    public function test_brand_cards_and_active_brand_options_have_one_global_case_insensitive_order(): void
+    {
+        $account = $this->account();
+        foreach ([['Zep', 0], ['amazon Usa', 0], ['BaBylissPRO', 0], ['ALFAPARF', 50], ['AccessPRO', 50], ['Agate', 50]] as [$name, $sortOrder]) {
+            $brand = MeliBrandGroup::factory()->create(['name' => $name, 'sort_order' => $sortOrder]);
+            $this->categorized($account, ['brand_group_id' => $brand->id]);
+        }
+        MeliBrandGroup::factory()->create(['name' => 'Aardvark inactiva', 'active' => false]);
+        $expected = ['AccessPRO', 'Agate', 'ALFAPARF', 'amazon Usa', 'BaBylissPRO', 'Zep'];
+
+        $this->get(route('meli-price-manager.index', ['account' => $account->id]))
+            ->assertInertia(fn (Assert $page) => $page
+                ->where('brands', fn ($brands): bool => collect($brands)->pluck('name')->all() === $expected)
+                ->where('brandOptions', fn ($brands): bool => collect($brands)->pluck('name')->all() === $expected));
+    }
+
+    public function test_categorized_item_brand_can_be_changed_with_audited_internal_only_assignment(): void
+    {
+        Http::fake();
+        $account = $this->account();
+        $oldBrand = MeliBrandGroup::factory()->create(['name' => 'BaBylissPRO']);
+        $newBrand = MeliBrandGroup::factory()->create(['name' => 'ALFAPARF']);
+        $suggested = MeliBrandGroup::factory()->create();
+        $item = $this->categorized($account, [
+            'brand_group_id' => $oldBrand->id,
+            'suggested_brand_group_id' => $suggested->id,
+            'current_price' => 200,
+            'available_quantity' => 7,
+        ]);
+
+        $this->post(route('meli-price-manager.items.brand.update', $item), [
+            'meli_account_id' => $account->id,
+            'brand_group_id' => $newBrand->id,
+        ])->assertRedirect()->assertSessionHas('success');
+
+        $item->refresh();
+        $this->assertSame($newBrand->id, $item->brand_group_id);
+        $this->assertNull($item->suggested_brand_group_id);
+        $this->assertSame('categorized', $item->classification_status);
+        $this->assertSame('manual_assignment', $item->classification_source);
+        $this->assertSame('200.00', $item->current_price);
+        $this->assertSame(7, $item->available_quantity);
+        $decision = collect($item->classification_metadata['manual_decisions'])->last();
+        $this->assertSame('assign_brand', $decision['action']);
+        $this->assertSame($oldBrand->id, $decision['previous_brand_group_id']);
+        $this->assertSame($newBrand->id, $decision['selected_brand_group_id']);
+        $this->assertSame($this->user->id, $decision['user_id']);
+        Http::assertNothingSent();
+
+        $this->get(route('meli-price-manager.index', ['account' => $account->id, 'brand' => $newBrand->id]))
+            ->assertInertia(fn (Assert $page) => $page
+                ->has('items.data', 1)
+                ->where('items.data.0.id', $item->id)
+                ->where('brands', fn ($brands): bool => collect($brands)->firstWhere('id', $newBrand->id)['categorized_items_count'] === 1
+                    && collect($brands)->firstWhere('id', $oldBrand->id) === null));
+    }
+
+    public function test_same_brand_is_a_no_op_and_inactive_foreign_or_unfocused_assignments_are_rejected(): void
+    {
+        Http::fake();
+        $account = $this->account();
+        $brand = MeliBrandGroup::factory()->create();
+        $inactive = MeliBrandGroup::factory()->create(['active' => false]);
+        $item = $this->categorized($account, ['brand_group_id' => $brand->id]);
+        $metadata = $item->classification_metadata;
+        $updatedAt = $item->updated_at;
+
+        $this->post(route('meli-price-manager.items.brand.update', $item), [
+            'meli_account_id' => $account->id,
+            'brand_group_id' => $brand->id,
+        ])->assertRedirect()->assertSessionHas('info');
+        $this->assertSame($metadata, $item->fresh()->classification_metadata);
+        $this->assertTrue($updatedAt->equalTo($item->fresh()->updated_at));
+
+        $this->post(route('meli-price-manager.items.brand.update', $item), [
+            'meli_account_id' => $account->id,
+            'brand_group_id' => $inactive->id,
+        ])->assertSessionHasErrors('brand_group_id');
+
+        $foreignAccount = MeliAccount::factory()->create();
+        $foreignItem = $this->categorized($foreignAccount, ['brand_group_id' => $brand->id]);
+        $this->post(route('meli-price-manager.items.brand.update', $foreignItem), [
+            'meli_account_id' => $account->id,
+            'brand_group_id' => $brand->id,
+        ])->assertSessionHasErrors('item');
+
+        config()->set('meli_price_manager.focused_catalog.allowed_category_ids', ['MLM-OTHER']);
+        $this->post(route('meli-price-manager.items.brand.update', $item), [
+            'meli_account_id' => $account->id,
+            'brand_group_id' => $brand->id,
+        ])->assertSessionHasErrors('item');
+        Http::assertNothingSent();
+    }
+
     public function test_dashboard_exposes_only_authenticated_users_accounts(): void
     {
         $own = $this->account(['nickname' => 'Propia']);
