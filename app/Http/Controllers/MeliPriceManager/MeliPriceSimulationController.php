@@ -8,6 +8,7 @@ use App\Models\MeliPriceManagerItem;
 use App\Services\MercadoLibre\MeliApiRequestException;
 use App\Services\MercadoLibre\PriceManager\MeliPriceSimulationService;
 use App\Services\MercadoLibre\PriceManager\MeliPriceSimulationTokenService;
+use App\Services\MercadoLibre\LinkedPublications\MeliLinkedPublicationService;
 use Illuminate\Http\JsonResponse;
 use InvalidArgumentException;
 use UnexpectedValueException;
@@ -19,6 +20,7 @@ class MeliPriceSimulationController extends Controller
         int $item,
         MeliPriceSimulationService $service,
         MeliPriceSimulationTokenService $tokens,
+        MeliLinkedPublicationService $linkedPublications,
     ): JsonResponse {
         $publication = MeliPriceManagerItem::query()
             ->focusedCatalog()
@@ -34,6 +36,7 @@ class MeliPriceSimulationController extends Controller
             $issuedToken = $tokens->issue((int) $request->user()->id, $account, $publication, $simulation);
             $simulation['simulation_token'] = $issuedToken['token'];
             $simulation['simulation_expires_at'] = $issuedToken['expires_at'];
+            $simulation['price_relations'] = $linkedPublications->priceRelations($publication);
         } catch (InvalidArgumentException $exception) {
             return response()->json(['message' => $exception->getMessage()], 422);
         } catch (MeliApiRequestException|UnexpectedValueException) {

@@ -6,6 +6,7 @@ use App\Models\MeliAccount;
 use App\Models\MeliPriceManagerItem;
 use App\Services\MercadoLibre\MeliAccountApiClient;
 use App\Services\MercadoLibre\MeliApiRequestException;
+use App\Services\MercadoLibre\LinkedPublications\MeliLinkedPublicationService;
 use Carbon\CarbonInterface;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
@@ -25,6 +26,7 @@ class MeliPriceManagerSyncService
     public function __construct(
         private readonly MeliAccountApiClient $api,
         private readonly MeliBrandNormalizer $brandNormalizer,
+        private readonly MeliLinkedPublicationService $linkedPublications,
     ) {}
 
     /**
@@ -105,6 +107,21 @@ class MeliPriceManagerSyncService
 
                 try {
                     $wasCreated = $this->saveItem($account, $item, now());
+                    if ((array) ($item['item_relations'] ?? []) !== []) {
+                        $record = MeliPriceManagerItem::query()
+                            ->where('meli_account_id', $account->id)
+                            ->where('meli_item_id', $itemId)
+                            ->firstOrFail();
+                        try {
+                            $this->linkedPublications->refreshPriceRelations($account, $record);
+                        } catch (Throwable $relationException) {
+                            Log::warning('[MeliPriceManager] Price relation refresh failed', [
+                                'meli_account_id' => (int) $account->id,
+                                'meli_item_id' => $itemId,
+                                'message' => $this->sanitizeMessage($relationException->getMessage()),
+                            ]);
+                        }
+                    }
                     $summary[$wasCreated ? 'created' : 'updated']++;
                 } catch (Throwable $exception) {
                     $this->recordItemFailure(
@@ -251,6 +268,17 @@ class MeliPriceManagerSyncService
             'category_id' => $this->nullableString($item['category_id'] ?? null, 64),
             'listing_type_id' => $this->nullableString($item['listing_type_id'] ?? null, 64),
             'catalog_product_id' => $this->nullableString($item['catalog_product_id'] ?? null, 128),
+            'user_product_id' => $this->nullableString($item['user_product_id'] ?? null, 128),
+            'inventory_id' => $this->nullableString($item['inventory_id'] ?? null, 128),
+            'catalog_listing' => (bool) ($item['catalog_listing'] ?? false),
+            'price_relation_ids' => array_values(array_unique(array_filter(array_map(
+                static fn (mixed $relation): string => mb_strtoupper(trim((string) (is_array($relation) ? ($relation['id'] ?? '') : $relation)), 'UTF-8'),
+                (array) ($item['item_relations'] ?? []),
+            )))),
+            // A fresh item snapshot invalidates the previous buybox assertion until
+            // /public/buybox/sync confirms it again during this synchronization.
+            'price_sync_status' => null,
+            'linked_synced_at' => null,
             'meli_brand' => $this->nullableString($brand, 255),
             'normalized_brand' => $this->brandNormalizer->normalize($brand),
             'current_price' => (string) $price,

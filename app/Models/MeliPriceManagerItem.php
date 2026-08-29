@@ -18,7 +18,9 @@ class MeliPriceManagerItem extends Model
 
     protected $fillable = [
         'meli_account_id', 'meli_item_id', 'sku', 'title', 'category_id', 'listing_type_id',
-        'catalog_product_id', 'meli_brand', 'normalized_brand', 'brand_group_id',
+        'catalog_product_id', 'user_product_id', 'inventory_id', 'catalog_listing',
+        'price_sync_status', 'price_relation_ids', 'linked_synced_at',
+        'meli_brand', 'normalized_brand', 'brand_group_id',
         'suggested_brand_group_id', 'matched_brand_alias_id',
         'classification_status', 'classification_source', 'classification_confidence',
         'classification_metadata',
@@ -37,6 +39,9 @@ class MeliPriceManagerItem extends Model
             'sold_quantity' => 'integer',
             'raw_attributes' => 'array',
             'raw_item' => 'array',
+            'catalog_listing' => 'boolean',
+            'price_relation_ids' => 'array',
+            'linked_synced_at' => 'datetime',
             'last_synced_at' => 'datetime',
         ];
     }

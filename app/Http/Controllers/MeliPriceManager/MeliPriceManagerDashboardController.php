@@ -10,6 +10,7 @@ use App\Models\MeliBrandGroup;
 use App\Models\MeliCategory;
 use App\Models\MeliPriceManagerItem;
 use App\Services\MercadoLibre\PriceManager\MeliHistoricalTaxRuleService;
+use App\Services\MercadoLibre\LinkedPublications\MeliLinkedPublicationService;
 use Illuminate\Bus\UniqueLock;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\RedirectResponse;
@@ -31,7 +32,11 @@ class MeliPriceManagerDashboardController extends Controller
         'last_synced_at' => 'last_synced_at',
     ];
 
-    public function index(Request $request, MeliHistoricalTaxRuleService $historicalTaxRules): Response
+    public function index(
+        Request $request,
+        MeliHistoricalTaxRuleService $historicalTaxRules,
+        MeliLinkedPublicationService $linkedPublications,
+    ): Response
     {
         $accounts = $request->user()->meliAccounts()
             ->orderByDesc('is_default')
@@ -91,6 +96,8 @@ class MeliPriceManagerDashboardController extends Controller
                 'id', 'meli_account_id', 'meli_item_id', 'sku', 'title', 'category_id', 'meli_brand',
                 'brand_group_id', 'classification_status', 'current_price', 'available_quantity',
                 'currency_id', 'status', 'permalink', 'thumbnail', 'last_synced_at',
+                'user_product_id', 'inventory_id', 'catalog_listing', 'price_sync_status',
+                'price_relation_ids', 'linked_synced_at',
             ])
             ->with(['brandGroup:id,name', 'category:id,category_id,name'])
             ->when($accountId, fn (Builder $query, int $id) => $query->where('meli_account_id', $id))
@@ -128,6 +135,26 @@ class MeliPriceManagerDashboardController extends Controller
             ->orderBy('id')
             ->paginate($perPage)
             ->withQueryString();
+        $pageItems = collect($items->items());
+        $relationIds = $pageItems->flatMap(fn (MeliPriceManagerItem $item): array => (array) $item->price_relation_ids)->filter()->unique();
+        $inventoryIds = $pageItems->pluck('inventory_id')->filter()->unique();
+        $linkedPool = ($accountId !== null && ($relationIds->isNotEmpty() || $inventoryIds->isNotEmpty()))
+            ? MeliPriceManagerItem::query()
+                ->where('meli_account_id', $accountId)
+                ->where(function (Builder $query) use ($relationIds, $inventoryIds): void {
+                    $query->when($relationIds->isNotEmpty(), fn (Builder $query) => $query->whereIn('meli_item_id', $relationIds))
+                        ->when($inventoryIds->isNotEmpty(), fn (Builder $query) => $query->orWhereIn('inventory_id', $inventoryIds));
+                })
+                ->get(['id', 'meli_account_id', 'meli_item_id', 'title', 'current_price', 'available_quantity', 'catalog_listing', 'inventory_id', 'user_product_id'])
+                ->concat($pageItems)
+                ->unique('id')
+            : $pageItems;
+        $items->through(function (MeliPriceManagerItem $item) use ($linkedPublications, $linkedPool): MeliPriceManagerItem {
+            $item->setAttribute('price_relations', $linkedPublications->priceRelations($item, $linkedPool));
+            $item->setAttribute('stock_relations', $linkedPublications->stockRelations($item, $linkedPool));
+
+            return $item;
+        });
         $categoryNames = Schema::hasTable('meli_categories')
             ? MeliCategory::query()->whereIn('category_id', $availableCategories)->pluck('name', 'category_id')
             : collect();

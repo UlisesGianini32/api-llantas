@@ -27,6 +27,8 @@ class MeliPriceUpdateTest extends TestCase
 
     private object $taxProfileMigration;
 
+    private object $linkedPublicationsMigration;
+
     private User $user;
 
     protected function setUp(): void
@@ -93,6 +95,8 @@ class MeliPriceUpdateTest extends TestCase
 
         $this->foundationMigration = require database_path('migrations/2026_08_26_000001_create_meli_price_manager_tables.php');
         $this->foundationMigration->up();
+        $this->linkedPublicationsMigration = require database_path('migrations/2026_08_29_000001_add_linked_publication_fields_to_meli_price_manager_items.php');
+        $this->linkedPublicationsMigration->up();
         $this->taxProfileMigration = require database_path('migrations/2026_08_27_000002_create_meli_account_tax_profiles_table.php');
         $this->taxProfileMigration->up();
 
@@ -105,6 +109,7 @@ class MeliPriceUpdateTest extends TestCase
     {
         Cache::flush();
         $this->taxProfileMigration->down();
+        $this->linkedPublicationsMigration->down();
         $this->foundationMigration->down();
         Schema::dropIfExists('automotive_part_meli_publications');
         Schema::dropIfExists('syscom_meli_queues');
@@ -200,7 +205,7 @@ class MeliPriceUpdateTest extends TestCase
             if (str_contains($request->url(), '/pricing-automation/')) {
                 return Http::response(['message' => 'automation_not_found'], 404);
             }
-            if (str_ends_with($request->url(), '/prices')) {
+            if (str_contains($request->url(), '/prices?display_version=true')) {
                 $priceReads++;
 
                 return Http::response([[
@@ -258,7 +263,7 @@ class MeliPriceUpdateTest extends TestCase
 
         Http::assertSentCount(1);
         Http::assertSent(fn (Request $request): bool => $request->method() === 'GET'
-            && str_ends_with($request->url(), '/items/MLM1343389489/prices'));
+            && str_contains($request->url(), '/items/MLM1343389489/prices?display_version=true'));
     }
 
     /** @return iterable<string, array{array<string|int, mixed>, float|null}> */
@@ -276,6 +281,15 @@ class MeliPriceUpdateTest extends TestCase
             ['type' => 'standard', 'amount' => 580, 'conditions' => ['context_restrictions' => []]],
             ['type' => 'standard', 'amount' => 599, 'conditions' => ['context_restrictions' => ['channel_marketplace']]],
         ], 599.0];
+
+        yield 'marketplace 420 wins over mshops 376' => [[
+            ['type' => 'standard', 'amount' => 376, 'conditions' => ['context_restrictions' => ['channel_mshops']]],
+            ['type' => 'standard', 'amount' => 420, 'conditions' => ['context_restrictions' => ['channel_marketplace']]],
+        ], 420.0];
+
+        yield 'general standard 420 is accepted' => [[
+            ['type' => 'standard', 'amount' => 420, 'conditions' => ['context_restrictions' => []]],
+        ], 420.0];
 
         yield 'multiple standards with two marketplace prices' => [[
             ['type' => 'standard', 'amount' => 580, 'conditions' => ['context_restrictions' => ['channel_marketplace']]],
@@ -378,7 +392,7 @@ class MeliPriceUpdateTest extends TestCase
                 return Http::response(['message' => 'automation_not_found'], 404);
             }
 
-            if (str_ends_with($request->url(), '/prices')) {
+            if (str_contains($request->url(), '/prices?display_version=true')) {
                 DB::table('llantas')->insert(['MLM' => $item->meli_item_id, 'sku' => null]);
 
                 return Http::response($this->prices(1531.20));
@@ -519,7 +533,7 @@ class MeliPriceUpdateTest extends TestCase
             if (str_contains($request->url(), '/pricing-automation/')) {
                 return Http::response([], 404);
             }
-            if (str_ends_with($request->url(), '/prices')) {
+            if (str_contains($request->url(), '/prices?display_version=true')) {
                 $priceReads[$status]++;
 
                 return Http::response($this->prices(1531.20));
@@ -564,7 +578,7 @@ class MeliPriceUpdateTest extends TestCase
                     ['type' => 'promotion', 'amount' => 1400, 'conditions' => ['context_restrictions' => ['channel_marketplace']]],
                 ]]);
             }
-            if (str_ends_with($request->url(), '/prices')) {
+            if (str_contains($request->url(), '/prices?display_version=true')) {
                 $unconfirmedReads++;
 
                 return Http::response($this->prices(1531.20));
@@ -605,7 +619,7 @@ class MeliPriceUpdateTest extends TestCase
             if (str_contains($request->url(), '/pricing-automation/')) {
                 return Http::response([], 404);
             }
-            if (str_ends_with($request->url(), '/prices')) {
+            if (str_contains($request->url(), '/prices?display_version=true')) {
                 $priceReads++;
 
                 return $priceReads === 1
@@ -647,7 +661,7 @@ class MeliPriceUpdateTest extends TestCase
             if (str_contains($request->url(), '/pricing-automation/')) {
                 return Http::response([], 404);
             }
-            if (str_ends_with($request->url(), '/prices')) {
+            if (str_contains($request->url(), '/prices?display_version=true')) {
                 return Http::response($this->prices(1531.20));
             }
             if ($request->method() === 'PUT') {
@@ -748,6 +762,109 @@ class MeliPriceUpdateTest extends TestCase
     }
 
     /** @param array<string, mixed> $overrides */
+    public function test_real_two_pairs_use_one_put_and_never_touch_the_other_pair(): void
+    {
+        [$account, $a, $b, $c, $d] = $this->realLinkedPairs();
+        $this->fakeLinkedPriceUpdate(420, 420, 'SYNC');
+
+        $response = $this->putJson(route('meli-price-manager.items.price.update', $a), [
+            'simulation_token' => $this->token($account, $a, 420),
+            'price' => 420,
+        ])->assertOk()->assertJsonPath('data.price_propagated', true);
+
+        $this->assertSame('420.00', $a->fresh()->current_price);
+        $this->assertSame('420.00', $b->fresh()->current_price);
+        $this->assertSame('361.00', $c->fresh()->current_price);
+        $this->assertSame('361.00', $d->fresh()->current_price);
+        $writes = collect(Http::recorded())->filter(fn (array $pair): bool => $pair[0]->method() === 'PUT');
+        $this->assertCount(1, $writes);
+        $this->assertStringEndsWith('/items/MLM1400075673', $writes->sole()[0]->url());
+        foreach (['MLM1910233204', 'MLM1904073073', 'MLM2237586680'] as $untouched) {
+            $this->assertFalse($writes->contains(fn (array $pair): bool => str_contains($pair[0]->url(), $untouched)));
+        }
+        foreach (['MLM1400075673', 'MLM1910233204'] as $readId) {
+            Http::assertSent(fn (Request $request): bool => $request->method() === 'GET'
+                && parse_url($request->url(), PHP_URL_PATH) === '/items/'.$readId);
+        }
+        $response->assertJsonPath('data.price_relations.status', 'SYNC');
+    }
+
+    public function test_linked_price_propagation_failure_persists_each_remote_price_without_putting_related_item(): void
+    {
+        [$account, $a, $b] = $this->realLinkedPairs();
+        $this->fakeLinkedPriceUpdate(420, 399, 'SYNC');
+
+        $this->putJson(route('meli-price-manager.items.price.update', $a), [
+            'simulation_token' => $this->token($account, $a, 420),
+            'price' => 420,
+        ])->assertOk()->assertJsonPath('data.price_propagated', false);
+
+        $this->assertSame('420.00', $a->fresh()->current_price);
+        $this->assertSame('399.00', $b->fresh()->current_price);
+        $writes = collect(Http::recorded())->filter(fn (array $pair): bool => $pair[0]->method() === 'PUT');
+        $this->assertCount(1, $writes);
+        $this->assertStringEndsWith('/items/MLM1400075673', $writes->sole()[0]->url());
+    }
+
+    public function test_non_sync_relation_updates_only_selected_item_and_keeps_detected_relation(): void
+    {
+        [$account, $a, $b] = $this->realLinkedPairs();
+        $this->fakeLinkedPriceUpdate(420, 399, 'OUT_OF_SYNC');
+
+        $this->putJson(route('meli-price-manager.items.price.update', $a), [
+            'simulation_token' => $this->token($account, $a, 420),
+            'price' => 420,
+        ])->assertOk()->assertJsonPath('data.price_relations.linked', false)
+            ->assertJsonPath('data.price_relations.detected', true);
+
+        $this->assertSame('420.00', $a->fresh()->current_price);
+        $this->assertSame('399.00', $b->fresh()->current_price);
+        $this->assertSame('OUT_OF_SYNC', $a->fresh()->price_sync_status);
+        $this->assertSame(['MLM1910233204'], $a->fresh()->price_relation_ids);
+        $this->assertCount(1, collect(Http::recorded())->filter(fn (array $pair): bool => $pair[0]->method() === 'PUT'));
+    }
+
+    /** @return array{MeliAccount, MeliPriceManagerItem, MeliPriceManagerItem, MeliPriceManagerItem, MeliPriceManagerItem} */
+    private function realLinkedPairs(): array
+    {
+        $account = $this->account();
+        $make = fn (string $id, float $price, string $relation): MeliPriceManagerItem => $this->item($account, [
+            'meli_item_id' => $id,
+            'current_price' => $price,
+            'user_product_id' => 'MLMU881417340',
+            'inventory_id' => 'ZIIL82640',
+            'price_sync_status' => 'SYNC',
+            'price_relation_ids' => [$relation],
+            'raw_item' => ['item_relations' => [['id' => $relation]]],
+        ]);
+
+        return [$account,
+            $make('MLM1400075673', 399, 'MLM1910233204'),
+            $make('MLM1910233204', 399, 'MLM1400075673'),
+            $make('MLM1904073073', 361, 'MLM2237586680'),
+            $make('MLM2237586680', 361, 'MLM1904073073'),
+        ];
+    }
+
+    private function fakeLinkedPriceUpdate(float $aPrice, float $bPrice, string $status): void
+    {
+        $aPriceReads = 0;
+        Http::fake(function (Request $request) use ($aPrice, $bPrice, $status, &$aPriceReads) {
+            $url = $request->url();
+            if (str_contains($url, '/pricing-automation/')) return Http::response(['message' => 'not found'], 404);
+            if (str_contains($url, '/public/buybox/sync/')) return Http::response(['status' => $status, 'relations' => [['id' => 'MLM1910233204']]]);
+            if (str_contains($url, '/items/MLM1400075673/prices')) {
+                $aPriceReads++;
+                return Http::response($this->prices($aPriceReads === 1 ? 399 : $aPrice));
+            }
+            if (str_contains($url, '/items/MLM1910233204/prices')) return Http::response($this->prices($bPrice));
+            if ($request->method() === 'PUT') return Http::response(['price' => 420]);
+            if (parse_url($url, PHP_URL_PATH) === '/items/MLM1400075673') return Http::response(['id' => 'MLM1400075673', 'price' => $aPrice, 'item_relations' => [['id' => 'MLM1910233204']]]);
+            if (parse_url($url, PHP_URL_PATH) === '/items/MLM1910233204') return Http::response(['id' => 'MLM1910233204', 'price' => $bPrice, 'item_relations' => [['id' => 'MLM1400075673']]]);
+            return Http::response(['message' => 'unexpected'], 500);
+        });
+    }
+
     private function account(array $overrides = []): MeliAccount
     {
         return MeliAccount::factory()->for($this->user)->create([
@@ -912,7 +1029,7 @@ class MeliPriceUpdateTest extends TestCase
             if (str_contains($request->url(), '/pricing-automation/')) {
                 return Http::response(['message' => 'automation_not_found'], 404);
             }
-            if (str_ends_with($request->url(), '/prices')) {
+            if (str_contains($request->url(), '/prices?display_version=true')) {
                 $priceReads++;
 
                 return Http::response($this->prices($priceReads === 1 ? $oldPrice : $confirmedPrice));
