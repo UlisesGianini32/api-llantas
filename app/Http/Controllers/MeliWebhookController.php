@@ -5,6 +5,8 @@ namespace App\Http\Controllers;
 use App\Jobs\ProcessMeliMessageNotification;
 use App\Jobs\ProcessMeliOrderNotification;
 use App\Jobs\ProcessMeliQuestionNotification;
+use App\Jobs\SyncMeliClaimJob;
+use App\Models\MeliAccount;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 
@@ -22,7 +24,6 @@ class MeliWebhookController extends Controller
             'topic' => $topic,
             'resource' => $resource,
             'application_id' => $appId,
-            'payload' => $payload,
         ]);
 
         $configuredAppId = (string) (config('services.meli.app_id') ?? '');
@@ -152,16 +153,38 @@ class MeliWebhookController extends Controller
             ], 200);
         }
 
-        if ($topic === 'post_purchase') {
-            Log::info('MELI WEBHOOK: post_purchase recibido (reclamos/post-compra — sin integración)', [
-                'resource' => $resource,
+        if (in_array($topic, ['claims', 'claims_actions', 'post_purchase'], true)) {
+            if ($topic === 'post_purchase') {
+                $actions = array_values(array_filter(array_map(
+                    static fn (mixed $action): string => trim((string) $action),
+                    (array) ($payload['actions'] ?? []),
+                )));
+                if (array_intersect($actions, ['claims', 'claims_actions']) === []) {
+                    return response()->json([
+                        'ok' => true,
+                        'ignored' => true,
+                        'reason' => 'unsupported_post_purchase_action',
+                    ]);
+                }
+            }
+
+            if (! preg_match('#^/?post-purchase/v1/claims/(\d+)(?:/.*)?$#', $resource, $matches)) {
+                return response()->json(['ok' => true, 'ignored' => true, 'reason' => 'invalid_claim_resource']);
+            }
+
+            $account = MeliAccount::query()
+                ->where('meli_user_id', (string) ($payload['user_id'] ?? ''))
+                ->first();
+            if (! $account) {
+                return response()->json(['ok' => true, 'ignored' => true, 'reason' => 'claim_account_not_found']);
+            }
+
+            SyncMeliClaimJob::dispatch((int) $account->id, $matches[1])->onQueue('meli');
+            Log::info('MELI WEBHOOK: reclamo encolado', [
+                'topic' => $topic, 'claim_id' => $matches[1], 'meli_account_id' => $account->id,
             ]);
 
-            return response()->json([
-                'ok' => true,
-                'ignored' => true,
-                'reason' => 'post_purchase_not_implemented',
-            ], 200);
+            return response()->json(['ok' => true]);
         }
 
         Log::warning('MELI WEBHOOK: topic no soportado', [

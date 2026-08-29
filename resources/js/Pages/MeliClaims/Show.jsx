@@ -1,0 +1,16 @@
+import AppShell from '@/Components/layout/AppShell'
+import { Head, Link } from '@inertiajs/react'
+
+const dump = (value) => Array.isArray(value) ? value : value?.data || value?.results || []
+const date = (value) => value ? new Date(value).toLocaleString('es-MX') : '—'
+
+export default function Show({ claim }) {
+    return <AppShell title="Reclamos"><Head title={`Reclamo ${claim.claim_id}`} /><div className="mx-auto max-w-5xl space-y-5 p-4 sm:p-6"><Link href="/meli-claims" className="text-sm font-bold text-indigo-600">← Volver a reclamos</Link><header><h1 className="text-2xl font-black">Reclamo {claim.claim_id}</h1><p className="text-slate-500">Solo lectura. Ninguna acción se ejecuta en Mercado Libre.</p></header>
+        <section className="grid gap-4 md:grid-cols-2"><Card title="Resumen"><Rows rows={[['Cuenta',claim.account?.nickname || claim.account?.meli_user_id],['Pedido',claim.order_id],['Producto',claim.product?.title],['MLM',claim.product?.mlm],['SKU',claim.product?.sku],['Monto local relacionado',claim.order_amount],['Estado',claim.status],['Etapa',claim.stage],['Tipo',claim.type],['Creado',date(claim.date_created)],['Actualizado',date(claim.last_updated)]]} /></Card><Card title="Problema"><Rows rows={[['Motivo',claim.reason],['Título',claim.detail_title],['Descripción',claim.detail_description],['Problema',claim.problem]]} /></Card><Card title="Reputación"><Rows rows={[['Resultado',claim.affects_reputation === true ? 'Afecta reputación' : claim.affects_reputation === false ? 'No afecta reputación' : 'Sin información'],['Tiene incentivo',claim.reputation_has_incentive === true ? 'Sí' : claim.reputation_has_incentive === false ? 'No' : 'Sin información'],['Plazo',date(claim.reputation_due_date)]]} /></Card><Card title="Resolución disponible (informativa)"><JsonList values={dump(claim.expected_resolutions)} /><h3 className="mt-4 font-bold">Acciones disponibles según Mercado Libre</h3><JsonList values={dump(claim.available_actions)} /></Card></section>
+        <Card title="Historial de estados"><Timeline values={dump(claim.status_history)} /></Card><Card title="Historial de acciones"><Timeline values={dump(claim.actions_history)} /></Card>
+    </div></AppShell>
+}
+function Card({title,children}) { return <section className="rounded-xl border bg-white p-5 dark:border-neutral-800 dark:bg-neutral-900"><h2 className="mb-4 text-lg font-black">{title}</h2>{children}</section> }
+function Rows({rows}) { return <dl className="space-y-2">{rows.map(([k,v]) => <div key={k}><dt className="text-xs font-bold uppercase text-slate-500">{k}</dt><dd className="whitespace-pre-wrap">{v ?? '—'}</dd></div>)}</dl> }
+function JsonList({values}) { return values.length ? <ul className="list-disc space-y-1 pl-5">{values.map((v,i)=><li key={i}>{typeof v === 'string' ? v : v.name || v.type || v.action || JSON.stringify(v)}</li>)}</ul> : <p className="text-slate-500">Sin información.</p> }
+function Timeline({values}) { return values.length ? <ol className="space-y-3 border-l pl-4">{values.map((v,i)=><li key={i}><p className="font-bold">{v.status || v.action || v.type || 'Evento'}</p><p className="text-sm text-slate-500">{date(v.date || v.date_created || v.created_at)}</p><p className="text-sm">{v.description || v.reason || ''}</p></li>)}</ol> : <p className="text-slate-500">Sin historial disponible.</p> }

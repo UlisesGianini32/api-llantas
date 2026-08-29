@@ -230,6 +230,14 @@ function SidebarNav({ currentPath, onNavigate, pendingQuestions = 0 }) {
                     </NavItem>
 
                     <NavItem
+                        href="/meli-claims"
+                        active={currentPath.startsWith('/meli-claims')}
+                        onNavigate={onNavigate}
+                    >
+                        Reclamos
+                    </NavItem>
+
+                    <NavItem
                         href="/meli/publicaciones"
                         active={currentPath.startsWith('/meli/publicaciones')}
                         onNavigate={onNavigate}

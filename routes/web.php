@@ -8,6 +8,7 @@ use App\Http\Controllers\ExcelImportController;
 use App\Http\Controllers\LlantaController;
 use App\Http\Controllers\MeliBatchRepublishController;
 use App\Http\Controllers\MeliCompareController;
+use App\Http\Controllers\MeliClaimController;
 use App\Http\Controllers\MeliFullStockController;
 use App\Http\Controllers\MeliMessagingController;
 use App\Http\Controllers\MeliPriceManager\MeliAccountTaxProfileController;
@@ -122,6 +123,10 @@ Route::middleware('auth')->group(function () {
     Route::post('/meli/preguntas/{question}/responder', [MeliQuestionController::class, 'answer'])
         ->whereNumber('question')
         ->name('meli.questions.answer');
+
+    Route::get('/meli-claims', [MeliClaimController::class, 'index'])->name('meli.claims.index');
+    Route::post('/meli-claims/sync', [MeliClaimController::class, 'sync'])->name('meli.claims.sync');
+    Route::get('/meli-claims/{claim}', [MeliClaimController::class, 'show'])->whereNumber('claim')->name('meli.claims.show');
 
     // PEDIDOS PRINCIPALES
     Route::get('/ams/pedidos', [AmsPedidosController::class, 'index'])->name('ams.pedidos.index');

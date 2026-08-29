@@ -93,6 +93,12 @@ Schedule::command('meli:sync-questions --pages=4')
     ->runInBackground()
     ->appendOutputTo(storage_path('logs/meli-questions-sync.log'));
 
+Schedule::command('meli:sync-claims --days=30')
+    ->everyFiveMinutes()
+    ->withoutOverlapping()
+    ->runInBackground()
+    ->appendOutputTo(storage_path('logs/meli-claims-sync.log'));
+
 // Sincronizar inventario/precio local con Mercado Libre cada 15 minutos.
 // Este comando ya no consulta SYSCOM; la consulta rápida de SYSCOM corre aparte cada hora.
 Schedule::command('meli:sync-stock')
