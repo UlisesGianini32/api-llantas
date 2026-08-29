@@ -26,6 +26,15 @@ export function simulationResultPresentation(draftPrice, simulatedPrice, hasResu
     }
 }
 
+export function currentReceivableForItem(item, updatedReceivables = {}, currentPrice = item?.current_price) {
+    if (!Object.prototype.hasOwnProperty.call(updatedReceivables, item?.id)) {
+        return item?.current_estimated_receivable ?? null
+    }
+
+    const snapshot = updatedReceivables[item.id]
+    return snapshot && simulationMatchesDraft(currentPrice, snapshot.price) ? snapshot.amount : null
+}
+
 export function shippingPresentation(result, fallbackCurrency = 'MXN') {
     const shipping = result?.charges?.shipping || {}
     const available = shipping.available === true

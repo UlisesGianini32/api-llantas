@@ -23,6 +23,7 @@ class MeliPriceUpdateService
         private readonly MeliAccountApiClient $api,
         private readonly MeliPriceSimulationTokenService $tokens,
         private readonly MeliLinkedPublicationService $linkedPublications,
+        private readonly MeliEstimatedReceivableSnapshotService $receivableSnapshots,
     ) {}
 
     /** @return array<string, float|int|string> */
@@ -183,6 +184,10 @@ class MeliPriceUpdateService
                     'failed_items' => 0,
                 ])->save();
             });
+            $receivableSnapshot = $this->receivableSnapshots->storeForCurrentPrice(
+                $item->refresh(),
+                (array) ($snapshot['simulation'] ?? []),
+            );
             $this->tokens->consume($simulationToken);
 
             return [
@@ -195,6 +200,7 @@ class MeliPriceUpdateService
                 'updated_at' => now()->toISOString(),
                 'price_propagated' => $pricePropagated,
                 'price_relations' => $priceRelation,
+                'receivable_snapshot' => $receivableSnapshot,
             ];
         } catch (Throwable $exception) {
             if ($remoteConfirmed) {
