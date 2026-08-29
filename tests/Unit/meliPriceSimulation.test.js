@@ -1,6 +1,20 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { canContinueWithSimulation, priceInCents, shippingPresentation, simulationMatchesDraft } from '../../resources/js/lib/meliPriceSimulation.js'
+import { canContinueWithSimulation, initialSimulationPrice, priceInCents, shippingPresentation, simulationMatchesDraft, simulationResultPresentation } from '../../resources/js/lib/meliPriceSimulation.js'
+
+test('la apertura usa el precio actual o el último precio confirmado localmente', () => {
+    const item = { id: 7, current_price: '200.00' }
+
+    assert.equal(initialSimulationPrice(item), '200.00')
+    assert.equal(initialSimulationPrice(item, { 7: 220 }), 220)
+    assert.equal(initialSimulationPrice({ id: 8, current_price: null }), '')
+})
+
+test('cambiar el draft conserva visible el resultado anterior y lo marca desactualizado', () => {
+    assert.deepEqual(simulationResultPresentation(200, 200, true), { visible: true, stale: false })
+    assert.deepEqual(simulationResultPresentation(220, 200, true), { visible: true, stale: true })
+    assert.deepEqual(simulationResultPresentation(220, null, false), { visible: false, stale: false })
+})
 
 test('habilita continuar sólo para el precio de la última simulación', () => {
     assert.equal(simulationMatchesDraft('220', 220), true)
@@ -21,6 +35,11 @@ test('un error o una petición en curso impiden continuar aunque el precio coinc
     assert.equal(canContinueWithSimulation(220, 220, { hasResult: true, error: 'Error remoto' }), false)
     assert.equal(canContinueWithSimulation(220, 220, { hasResult: true, loading: true }), false)
     assert.equal(canContinueWithSimulation(220, 220, { hasResult: false }), false)
+})
+
+test('después de editar exige recalcular y vuelve a habilitar al simular el nuevo precio', () => {
+    assert.equal(canContinueWithSimulation(220, 200, { hasResult: true }), false)
+    assert.equal(canContinueWithSimulation(220, 220, { hasResult: true }), true)
 })
 
 test('presenta envío disponible, cero y no disponible sin confundir null con cero', () => {

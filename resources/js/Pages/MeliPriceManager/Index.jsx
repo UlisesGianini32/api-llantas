@@ -1,7 +1,7 @@
 import AppShell from '@/Components/layout/AppShell'
-import { canContinueWithSimulation, shippingPresentation, simulationMatchesDraft } from '@/lib/meliPriceSimulation'
+import { canContinueWithSimulation, initialSimulationPrice, shippingPresentation, simulationMatchesDraft, simulationResultPresentation } from '@/lib/meliPriceSimulation'
 import { Head, Link, router } from '@inertiajs/react'
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 
 const fieldClass =
     'w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 dark:border-neutral-700 dark:bg-neutral-950 dark:text-white'
@@ -160,13 +160,14 @@ function ChargesBreakdown({ result, currency }) {
     </div>
 }
 
-function PriceSimulationModal({ item, price, simulatedPrice, result, loading, updating, confirming, success, error, onPriceChange, onSubmit, onContinue, onCancelConfirmation, onConfirm, onClose }) {
+function PriceSimulationModal({ item, price, simulatedPrice, result, loading, initialLoading, updating, confirming, success, error, onPriceChange, onSubmit, onContinue, onCancelConfirmation, onConfirm, onClose }) {
     if (!item) return null
 
     const currency = result?.currency_id || item.currency_id || 'MXN'
     const priceDifference = result ? Number(result.proposed_price) - Number(result.current_price) : 0
     const busy = loading || updating
-    const priceMatchesSimulation = Boolean(result) && simulationMatchesDraft(price, simulatedPrice)
+    const resultPresentation = simulationResultPresentation(price, simulatedPrice, Boolean(result))
+    const priceMatchesSimulation = resultPresentation.visible && !resultPresentation.stale
     const currentSimulation = canContinueWithSimulation(price, simulatedPrice, { hasResult: Boolean(result), error, loading, updating })
     const priceRelation = result?.price_relations || item.price_relations
     const relatedItems = (priceRelation?.items || []).filter((member) => member.meli_item_id !== item.meli_item_id)
@@ -175,7 +176,7 @@ function PriceSimulationModal({ item, price, simulatedPrice, result, loading, up
         <div className="max-h-[95vh] w-full max-w-2xl overflow-y-auto rounded-2xl bg-white shadow-2xl dark:bg-neutral-900">
             <div className="flex items-start justify-between gap-4 border-b border-slate-200 p-5 dark:border-neutral-800">
                 <div><p className="text-xs font-bold uppercase tracking-wide text-indigo-600">Simulación de precio</p><h2 id="price-simulation-title" className="mt-1 text-xl font-bold">{item.title}</h2><p className="mt-1 text-xs text-slate-500">{item.meli_item_id} · SKU: {item.sku || '—'}</p></div>
-                <button type="button" onClick={onClose} disabled={busy} className={secondaryButton}>Cerrar</button>
+                <button type="button" onClick={onClose} disabled={updating} className={secondaryButton}>Cerrar</button>
             </div>
 
             {success ? <div className="space-y-5 p-5">
@@ -184,6 +185,7 @@ function PriceSimulationModal({ item, price, simulatedPrice, result, loading, up
             </div> : <>
             {priceRelation?.linked && <div className="mx-5 mt-5 rounded-xl border border-indigo-200 bg-indigo-50 p-4 text-sm dark:border-indigo-500/30 dark:bg-indigo-500/10"><p className="font-extrabold text-indigo-800 dark:text-indigo-200">Publicación vinculada</p><p className="mt-1">Este precio está sincronizado por Mercado Libre con otra publicación.</p>{relatedItems.map((member) => <div key={member.meli_item_id}><p className="mt-2 font-bold">{item.meli_item_id} ({item.catalog_listing ? 'Catálogo' : 'No catálogo'}) ↔ Mercado Libre SYNC ↔ {member.meli_item_id} ({member.catalog_listing ? 'Catálogo' : 'No catálogo'})</p>{confirming && <p className="mt-2 rounded-lg bg-amber-100 p-2 font-semibold text-amber-900">Este cambio también puede reflejarse automáticamente en {member.meli_item_id} porque Mercado Libre mantiene ambas publicaciones sincronizadas.</p>}</div>)}</div>}
             {priceRelation?.detected && !priceRelation?.linked && <div className="mx-5 mt-5 rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm font-semibold text-amber-900 dark:bg-amber-500/10 dark:text-amber-200">Relación detectada, pero Mercado Libre no indica sincronización activa.</div>}
+            {initialLoading && <p className="mx-5 mt-5 rounded-xl bg-slate-50 p-3 text-sm font-semibold text-slate-600 dark:bg-neutral-800 dark:text-slate-300">Calculando cargos del precio actual…</p>}
             <form onSubmit={onSubmit} className="grid gap-4 border-b border-slate-200 p-5 sm:grid-cols-2 dark:border-neutral-800">
                 <div><p className="text-xs font-bold text-slate-500">Precio actual</p><p className="mt-1 text-2xl font-bold">{money(item.current_price, currency)}</p></div>
                 <label><span className="mb-1 block text-xs font-bold">Nuevo precio</span><input type="number" min="0.01" max="999999999.99" step="0.01" required autoFocus disabled={confirming || updating} value={price} onChange={(event) => onPriceChange(event.target.value)} className={fieldClass} /></label>
@@ -306,11 +308,13 @@ export default function Index({
     const [simulatedPrice, setSimulatedPrice] = useState(null)
     const [simulationResult, setSimulationResult] = useState(null)
     const [simulationLoading, setSimulationLoading] = useState(false)
+    const [initialSimulationLoading, setInitialSimulationLoading] = useState(false)
     const [priceUpdating, setPriceUpdating] = useState(false)
     const [simulationConfirming, setSimulationConfirming] = useState(false)
     const [updateSuccess, setUpdateSuccess] = useState(null)
     const [simulationError, setSimulationError] = useState('')
     const [updatedPrices, setUpdatedPrices] = useState({})
+    const simulationRequestId = useRef(0)
     const allSelected = items.data.length > 0 && items.data.every((item) => selectedIds.includes(item.id))
     const selectedAccount = useMemo(() => accounts.find((account) => Number(account.id) === Number(selectedAccountId)), [accounts, selectedAccountId])
 
@@ -327,34 +331,61 @@ export default function Index({
 
     const stale = (item) => !item.last_synced_at || new Date(item.last_synced_at) < new Date(syncStatus.stale_before)
 
+    const runSimulation = async (item, price, initial = false) => {
+        const requestId = ++simulationRequestId.current
+        setSimulationLoading(true)
+        setInitialSimulationLoading(initial)
+        setSimulationError('')
+        setSimulationConfirming(false)
+        setUpdateSuccess(null)
+        try {
+            const result = await simulatePrice(item.id, price)
+            if (requestId !== simulationRequestId.current) return
+            setSimulationResult(result)
+            setSimulatedPrice(result.proposed_price)
+        } catch (requestError) {
+            if (requestId !== simulationRequestId.current) return
+            setSimulationError(requestError instanceof Error ? requestError.message : 'No fue posible calcular los cargos.')
+        } finally {
+            if (requestId === simulationRequestId.current) {
+                setSimulationLoading(false)
+                setInitialSimulationLoading(false)
+            }
+        }
+    }
+
     const openSimulation = (item) => {
-        const currentPrice = updatedPrices[item.id] ?? item.current_price
-        setSimulationItem({ ...item, current_price: currentPrice })
+        const currentPrice = initialSimulationPrice(item, updatedPrices)
+        const selectedItem = { ...item, current_price: currentPrice }
+        ++simulationRequestId.current
+        setSimulationItem(selectedItem)
         setSimulationPrice(currentPrice ?? '')
         setSimulationResult(null)
         setSimulatedPrice(null)
         setSimulationConfirming(false)
         setUpdateSuccess(null)
         setSimulationError('')
+        void runSimulation(selectedItem, currentPrice, true)
     }
 
     const calculateSimulation = async (event) => {
         event.preventDefault()
         if (!simulationItem || simulationLoading) return
 
-        setSimulationLoading(true)
+        await runSimulation(simulationItem, simulationPrice)
+    }
+
+    const closeSimulation = () => {
+        if (priceUpdating) return
+        ++simulationRequestId.current
+        setSimulationItem(null)
+        setSimulationResult(null)
+        setSimulatedPrice(null)
         setSimulationError('')
+        setSimulationLoading(false)
+        setInitialSimulationLoading(false)
         setSimulationConfirming(false)
         setUpdateSuccess(null)
-        try {
-            const result = await simulatePrice(simulationItem.id, simulationPrice)
-            setSimulationResult(result)
-            setSimulatedPrice(result.proposed_price)
-        } catch (requestError) {
-            setSimulationError(requestError instanceof Error ? requestError.message : 'No fue posible calcular los cargos.')
-        } finally {
-            setSimulationLoading(false)
-        }
     }
 
     const confirmPriceUpdate = async () => {
@@ -455,7 +486,7 @@ export default function Index({
                     {items.links?.length > 0 && <div className="flex flex-wrap gap-2 border-t border-slate-200 p-4 dark:border-neutral-800">{items.links.map((link, index) => <Link key={index} href={link.url ?? '#'} preserveScroll className={`rounded-lg px-3 py-2 text-sm ${link.active ? 'bg-indigo-600 text-white' : 'border border-slate-200 dark:border-neutral-700'} ${!link.url ? 'pointer-events-none opacity-40' : ''}`} dangerouslySetInnerHTML={{ __html: link.label }} />)}</div>}
                 </section>
             </div>
-            <PriceSimulationModal item={simulationItem} price={simulationPrice} simulatedPrice={simulatedPrice} result={simulationResult} loading={simulationLoading} updating={priceUpdating} confirming={simulationConfirming} success={updateSuccess} error={simulationError} onPriceChange={(value) => { setSimulationPrice(value); setSimulationConfirming(false); setUpdateSuccess(null) }} onSubmit={calculateSimulation} onContinue={() => { if (simulationMatchesDraft(simulationPrice, simulatedPrice) && !simulationError) setSimulationConfirming(true) }} onCancelConfirmation={() => setSimulationConfirming(false)} onConfirm={confirmPriceUpdate} onClose={() => { if (!simulationLoading && !priceUpdating) setSimulationItem(null) }} />
+            <PriceSimulationModal item={simulationItem} price={simulationPrice} simulatedPrice={simulatedPrice} result={simulationResult} loading={simulationLoading} initialLoading={initialSimulationLoading} updating={priceUpdating} confirming={simulationConfirming} success={updateSuccess} error={simulationError} onPriceChange={(value) => { setSimulationPrice(value); setSimulationConfirming(false); setUpdateSuccess(null) }} onSubmit={calculateSimulation} onContinue={() => { if (simulationMatchesDraft(simulationPrice, simulatedPrice) && !simulationError) setSimulationConfirming(true) }} onCancelConfirmation={() => setSimulationConfirming(false)} onConfirm={confirmPriceUpdate} onClose={closeSimulation} />
         </AppShell>
     )
 }

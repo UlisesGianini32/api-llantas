@@ -15,6 +15,17 @@ export function canContinueWithSimulation(draftPrice, simulatedPrice, { hasResul
     return Boolean(hasResult) && !error && !loading && !updating && simulationMatchesDraft(draftPrice, simulatedPrice)
 }
 
+export function initialSimulationPrice(item, updatedPrices = {}) {
+    return updatedPrices[item?.id] ?? item?.current_price ?? ''
+}
+
+export function simulationResultPresentation(draftPrice, simulatedPrice, hasResult) {
+    return {
+        visible: Boolean(hasResult),
+        stale: Boolean(hasResult) && !simulationMatchesDraft(draftPrice, simulatedPrice),
+    }
+}
+
 export function shippingPresentation(result, fallbackCurrency = 'MXN') {
     const shipping = result?.charges?.shipping || {}
     const available = shipping.available === true
