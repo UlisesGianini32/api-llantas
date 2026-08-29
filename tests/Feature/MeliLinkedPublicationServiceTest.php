@@ -6,14 +6,75 @@ use App\Models\MeliAccount;
 use App\Models\MeliPriceManagerItem;
 use App\Services\MercadoLibre\LinkedPublications\MeliLinkedPublicationService;
 use App\Services\MercadoLibre\MeliAccountApiClient;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Http\Client\Response;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Mockery;
 use Tests\TestCase;
 
 class MeliLinkedPublicationServiceTest extends TestCase
 {
-    use RefreshDatabase;
+    private object $foundationMigration;
+
+    private object $linkedPublicationsMigration;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        config()->set('database.default', 'sqlite');
+        config()->set('database.connections.sqlite.database', ':memory:');
+        config()->set('database.connections.sqlite.foreign_key_constraints', true);
+        DB::purge('sqlite');
+
+        Schema::create('users', function (Blueprint $table): void {
+            $table->id();
+            $table->string('name');
+            $table->string('email')->unique();
+            $table->timestamp('email_verified_at')->nullable();
+            $table->string('password');
+            $table->rememberToken();
+            $table->text('two_factor_secret')->nullable();
+            $table->text('two_factor_recovery_codes')->nullable();
+            $table->timestamp('two_factor_confirmed_at')->nullable();
+            $table->string('meli_id')->nullable();
+            $table->unsignedBigInteger('official_store_id')->nullable();
+            $table->text('access_token')->nullable();
+            $table->text('refresh_token')->nullable();
+            $table->timestamp('expires_at')->nullable();
+            $table->timestamps();
+        });
+        Schema::create('meli_accounts', function (Blueprint $table): void {
+            $table->id();
+            $table->foreignId('user_id')->constrained()->cascadeOnDelete();
+            $table->string('meli_user_id');
+            $table->string('nickname')->nullable();
+            $table->unsignedBigInteger('official_store_id')->nullable();
+            $table->text('access_token')->nullable();
+            $table->text('refresh_token')->nullable();
+            $table->timestamp('expires_at')->nullable();
+            $table->boolean('is_default')->default(false);
+            $table->timestamps();
+            $table->unique(['user_id', 'meli_user_id']);
+        });
+
+        $this->foundationMigration = require database_path('migrations/2026_08_26_000001_create_meli_price_manager_tables.php');
+        $this->foundationMigration->up();
+        $this->linkedPublicationsMigration = require database_path('migrations/2026_08_29_000001_add_linked_publication_fields_to_meli_price_manager_items.php');
+        $this->linkedPublicationsMigration->up();
+    }
+
+    protected function tearDown(): void
+    {
+        $this->linkedPublicationsMigration->down();
+        $this->foundationMigration->down();
+        Schema::dropIfExists('meli_accounts');
+        Schema::dropIfExists('users');
+        DB::purge('sqlite');
+
+        parent::tearDown();
+    }
 
     public function test_same_user_product_keeps_two_independent_price_pairs(): void
     {
