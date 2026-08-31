@@ -71,6 +71,10 @@ class MeliClaimController extends Controller
             'actions_history' => $claim->actions_history ?? [], 'expected_resolutions' => $this->withoutParticipantIds($claim->expected_resolutions ?? []),
             'available_actions' => $claim->available_actions ?? [], 'reputation_has_incentive' => $claim->reputation_has_incentive,
             'reputation_due_date' => $claim->reputation_due_date?->toISOString(), 'resolution_reason' => $claim->resolution_reason,
+            'messages' => $this->withoutParticipantIds($claim->messages ?? []), 'changes' => $this->withoutParticipantIds($claim->changes ?? []),
+            'participants' => $this->participants($claim), 'deadlines' => $this->deadlines($claim),
+            'timeline' => $this->timeline($claim),
+            'order' => $this->orderData($claim),
         ]]);
     }
 
@@ -81,12 +85,29 @@ class MeliClaimController extends Controller
         catch (\Throwable $e) { report($e); return back()->with('err', 'No fue posible sincronizar reclamos: '.$e->getMessage()); }
     }
 
+    public function refresh(Request $request, MeliClaim $claim, MeliClaimsService $service): RedirectResponse
+    {
+        $account = $request->user()->meliAccounts()->findOrFail($claim->meli_account_id);
+
+        try {
+            $service->syncClaim($account, $claim->claim_id, true);
+
+            return redirect()->route('meli.claims.show', $claim)->with('ok', 'Reclamo actualizado.');
+        } catch (\Throwable $e) {
+            report($e);
+            $claim->forceFill(['sync_error' => $service->safeErrorMessage($e)])->save();
+
+            return redirect()->route('meli.claims.show', $claim)
+                ->with('err', 'No fue posible actualizar la información del reclamo.');
+        }
+    }
+
     private function claimData(MeliClaim $claim, Collection $publications): array
     {
         $order = $claim->order && (int) $claim->order->meli_account_id === (int) $claim->meli_account_id
             ? $claim->order
             : null;
-        $products = $order?->items?->map(function ($item) use ($claim, $publications): array {
+        $products = $order?->items?->map(function ($item) use ($claim, $publications, $order): array {
             $publication = $publications->get($claim->meli_account_id.'|'.$item->item_id);
             $publicationItem = MeliPublication::itemArrayFromRaw($publication?->raw);
             $unitPrice = $item->unit_price !== null ? (float) $item->unit_price : null;
@@ -96,9 +117,12 @@ class MeliClaimController extends Controller
                 'sku' => $item->sku ?: $publication?->sku,
                 'title' => $item->title ?: ($publicationItem['title'] ?? null),
                 'thumbnail' => $this->publicationThumbnail($publication),
+                'variation' => $item->variation_text,
                 'quantity' => (int) $item->quantity,
                 'unit_price' => $unitPrice,
                 'amount' => $unitPrice !== null ? $unitPrice * (int) $item->quantity : null,
+                'variation_id' => $this->variationId($order, $item->item_id, $item->sku),
+                'variation_text' => $item->variation_text,
             ];
         })->values()->all() ?? [];
         $sellerActs = in_array($claim->action_responsible, ['seller', 'respondent'], true);
@@ -158,5 +182,82 @@ class MeliClaimController extends Controller
 
         return collect($value)->reject(fn (mixed $_, string|int $key) => $key === 'user_id')
             ->map(fn (mixed $item) => $this->withoutParticipantIds($item))->all();
+    }
+
+    private function participants(MeliClaim $claim): array
+    {
+        return collect((array) data_get($claim->raw_claim, 'players', []))
+            ->filter('is_array')
+            ->map(fn (array $player): array => array_filter([
+                'role' => $player['role'] ?? null,
+                'type' => $player['type'] ?? null,
+            ], fn (mixed $value): bool => filled($value)))
+            ->values()->all();
+    }
+
+    private function timeline(MeliClaim $claim): array
+    {
+        $events = collect($this->listPayload($claim->status_history))->map(fn (array $item): array => [...$item, 'source' => 'status']);
+        $events = $events->concat(collect($this->listPayload($claim->actions_history))->map(fn (array $item): array => [...$item, 'source' => 'action']));
+        $events = $events->concat(collect($this->listPayload($claim->changes))->map(fn (array $item): array => [...$item, 'source' => 'change']));
+
+        return $events->sortByDesc(fn (array $item): string => (string) ($item['date'] ?? $item['date_created'] ?? $item['created_at'] ?? ''))
+            ->values()->all();
+    }
+
+    private function deadlines(MeliClaim $claim): array
+    {
+        $deadlines = collect((array) data_get($claim->raw_claim, 'players', []))
+            ->filter('is_array')->flatMap(fn (array $player) => collect((array) ($player['available_actions'] ?? []))
+                ->filter('is_array')->map(fn (array $action): array => [
+                    'role' => $player['role'] ?? $player['type'] ?? null,
+                    'action' => $action['action'] ?? $action['name'] ?? null,
+                    'due_date' => $action['due_date'] ?? null,
+                    'mandatory' => $action['mandatory'] ?? null,
+                ])->all());
+
+        if ($claim->due_date !== null && $deadlines->where('due_date', $claim->due_date->toISOString())->isEmpty()) {
+            $deadlines->push(['role' => $claim->action_responsible, 'action' => null, 'due_date' => $claim->due_date->toISOString(), 'mandatory' => null]);
+        }
+
+        return $deadlines->filter(fn (array $item): bool => filled($item['due_date']))->sortBy('due_date')->values()->all();
+    }
+
+    private function listPayload(mixed $value): array
+    {
+        if (! is_array($value)) return [];
+        $items = array_is_list($value) ? $value : ($value['data'] ?? $value['results'] ?? []);
+
+        return array_values(array_filter((array) $items, 'is_array'));
+    }
+
+    private function orderData(MeliClaim $claim): ?array
+    {
+        $order = $claim->order;
+        if (! $order || (int) $order->meli_account_id !== (int) $claim->meli_account_id) return null;
+        $raw = (array) $order->raw;
+
+        return [
+            'id' => $order->id,
+            'order_id' => $order->order_id,
+            'display_id' => $order->display_id,
+            'status' => $order->status,
+            'date_created' => data_get($raw, 'date_created'),
+            'total_amount' => is_numeric(data_get($raw, 'total_amount')) ? (float) data_get($raw, 'total_amount') : null,
+            'currency_id' => data_get($raw, 'currency_id'),
+        ];
+    }
+
+    private function variationId($order, ?string $itemId, ?string $sku): ?string
+    {
+        foreach ((array) data_get($order?->raw, 'order_items', []) as $row) {
+            if (! is_array($row) || (string) data_get($row, 'item.id') !== (string) $itemId) continue;
+            $remoteSku = data_get($row, 'item.seller_sku');
+            if (filled($sku) && filled($remoteSku) && (string) $remoteSku !== (string) $sku) continue;
+            $id = data_get($row, 'item.variation_id');
+            return filled($id) ? (string) $id : null;
+        }
+
+        return null;
     }
 }

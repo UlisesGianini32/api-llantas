@@ -17,6 +17,11 @@ class MeliClaimsService
 
     public function __construct(private readonly MeliAccountApiClient $api) {}
 
+    public function safeErrorMessage(Throwable $error): string
+    {
+        return $this->api->sanitizeMessage($error->getMessage());
+    }
+
     /** @return array{received:int,saved:int,failed:int} */
     public function syncAccount(MeliAccount $account, ?string $status = null, int $days = 30, bool $force = false): array
     {
@@ -70,6 +75,8 @@ class MeliClaimsService
             'status_history' => '/status-history',
             'actions_history' => '/actions-history',
             'expected_resolutions' => '/expected-resolutions',
+            'messages' => '/messages',
+            'changes' => '/changes',
         ];
         $updates = [];
         foreach ($resources as $key => $suffix) {
@@ -78,7 +85,9 @@ class MeliClaimsService
                 if ($key === 'reputation') {
                     $updates += $this->mapReputation($data);
                 } else {
-                    $updates[$key] = $data;
+                    $updates[$key] = in_array($key, ['messages', 'changes'], true)
+                        ? $this->withoutParticipantIds($data)
+                        : $data;
                 }
             } catch (Throwable $e) {
                 Log::notice('MELI CLAIMS: recurso opcional no disponible', [
@@ -199,7 +208,7 @@ class MeliClaimsService
 
     private function read(MeliAccount $account, string $path): array
     {
-        $data = $this->api->getReadOnly($account, $path)->json();
+        $data = $this->api->getReadOnly($account, $path, [], 1)->json();
         return is_array($data) ? $data : [];
     }
 
@@ -218,6 +227,16 @@ class MeliClaimsService
             $payload['players'][$index] = $player;
         }
         return $payload;
+    }
+
+    private function withoutParticipantIds(mixed $value): mixed
+    {
+        if (! is_array($value)) return $value;
+
+        return collect($value)
+            ->reject(fn (mixed $_, string|int $key) => in_array($key, ['user_id', 'buyer_id', 'seller_id'], true))
+            ->map(fn (mixed $item) => $this->withoutParticipantIds($item))
+            ->all();
     }
 
     private function text(mixed $value): ?string { $value = trim((string) ($value ?? '')); return $value === '' ? null : $value; }
