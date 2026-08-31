@@ -31,13 +31,20 @@ class MeliClaimMessageController extends Controller
         }
 
         $message = $request->validated('message');
-        $hash = hash('sha256', $claim->id.'|'.$request->user()->id.'|'.$receiver.'|'.$message);
+        // Receiver can legitimately change during the GET refresh after a successful send.
+        // The cooldown identifies the user's intent, so an immediate resubmit remains blocked.
+        $hash = hash('sha256', $claim->id.'|'.$request->user()->id.'|'.$message);
         $lock = Cache::lock('meli-claim-message:'.$hash, self::DUPLICATE_WINDOW_SECONDS);
         if (! $lock->get()) {
             throw ValidationException::withMessages(['message' => 'Este mensaje ya se está enviando. Espera antes de intentarlo nuevamente.']);
         }
 
         try {
+            $cooldownKey = 'meli-claim-message-cooldown:'.$hash;
+            if (! Cache::add($cooldownKey, true, now()->addSeconds(self::DUPLICATE_WINDOW_SECONDS))) {
+                throw ValidationException::withMessages(['message' => 'Este mensaje ya fue procesado recientemente.']);
+            }
+
             if (MeliClaimActionLog::query()->where('meli_claim_id', $claim->id)->where('user_id', $request->user()->id)
                 ->where('message_hash', $hash)->where('created_at', '>=', now()->subSeconds(self::DUPLICATE_WINDOW_SECONDS))->exists()) {
                 throw ValidationException::withMessages(['message' => 'Este mensaje ya fue procesado recientemente.']);

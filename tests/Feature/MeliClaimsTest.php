@@ -430,6 +430,68 @@ class MeliClaimsTest extends TestCase
 
         $posts = collect(Http::recorded())->pluck(0)->filter(fn (Request $request): bool => $request->method() === 'POST');
         $this->assertCount(1, $posts);
+        $this->assertSame(1, MeliClaimActionLog::query()->where('meli_claim_id', $claim->id)->count());
+    }
+
+    public function test_same_message_can_be_sent_after_cooldown_expires(): void
+    {
+        $account = $this->account();
+        $claim = $this->claim($account, ['claim_id' => 'LATER', 'status' => 'opened', 'available_actions' => [['action' => 'send_message_to_complainant']]]);
+        $this->fakeMessageApi();
+
+        $this->post(route('meli.claims.messages.store', $claim), ['message' => 'Repetible después'])->assertSessionHas('ok');
+        $this->travel(16)->seconds();
+        $this->post(route('meli.claims.messages.store', $claim), ['message' => 'Repetible después'])->assertSessionHas('ok');
+
+        $posts = collect(Http::recorded())->pluck(0)->filter(fn (Request $request): bool => $request->method() === 'POST');
+        $this->assertCount(2, $posts);
+    }
+
+    public function test_different_messages_and_claims_do_not_share_cooldown(): void
+    {
+        $account = $this->account();
+        $first = $this->claim($account, ['claim_id' => 'CLAIM-A', 'status' => 'opened', 'available_actions' => [['action' => 'send_message_to_complainant']]]);
+        $second = $this->claim($account, ['claim_id' => 'CLAIM-B', 'status' => 'opened', 'available_actions' => [['action' => 'send_message_to_complainant']]]);
+        $this->fakeMessageApi();
+
+        $this->post(route('meli.claims.messages.store', $first), ['message' => 'Texto A'])->assertSessionHas('ok');
+        $this->post(route('meli.claims.messages.store', $first), ['message' => 'Texto B'])->assertSessionHas('ok');
+        $this->post(route('meli.claims.messages.store', $second), ['message' => 'Texto A'])->assertSessionHas('ok');
+
+        $posts = collect(Http::recorded())->pluck(0)->filter(fn (Request $request): bool => $request->method() === 'POST');
+        $this->assertCount(3, $posts);
+    }
+
+    public function test_users_do_not_share_message_cooldown(): void
+    {
+        $firstAccount = $this->account();
+        $firstClaim = $this->claim($firstAccount, ['claim_id' => 'USER-A', 'status' => 'opened', 'available_actions' => [['action' => 'send_message_to_complainant']]]);
+        $otherUser = User::factory()->create();
+        $secondAccount = $this->account(['user_id' => $otherUser->id, 'meli_user_id' => 'OTHER-COOLDOWN']);
+        $secondClaim = $this->claim($secondAccount, ['claim_id' => 'USER-B', 'status' => 'opened', 'available_actions' => [['action' => 'send_message_to_complainant']]]);
+        $this->fakeMessageApi();
+
+        $this->post(route('meli.claims.messages.store', $firstClaim), ['message' => 'Mismo texto'])->assertSessionHas('ok');
+        $this->actingAs($otherUser)->post(route('meli.claims.messages.store', $secondClaim), ['message' => 'Mismo texto'])->assertSessionHas('ok');
+
+        $posts = collect(Http::recorded())->pluck(0)->filter(fn (Request $request): bool => $request->method() === 'POST');
+        $this->assertCount(2, $posts);
+    }
+
+    public function test_connection_uncertainty_keeps_immediate_cooldown(): void
+    {
+        $account = $this->account();
+        $claim = $this->claim($account, ['claim_id' => 'TIMEOUT-DEDUPE', 'status' => 'opened', 'available_actions' => [['action' => 'send_message_to_complainant']]]);
+        $attempts = 0;
+        Http::fake(function () use (&$attempts) {
+            $attempts++;
+            throw new ConnectionException('timeout');
+        });
+
+        $this->post(route('meli.claims.messages.store', $claim), ['message' => 'Entrega incierta'])->assertSessionHas('err');
+        $this->post(route('meli.claims.messages.store', $claim), ['message' => 'Entrega incierta'])->assertSessionHasErrors('message');
+
+        $this->assertSame(1, $attempts);
     }
 
     public function test_post_purchase_claims_dispatches_without_leading_resource_slash(): void
