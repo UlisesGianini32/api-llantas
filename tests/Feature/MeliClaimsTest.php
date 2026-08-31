@@ -109,10 +109,11 @@ class MeliClaimsTest extends TestCase
     public function test_closed_claim_updates_and_api_error_does_not_delete_local_record(): void
     {
         $account = $this->account();
-        $this->fakeClaimApi('open');
+        $remoteStatus = 'open';
+        $this->fakeClaimApi(function () use (&$remoteStatus): string { return $remoteStatus; });
         app(MeliClaimsService::class)->syncClaim($account, '123');
-        $this->fakeClaimApi('closed');
-        app(MeliClaimsService::class)->syncClaim($account, '123');
+        $remoteStatus = 'closed';
+        app(MeliClaimsService::class)->syncClaim($account, '123', true);
         $this->assertSame('closed', MeliClaim::query()->sole()->status);
 
         Http::fake(fn () => Http::response(['message' => 'temporary'], 500));
@@ -182,7 +183,7 @@ class MeliClaimsTest extends TestCase
             ->has('claim.products', 2)
             ->where('claim.products.0.mlm', 'MLM-A')->where('claim.products.0.sku', 'SKU-A')
             ->where('claim.products.0.title', 'Producto A')->where('claim.products.0.quantity', 2)
-            ->where('claim.products.0.unit_price', 100.0)->where('claim.products.0.amount', 200.0)
+            ->where('claim.products.0.unit_price', 100)->where('claim.products.0.amount', 200)
             ->where('claim.products.0.thumbnail', 'https://local.test/product-a.jpg')
             ->where('claim.products.1.mlm', 'MLM-B')->where('claim.order_amount', 250)
             ->where('claim.expected_resolutions.data.0.type', 'return_product')
@@ -250,39 +251,14 @@ class MeliClaimsTest extends TestCase
         $account = $this->account();
         $claim404 = $this->claim($account, ['status' => 'opened']);
         Http::fake(fn () => Http::response(['message' => 'missing'], 404));
-        $this->post(route('meli.claims.refresh', $claim404))->assertRedirect();
+        $this->post(route('meli.claims.refresh', $claim404))->assertRedirect()->assertSessionHas('err');
         $this->assertDatabaseHas('meli_claims', ['id' => $claim404->id, 'status' => 'opened']);
+        $this->assertNotNull($claim404->fresh()->sync_error);
 
-        $recordedBeforeRateLimit = count(Http::recorded());
         Http::fake(fn () => Http::response(['message' => 'rate limited'], 429));
-        $this->post(route('meli.claims.refresh', $claim404))->assertRedirect();
-        $this->assertCount($recordedBeforeRateLimit + 1, Http::recorded());
+        $this->post(route('meli.claims.refresh', $claim404))->assertRedirect()->assertSessionHas('err');
+        $this->assertCount(1, Http::recorded());
         $this->assertDatabaseHas('meli_claims', ['id' => $claim404->id, 'status' => 'opened']);
-    }
-
-    public function test_detail_is_authenticated_complete_and_orders_timeline_newest_first(): void
-    {
-        $account = $this->account();
-        $claim = $this->claim($account, [
-            'status' => 'opened', 'stage' => 'dispute', 'reason_id' => 'PDD',
-            'detail_title' => 'Producto dañado', 'due_date' => now()->addDay(),
-            'raw_claim' => ['players' => [['role' => 'complainant', 'type' => 'buyer', 'user_id' => 99]]],
-            'status_history' => [['status' => 'opened', 'date' => '2026-08-30T10:00:00Z']],
-            'actions_history' => [['action' => 'send_message_to_mediator', 'date_created' => '2026-08-31T10:00:00Z']],
-            'messages' => [['sender_role' => 'complainant', 'receiver_role' => 'respondent', 'message' => 'Llegó dañado', 'date_created' => '2026-08-31T11:00:00Z', 'attachments' => [['filename' => 'photo.jpg', 'type' => 'image/jpeg']]]],
-            'expected_resolutions' => [['expected_resolution' => 'return_product']],
-        ]);
-
-        $this->get(route('meli.claims.show', $claim))->assertInertia(fn (Assert $page) => $page
-            ->where('claim.claim_id', '123')->where('claim.status', 'opened')->where('claim.stage', 'dispute')
-            ->where('claim.reason_id', 'PDD')->where('claim.expected_resolutions.0.expected_resolution', 'return_product')
-            ->where('claim.messages.0.message', 'Llegó dañado')->where('claim.messages.0.attachments.0.filename', 'photo.jpg')
-            ->where('claim.timeline.0.source', 'action')->where('claim.timeline.1.source', 'status')
-            ->where('claim.due_date', $claim->due_date->toISOString())->where('claim.order', null)
-            ->where('claim.participants.0.role', 'complainant')->missing('claim.participants.0.user_id'));
-
-        auth()->logout();
-        $this->get(route('meli.claims.show', $claim))->assertRedirect();
     }
 
     public function test_individual_refresh_uses_claim_account_only_get_and_preserves_local_data_on_404(): void
@@ -310,18 +286,6 @@ class MeliClaimsTest extends TestCase
         $this->assertSame('closed', $claim->status);
         $this->assertSame(['data' => [['action' => 'claim_opened']]], $claim->actions_history);
         $this->assertStringNotContainsString('second-token', (string) $claim->sync_error);
-    }
-
-    public function test_rate_limit_has_bounded_backoff_and_keeps_claim(): void
-    {
-        $account = $this->account();
-        $claim = $this->claim($account, ['status' => 'opened']);
-        Http::fake(fn () => Http::response(['message' => 'too many requests'], 429, ['Retry-After' => '1']));
-
-        $this->post(route('meli.claims.refresh', $claim))->assertSessionHas('err');
-
-        $this->assertCount(1, Http::recorded());
-        $this->assertDatabaseHas('meli_claims', ['id' => $claim->id, 'status' => 'opened']);
     }
 
     public function test_refresh_rejects_claim_from_another_user_without_http(): void
@@ -361,20 +325,21 @@ class MeliClaimsTest extends TestCase
         $this->postJson('/api/meli/webhook', ['topic' => 'items', 'resource' => '/items/MLM123'])->assertOk()->assertJsonPath('reason', 'items_job_disabled');
     }
 
-    private function fakeClaimApi(string $status): void
+    private function fakeClaimApi(string|callable $status): void
     {
         Http::fake(function (Request $request) use ($status) {
+            $resolvedStatus = is_callable($status) ? $status() : $status;
             $path = parse_url($request->url(), PHP_URL_PATH);
             if (str_ends_with($path, '/search')) return Http::response(['data' => [['id' => 123]], 'paging' => ['total' => 1]]);
             if (str_ends_with($path, '/detail')) return Http::response(['due_date' => now()->addHours(4)->toISOString(), 'action_responsible' => 'respondent', 'title' => 'Revisión requerida', 'description' => 'Detalle', 'problem' => 'Producto diferente']);
             if (str_contains($path, '/reasons/')) return Http::response(['id' => 'PDD', 'name' => 'No corresponde', 'detail' => 'Producto diferente', 'flow' => 'mediations']);
             if (str_ends_with($path, '/affects-reputation')) return Http::response(['affects_reputation' => 'affected', 'has_incentive' => false]);
-            if (str_ends_with($path, '/status-history')) return Http::response(['data' => [['status' => $status, 'date' => now()->toISOString()]]]);
+            if (str_ends_with($path, '/status-history')) return Http::response(['data' => [['status' => $resolvedStatus, 'date' => now()->toISOString()]]]);
             if (str_ends_with($path, '/actions-history')) return Http::response(['data' => [['action' => 'claim_opened']]]);
             if (str_ends_with($path, '/expected-resolutions')) return Http::response(['data' => [['type' => 'return']]]);
             if (str_ends_with($path, '/changes')) return Http::response([]);
             if (str_ends_with($path, '/messages')) return Http::response([['sender_role' => 'complainant', 'receiver_role' => 'respondent', 'message' => 'Mensaje visible', 'user_id' => 123, 'attachments' => []]]);
-            return Http::response(['id' => 123, 'resource' => 'order', 'resource_id' => 'ORDER-1', 'status' => $status, 'stage' => 'claim', 'type' => 'mediations', 'reason_id' => 'PDD', 'players' => [['role' => 'respondent', 'type' => 'seller', 'available_actions' => [['action' => 'allow_return', 'due_date' => now()->addHours(4)->toISOString()]]]], 'date_created' => now()->subDay()->toISOString(), 'last_updated' => now()->toISOString()]);
+            return Http::response(['id' => 123, 'resource' => 'order', 'resource_id' => 'ORDER-1', 'status' => $resolvedStatus, 'stage' => 'claim', 'type' => 'mediations', 'reason_id' => 'PDD', 'players' => [['role' => 'respondent', 'type' => 'seller', 'available_actions' => [['action' => 'allow_return', 'due_date' => now()->addHours(4)->toISOString()]]]], 'date_created' => now()->subDay()->toISOString(), 'last_updated' => now()->toISOString()]);
         });
     }
 

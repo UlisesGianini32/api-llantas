@@ -187,7 +187,7 @@ class MeliClaimController extends Controller
     private function participants(MeliClaim $claim): array
     {
         return collect((array) data_get($claim->raw_claim, 'players', []))
-            ->filter('is_array')
+            ->filter(fn (mixed $player): bool => is_array($player))
             ->map(fn (array $player): array => array_filter([
                 'role' => $player['role'] ?? null,
                 'type' => $player['type'] ?? null,
@@ -208,8 +208,8 @@ class MeliClaimController extends Controller
     private function deadlines(MeliClaim $claim): array
     {
         $deadlines = collect((array) data_get($claim->raw_claim, 'players', []))
-            ->filter('is_array')->flatMap(fn (array $player) => collect((array) ($player['available_actions'] ?? []))
-                ->filter('is_array')->map(fn (array $action): array => [
+            ->filter(fn (mixed $player): bool => is_array($player))->flatMap(fn (array $player) => collect((array) ($player['available_actions'] ?? []))
+                ->filter(fn (mixed $action): bool => is_array($action))->map(fn (array $action): array => [
                     'role' => $player['role'] ?? $player['type'] ?? null,
                     'action' => $action['action'] ?? $action['name'] ?? null,
                     'due_date' => $action['due_date'] ?? null,
