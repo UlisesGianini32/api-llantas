@@ -128,6 +128,7 @@ Route::middleware('auth')->group(function () {
     Route::get('/meli-claims', [MeliClaimController::class, 'index'])->name('meli.claims.index');
     Route::post('/meli-claims/sync', [MeliClaimController::class, 'sync'])->name('meli.claims.sync');
     Route::get('/meli-claims/{claim}', [MeliClaimController::class, 'show'])->whereNumber('claim')->name('meli.claims.show');
+    Route::post('/meli-claims/{claim}/refresh', [MeliClaimController::class, 'refresh'])->whereNumber('claim')->name('meli.claims.refresh');
 
     // PEDIDOS PRINCIPALES
     Route::get('/ams/pedidos', [AmsPedidosController::class, 'index'])->name('ams.pedidos.index');

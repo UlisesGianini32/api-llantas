@@ -68,13 +68,15 @@ class MeliAccountApiClient
         array $payload = [],
         bool $refreshAfterUnauthorized = true,
         array $headers = [],
+        int $maxAttempts = self::MAX_ATTEMPTS,
     ): Response
     {
         $lastResponse = null;
         $lastException = null;
         $refreshedAfterUnauthorized = false;
 
-        for ($attempt = 1; $attempt <= self::MAX_ATTEMPTS; $attempt++) {
+        $maxAttempts = max(1, min(self::MAX_ATTEMPTS, $maxAttempts));
+        for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
             try {
                 $client = Http::withToken((string) $account->access_token)
                     ->acceptJson()
@@ -93,7 +95,7 @@ class MeliAccountApiClient
             } catch (ConnectionException $exception) {
                 $lastException = $exception;
 
-                if ($attempt < self::MAX_ATTEMPTS) {
+                if ($attempt < $maxAttempts) {
                     Sleep::sleep($this->backoffSeconds($attempt));
 
                     continue;
@@ -113,7 +115,7 @@ class MeliAccountApiClient
                 continue;
             }
 
-            if (($response->status() === 429 || $response->serverError()) && $attempt < self::MAX_ATTEMPTS) {
+            if (($response->status() === 429 || $response->serverError()) && $attempt < $maxAttempts) {
                 Sleep::sleep($this->retryDelaySeconds($response, $attempt));
 
                 continue;
@@ -135,9 +137,9 @@ class MeliAccountApiClient
     }
 
     /** @param array<string, mixed> $query */
-    public function getReadOnly(MeliAccount $account, string $path, array $query = []): Response
+    public function getReadOnly(MeliAccount $account, string $path, array $query = [], int $maxAttempts = self::MAX_ATTEMPTS): Response
     {
-        return $this->request($account, 'get', $path, $query, false);
+        return $this->request($account, 'get', $path, $query, false, [], $maxAttempts);
     }
 
     private function retryDelaySeconds(Response $response, int $attempt): int

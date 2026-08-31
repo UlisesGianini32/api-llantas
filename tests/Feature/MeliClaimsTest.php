@@ -20,6 +20,7 @@ use Tests\TestCase;
 class MeliClaimsTest extends TestCase
 {
     private object $migration;
+    private object $detailMigration;
     private User $user;
 
     protected function setUp(): void
@@ -43,12 +44,12 @@ class MeliClaimsTest extends TestCase
         });
         Schema::create('meli_orders', function (Blueprint $table): void {
             $table->id(); $table->foreignId('meli_account_id')->nullable(); $table->string('order_id')->unique();
-            $table->string('status')->nullable(); $table->timestamps();
+            $table->string('status')->nullable(); $table->string('display_id')->nullable(); $table->json('raw')->nullable(); $table->timestamps();
         });
         Schema::create('meli_order_items', function (Blueprint $table): void {
             $table->id(); $table->foreignId('meli_order_id'); $table->string('item_id')->nullable();
             $table->string('sku')->nullable(); $table->string('title')->nullable(); $table->unsignedInteger('quantity')->default(1);
-            $table->decimal('unit_price', 14, 2)->nullable(); $table->timestamps();
+            $table->string('variation_text')->nullable(); $table->decimal('unit_price', 14, 2)->nullable(); $table->timestamps();
         });
         Schema::create('meli_publications', function (Blueprint $table): void {
             $table->id(); $table->foreignId('user_id')->nullable(); $table->foreignId('meli_account_id')->nullable();
@@ -56,6 +57,8 @@ class MeliClaimsTest extends TestCase
         });
         $this->migration = require database_path('migrations/2026_08_29_000001_create_meli_claim_tables.php');
         $this->migration->up();
+        $this->detailMigration = require database_path('migrations/2026_08_31_000001_add_detail_snapshots_to_meli_claims.php');
+        $this->detailMigration->up();
         $this->user = User::factory()->create();
         $this->actingAs($this->user);
         Http::preventStrayRequests();
@@ -63,6 +66,7 @@ class MeliClaimsTest extends TestCase
 
     protected function tearDown(): void
     {
+        $this->detailMigration->down();
         $this->migration->down();
         foreach (['meli_publications', 'meli_order_items', 'meli_orders', 'meli_accounts', 'users'] as $table) Schema::dropIfExists($table);
         DB::purge('sqlite');
@@ -89,6 +93,8 @@ class MeliClaimsTest extends TestCase
         $this->assertCount(1, $claim->actions_history['data']);
         $this->assertNotEmpty($claim->expected_resolutions);
         $this->assertNotEmpty($claim->available_actions);
+        $this->assertSame('Mensaje visible', $claim->messages[0]['message']);
+        $this->assertArrayNotHasKey('user_id', $claim->messages[0]);
         $this->assertArrayNotHasKey('user_id', $claim->raw_claim['players'][0]);
         $requests = collect(Http::recorded())->pluck(0);
         $this->assertTrue($requests->every(fn (Request $request): bool => $request->method() === 'GET'));
@@ -192,6 +198,143 @@ class MeliClaimsTest extends TestCase
             ->assertInertia(fn (Assert $page) => $page->has('claims.data', 0));
     }
 
+    public function test_detail_requires_authentication_and_shows_safe_empty_states(): void
+    {
+        $claim = $this->claim($this->account(), ['status' => 'opened', 'stage' => 'claim', 'reason_id' => 'PDD']);
+        auth()->logout();
+        $this->get(route('meli.claims.show', $claim))->assertRedirect('/login');
+        $this->actingAs($this->user)->get(route('meli.claims.show', $claim))->assertInertia(fn (Assert $page) => $page
+            ->where('claim.claim_id', '123')->where('claim.status', 'opened')->where('claim.stage', 'claim')
+            ->where('claim.reason_id', 'PDD')->where('claim.order', null)->has('claim.messages', 0)->has('claim.deadlines', 0));
+    }
+
+    public function test_detail_orders_timeline_and_exposes_messages_deadlines_and_variation(): void
+    {
+        $account = $this->account();
+        $orderId = DB::table('meli_orders')->insertGetId([
+            'meli_account_id' => $account->id, 'order_id' => 'ORDER-DETAIL', 'status' => 'paid',
+            'raw' => json_encode(['date_created' => '2026-08-01T10:00:00Z', 'total_amount' => 500, 'currency_id' => 'MXN', 'order_items' => [['item' => ['id' => 'MLM1', 'seller_sku' => 'SKU1', 'variation_id' => 987]]]]),
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+        DB::table('meli_order_items')->insert(['meli_order_id' => $orderId, 'item_id' => 'MLM1', 'sku' => 'SKU1', 'title' => 'Llanta', 'quantity' => 1, 'unit_price' => 500, 'created_at' => now(), 'updated_at' => now()]);
+        $claim = $this->claim($account, [
+            'meli_order_id' => $orderId, 'order_id' => 'ORDER-DETAIL', 'status' => 'opened', 'stage' => 'dispute',
+            'raw_claim' => ['players' => [['role' => 'respondent', 'type' => 'seller', 'available_actions' => [['action' => 'send_message_to_mediator', 'due_date' => '2026-09-01T12:00:00Z']]]]],
+            'status_history' => [['status' => 'opened', 'date' => '2026-08-01T10:00:00Z']],
+            'actions_history' => [['action_name' => 'open_dispute', 'date_created' => '2026-08-02T10:00:00Z']],
+            'messages' => [['sender_role' => 'complainant', 'receiver_role' => 'respondent', 'message' => 'Producto dañado', 'date_created' => '2026-08-03T10:00:00Z']],
+        ]);
+        $this->get(route('meli.claims.show', $claim))->assertInertia(fn (Assert $page) => $page
+            ->where('claim.products.0.variation_id', '987')->where('claim.order.status', 'paid')
+            ->where('claim.deadlines.0.role', 'respondent')->where('claim.messages.0.message', 'Producto dañado')
+            ->where('claim.timeline.0.source', 'action')->where('claim.timeline.1.source', 'status'));
+    }
+
+    public function test_individual_refresh_uses_claim_account_and_only_get_requests(): void
+    {
+        $first = $this->account(['access_token' => 'token-one']);
+        $this->account(['meli_user_id' => 'OTHER', 'access_token' => 'token-two']);
+        $claim = $this->claim($first);
+        $this->fakeClaimApi('opened');
+
+        $this->post(route('meli.claims.refresh', $claim))->assertRedirect(route('meli.claims.show', $claim));
+        $requests = collect(Http::recorded())->pluck(0);
+        $this->assertNotEmpty($requests);
+        $this->assertTrue($requests->every(fn (Request $request): bool => $request->method() === 'GET'));
+        $this->assertTrue($requests->every(fn (Request $request): bool => $request->hasHeader('Authorization', 'Bearer token-one')));
+        $this->assertDatabaseHas('meli_claims', ['id' => $claim->id, 'status' => 'opened']);
+    }
+
+    public function test_404_and_429_keep_local_claim_and_rate_limit_is_not_retried(): void
+    {
+        $account = $this->account();
+        $claim404 = $this->claim($account, ['status' => 'opened']);
+        Http::fake(fn () => Http::response(['message' => 'missing'], 404));
+        $this->post(route('meli.claims.refresh', $claim404))->assertRedirect();
+        $this->assertDatabaseHas('meli_claims', ['id' => $claim404->id, 'status' => 'opened']);
+
+        $recordedBeforeRateLimit = count(Http::recorded());
+        Http::fake(fn () => Http::response(['message' => 'rate limited'], 429));
+        $this->post(route('meli.claims.refresh', $claim404))->assertRedirect();
+        $this->assertCount($recordedBeforeRateLimit + 1, Http::recorded());
+        $this->assertDatabaseHas('meli_claims', ['id' => $claim404->id, 'status' => 'opened']);
+    }
+
+    public function test_detail_is_authenticated_complete_and_orders_timeline_newest_first(): void
+    {
+        $account = $this->account();
+        $claim = $this->claim($account, [
+            'status' => 'opened', 'stage' => 'dispute', 'reason_id' => 'PDD',
+            'detail_title' => 'Producto dañado', 'due_date' => now()->addDay(),
+            'raw_claim' => ['players' => [['role' => 'complainant', 'type' => 'buyer', 'user_id' => 99]]],
+            'status_history' => [['status' => 'opened', 'date' => '2026-08-30T10:00:00Z']],
+            'actions_history' => [['action' => 'send_message_to_mediator', 'date_created' => '2026-08-31T10:00:00Z']],
+            'messages' => [['sender_role' => 'complainant', 'receiver_role' => 'respondent', 'message' => 'Llegó dañado', 'date_created' => '2026-08-31T11:00:00Z', 'attachments' => [['filename' => 'photo.jpg', 'type' => 'image/jpeg']]]],
+            'expected_resolutions' => [['expected_resolution' => 'return_product']],
+        ]);
+
+        $this->get(route('meli.claims.show', $claim))->assertInertia(fn (Assert $page) => $page
+            ->where('claim.claim_id', '123')->where('claim.status', 'opened')->where('claim.stage', 'dispute')
+            ->where('claim.reason_id', 'PDD')->where('claim.expected_resolutions.0.expected_resolution', 'return_product')
+            ->where('claim.messages.0.message', 'Llegó dañado')->where('claim.messages.0.attachments.0.filename', 'photo.jpg')
+            ->where('claim.timeline.0.source', 'action')->where('claim.timeline.1.source', 'status')
+            ->where('claim.due_date', $claim->due_date->toISOString())->where('claim.order', null)
+            ->where('claim.participants.0.role', 'complainant')->missing('claim.participants.0.user_id'));
+
+        auth()->logout();
+        $this->get(route('meli.claims.show', $claim))->assertRedirect();
+    }
+
+    public function test_individual_refresh_uses_claim_account_only_get_and_preserves_local_data_on_404(): void
+    {
+        $first = $this->account(['access_token' => 'first-token']);
+        $second = $this->account(['meli_user_id' => 'SECOND', 'access_token' => 'second-token']);
+        $claim = $this->claim($second, ['claim_id' => '456', 'status' => 'opened', 'actions_history' => [['action' => 'open_claim']]]);
+        $beforeOrders = DB::table('meli_orders')->count();
+        $beforePublications = DB::table('meli_publications')->count();
+        $this->fakeClaimApi('closed');
+
+        $this->post(route('meli.claims.refresh', $claim))->assertRedirect(route('meli.claims.show', $claim));
+        $claim->refresh();
+        $this->assertSame('closed', $claim->status);
+        $requests = collect(Http::recorded())->pluck(0);
+        $this->assertTrue($requests->every(fn (Request $request): bool => $request->method() === 'GET'));
+        $this->assertTrue($requests->every(fn (Request $request): bool => $request->hasHeader('Authorization', 'Bearer second-token')));
+        $this->assertFalse($requests->contains(fn (Request $request): bool => $request->hasHeader('Authorization', 'Bearer first-token')));
+        $this->assertSame($beforeOrders, DB::table('meli_orders')->count());
+        $this->assertSame($beforePublications, DB::table('meli_publications')->count());
+
+        Http::fake(fn () => Http::response(['message' => 'not found'], 404));
+        $this->post(route('meli.claims.refresh', $claim))->assertSessionHas('err');
+        $claim->refresh();
+        $this->assertSame('closed', $claim->status);
+        $this->assertSame(['data' => [['action' => 'claim_opened']]], $claim->actions_history);
+        $this->assertStringNotContainsString('second-token', (string) $claim->sync_error);
+    }
+
+    public function test_rate_limit_has_bounded_backoff_and_keeps_claim(): void
+    {
+        $account = $this->account();
+        $claim = $this->claim($account, ['status' => 'opened']);
+        Http::fake(fn () => Http::response(['message' => 'too many requests'], 429, ['Retry-After' => '1']));
+
+        $this->post(route('meli.claims.refresh', $claim))->assertSessionHas('err');
+
+        $this->assertCount(1, Http::recorded());
+        $this->assertDatabaseHas('meli_claims', ['id' => $claim->id, 'status' => 'opened']);
+    }
+
+    public function test_refresh_rejects_claim_from_another_user_without_http(): void
+    {
+        $other = User::factory()->create();
+        $foreignAccount = $this->account(['user_id' => $other->id, 'meli_user_id' => 'FOREIGN']);
+        $claim = $this->claim($foreignAccount);
+        Http::fake();
+
+        $this->post(route('meli.claims.refresh', $claim))->assertNotFound();
+        $this->assertCount(0, Http::recorded());
+    }
+
     public function test_post_purchase_claims_dispatches_without_leading_resource_slash(): void
     {
         Bus::fake();
@@ -229,6 +372,8 @@ class MeliClaimsTest extends TestCase
             if (str_ends_with($path, '/status-history')) return Http::response(['data' => [['status' => $status, 'date' => now()->toISOString()]]]);
             if (str_ends_with($path, '/actions-history')) return Http::response(['data' => [['action' => 'claim_opened']]]);
             if (str_ends_with($path, '/expected-resolutions')) return Http::response(['data' => [['type' => 'return']]]);
+            if (str_ends_with($path, '/changes')) return Http::response([]);
+            if (str_ends_with($path, '/messages')) return Http::response([['sender_role' => 'complainant', 'receiver_role' => 'respondent', 'message' => 'Mensaje visible', 'user_id' => 123, 'attachments' => []]]);
             return Http::response(['id' => 123, 'resource' => 'order', 'resource_id' => 'ORDER-1', 'status' => $status, 'stage' => 'claim', 'type' => 'mediations', 'reason_id' => 'PDD', 'players' => [['role' => 'respondent', 'type' => 'seller', 'available_actions' => [['action' => 'allow_return', 'due_date' => now()->addHours(4)->toISOString()]]]], 'date_created' => now()->subDay()->toISOString(), 'last_updated' => now()->toISOString()]);
         });
     }

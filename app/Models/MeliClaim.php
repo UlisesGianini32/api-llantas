@@ -18,6 +18,7 @@ class MeliClaim extends Model
             'last_updated' => 'datetime', 'last_synced_at' => 'datetime',
             'raw_claim' => 'array', 'raw_detail' => 'array', 'status_history' => 'array',
             'actions_history' => 'array', 'expected_resolutions' => 'array', 'available_actions' => 'array',
+            'messages' => 'array', 'changes' => 'array',
         ];
     }
 
