@@ -793,10 +793,14 @@ class MeliClaimsTest extends TestCase
 
     public function test_allow_return_never_retries_errors_and_timeout_is_uncertain(): void
     {
-        Http::fake(function (Request $request) {
+        $timeoutPostAttempts = 0;
+        Http::fake(function (Request $request) use (&$timeoutPostAttempts) {
             $path = parse_url($request->url(), PHP_URL_PATH);
             if ($request->method() === 'POST') {
-                if (str_contains($path, 'RETURN-TIMEOUT')) throw new ConnectionException('timeout');
+                if (str_contains($path, 'RETURN-TIMEOUT')) {
+                    $timeoutPostAttempts++;
+                    throw new ConnectionException('timeout');
+                }
                 foreach ([401, 429, 500] as $status) if (str_contains($path, 'RETURN-'.$status)) return Http::response([], $status);
             }
             return Http::response(['id' => 'RETURN', 'status' => 'opened', 'players' => [['role' => 'respondent', 'available_actions' => [['action' => 'allow_return']]]]]);
@@ -812,7 +816,41 @@ class MeliClaimsTest extends TestCase
         $claim = $this->claim($this->account(), ['claim_id' => 'RETURN-TIMEOUT']);
         $this->post(route('meli.claims.resolutions.allow-return', $claim), ['confirmed' => true])->assertSessionHas('err');
         $this->assertDatabaseHas('meli_claim_action_logs', ['meli_claim_id' => $claim->id, 'action' => 'allow_return', 'success' => null, 'error_code' => 'uncertain_delivery']);
-        $this->assertCount(1, collect(Http::recorded())->pluck(0)->filter(fn (Request $request): bool => $request->method() === 'POST' && str_contains($request->url(), 'RETURN-TIMEOUT')));
+        $this->assertSame(1, $timeoutPostAttempts);
+    }
+
+    public function test_refund_never_retries_errors_and_timeout_is_uncertain(): void
+    {
+        $timeoutPostAttempts = 0;
+        Http::fake(function (Request $request) use (&$timeoutPostAttempts) {
+            $path = parse_url($request->url(), PHP_URL_PATH);
+            if ($request->method() === 'POST') {
+                if (str_contains($path, 'REFUND-TIMEOUT')) {
+                    $timeoutPostAttempts++;
+                    throw new ConnectionException('timeout');
+                }
+                foreach ([401, 429, 500] as $status) if (str_contains($path, 'REFUND-'.$status)) return Http::response([], $status);
+            }
+            return Http::response(['id' => 'REFUND', 'status' => 'opened', 'players' => [['role' => 'respondent', 'available_actions' => [['action' => 'refund']]]]]);
+        });
+
+        foreach ([401, 429, 500] as $status) {
+            $claim = $this->claim($this->account(), ['claim_id' => 'REFUND-'.$status]);
+            $this->post(route('meli.claims.resolutions.refund', $claim), ['confirmed' => true])->assertSessionHas('err');
+            $posts = collect(Http::recorded())->pluck(0)->filter(fn (Request $request): bool => $request->method() === 'POST' && str_contains($request->url(), 'REFUND-'.$status));
+            $this->assertCount(1, $posts);
+            $this->assertStringEndsWith('/expected-resolutions/refund', parse_url($posts->sole()->url(), PHP_URL_PATH));
+        }
+
+        $claim = $this->claim($this->account(), ['claim_id' => 'REFUND-TIMEOUT']);
+        $this->post(route('meli.claims.resolutions.refund', $claim), ['confirmed' => true])->assertSessionHas('err');
+        $this->assertSame(1, $timeoutPostAttempts);
+        $this->assertDatabaseHas('meli_claim_action_logs', [
+            'meli_claim_id' => $claim->id,
+            'action' => 'refund',
+            'success' => null,
+            'error_code' => 'uncertain_delivery',
+        ]);
     }
 
     public function test_partial_refund_uses_remote_offer_and_posts_only_percentage(): void
