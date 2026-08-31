@@ -8,8 +8,25 @@ const money = (value, currency = 'MXN') => value == null ? '—' : new Intl.Numb
 
 export default function Show({ claim }) {
     const [refreshing, setRefreshing] = useState(false)
-    const flash = usePage().props.flash || {}
+    const [message, setMessage] = useState('')
+    const [confirming, setConfirming] = useState(false)
+    const [sending, setSending] = useState(false)
+    const page = usePage()
+    const flash = page.props.flash || {}
+    const errors = page.props.errors || {}
     const refresh = () => router.post(`/meli-claims/${claim.id}/refresh`, {}, { preserveScroll: true, onStart: () => setRefreshing(true), onFinish: () => setRefreshing(false) })
+    const recipientLabel = claim.message_recipient === 'mediator' ? 'Mediador de Mercado Libre' : claim.message_recipient === 'complainant' ? 'Comprador' : claim.message_recipient === 'respondent' ? 'Vendedor' : null
+    const confirmMessage = () => { if (message.trim() && !sending) setConfirming(true) }
+    const sendMessage = () => {
+        if (sending) return
+        router.post(`/meli-claims/${claim.id}/messages`, { message }, {
+            preserveScroll: true,
+            onStart: () => setSending(true),
+            onSuccess: responsePage => { if (responsePage.props.flash?.ok) setMessage(''); setConfirming(false) },
+            onError: () => setConfirming(false),
+            onFinish: () => setSending(false),
+        })
+    }
     return <AppShell title="Reclamos"><Head title={`Reclamo ${claim.claim_id}`} /><main className="mx-auto max-w-6xl space-y-5 p-4 sm:p-6">
         <div className="flex flex-wrap justify-between gap-3"><Link href="/meli-claims" className="font-bold text-indigo-600">← Volver a Reclamos</Link><button onClick={refresh} disabled={refreshing} className="rounded-lg bg-indigo-600 px-4 py-2 font-bold text-white disabled:opacity-50">{refreshing ? 'Actualizando…' : 'Actualizar reclamo'}</button></div>
         {(flash.ok || flash.err) && <div className={`rounded-xl border p-4 ${flash.err ? 'border-red-200 bg-red-50 text-red-800' : 'border-emerald-200 bg-emerald-50 text-emerald-800'}`}>{flash.err || flash.ok}</div>}
@@ -24,7 +41,9 @@ export default function Show({ claim }) {
         <Card title="Resolución solicitada / esperada"><Resolutions value={claim.expected_resolutions} /></Card>
         <Card title="Historial del reclamo"><Timeline values={claim.timeline || []} /></Card>
         <Card title="Conversación"><Messages value={claim.messages} /></Card>
+        <Card title="Responder reclamo">{recipientLabel ? <div className="space-y-3"><p><b>Destinatario:</b> {recipientLabel}</p><textarea value={message} onChange={event => setMessage(event.target.value)} maxLength={2000} rows={7} disabled={sending} placeholder="Escribe tu mensaje" className="w-full rounded-lg border p-3 dark:border-neutral-700 dark:bg-neutral-800" />{errors.message && <p className="text-sm font-semibold text-red-600">{errors.message}</p>}<div className="flex flex-wrap items-center justify-between gap-3"><span className="text-xs text-slate-500">{message.length}/2000 · Adjuntos próximamente</span><div className="flex gap-2"><button type="button" onClick={() => setMessage('')} disabled={sending || message.length === 0} className="rounded-lg border px-4 py-2 font-bold disabled:opacity-50">Limpiar</button><button type="button" onClick={confirmMessage} disabled={sending || !message.trim()} className="rounded-lg bg-indigo-600 px-4 py-2 font-bold text-white disabled:opacity-50">Enviar mensaje</button></div></div></div> : <Empty>Actualmente Mercado Libre no permite enviar un mensaje desde este reclamo.</Empty>}</Card>
         {listData(claim.changes).length > 0 && <Card title="Cambio / reemplazo relacionado"><Changes value={claim.changes} /></Card>}
+        {confirming && <div role="dialog" aria-modal="true" className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"><div className="w-full max-w-xl rounded-xl bg-white p-6 shadow-xl dark:bg-neutral-900"><h2 className="text-xl font-black">Confirmar envío</h2><p className="mt-2">Vas a enviar este mensaje a Mercado Libre.</p><dl className="mt-4 space-y-3"><div><dt className="text-xs font-bold uppercase text-slate-500">Reclamo</dt><dd>{claim.claim_id}</dd></div><div><dt className="text-xs font-bold uppercase text-slate-500">Destinatario</dt><dd>{recipientLabel}</dd></div><div><dt className="text-xs font-bold uppercase text-slate-500">Mensaje</dt><dd className="max-h-64 overflow-auto whitespace-pre-wrap rounded-lg bg-slate-50 p-3 dark:bg-neutral-800">{message.trim()}</dd></div></dl><div className="mt-5 flex justify-end gap-2"><button type="button" onClick={() => setConfirming(false)} disabled={sending} className="rounded-lg border px-4 py-2 font-bold disabled:opacity-50">Cancelar</button><button type="button" onClick={sendMessage} disabled={sending} className="rounded-lg bg-indigo-600 px-4 py-2 font-bold text-white disabled:opacity-50">{sending ? 'Enviando…' : 'Confirmar y enviar'}</button></div></div></div>}
     </main></AppShell>
 }
 

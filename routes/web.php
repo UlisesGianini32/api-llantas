@@ -9,6 +9,7 @@ use App\Http\Controllers\LlantaController;
 use App\Http\Controllers\MeliBatchRepublishController;
 use App\Http\Controllers\MeliCompareController;
 use App\Http\Controllers\MeliClaimController;
+use App\Http\Controllers\MeliClaimMessageController;
 use App\Http\Controllers\MeliFullStockController;
 use App\Http\Controllers\MeliMessagingController;
 use App\Http\Controllers\MeliPriceManager\MeliAccountTaxProfileController;
@@ -128,6 +129,7 @@ Route::middleware('auth')->group(function () {
     Route::post('/meli-claims/sync', [MeliClaimController::class, 'sync'])->name('meli.claims.sync');
     Route::get('/meli-claims/{claim}', [MeliClaimController::class, 'show'])->whereNumber('claim')->name('meli.claims.show');
     Route::post('/meli-claims/{claim}/refresh', [MeliClaimController::class, 'refresh'])->whereNumber('claim')->name('meli.claims.refresh');
+    Route::post('/meli-claims/{claim}/messages', [MeliClaimMessageController::class, 'store'])->whereNumber('claim')->name('meli.claims.messages.store');
 
     // PEDIDOS PRINCIPALES
     Route::get('/ams/pedidos', [AmsPedidosController::class, 'index'])->name('ams.pedidos.index');
