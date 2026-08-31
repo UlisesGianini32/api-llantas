@@ -68,7 +68,7 @@ class MeliClaimResolutionService
             ? $payload
             : (array) data_get($payload, 'available_offers', data_get($payload, 'data', data_get($payload, 'offers', [])));
 
-        return collect($items)->filter('is_array')->map(function (array $offer) use ($globalCurrency): ?array {
+        return collect($items)->filter(fn (mixed $item): bool => is_array($item))->map(function (array $offer) use ($globalCurrency): ?array {
             $percentage = $offer['percentage'] ?? null;
             if (! is_numeric($percentage) || (float) $percentage >= 100) return null;
 
@@ -109,6 +109,6 @@ class MeliClaimResolutionService
             ->filter(fn (mixed $player): bool => is_array($player)
                 && (($player['role'] ?? null) === 'respondent' || ($player['type'] ?? null) === 'seller'))
             ->flatMap(fn (array $player): array => (array) ($player['available_actions'] ?? []))
-            ->filter('is_array')->values()->all();
+            ->filter(fn (mixed $item): bool => is_array($item))->values()->all();
     }
 }
