@@ -17,7 +17,7 @@ export default function Index({ accounts, selectedAccountId, claims, stats, filt
         <Head title="Reclamos · Mercado Libre" />
         <div className="mx-auto max-w-7xl space-y-5 p-4 sm:p-6">
             <header className="flex flex-wrap items-end justify-between gap-4">
-                <div><p className="text-xs font-bold uppercase tracking-widest text-indigo-600">Mercado Libre</p><h1 className="text-2xl font-black">Reclamos</h1><p className="text-sm text-slate-500">Información local de solo lectura · Última sincronización: {date(lastSyncedAt)}</p></div>
+                <div><p className="text-xs font-bold uppercase tracking-widest text-indigo-600">Mercado Libre</p><h1 className="text-2xl font-black">Reclamos</h1><p className="text-sm text-slate-500">Información sincronizada de Mercado Libre · Última sincronización: {date(lastSyncedAt)}</p></div>
                 <button disabled={!selectedAccountId || sync.processing} onClick={() => sync.post('/meli-claims/sync', { preserveScroll: true })} className="rounded-lg bg-indigo-600 px-4 py-2 font-bold text-white disabled:opacity-50">Sincronizar reclamos</button>
             </header>
             <div className="grid gap-3 sm:grid-cols-5">{[['Abiertos', stats.open], ['Requieren mi acción', stats.action], ['Por vencer', stats.due], ['En mediación', stats.mediation], ['Cerrados', stats.closed]].map(([label, value]) => <div key={label} className="rounded-xl border bg-white p-4 dark:border-neutral-800 dark:bg-neutral-900"><p className="text-xs text-slate-500">{label}</p><p className="text-2xl font-black">{value}</p></div>)}</div>
