@@ -12,7 +12,11 @@ test('exige confirmación antes de ejecutar el POST de mensaje', () => {
 })
 
 test('envía solamente message y bloquea doble click mientras procesa', () => {
-    assert.match(source, /router\.post\(`\/meli-claims\/\$\{claim\.id\}\/messages`, \{ message \}/)
+    assert.match(source, /router\.post\(`\/meli-claims\/\$\{claim\.id\}\/messages`, \{ message, attachments \}/)
     assert.match(source, /if \(sending\) return/)
     assert.match(source, /disabled=\{sending \|\| !message\.trim\(\)\}/)
+    assert.match(source, /JPG, PNG o PDF/)
+    assert.match(source, />Quitar<\/button>/)
+    assert.match(source, /<FileList files=\{attachments\} \/>/)
+    assert.match(source, /Ver \/ Descargar/)
 })

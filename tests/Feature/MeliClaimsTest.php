@@ -11,6 +11,7 @@ use App\Services\MercadoLibre\Claims\MeliClaimsService;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Http\Client\Request;
 use Illuminate\Http\Client\ConnectionException;
+use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
@@ -24,6 +25,7 @@ class MeliClaimsTest extends TestCase
     private object $migration;
     private object $detailMigration;
     private object $actionMigration;
+    private object $attachmentMigration;
     private User $user;
 
     protected function setUp(): void
@@ -64,6 +66,8 @@ class MeliClaimsTest extends TestCase
         $this->detailMigration->up();
         $this->actionMigration = require database_path('migrations/2026_09_01_000001_create_meli_claim_action_logs_table.php');
         $this->actionMigration->up();
+        $this->attachmentMigration = require database_path('migrations/2026_09_02_000001_create_meli_claim_attachment_uploads_table.php');
+        $this->attachmentMigration->up();
         $this->user = User::factory()->create();
         $this->actingAs($this->user);
         Http::preventStrayRequests();
@@ -71,6 +75,7 @@ class MeliClaimsTest extends TestCase
 
     protected function tearDown(): void
     {
+        $this->attachmentMigration->down();
         $this->actionMigration->down();
         $this->detailMigration->down();
         $this->migration->down();
@@ -494,6 +499,193 @@ class MeliClaimsTest extends TestCase
         $this->assertSame(1, $attempts);
     }
 
+    public function test_attachment_validation_rejects_size_type_and_more_than_five_before_http(): void
+    {
+        $claim = $this->claim($this->account(), ['claim_id' => 'VALIDATE-FILES', 'status' => 'opened', 'available_actions' => [['action' => 'send_message_to_complainant']]]);
+        Http::fake();
+        $this->post(route('meli.claims.messages.store', $claim), ['message' => 'Grande', 'attachments' => [UploadedFile::fake()->create('large.pdf', 5121, 'application/pdf')]])->assertSessionHasErrors('attachments.0');
+        $this->post(route('meli.claims.messages.store', $claim), ['message' => 'Texto', 'attachments' => [UploadedFile::fake()->create('notes.txt', 1, 'text/plain')]])->assertSessionHasErrors('attachments.0');
+        $files = collect(range(1, 6))->map(fn (int $index) => UploadedFile::fake()->create("file{$index}.pdf", 1, 'application/pdf'))->all();
+        $this->post(route('meli.claims.messages.store', $claim), ['message' => 'Muchos', 'attachments' => $files])->assertSessionHasErrors('attachments');
+        $this->assertCount(0, Http::recorded());
+    }
+
+    public function test_valid_attachment_is_uploaded_once_then_sent_with_remote_filename(): void
+    {
+        $account = $this->account(['access_token' => 'attachment-token']);
+        $claim = $this->claim($account, ['claim_id' => 'FILES', 'status' => 'opened', 'available_actions' => [['action' => 'send_message_to_complainant']]]);
+        $this->fakeAttachmentMessageApi();
+        $file = UploadedFile::fake()->createWithContent('evidencia á (1).pdf', "%PDF-1.4\narchivo");
+
+        $this->post(route('meli.claims.messages.store', $claim), ['message' => 'Con evidencia', 'attachments' => [$file]])->assertSessionHas('ok');
+
+        $requests = collect(Http::recorded())->pluck(0);
+        $uploads = $requests->filter(fn (Request $request): bool => $request->method() === 'POST' && str_ends_with(parse_url($request->url(), PHP_URL_PATH), '/attachments'));
+        $messages = $requests->filter(fn (Request $request): bool => $request->method() === 'POST' && str_ends_with(parse_url($request->url(), PHP_URL_PATH), '/actions/send-message'));
+        $this->assertCount(1, $uploads); $this->assertCount(1, $messages);
+        $this->assertTrue($uploads->sole()->hasHeader('Authorization', 'Bearer attachment-token'));
+        $this->assertStringContainsString('multipart/form-data', $uploads->sole()->header('Content-Type')[0]);
+        $this->assertSame(['receiver_role' => 'complainant', 'message' => 'Con evidencia', 'attachments' => ['REMOTE-safe.pdf']], $messages->sole()->data());
+        $this->assertDatabaseHas('meli_claim_attachment_uploads', ['meli_claim_id' => $claim->id, 'remote_filename' => 'REMOTE-safe.pdf', 'success' => true]);
+        $upload = DB::table('meli_claim_attachment_uploads')->first();
+        $this->assertLessThanOrEqual(125, strlen($upload->safe_filename));
+        $this->assertMatchesRegularExpression('/\A[A-Za-z0-9._-]+\z/', $upload->safe_filename);
+    }
+
+    public function test_partial_upload_failure_does_not_send_message_and_is_audited(): void
+    {
+        $claim = $this->claim($this->account(), ['claim_id' => 'PARTIAL', 'status' => 'opened', 'available_actions' => [['action' => 'send_message_to_complainant']]]);
+        $uploadNumber = 0;
+        Http::fake(function (Request $request) use (&$uploadNumber) {
+            if (str_ends_with(parse_url($request->url(), PHP_URL_PATH), '/attachments')) {
+                $uploadNumber++;
+                return $uploadNumber === 1 ? Http::response(['filename' => 'FIRST.pdf'], 201) : Http::response(['message' => 'failed'], 500);
+            }
+            return Http::response([], 200);
+        });
+        $files = [UploadedFile::fake()->createWithContent('one.pdf', "%PDF-1.4\none"), UploadedFile::fake()->createWithContent('two.pdf', "%PDF-1.4\ntwo")];
+
+        $this->post(route('meli.claims.messages.store', $claim), ['message' => 'Dos archivos', 'attachments' => $files])->assertSessionHas('err');
+
+        $posts = collect(Http::recorded())->pluck(0)->filter(fn (Request $request): bool => $request->method() === 'POST');
+        $this->assertCount(2, $posts);
+        $this->assertFalse($posts->contains(fn (Request $request): bool => str_ends_with(parse_url($request->url(), PHP_URL_PATH), '/actions/send-message')));
+        $this->assertDatabaseHas('meli_claim_attachment_uploads', ['remote_filename' => 'FIRST.pdf', 'success' => true]);
+        $this->assertDatabaseHas('meli_claim_attachment_uploads', ['remote_status' => 500, 'success' => false]);
+    }
+
+    public function test_attachment_upload_401_429_and_500_are_never_retried(): void
+    {
+        $account = $this->account();
+        $remoteStatus = 401;
+        Http::fake(function () use (&$remoteStatus) { return Http::response(['message' => 'upload rejected'], $remoteStatus); });
+        foreach ([401, 429, 500] as $status) {
+            $remoteStatus = $status;
+            $claim = $this->claim($account, ['claim_id' => 'UPLOAD-'.$status, 'status' => 'opened', 'available_actions' => [['action' => 'send_message_to_complainant']]]);
+            $before = count(Http::recorded());
+            $file = UploadedFile::fake()->createWithContent("evidence-{$status}.pdf", "%PDF-1.4\n{$status}");
+            $this->post(route('meli.claims.messages.store', $claim), ['message' => 'Upload '.$status, 'attachments' => [$file]])->assertSessionHas('err');
+            $this->assertCount($before + 1, Http::recorded());
+            $request = Http::recorded()[$before][0];
+            $this->assertSame('POST', $request->method());
+            $this->assertStringEndsWith('/attachments', parse_url($request->url(), PHP_URL_PATH));
+        }
+    }
+
+    public function test_uncertain_attachment_upload_is_attempted_once_and_keeps_cooldown(): void
+    {
+        $claim = $this->claim($this->account(), ['claim_id' => 'UPLOAD-TIMEOUT', 'status' => 'opened', 'available_actions' => [['action' => 'send_message_to_complainant']]]);
+        $attempts = 0;
+        Http::fake(function () use (&$attempts) { $attempts++; throw new ConnectionException('timeout'); });
+        $file = UploadedFile::fake()->createWithContent('timeout.pdf', "%PDF-1.4\ntimeout");
+
+        $this->post(route('meli.claims.messages.store', $claim), ['message' => 'Incierto', 'attachments' => [$file]])->assertSessionHas('err');
+        $secondFile = UploadedFile::fake()->createWithContent('timeout.pdf', "%PDF-1.4\ntimeout");
+        $this->post(route('meli.claims.messages.store', $claim), ['message' => 'Incierto', 'attachments' => [$secondFile]])->assertSessionHasErrors('message');
+
+        $this->assertSame(1, $attempts);
+        $this->assertDatabaseHas('meli_claim_attachment_uploads', ['meli_claim_id' => $claim->id, 'error_code' => 'uncertain_upload', 'success' => false]);
+    }
+
+    public function test_successful_response_without_remote_filename_is_invalid_and_never_sends_message(): void
+    {
+        $claim = $this->claim($this->account(), ['claim_id' => 'NO-FILENAME', 'status' => 'opened', 'available_actions' => [['action' => 'send_message_to_complainant']]]);
+        Http::fake(fn () => Http::response(['user_id' => 123], 201));
+        $file = UploadedFile::fake()->createWithContent('evidence.pdf', "%PDF-1.4\nmissing name");
+
+        $this->post(route('meli.claims.messages.store', $claim), ['message' => 'Sin filename', 'attachments' => [$file]])->assertSessionHas('err');
+
+        $posts = collect(Http::recorded())->pluck(0)->filter(fn (Request $request): bool => $request->method() === 'POST');
+        $this->assertCount(1, $posts);
+        $this->assertStringEndsWith('/attachments', parse_url($posts->sole()->url(), PHP_URL_PATH));
+        $this->assertDatabaseHas('meli_claim_attachment_uploads', [
+            'meli_claim_id' => $claim->id, 'remote_status' => 201,
+            'success' => false, 'error_code' => 'invalid_remote_response',
+        ]);
+    }
+
+    public function test_two_files_upload_twice_and_send_one_message_with_both_remote_names(): void
+    {
+        $claim = $this->claim($this->account(), ['claim_id' => 'TWO-FILES', 'status' => 'opened', 'available_actions' => [['action' => 'send_message_to_complainant']]]);
+        $upload = 0;
+        Http::fake(function (Request $request) use (&$upload) {
+            $path = parse_url($request->url(), PHP_URL_PATH);
+            if ($request->method() === 'POST' && str_ends_with($path, '/attachments')) return Http::response(['filename' => 'REMOTE-'.(++$upload).'.pdf'], 201);
+            if ($request->method() === 'POST') return Http::response(['id' => 'MSG-TWO'], 201);
+            if (str_ends_with($path, '/messages')) return Http::response([]);
+            if (preg_match('#/(detail|affects-reputation|status-history|actions-history|expected-resolutions|changes)$#', $path)) return Http::response([]);
+            return Http::response(['id' => 'TWO-FILES', 'status' => 'opened', 'players' => [['role' => 'respondent', 'available_actions' => [['action' => 'send_message_to_complainant']]]]]);
+        });
+        $files = [UploadedFile::fake()->createWithContent('one.pdf', "%PDF-1.4\none"), UploadedFile::fake()->createWithContent('two.pdf', "%PDF-1.4\ntwo")];
+
+        $this->post(route('meli.claims.messages.store', $claim), ['message' => 'Ambos', 'attachments' => $files])->assertSessionHas('ok');
+
+        $posts = collect(Http::recorded())->pluck(0)->filter(fn (Request $request): bool => $request->method() === 'POST');
+        $this->assertSame(2, $posts->filter(fn (Request $request): bool => str_ends_with(parse_url($request->url(), PHP_URL_PATH), '/attachments'))->count());
+        $messagePost = $posts->filter(fn (Request $request): bool => str_ends_with(parse_url($request->url(), PHP_URL_PATH), '/actions/send-message'));
+        $this->assertCount(1, $messagePost);
+        $this->assertSame(['REMOTE-1.pdf', 'REMOTE-2.pdf'], $messagePost->sole()->data()['attachments']);
+    }
+
+    public function test_same_message_with_different_file_hash_does_not_share_cooldown(): void
+    {
+        $claim = $this->claim($this->account(), ['claim_id' => 'DIFFERENT-HASH', 'status' => 'opened', 'available_actions' => [['action' => 'send_message_to_complainant']]]);
+        $this->fakeAttachmentMessageApi();
+
+        $this->post(route('meli.claims.messages.store', $claim), ['message' => 'Mismo texto', 'attachments' => [UploadedFile::fake()->createWithContent('same.pdf', "%PDF-1.4\nA")]])->assertSessionHas('ok');
+        $this->post(route('meli.claims.messages.store', $claim), ['message' => 'Mismo texto', 'attachments' => [UploadedFile::fake()->createWithContent('same.pdf', "%PDF-1.4\nB")]])->assertSessionHas('ok');
+
+        $posts = collect(Http::recorded())->pluck(0)->filter(fn (Request $request): bool => $request->method() === 'POST');
+        $this->assertCount(4, $posts);
+    }
+
+    public function test_same_message_and_file_can_be_processed_after_attachment_cooldown(): void
+    {
+        $claim = $this->claim($this->account(), ['claim_id' => 'FILE-LATER', 'status' => 'opened', 'available_actions' => [['action' => 'send_message_to_complainant']]]);
+        $this->fakeAttachmentMessageApi();
+        $content = "%PDF-1.4\nrepeat";
+
+        $this->post(route('meli.claims.messages.store', $claim), ['message' => 'Después', 'attachments' => [UploadedFile::fake()->createWithContent('repeat.pdf', $content)]])->assertSessionHas('ok');
+        $this->travel(16)->seconds();
+        $this->post(route('meli.claims.messages.store', $claim), ['message' => 'Después', 'attachments' => [UploadedFile::fake()->createWithContent('repeat.pdf', $content)]])->assertSessionHas('ok');
+
+        $posts = collect(Http::recorded())->pluck(0)->filter(fn (Request $request): bool => $request->method() === 'POST');
+        $this->assertCount(4, $posts);
+    }
+
+    public function test_reversing_same_files_keeps_same_intention_hash_and_is_blocked(): void
+    {
+        $claim = $this->claim($this->account(), ['claim_id' => 'ORDER-INDEPENDENT', 'status' => 'opened', 'available_actions' => [['action' => 'send_message_to_complainant']]]);
+        $this->fakeAttachmentMessageApi();
+        $one = "%PDF-1.4\none"; $two = "%PDF-1.4\ntwo";
+        $this->post(route('meli.claims.messages.store', $claim), ['message' => 'Orden', 'attachments' => [UploadedFile::fake()->createWithContent('one.pdf', $one), UploadedFile::fake()->createWithContent('two.pdf', $two)]])->assertSessionHas('ok');
+        $this->post(route('meli.claims.messages.store', $claim), ['message' => 'Orden', 'attachments' => [UploadedFile::fake()->createWithContent('two.pdf', $two), UploadedFile::fake()->createWithContent('one.pdf', $one)]])->assertSessionHasErrors('message');
+
+        $posts = collect(Http::recorded())->pluck(0)->filter(fn (Request $request): bool => $request->method() === 'POST');
+        $this->assertCount(3, $posts);
+    }
+
+    public function test_attachment_download_requires_snapshot_and_uses_safe_get_proxy(): void
+    {
+        $account = $this->account(['access_token' => 'download-token']);
+        $claim = $this->claim($account, ['claim_id' => 'DOWNLOAD', 'messages' => [['attachments' => [['filename' => 'remote-file.pdf', 'original_filename' => "factura\r\nmaliciosa.pdf"]]]]]);
+        Http::fake(fn () => Http::response('PDF', 200, ['Content-Type' => 'application/pdf']));
+
+        auth()->logout();
+        $this->get(route('meli.claims.attachments.download', [$claim, 'remote-file.pdf']))->assertRedirect('/login');
+        $otherUser = User::factory()->create();
+        $this->actingAs($otherUser)->get(route('meli.claims.attachments.download', [$claim, 'remote-file.pdf']))->assertNotFound();
+        $this->actingAs($this->user);
+        $this->get(route('meli.claims.attachments.download', [$claim, 'missing.pdf']))->assertNotFound();
+        $response = $this->get(route('meli.claims.attachments.download', [$claim, 'remote-file.pdf']))->assertOk()->assertHeader('Content-Type', 'application/pdf');
+        $this->assertStringNotContainsString("\r", $response->headers->get('Content-Disposition'));
+        $this->assertStringNotContainsString("\n", $response->headers->get('Content-Disposition'));
+        $requests = collect(Http::recorded())->pluck(0);
+        $this->assertCount(1, $requests);
+        $this->assertSame('GET', $requests->sole()->method());
+        $this->assertTrue($requests->sole()->hasHeader('Authorization', 'Bearer download-token'));
+    }
+
     public function test_post_purchase_claims_dispatches_without_leading_resource_slash(): void
     {
         Bus::fake();
@@ -564,6 +756,18 @@ class MeliClaimsTest extends TestCase
                 'status' => 'opened', 'stage' => 'dispute', 'type' => 'mediations',
                 'players' => [['role' => 'respondent', 'type' => 'seller', 'available_actions' => [['action' => 'send_message_to_mediator']]]],
             ]);
+        });
+    }
+
+    private function fakeAttachmentMessageApi(): void
+    {
+        Http::fake(function (Request $request) {
+            $path = parse_url($request->url(), PHP_URL_PATH);
+            if ($request->method() === 'POST' && str_ends_with($path, '/attachments')) return Http::response(['file_name' => 'REMOTE-safe.pdf'], 201);
+            if ($request->method() === 'POST') return Http::response(['id' => 'MSG-FILE'], 201);
+            if (str_ends_with($path, '/messages')) return Http::response([['message' => 'Con evidencia', 'attachments' => [['filename' => 'REMOTE-safe.pdf']]]]);
+            if (str_ends_with($path, '/detail') || str_ends_with($path, '/affects-reputation') || str_ends_with($path, '/status-history') || str_ends_with($path, '/actions-history') || str_ends_with($path, '/expected-resolutions') || str_ends_with($path, '/changes')) return Http::response([]);
+            return Http::response(['id' => 'FILES', 'status' => 'opened', 'players' => [['role' => 'respondent', 'available_actions' => [['action' => 'send_message_to_complainant']]]]]);
         });
     }
 

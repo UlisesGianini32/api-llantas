@@ -139,7 +139,40 @@ class MeliAccountApiClient
     /** @param array<string, mixed> $query */
     public function getReadOnly(MeliAccount $account, string $path, array $query = [], int $maxAttempts = self::MAX_ATTEMPTS): Response
     {
-        return $this->request($account, 'get', $path, $query, false, [], $maxAttempts);
+        return $this->request(
+            $account,
+            'get',
+            $path,
+            $query,
+            refreshAfterUnauthorized: false,
+            maxAttempts: $maxAttempts,
+        );
+    }
+
+    public function postMultipartOnce(MeliAccount $account, string $path, string $field, mixed $contents, string $filename): Response
+    {
+        try {
+            $response = Http::withToken((string) $account->access_token)
+                ->acceptJson()
+                ->timeout(60)
+                ->attach($field, $contents, $filename)
+                ->post(self::API_BASE_URL.'/'.ltrim($path, '/'));
+        } catch (ConnectionException $exception) {
+            throw new MeliApiRequestException(
+                'Mercado Libre HTTP 0: No fue posible confirmar la carga del archivo.',
+                0,
+                $exception
+            );
+        }
+
+        if ($response->successful()) {
+            return $response;
+        }
+
+        throw new MeliApiRequestException(
+            "Mercado Libre HTTP {$response->status()}: ".$this->responseMessage($response),
+            $response->status(),
+        );
     }
 
     private function retryDelaySeconds(Response $response, int $attempt): int

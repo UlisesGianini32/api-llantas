@@ -10,6 +10,8 @@ use App\Services\MercadoLibre\MeliAccountApiClient;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Http\Client\Response;
+use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Str;
 use Throwable;
 
 class MeliClaimsService
@@ -23,18 +25,53 @@ class MeliClaimsService
         return $this->api->sanitizeMessage($error->getMessage());
     }
 
-    public function sendMessage(MeliAccount $account, MeliClaim $claim, string $receiverRole, string $message): Response
+    public function ensureFreshToken(MeliAccount $account): void
     {
         $this->api->ensureFreshAccessToken($account);
+    }
+
+    public function uploadAttachment(MeliAccount $account, MeliClaim $claim, UploadedFile $file, string $safeFilename): Response
+    {
+        $stream = fopen($file->getRealPath(), 'rb');
+        if ($stream === false) throw new \RuntimeException('No fue posible leer el archivo temporal.');
+        try {
+            return $this->api->postMultipartOnce($account, self::BASE.'/'.rawurlencode($claim->claim_id).'/attachments', 'file', $stream, $safeFilename);
+        } finally {
+            if (is_resource($stream)) fclose($stream);
+        }
+    }
+
+    public function safeAttachmentFilename(UploadedFile $file, string $hash): string
+    {
+        $extension = match ($file->getMimeType()) { 'image/jpeg' => 'jpg', 'image/png' => 'png', 'application/pdf' => 'pdf', default => throw new \InvalidArgumentException('Formato no permitido.') };
+        $base = pathinfo($file->getClientOriginalName(), PATHINFO_FILENAME);
+        $base = trim(preg_replace('/[^A-Za-z0-9_-]+/', '_', Str::ascii($base)) ?? '', '_-');
+        $base = $base !== '' ? $base : 'archivo';
+        $suffix = '_'.substr($hash, 0, 10).'.'.$extension;
+        return substr($base, 0, 125 - strlen($suffix)).$suffix;
+    }
+
+    public function sendMessage(MeliAccount $account, MeliClaim $claim, string $receiverRole, string $message, array $attachments = []): Response
+    {
+        $this->api->ensureFreshAccessToken($account);
+
+        $payload = ['receiver_role' => $receiverRole, 'message' => $message];
+        if ($attachments !== []) $payload['attachments'] = array_values($attachments);
 
         return $this->api->request(
             $account,
             'post',
             self::BASE.'/'.rawurlencode($claim->claim_id).'/actions/send-message',
-            ['receiver_role' => $receiverRole, 'message' => $message],
+            $payload,
             refreshAfterUnauthorized: false,
             maxAttempts: 1,
         );
+    }
+
+    public function downloadAttachment(MeliAccount $account, MeliClaim $claim, string $attachment): Response
+    {
+        $this->api->ensureFreshAccessToken($account);
+        return $this->api->getReadOnly($account, self::BASE.'/'.rawurlencode($claim->claim_id).'/attachments/'.rawurlencode($attachment).'/download', [], 1);
     }
 
     /** @return array{received:int,saved:int,failed:int} */
