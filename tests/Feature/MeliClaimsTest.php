@@ -268,7 +268,12 @@ class MeliClaimsTest extends TestCase
         $claim = $this->claim($second, ['claim_id' => '456', 'status' => 'opened', 'actions_history' => [['action' => 'open_claim']]]);
         $beforeOrders = DB::table('meli_orders')->count();
         $beforePublications = DB::table('meli_publications')->count();
-        $this->fakeClaimApi('closed');
+        $remoteStatus = 'closed';
+        $return404 = false;
+        $this->fakeClaimApi(
+            function () use (&$remoteStatus): string { return $remoteStatus; },
+            function () use (&$return404): bool { return $return404; },
+        );
 
         $this->post(route('meli.claims.refresh', $claim))->assertRedirect(route('meli.claims.show', $claim));
         $claim->refresh();
@@ -280,11 +285,12 @@ class MeliClaimsTest extends TestCase
         $this->assertSame($beforeOrders, DB::table('meli_orders')->count());
         $this->assertSame($beforePublications, DB::table('meli_publications')->count());
 
-        Http::fake(fn () => Http::response(['message' => 'not found'], 404));
+        $return404 = true;
         $this->post(route('meli.claims.refresh', $claim))->assertSessionHas('err');
         $claim->refresh();
         $this->assertSame('closed', $claim->status);
         $this->assertSame(['data' => [['action' => 'claim_opened']]], $claim->actions_history);
+        $this->assertNotNull($claim->sync_error);
         $this->assertStringNotContainsString('second-token', (string) $claim->sync_error);
     }
 
@@ -325,9 +331,13 @@ class MeliClaimsTest extends TestCase
         $this->postJson('/api/meli/webhook', ['topic' => 'items', 'resource' => '/items/MLM123'])->assertOk()->assertJsonPath('reason', 'items_job_disabled');
     }
 
-    private function fakeClaimApi(string|callable $status): void
+    private function fakeClaimApi(string|callable $status, ?callable $shouldFail = null): void
     {
-        Http::fake(function (Request $request) use ($status) {
+        Http::fake(function (Request $request) use ($status, $shouldFail) {
+            if ($shouldFail !== null && $shouldFail()) {
+                return Http::response(['message' => 'not found'], 404);
+            }
+
             $resolvedStatus = is_callable($status) ? $status() : $status;
             $path = parse_url($request->url(), PHP_URL_PATH);
             if (str_ends_with($path, '/search')) return Http::response(['data' => [['id' => 123]], 'paging' => ['total' => 1]]);
