@@ -10,6 +10,7 @@ const labels = {
         refund: 'Reembolsar',
         open_dispute: 'Abrir mediación/disputa',
         allow_return: 'Permitir devolución',
+        allow_return_label: 'Permitir devolución',
         allow_partial_refund: 'Ofrecer reembolso parcial',
         return_review_fail: 'Informar problema con la devolución',
         return_review_ok: 'Confirmar devolución correcta',

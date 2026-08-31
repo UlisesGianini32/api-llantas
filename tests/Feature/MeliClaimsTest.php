@@ -712,6 +712,220 @@ class MeliClaimsTest extends TestCase
         $this->postJson('/api/meli/webhook', ['topic' => 'items', 'resource' => '/items/MLM123'])->assertOk()->assertJsonPath('reason', 'items_job_disabled');
     }
 
+    public function test_economic_resolution_routes_require_auth_and_foreign_claim_makes_no_http_request(): void
+    {
+        $claim = $this->claim($this->account(), ['claim_id' => 'FOREIGN-RESOLUTION']);
+        auth()->logout();
+        $this->post(route('meli.claims.resolutions.refund', $claim), ['confirmed' => true])->assertRedirect('/login');
+        $this->get(route('meli.claims.resolutions.partial-refund.offers', $claim))->assertRedirect('/login');
+
+        $this->actingAs(User::factory()->create());
+        Http::fake();
+        $this->post(route('meli.claims.resolutions.refund', $claim), [])->assertNotFound();
+        $this->post(route('meli.claims.resolutions.partial-refund', $claim), ['confirmed' => true, 'percentage' => 'invalid'])->assertNotFound();
+        $this->post(route('meli.claims.resolutions.partial-refund', $claim), ['confirmed' => true, 'percentage' => 40, 'amount' => 1])->assertNotFound();
+        $this->get(route('meli.claims.resolutions.partial-refund.offers', $claim))->assertNotFound();
+        $this->assertCount(0, Http::recorded());
+    }
+
+    public function test_refund_uses_fresh_seller_action_exact_endpoint_empty_body_and_one_post(): void
+    {
+        $account = $this->account(['access_token' => 'economic-token']);
+        $claim = $this->claim($account, ['claim_id' => 'REFUND', 'stage' => 'claim', 'reason_id' => 'PDD', 'raw_claim' => ['players' => [['role' => 'respondent', 'available_actions' => [['action' => 'refund']]]]]]);
+        $this->fakeEconomicApi('REFUND', ['refund']);
+
+        $this->post(route('meli.claims.resolutions.refund', $claim), ['confirmed' => true])->assertSessionHas('ok');
+
+        $requests = collect(Http::recorded())->pluck(0);
+        $posts = $requests->filter(fn (Request $request): bool => $request->method() === 'POST');
+        $this->assertCount(1, $posts);
+        $this->assertStringEndsWith('/post-purchase/v1/claims/REFUND/expected-resolutions/refund', parse_url($posts->sole()->url(), PHP_URL_PATH));
+        $this->assertFalse($posts->contains(fn (Request $request): bool => str_contains($request->url(), '/messages') || str_contains($request->url(), '/attachments') || str_contains($request->url(), '/returns')));
+        $this->assertSame([], $posts->sole()->data());
+        $this->assertTrue($posts->sole()->hasHeader('Authorization', 'Bearer economic-token'));
+        $this->assertSame('GET', $requests->first()->method());
+        $this->assertDatabaseHas('meli_claim_action_logs', ['meli_claim_id' => $claim->id, 'action' => 'refund', 'success' => true, 'remote_status' => 201]);
+        $this->assertStringNotContainsString('economic-token', MeliClaimActionLog::query()->latest('id')->first()->toJson());
+    }
+
+    public function test_stale_local_action_stage_and_reason_never_authorize_when_fresh_seller_action_is_missing(): void
+    {
+        $claim = $this->claim($this->account(), ['claim_id' => 'STALE', 'stage' => 'claim', 'reason_id' => 'PDD', 'raw_claim' => ['players' => [['role' => 'respondent', 'available_actions' => [['action' => 'refund']]]]]]);
+        $this->fakeEconomicApi('STALE', []);
+
+        $this->post(route('meli.claims.resolutions.refund', $claim), ['confirmed' => true])
+            ->assertSessionHas('err', 'Mercado Libre ya no permite realizar esta acción. El reclamo fue actualizado.');
+
+        $this->assertCount(0, collect(Http::recorded())->pluck(0)->filter(fn (Request $request): bool => $request->method() === 'POST'));
+        $this->assertSame([], $claim->fresh()->available_actions);
+    }
+
+    public function test_preflight_error_makes_zero_economic_posts(): void
+    {
+        $claim = $this->claim($this->account(), ['claim_id' => 'PREFLIGHT-ERROR']);
+        Http::fake(fn () => throw new ConnectionException('preflight timeout'));
+
+        $this->post(route('meli.claims.resolutions.refund', $claim), ['confirmed' => true])->assertSessionHas('err');
+
+        $this->assertCount(0, collect(Http::recorded())->pluck(0)->filter(fn (Request $request): bool => $request->method() === 'POST'));
+        $this->assertDatabaseMissing('meli_claim_action_logs', ['meli_claim_id' => $claim->id]);
+    }
+
+    public function test_failed_refresh_after_success_keeps_economic_audit_successful(): void
+    {
+        $claim = $this->claim($this->account(), ['claim_id' => 'REFRESH-FAILS']);
+        $posted = false;
+        Http::fake(function (Request $request) use (&$posted) {
+            if ($request->method() === 'POST') {
+                $posted = true;
+                return Http::response(['id' => 'REMOTE-OK'], 201);
+            }
+            if ($posted) throw new ConnectionException('refresh timeout');
+            return Http::response(['id' => 'REFRESH-FAILS', 'status' => 'opened', 'players' => [['role' => 'respondent', 'available_actions' => [['action' => 'refund']]]]]);
+        });
+
+        $this->post(route('meli.claims.resolutions.refund', $claim), ['confirmed' => true])
+            ->assertSessionHas('err', 'La resolución fue enviada correctamente, pero no fue posible actualizar el reclamo. Actualízalo manualmente.');
+
+        $this->assertDatabaseHas('meli_claim_action_logs', ['meli_claim_id' => $claim->id, 'action' => 'refund', 'success' => true, 'remote_status' => 201]);
+        $this->assertCount(1, collect(Http::recorded())->pluck(0)->filter(fn (Request $request): bool => $request->method() === 'POST'));
+    }
+
+    public function test_allow_return_never_retries_errors_and_timeout_is_uncertain(): void
+    {
+        Http::fake(function (Request $request) {
+            $path = parse_url($request->url(), PHP_URL_PATH);
+            if ($request->method() === 'POST') {
+                if (str_contains($path, 'RETURN-TIMEOUT')) throw new ConnectionException('timeout');
+                foreach ([401, 429, 500] as $status) if (str_contains($path, 'RETURN-'.$status)) return Http::response([], $status);
+            }
+            return Http::response(['id' => 'RETURN', 'status' => 'opened', 'players' => [['role' => 'respondent', 'available_actions' => [['action' => 'allow_return']]]]]);
+        });
+        foreach ([401, 429, 500] as $status) {
+            $claim = $this->claim($this->account(), ['claim_id' => 'RETURN-'.$status]);
+            $this->post(route('meli.claims.resolutions.allow-return', $claim), ['confirmed' => true])->assertSessionHas('err');
+            $posts = collect(Http::recorded())->pluck(0)->filter(fn (Request $request): bool => $request->method() === 'POST' && str_contains($request->url(), 'RETURN-'.$status));
+            $this->assertCount(1, $posts);
+            $this->assertStringEndsWith('/expected-resolutions/allow-return', parse_url($posts->sole()->url(), PHP_URL_PATH));
+        }
+
+        $claim = $this->claim($this->account(), ['claim_id' => 'RETURN-TIMEOUT']);
+        $this->post(route('meli.claims.resolutions.allow-return', $claim), ['confirmed' => true])->assertSessionHas('err');
+        $this->assertDatabaseHas('meli_claim_action_logs', ['meli_claim_id' => $claim->id, 'action' => 'allow_return', 'success' => null, 'error_code' => 'uncertain_delivery']);
+        $this->assertCount(1, collect(Http::recorded())->pluck(0)->filter(fn (Request $request): bool => $request->method() === 'POST' && str_contains($request->url(), 'RETURN-TIMEOUT')));
+    }
+
+    public function test_partial_refund_uses_remote_offer_and_posts_only_percentage(): void
+    {
+        $claim = $this->claim($this->account(), ['claim_id' => 'PARTIAL-ECONOMIC']);
+        $this->fakeEconomicApi('PARTIAL-ECONOMIC', ['allow_partial_refund'], 201, [['amount' => 259.60, 'percentage' => 40]], 'MXN');
+
+        $this->getJson(route('meli.claims.resolutions.partial-refund.offers', $claim))
+            ->assertOk()->assertJsonPath('offers.0.percentage', 40)->assertJsonPath('offers.0.amount', 259.6)->assertJsonPath('offers.0.currency_id', 'MXN');
+        $this->post(route('meli.claims.resolutions.partial-refund', $claim), ['confirmed' => true, 'percentage' => 40])->assertSessionHas('ok');
+
+        $requests = collect(Http::recorded())->pluck(0);
+        $this->assertTrue($requests->contains(fn (Request $request): bool => $request->method() === 'GET' && str_ends_with(parse_url($request->url(), PHP_URL_PATH), '/partial-refund/available-offers')));
+        $posts = $requests->filter(fn (Request $request): bool => $request->method() === 'POST');
+        $this->assertCount(1, $posts);
+        $this->assertStringEndsWith('/expected-resolutions/partial-refund', parse_url($posts->sole()->url(), PHP_URL_PATH));
+        $this->assertSame(['percentage' => 40.0], $posts->sole()->data());
+        $audit = MeliClaimActionLog::query()->where('meli_claim_id', $claim->id)->sole();
+        $this->assertSame(['percentage' => 40, 'amount' => 259.6, 'currency_id' => 'MXN'], $audit->request_payload_sanitized);
+    }
+
+    public function test_partial_offers_use_global_currency_and_filter_one_hundred_percent(): void
+    {
+        $claim = $this->claim($this->account(), ['claim_id' => 'PARTIAL-FILTER']);
+        $this->fakeEconomicApi('PARTIAL-FILTER', ['allow_partial_refund'], 201, [
+            ['amount' => 259.60, 'percentage' => 40],
+            ['amount' => 649.00, 'percentage' => 100],
+        ], 'MXN');
+
+        $this->getJson(route('meli.claims.resolutions.partial-refund.offers', $claim))
+            ->assertOk()->assertJsonCount(1, 'offers')
+            ->assertJsonPath('offers.0.percentage', 40)
+            ->assertJsonPath('offers.0.amount', 259.6)
+            ->assertJsonPath('offers.0.currency_id', 'MXN');
+    }
+
+    public function test_preflight_persists_sanitized_raw_claim_without_participant_or_address_data(): void
+    {
+        $claim = $this->claim($this->account(), ['claim_id' => 'SANITIZED-PREFLIGHT']);
+        Http::fake(fn () => Http::response([
+            'id' => 'SANITIZED-PREFLIGHT',
+            'buyer' => ['id' => 1],
+            'complainant' => ['email' => 'buyer@example.test'],
+            'shipping_address' => ['street_name' => 'Privada'],
+            'receiver_address' => ['zip_code' => '00000'],
+            'players' => [[
+                'role' => 'respondent', 'type' => 'seller', 'user_id' => 10, 'id' => 11,
+                'email' => 'seller@example.test', 'nickname' => 'private', 'available_actions' => [],
+            ]],
+        ]));
+
+        $this->post(route('meli.claims.resolutions.refund', $claim), ['confirmed' => true])->assertSessionHas('err');
+
+        $raw = $claim->fresh()->raw_claim;
+        foreach (['buyer', 'complainant', 'shipping_address', 'receiver_address'] as $key) $this->assertArrayNotHasKey($key, $raw);
+        foreach (['user_id', 'id', 'email', 'nickname'] as $key) $this->assertArrayNotHasKey($key, $raw['players'][0]);
+        $this->assertCount(0, collect(Http::recorded())->pluck(0)->filter(fn (Request $request): bool => $request->method() === 'POST'));
+    }
+
+    public function test_partial_refund_rejects_manual_amount_invalid_and_full_percentage_without_post(): void
+    {
+        $claim = $this->claim($this->account(), ['claim_id' => 'PARTIAL-INVALID']);
+        $this->fakeEconomicApi('PARTIAL-INVALID', ['allow_partial_refund'], 201, [['percentage' => 40, 'amount' => 100, 'currency_id' => 'MXN']]);
+        $this->post(route('meli.claims.resolutions.partial-refund', $claim), ['confirmed' => true, 'percentage' => 40, 'amount' => 1])->assertSessionHasErrors('amount');
+        $this->post(route('meli.claims.resolutions.partial-refund', $claim), ['confirmed' => true, 'percentage' => 30])->assertSessionHasErrors('percentage');
+        $this->post(route('meli.claims.resolutions.partial-refund', $claim), ['confirmed' => true, 'percentage' => 100])->assertSessionHasErrors('percentage');
+        $this->assertCount(0, collect(Http::recorded())->pluck(0)->filter(fn (Request $request): bool => $request->method() === 'POST'));
+    }
+
+    public function test_economic_double_submit_has_one_post(): void
+    {
+        $claim = $this->claim($this->account(), ['claim_id' => 'DEDUPE-ECONOMIC']);
+        $this->fakeEconomicApi('DEDUPE-ECONOMIC', ['refund']);
+        $this->post(route('meli.claims.resolutions.refund', $claim), ['confirmed' => true])->assertSessionHas('ok');
+        $this->post(route('meli.claims.resolutions.refund', $claim), ['confirmed' => true])->assertSessionHas('err');
+        $this->assertCount(1, collect(Http::recorded())->pluck(0)->filter(fn (Request $request): bool => $request->method() === 'POST'));
+    }
+
+    public function test_different_partial_percentage_has_a_distinct_intention(): void
+    {
+        $claim = $this->claim($this->account(), ['claim_id' => 'PARTIAL-INTENT']);
+        $offers = [
+            ['percentage' => 20, 'amount' => 20, 'currency_id' => 'MXN'],
+            ['percentage' => 40, 'amount' => 40, 'currency_id' => 'MXN'],
+        ];
+        $this->fakeEconomicApi('PARTIAL-INTENT', ['allow_partial_refund'], 201, $offers);
+
+        $this->post(route('meli.claims.resolutions.partial-refund', $claim), ['confirmed' => true, 'percentage' => 20])->assertSessionHas('ok');
+        $this->post(route('meli.claims.resolutions.partial-refund', $claim), ['confirmed' => true, 'percentage' => 40])->assertSessionHas('ok');
+
+        $posts = collect(Http::recorded())->pluck(0)->filter(fn (Request $request): bool => $request->method() === 'POST');
+        $this->assertCount(2, $posts);
+        $this->assertSame([["percentage" => 20.0], ["percentage" => 40.0]], $posts->map(fn (Request $request): array => $request->data())->values()->all());
+        $this->assertSame(2, MeliClaimActionLog::query()->where('meli_claim_id', $claim->id)->distinct()->count('message_hash'));
+    }
+
+    private function fakeEconomicApi(string $claimId, array $actions, int|string $postResult = 201, array $offers = [], ?string $currencyId = null): void
+    {
+        Http::fake(function (Request $request) use ($claimId, $actions, $postResult, $offers, $currencyId) {
+            $path = parse_url($request->url(), PHP_URL_PATH);
+            if ($request->method() === 'POST') {
+                if ($postResult === 'timeout') throw new ConnectionException('timeout');
+                return Http::response(['id' => 'RESOLUTION-1'], $postResult);
+            }
+            if (str_ends_with($path, '/partial-refund/available-offers')) return Http::response(array_filter([
+                'currency_id' => $currencyId,
+                'available_offers' => $offers,
+            ], fn (mixed $value): bool => $value !== null));
+            if (preg_match('#/(detail|affects-reputation|status-history|actions-history|expected-resolutions|messages|changes)$#', $path)) return Http::response([]);
+            return Http::response(['id' => $claimId, 'status' => 'opened', 'stage' => 'claim', 'players' => [['role' => 'respondent', 'type' => 'seller', 'available_actions' => array_map(fn (string $action): array => ['action' => $action], $actions)]]]);
+        });
+    }
+
     private function fakeClaimApi(string|callable $status, ?callable $shouldFail = null): void
     {
         Http::fake(function (Request $request) use ($status, $shouldFail) {
