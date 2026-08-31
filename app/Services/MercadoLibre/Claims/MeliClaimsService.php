@@ -9,6 +9,7 @@ use App\Models\MeliOrder;
 use App\Services\MercadoLibre\MeliAccountApiClient;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Http\Client\Response;
 use Throwable;
 
 class MeliClaimsService
@@ -20,6 +21,20 @@ class MeliClaimsService
     public function safeErrorMessage(Throwable $error): string
     {
         return $this->api->sanitizeMessage($error->getMessage());
+    }
+
+    public function sendMessage(MeliAccount $account, MeliClaim $claim, string $receiverRole, string $message): Response
+    {
+        $this->api->ensureFreshAccessToken($account);
+
+        return $this->api->request(
+            $account,
+            'post',
+            self::BASE.'/'.rawurlencode($claim->claim_id).'/actions/send-message',
+            ['receiver_role' => $receiverRole, 'message' => $message],
+            refreshAfterUnauthorized: false,
+            maxAttempts: 1,
+        );
     }
 
     /** @return array{received:int,saved:int,failed:int} */

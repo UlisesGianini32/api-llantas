@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class MeliClaim extends Model
 {
@@ -27,4 +28,6 @@ class MeliClaim extends Model
     public function reason(): BelongsTo { return $this->belongsTo(MeliClaimReason::class, 'reason_id', 'reason_id'); }
 
     public function order(): BelongsTo { return $this->belongsTo(MeliOrder::class, 'meli_order_id'); }
+
+    public function actionLogs(): HasMany { return $this->hasMany(MeliClaimActionLog::class); }
 }

@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\MeliClaim;
 use App\Models\MeliPublication;
 use App\Services\MercadoLibre\Claims\MeliClaimsService;
+use App\Services\MercadoLibre\Claims\MeliClaimMessagePolicy;
 use Illuminate\Support\Collection;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\RedirectResponse;
@@ -61,7 +62,7 @@ class MeliClaimController extends Controller
         ]);
     }
 
-    public function show(Request $request, MeliClaim $claim): Response
+    public function show(Request $request, MeliClaim $claim, MeliClaimMessagePolicy $messagePolicy): Response
     {
         abort_unless($request->user()->meliAccounts()->whereKey($claim->meli_account_id)->exists(), 404);
         $claim->load(['meliAccount:id,nickname,meli_user_id,is_default', 'reason:reason_id,name,detail', 'order.items']);
@@ -75,6 +76,7 @@ class MeliClaimController extends Controller
             'participants' => $this->participants($claim), 'deadlines' => $this->deadlines($claim),
             'timeline' => $this->timeline($claim),
             'order' => $this->orderData($claim),
+            'message_recipient' => $messagePolicy->recipient($claim),
         ]]);
     }
 

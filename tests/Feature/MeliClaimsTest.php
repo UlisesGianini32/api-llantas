@@ -5,10 +5,12 @@ namespace Tests\Feature;
 use App\Jobs\SyncMeliClaimJob;
 use App\Models\MeliAccount;
 use App\Models\MeliClaim;
+use App\Models\MeliClaimActionLog;
 use App\Models\User;
 use App\Services\MercadoLibre\Claims\MeliClaimsService;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Http\Client\Request;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
@@ -21,6 +23,7 @@ class MeliClaimsTest extends TestCase
 {
     private object $migration;
     private object $detailMigration;
+    private object $actionMigration;
     private User $user;
 
     protected function setUp(): void
@@ -59,6 +62,8 @@ class MeliClaimsTest extends TestCase
         $this->migration->up();
         $this->detailMigration = require database_path('migrations/2026_08_31_000001_add_detail_snapshots_to_meli_claims.php');
         $this->detailMigration->up();
+        $this->actionMigration = require database_path('migrations/2026_09_01_000001_create_meli_claim_action_logs_table.php');
+        $this->actionMigration->up();
         $this->user = User::factory()->create();
         $this->actingAs($this->user);
         Http::preventStrayRequests();
@@ -66,6 +71,7 @@ class MeliClaimsTest extends TestCase
 
     protected function tearDown(): void
     {
+        $this->actionMigration->down();
         $this->detailMigration->down();
         $this->migration->down();
         foreach (['meli_publications', 'meli_order_items', 'meli_orders', 'meli_accounts', 'users'] as $table) Schema::dropIfExists($table);
@@ -305,6 +311,127 @@ class MeliClaimsTest extends TestCase
         $this->assertCount(0, Http::recorded());
     }
 
+    public function test_message_recipient_comes_only_from_available_actions(): void
+    {
+        $account = $this->account();
+        $mediator = $this->claim($account, ['claim_id' => 'MED', 'stage' => 'claim', 'available_actions' => [['action' => 'send_message_to_mediator']]]);
+        $buyer = $this->claim($account, ['claim_id' => 'BUY', 'stage' => 'dispute', 'available_actions' => [['action' => 'send_message_to_complainant']]]);
+        $seller = $this->claim($account, ['claim_id' => 'SELLER', 'available_actions' => [['action' => 'send_message_to_respondent']]]);
+        $none = $this->claim($account, ['claim_id' => 'NONE', 'available_actions' => [['action' => 'allow_return']]]);
+
+        $this->get(route('meli.claims.show', $mediator))->assertInertia(fn (Assert $page) => $page->where('claim.message_recipient', 'mediator'));
+        $this->get(route('meli.claims.show', $buyer))->assertInertia(fn (Assert $page) => $page->where('claim.message_recipient', 'complainant'));
+        $this->get(route('meli.claims.show', $seller))->assertInertia(fn (Assert $page) => $page->where('claim.message_recipient', 'respondent'));
+        $this->get(route('meli.claims.show', $none))->assertInertia(fn (Assert $page) => $page->where('claim.message_recipient', null));
+    }
+
+    public function test_message_route_requires_auth_and_rejects_foreign_empty_closed_or_disallowed_claims(): void
+    {
+        $account = $this->account();
+        $allowed = $this->claim($account, ['claim_id' => 'ALLOWED', 'status' => 'opened', 'available_actions' => [['action' => 'send_message_to_complainant']]]);
+        auth()->logout();
+        $this->post(route('meli.claims.messages.store', $allowed), ['message' => 'Hola'])->assertRedirect('/login');
+        $this->actingAs($this->user)->post(route('meli.claims.messages.store', $allowed), ['message' => '   '])->assertSessionHasErrors('message');
+
+        $closed = $this->claim($account, ['claim_id' => 'CLOSED', 'status' => 'closed', 'available_actions' => [['action' => 'send_message_to_complainant']]]);
+        $none = $this->claim($account, ['claim_id' => 'NOACTION', 'status' => 'opened', 'available_actions' => []]);
+        $this->post(route('meli.claims.messages.store', $closed), ['message' => 'Hola'])->assertSessionHasErrors('message');
+        $this->post(route('meli.claims.messages.store', $none), ['message' => 'Hola'])->assertSessionHasErrors('message');
+
+        $otherUser = User::factory()->create();
+        $foreignAccount = $this->account(['user_id' => $otherUser->id, 'meli_user_id' => 'FOREIGN-MSG']);
+        $foreign = $this->claim($foreignAccount, ['claim_id' => 'FOREIGN-MSG', 'available_actions' => [['action' => 'send_message_to_complainant']]]);
+        Http::fake();
+        $this->post(route('meli.claims.messages.store', $foreign), ['message' => 'Hola'])->assertNotFound();
+        $this->assertCount(0, Http::recorded());
+    }
+
+    public function test_message_uses_correct_account_trims_payload_audits_and_refreshes_with_get(): void
+    {
+        $first = $this->account(['access_token' => 'first-token']);
+        $second = $this->account(['meli_user_id' => 'SECOND-MSG', 'access_token' => 'second-token']);
+        $claim = $this->claim($second, ['claim_id' => '456', 'status' => 'opened', 'available_actions' => [['action' => 'send_message_to_mediator']]]);
+        $orders = DB::table('meli_orders')->count();
+        $publications = DB::table('meli_publications')->count();
+        $this->fakeMessageApi();
+
+        $this->post(route('meli.claims.messages.store', $claim), [
+            'message' => '  Mensaje confirmado  ', 'receiver_role' => 'respondent',
+            'meli_account_id' => $first->id, 'claim_id' => 'OTHER', 'access_token' => 'evil',
+        ])->assertRedirect(route('meli.claims.show', $claim))->assertSessionHas('ok');
+
+        $requests = collect(Http::recorded())->pluck(0);
+        $posts = $requests->filter(fn (Request $request): bool => $request->method() === 'POST');
+        $this->assertCount(1, $posts);
+        $post = $posts->sole();
+        $this->assertStringEndsWith('/post-purchase/v1/claims/456/actions/send-message', parse_url($post->url(), PHP_URL_PATH));
+        $this->assertFalse(str_ends_with(parse_url($post->url(), PHP_URL_PATH), '/claims/456/messages'));
+        $this->assertSame(['receiver_role' => 'mediator', 'message' => 'Mensaje confirmado'], $post->data());
+        $this->assertTrue($post->hasHeader('Authorization', 'Bearer second-token'));
+        $this->assertFalse($post->hasHeader('Authorization', 'Bearer first-token'));
+        $this->assertTrue($requests->skipUntil(fn (Request $request): bool => $request->method() === 'POST')->skip(1)->every(fn (Request $request): bool => $request->method() === 'GET'));
+        $this->assertSame('Mensaje confirmado', $claim->fresh()->messages[0]['message']);
+        $this->assertSame($orders, DB::table('meli_orders')->count());
+        $this->assertSame($publications, DB::table('meli_publications')->count());
+        $audit = MeliClaimActionLog::query()->sole();
+        $this->assertTrue($audit->success);
+        $this->assertSame('mediator', $audit->receiver_role);
+        $this->assertSame('Mensaje confirmado', $audit->request_payload_sanitized['message']);
+        $this->assertStringNotContainsString('second-token', json_encode($audit->toArray()));
+    }
+
+    public function test_message_has_one_post_and_no_retry_for_401_429_or_500(): void
+    {
+        $account = $this->account();
+        $claim = $this->claim($account, ['claim_id' => 'ERRORS', 'status' => 'opened', 'available_actions' => [['action' => 'send_message_to_complainant']]]);
+        $remoteStatus = 401;
+        Http::fake(function () use (&$remoteStatus) { return Http::response(['message' => 'authorization=APP_USR-secret'], $remoteStatus); });
+
+        foreach ([401, 429, 500] as $status) {
+            $remoteStatus = $status;
+            $before = count(Http::recorded());
+
+            $this->post(route('meli.claims.messages.store', $claim), ['message' => 'Falla '.$status])->assertSessionHas('err');
+            $this->assertCount($before + 1, Http::recorded());
+            $this->assertSame('POST', Http::recorded()[$before][0]->method());
+            $this->assertDatabaseHas('meli_claim_action_logs', ['meli_claim_id' => $claim->id, 'remote_status' => $status, 'success' => false]);
+        }
+        $this->assertStringNotContainsString('APP_USR-secret', MeliClaimActionLog::query()->get()->toJson());
+    }
+
+    public function test_connection_uncertainty_is_not_retried_or_added_to_messages(): void
+    {
+        $account = $this->account();
+        $claim = $this->claim($account, ['claim_id' => 'TIMEOUT', 'status' => 'opened', 'available_actions' => [['action' => 'send_message_to_complainant']], 'messages' => [['message' => 'Anterior']]]);
+        $attempts = 0;
+        $attemptedMethods = [];
+        Http::fake(function (Request $request) use (&$attempts, &$attemptedMethods) {
+            $attempts++;
+            $attemptedMethods[] = $request->method();
+            throw new ConnectionException('timeout');
+        });
+
+        $this->post(route('meli.claims.messages.store', $claim), ['message' => 'Mensaje incierto'])->assertSessionHas('err');
+
+        $this->assertSame(1, $attempts);
+        $this->assertSame(['POST'], $attemptedMethods);
+        $this->assertSame([['message' => 'Anterior']], $claim->fresh()->messages);
+        $this->assertDatabaseHas('meli_claim_action_logs', ['meli_claim_id' => $claim->id, 'error_code' => 'uncertain_delivery', 'success' => false]);
+    }
+
+    public function test_immediate_duplicate_message_is_blocked_after_one_remote_post(): void
+    {
+        $account = $this->account();
+        $claim = $this->claim($account, ['claim_id' => 'DUP', 'status' => 'opened', 'available_actions' => [['action' => 'send_message_to_complainant']]]);
+        $this->fakeMessageApi();
+
+        $this->post(route('meli.claims.messages.store', $claim), ['message' => 'Una sola vez'])->assertSessionHas('ok');
+        $this->post(route('meli.claims.messages.store', $claim), ['message' => 'Una sola vez'])->assertSessionHasErrors('message');
+
+        $posts = collect(Http::recorded())->pluck(0)->filter(fn (Request $request): bool => $request->method() === 'POST');
+        $this->assertCount(1, $posts);
+    }
+
     public function test_post_purchase_claims_dispatches_without_leading_resource_slash(): void
     {
         Bus::fake();
@@ -350,6 +477,31 @@ class MeliClaimsTest extends TestCase
             if (str_ends_with($path, '/changes')) return Http::response([]);
             if (str_ends_with($path, '/messages')) return Http::response([['sender_role' => 'complainant', 'receiver_role' => 'respondent', 'message' => 'Mensaje visible', 'user_id' => 123, 'attachments' => []]]);
             return Http::response(['id' => 123, 'resource' => 'order', 'resource_id' => 'ORDER-1', 'status' => $resolvedStatus, 'stage' => 'claim', 'type' => 'mediations', 'reason_id' => 'PDD', 'players' => [['role' => 'respondent', 'type' => 'seller', 'available_actions' => [['action' => 'allow_return', 'due_date' => now()->addHours(4)->toISOString()]]]], 'date_created' => now()->subDay()->toISOString(), 'last_updated' => now()->toISOString()]);
+        });
+    }
+
+    private function fakeMessageApi(): void
+    {
+        Http::fake(function (Request $request) {
+            $path = parse_url($request->url(), PHP_URL_PATH);
+            if ($request->method() === 'POST') {
+                return Http::response(['id' => 'MSG-1'], 201);
+            }
+            if (str_ends_with($path, '/messages')) {
+                return Http::response([['sender_role' => 'respondent', 'receiver_role' => 'mediator', 'message' => 'Mensaje confirmado']]);
+            }
+            if (str_ends_with($path, '/detail')) return Http::response([]);
+            if (str_ends_with($path, '/affects-reputation')) return Http::response([]);
+            if (str_ends_with($path, '/status-history')) return Http::response([]);
+            if (str_ends_with($path, '/actions-history')) return Http::response([]);
+            if (str_ends_with($path, '/expected-resolutions')) return Http::response([]);
+            if (str_ends_with($path, '/changes')) return Http::response([]);
+
+            return Http::response([
+                'id' => 456, 'resource' => 'order', 'resource_id' => 'ORDER-1',
+                'status' => 'opened', 'stage' => 'dispute', 'type' => 'mediations',
+                'players' => [['role' => 'respondent', 'type' => 'seller', 'available_actions' => [['action' => 'send_message_to_mediator']]]],
+            ]);
         });
     }
 
