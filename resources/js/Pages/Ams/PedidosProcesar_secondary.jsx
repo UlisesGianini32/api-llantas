@@ -1,4 +1,5 @@
 import AppShell from '@/Components/layout/AppShell'
+import { esAndroid, imprimirTsplConRawBt } from '@/lib/rawBtTspl'
 import { router, usePage } from '@inertiajs/react'
 import qz from 'qz-tray'
 import { useState } from 'react'
@@ -337,6 +338,7 @@ export default function PedidosProcesar({
     selectedMeliAccountLabel = '',
     cancelReasons = {},
 }) {
+    const android = esAndroid()
     const [printingShippingId, setPrintingShippingId] = useState(null)
     const [thermalPrinterName, setThermalPrinterName] = useState(storedThermalPrinterName)
     const [thermalPrinters, setThermalPrinters] = useState([])
@@ -491,6 +493,18 @@ export default function PedidosProcesar({
         setPrintingShippingId(shippingId)
 
         try {
+            if (android) {
+                const kamoUrl = etiquetaKamoTsplUrl(
+                    pedido,
+                    labelBaseUrl,
+                    selectedMeliAccountId
+                )
+
+                await imprimirTsplConRawBt(kamoUrl)
+
+                return
+            }
+
             const printer =
                 await resolveThermalPrinter()
 
@@ -649,16 +663,23 @@ export default function PedidosProcesar({
                     },
                 ]
             )
-} catch (error) {
-            console.error(
-                'Error al imprimir con QZ Tray:',
-                error
-            )
-
+        } catch (error) {
             const message =
                 error instanceof Error
                     ? error.message
                     : String(error)
+
+            if (android) {
+                console.error('Error al enviar TSPL a RawBT:', error)
+                window.alert(`No se pudo enviar el TSPL a RawBT. ${message}`)
+
+                return
+            }
+
+            console.error(
+                'Error al imprimir con QZ Tray:',
+                error
+            )
 
             window.alert(
                 `No se pudo imprimir la etiqueta térmica. ${message}`
@@ -895,44 +916,52 @@ export default function PedidosProcesar({
                             </div>
                         </div>
 
-                        <div className="mt-5 flex flex-col gap-3 border border-cyan-700/70 bg-cyan-950/30 p-4 lg:flex-row lg:items-end">
-                            <div className="min-w-0 flex-1">
-                                <label
-                                    htmlFor="thermal-printer"
-                                    className="mb-1 block text-xs font-medium uppercase tracking-wide text-cyan-200"
-                                >
-                                    Impresora térmica de esta computadora
-                                </label>
-                                <select
-                                    id="thermal-printer"
-                                    value={thermalPrinterName}
-                                    onChange={(event) => selectThermalPrinter(event.target.value)}
-                                    className="w-full rounded-lg border border-cyan-700 bg-slate-900 px-4 py-2 text-white outline-none focus:border-cyan-400"
-                                >
-                                    <option value="">Detectar automáticamente</option>
-                                    {printerOptions.map((printer) => (
-                                        <option key={printer} value={printer}>
-                                            {printer}
-                                        </option>
-                                    ))}
-                                </select>
-                                <p className="mt-1 text-xs text-cyan-100/80">
-                                    {thermalPrinterMessage
-                                        || (thermalPrinterName
-                                            ? `Seleccionada en esta computadora: ${thermalPrinterName}`
-                                            : 'Compatible con 4BARCODE y Zebra GK420t. La elección se guarda solo en este navegador.')}
-                                </p>
+                        {android ? (
+                            <div className="mt-5 border border-cyan-700/70 bg-cyan-950/30 p-4">
+                                <p className="text-xs font-medium uppercase tracking-wide text-cyan-200">Impresión térmica en Android</p>
+                                <p className="mt-1 text-sm font-semibold text-cyan-50">Envía el TSPL directamente a RawBT.</p>
+                                <p className="mt-1 text-xs text-cyan-100/80">RawBT utilizará la impresora predeterminada configurada en la tablet.</p>
                             </div>
+                        ) : (
+                            <div className="mt-5 flex flex-col gap-3 border border-cyan-700/70 bg-cyan-950/30 p-4 lg:flex-row lg:items-end">
+                                <div className="min-w-0 flex-1">
+                                    <label
+                                        htmlFor="thermal-printer"
+                                        className="mb-1 block text-xs font-medium uppercase tracking-wide text-cyan-200"
+                                    >
+                                        Impresora térmica de esta computadora
+                                    </label>
+                                    <select
+                                        id="thermal-printer"
+                                        value={thermalPrinterName}
+                                        onChange={(event) => selectThermalPrinter(event.target.value)}
+                                        className="w-full rounded-lg border border-cyan-700 bg-slate-900 px-4 py-2 text-white outline-none focus:border-cyan-400"
+                                    >
+                                        <option value="">Detectar automáticamente</option>
+                                        {printerOptions.map((printer) => (
+                                            <option key={printer} value={printer}>
+                                                {printer}
+                                            </option>
+                                        ))}
+                                    </select>
+                                    <p className="mt-1 text-xs text-cyan-100/80">
+                                        {thermalPrinterMessage
+                                            || (thermalPrinterName
+                                                ? `Seleccionada en esta computadora: ${thermalPrinterName}`
+                                                : 'Compatible con 4BARCODE y Zebra GK420t. La elección se guarda solo en este navegador.')}
+                                    </p>
+                                </div>
 
-                            <button
-                                type="button"
-                                onClick={() => loadThermalPrinters({ notify: true })}
-                                disabled={loadingThermalPrinters}
-                                className="rounded-lg border border-cyan-500 bg-cyan-700/30 px-4 py-2 text-sm font-semibold text-cyan-50 transition hover:bg-cyan-700/50 disabled:cursor-wait disabled:opacity-60"
-                            >
-                                {loadingThermalPrinters ? 'Buscando...' : 'Buscar impresoras'}
-                            </button>
-                        </div>
+                                <button
+                                    type="button"
+                                    onClick={() => loadThermalPrinters({ notify: true })}
+                                    disabled={loadingThermalPrinters}
+                                    className="rounded-lg border border-cyan-500 bg-cyan-700/30 px-4 py-2 text-sm font-semibold text-cyan-50 transition hover:bg-cyan-700/50 disabled:cursor-wait disabled:opacity-60"
+                                >
+                                    {loadingThermalPrinters ? 'Buscando...' : 'Buscar impresoras'}
+                                </button>
+                            </div>
+                        )}
 
                         <div className="mt-6 grid grid-cols-1 gap-4 md:grid-cols-2">
                             <div className="border border-slate-700 bg-slate-800/70 p-4">
@@ -1029,11 +1058,13 @@ export default function PedidosProcesar({
                                                             onClick={() => imprimirTermica(pedido)}
                                                             disabled={cancellingOrderId !== null || printingShippingId === String(pedido?.shipping_id || '').trim()}
                                                             className="rounded-md border border-cyan-500/60 bg-cyan-700/20 px-3 py-1.5 text-xs font-semibold text-cyan-100 transition hover:bg-cyan-700/35 disabled:cursor-wait disabled:opacity-60"
-                                                            title={`Imprime mediante QZ Tray en ${thermalPrinterName || 'la impresora térmica detectada'}`}
+                                                            title={android
+                                                                ? 'Envía el TSPL directamente a RawBT'
+                                                                : `Imprime mediante QZ Tray en ${thermalPrinterName || 'la impresora térmica detectada'}`}
                                                         >
                                                             {printingShippingId === String(pedido?.shipping_id || '').trim()
-                                                                ? 'Imprimiendo...'
-                                                                : 'Imprimir térmica'}
+                                                                ? (android ? 'Preparando TSPL...' : 'Imprimiendo...')
+                                                                : (android ? 'Imprimir TSPL' : 'Imprimir térmica')}
                                                         </button>
 
                                                         <a

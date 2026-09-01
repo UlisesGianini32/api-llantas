@@ -1,4 +1,5 @@
 import AppShell from '@/Components/layout/AppShell'
+import { esAndroid, imprimirTsplConRawBt } from '@/lib/rawBtTspl'
 import { useState } from 'react'
 import { router } from '@inertiajs/react'
 import qz from 'qz-tray'
@@ -229,6 +230,7 @@ export default function PedidosProcesar({
     selectedMeliAccountId = null,
     selectedMeliAccountLabel = '',
 }) {
+    const android = esAndroid()
     const [printingShippingId, setPrintingShippingId] = useState(null)
     const [printerBusy, setPrinterBusy] = useState(false)
     const [selectedThermalPrinter, setSelectedThermalPrinter] = useState(() => {
@@ -425,6 +427,17 @@ export default function PedidosProcesar({
         setPrintingShippingId(shippingId)
 
         try {
+            if (android) {
+                const kamoTsplUrl = etiquetaKamoTsplUrl(
+                    pedido,
+                    labelBaseUrl
+                )
+
+                await imprimirTsplConRawBt(kamoTsplUrl)
+
+                return
+            }
+
             const printer =
                 await resolverImpresoraTermica(false)
 
@@ -605,15 +618,22 @@ export default function PedidosProcesar({
                 `Etiqueta enviada correctamente a: ${printer}`
             )
         } catch (error) {
-            console.error(
-                'Error al imprimir con QZ Tray:',
-                error
-            )
-
             const message =
                 error instanceof Error
                     ? error.message
                     : String(error)
+
+            if (android) {
+                console.error('Error al enviar TSPL a RawBT:', error)
+                window.alert(`No se pudo enviar el TSPL a RawBT. ${message}`)
+
+                return
+            }
+
+            console.error(
+                'Error al imprimir con QZ Tray:',
+                error
+            )
 
             window.alert(
                 `No se pudo imprimir la etiqueta térmica. ${message}`
@@ -918,42 +938,48 @@ export default function PedidosProcesar({
                                                             Imprimir PDF
                                                         </a>
 
-                                                        <button
-                                                            type="button"
-                                                            onClick={seleccionarImpresoraTermica}
-                                                            disabled={printerBusy || printingShippingId !== null}
-                                                            className="rounded-md border border-violet-500/60 bg-violet-700/20 px-3 py-1.5 text-xs font-semibold text-violet-100 transition hover:bg-violet-700/35 disabled:cursor-wait disabled:opacity-60"
-                                                            title={selectedThermalPrinter
-                                                                ? `Impresora actual: ${selectedThermalPrinter}`
-                                                                : 'Elegir la impresora térmica de esta computadora'}
-                                                        >
-                                                            {printerBusy
-                                                                ? 'Buscando...'
-                                                                : (selectedThermalPrinter ? 'Cambiar impresora' : 'Elegir impresora')}
-                                                        </button>
+                                                        {!android ? (
+                                                            <>
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={seleccionarImpresoraTermica}
+                                                                    disabled={printerBusy || printingShippingId !== null}
+                                                                    className="rounded-md border border-violet-500/60 bg-violet-700/20 px-3 py-1.5 text-xs font-semibold text-violet-100 transition hover:bg-violet-700/35 disabled:cursor-wait disabled:opacity-60"
+                                                                    title={selectedThermalPrinter
+                                                                        ? `Impresora actual: ${selectedThermalPrinter}`
+                                                                        : 'Elegir la impresora térmica de esta computadora'}
+                                                                >
+                                                                    {printerBusy
+                                                                        ? 'Buscando...'
+                                                                        : (selectedThermalPrinter ? 'Cambiar impresora' : 'Elegir impresora')}
+                                                                </button>
 
-                                                        <button
-                                                            type="button"
-                                                            onClick={probarImpresoraTermica}
-                                                            disabled={printerBusy || printingShippingId !== null}
-                                                            className="rounded-md border border-fuchsia-500/60 bg-fuchsia-700/20 px-3 py-1.5 text-xs font-semibold text-fuchsia-100 transition hover:bg-fuchsia-700/35 disabled:cursor-wait disabled:opacity-60"
-                                                            title={selectedThermalPrinter
-                                                                ? `Enviar prueba a ${selectedThermalPrinter}`
-                                                                : 'Seleccionar impresora y enviar una etiqueta de prueba'}
-                                                        >
-                                                            Probar impresora
-                                                        </button>
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={probarImpresoraTermica}
+                                                                    disabled={printerBusy || printingShippingId !== null}
+                                                                    className="rounded-md border border-fuchsia-500/60 bg-fuchsia-700/20 px-3 py-1.5 text-xs font-semibold text-fuchsia-100 transition hover:bg-fuchsia-700/35 disabled:cursor-wait disabled:opacity-60"
+                                                                    title={selectedThermalPrinter
+                                                                        ? `Enviar prueba a ${selectedThermalPrinter}`
+                                                                        : 'Seleccionar impresora y enviar una etiqueta de prueba'}
+                                                                >
+                                                                    Probar impresora
+                                                                </button>
+                                                            </>
+                                                        ) : null}
 
                                                         <button
                                                             type="button"
                                                             onClick={() => imprimirTermica(pedido)}
                                                             disabled={printingShippingId === String(pedido?.shipping_id || '').trim()}
                                                             className="rounded-md border border-cyan-500/60 bg-cyan-700/20 px-3 py-1.5 text-xs font-semibold text-cyan-100 transition hover:bg-cyan-700/35 disabled:cursor-wait disabled:opacity-60"
-                                                            title="Imprime la etiqueta modificada mediante QZ Tray"
+                                                            title={android
+                                                                ? 'Envía el TSPL directamente a RawBT'
+                                                                : 'Imprime la etiqueta modificada mediante QZ Tray'}
                                                         >
                                                             {printingShippingId === String(pedido?.shipping_id || '').trim()
-                                                                ? 'Imprimiendo...'
-                                                                : 'Imprimir térmica'}
+                                                                ? (android ? 'Preparando TSPL...' : 'Imprimiendo...')
+                                                                : (android ? 'Imprimir TSPL' : 'Imprimir térmica')}
                                                         </button>
                                                     </>
                                                 ) : (
