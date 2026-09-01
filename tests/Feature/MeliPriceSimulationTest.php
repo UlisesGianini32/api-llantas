@@ -22,6 +22,8 @@ use Tests\TestCase;
 
 class MeliPriceSimulationTest extends TestCase
 {
+    private const FOCUSED_CATEGORY_ID = 'MLM438195';
+
     private object $foundationMigration;
 
     private object $taxProfileMigration;
@@ -119,7 +121,7 @@ class MeliPriceSimulationTest extends TestCase
         Http::assertSent(fn (Request $request): bool => str_contains($request->url(), '/sites/MLM/listing_prices')
             && $request->method() === 'GET'
             && (float) $request['price'] === 1531.20
-            && $request['category_id'] === 'MLM171894'
+            && $request['category_id'] === self::FOCUSED_CATEGORY_ID
             && $request['listing_type_id'] === 'gold_pro'
             && $request['shipping_mode'] === 'me2'
             && $request['logistic_type'] === 'fulfillment');
@@ -558,7 +560,7 @@ class MeliPriceSimulationTest extends TestCase
             'meli_item_id' => 'MLM1343389489',
             'title' => 'Alfaparf Yellow Liss Mascarilla 500ml',
             'sku' => 'SKU-PRICE-1',
-            'category_id' => 'MLM171894',
+            'category_id' => self::FOCUSED_CATEGORY_ID,
             'listing_type_id' => 'gold_pro',
             'currency_id' => 'MXN',
             'current_price' => '1531.20',

@@ -17,6 +17,8 @@ use Tests\TestCase;
 
 class MeliUncategorizedReviewTest extends TestCase
 {
+    private const FOCUSED_CATEGORY_ID = 'MLM438195';
+
     private object $foundationMigration;
 
     private object $classificationMigration;
@@ -476,6 +478,7 @@ class MeliUncategorizedReviewTest extends TestCase
     {
         return MeliPriceManagerItem::factory()->for($account, 'meliAccount')->create([
             'meli_item_id' => 'MLM'.fake()->unique()->numberBetween(100000000, 999999999),
+            'category_id' => self::FOCUSED_CATEGORY_ID,
             'classification_status' => 'uncategorized',
             'brand_group_id' => null,
             'suggested_brand_group_id' => null,
