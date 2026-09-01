@@ -38,8 +38,11 @@ class MeliOrderCancellationPolicy
     public function isAlreadyCancelled(array $order): bool
     {
         $tags = array_map(fn (mixed $tag): string => strtolower((string) $tag), (array) ($order['tags'] ?? []));
+        $feedback = is_array($order['feedback'] ?? null) ? $order['feedback'] : [];
 
         return (array_key_exists('cancel_detail', $order) && $order['cancel_detail'] !== null)
+            || (array_key_exists('sale', $feedback) && $feedback['sale'] !== null)
+            || (array_key_exists('seller', $feedback) && $feedback['seller'] !== null)
             || in_array('unfulfilled', $tags, true)
             || in_array(strtolower((string) ($order['status'] ?? '')), ['cancelled', 'canceled'], true);
     }
