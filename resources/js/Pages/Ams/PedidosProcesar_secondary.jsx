@@ -1,5 +1,5 @@
 import AppShell from '@/Components/layout/AppShell'
-import { router } from '@inertiajs/react'
+import { router, usePage } from '@inertiajs/react'
 import qz from 'qz-tray'
 import { useState } from 'react'
 
@@ -335,12 +335,36 @@ export default function PedidosProcesar({
     meliAccounts = [],
     selectedMeliAccountId = null,
     selectedMeliAccountLabel = '',
+    cancelReasons = {},
 }) {
     const [printingShippingId, setPrintingShippingId] = useState(null)
     const [thermalPrinterName, setThermalPrinterName] = useState(storedThermalPrinterName)
     const [thermalPrinters, setThermalPrinters] = useState([])
     const [loadingThermalPrinters, setLoadingThermalPrinters] = useState(false)
     const [thermalPrinterMessage, setThermalPrinterMessage] = useState('')
+    const [cancelOrder, setCancelOrder] = useState(null)
+    const [cancelReason, setCancelReason] = useState('')
+    const [cancelConfirmed, setCancelConfirmed] = useState(false)
+    const [cancellingOrderId, setCancellingOrderId] = useState(null)
+    const flash = usePage().props.flash || {}
+
+    const openCancellation = (pedido, order) => {
+        if (cancellingOrderId || order.cancelled) return
+        setCancelReason('')
+        setCancelConfirmed(false)
+        setCancelOrder({ pedido, order })
+    }
+
+    const confirmCancellation = () => {
+        if (!cancelOrder || !cancelReason || !cancelConfirmed || cancellingOrderId) return
+        const localOrderId = cancelOrder.order.id
+        router.post(`/ams/pedidos-secundaria/orders/${localOrderId}/cancel`, { reason: cancelReason, confirmed: true }, {
+            preserveScroll: true,
+            onStart: () => setCancellingOrderId(localOrderId),
+            onSuccess: () => { setCancelOrder(null); setCancelReason(''); setCancelConfirmed(false) },
+            onFinish: () => setCancellingOrderId(null),
+        })
+    }
 
     const connectQzTray = async () => {
         configureQzSecurity()
@@ -712,6 +736,7 @@ export default function PedidosProcesar({
         <AppShell title={tituloPagina}>
             <section className="bg-[#0b1220] min-h-[calc(100vh-4rem)] py-4 sm:py-6">
                 <div className="mx-auto max-w-[1400px] px-4 sm:px-6 lg:px-8">
+                    {(flash.success || flash.error) ? <div className={`mb-4 rounded-lg border p-4 font-semibold ${flash.error ? 'border-red-500 bg-red-950/60 text-red-100' : 'border-emerald-500 bg-emerald-950/60 text-emerald-100'}`}>{flash.error || flash.success}</div> : null}
                     <div className="rounded-none border border-slate-700 bg-[#00153b] p-6 shadow-2xl">
                         <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
                             <div>
@@ -974,6 +999,11 @@ export default function PedidosProcesar({
                                                 ) : null}
                                             </div>
                                             <div className="flex items-center gap-2">
+                                                {(pedido.orders || []).map((order) => order.cancelled ? (
+                                                    <span key={order.id} className="rounded-md border border-slate-400 bg-slate-700 px-3 py-1.5 text-xs font-semibold text-slate-100">Orden {order.order_id}: Cancelada / No concretada</span>
+                                                ) : (
+                                                    <button key={order.id} type="button" onClick={() => openCancellation(pedido, order)} disabled={cancellingOrderId !== null} className="rounded-md border border-red-500 bg-red-800/40 px-3 py-1.5 text-xs font-bold text-red-100 transition hover:bg-red-800/70 disabled:cursor-wait disabled:opacity-50">{cancellingOrderId === order.id ? 'Cancelando…' : `Cancelar compra · ${order.order_id}`}</button>
+                                                ))}
                                                 {etiquetaUrl(pedido, labelBaseUrl, alcance, fechaSeleccionada, selectedMeliAccountId) ? (
                                                     <>
                                                         <a
@@ -984,7 +1014,9 @@ export default function PedidosProcesar({
                                                                 fechaSeleccionada,
                                                                 selectedMeliAccountId
                                                             )}
-                                                            className="rounded-md border border-lime-500/60 bg-lime-700/20 px-3 py-1.5 text-xs font-semibold text-lime-100 transition hover:bg-lime-700/35"
+                                                            onClick={(event) => { if (cancellingOrderId !== null) event.preventDefault() }}
+                                                            aria-disabled={cancellingOrderId !== null}
+                                                            className={`rounded-md border border-lime-500/60 bg-lime-700/20 px-3 py-1.5 text-xs font-semibold text-lime-100 transition hover:bg-lime-700/35 ${cancellingOrderId !== null ? 'pointer-events-none opacity-50' : ''}`}
                                                             title="Abre el PDF y el diálogo de impresión del navegador"
                                                         >
                                                             {alcance === 'procesados'
@@ -995,7 +1027,7 @@ export default function PedidosProcesar({
                                                         <button
                                                             type="button"
                                                             onClick={() => imprimirTermica(pedido)}
-                                                            disabled={printingShippingId === String(pedido?.shipping_id || '').trim()}
+                                                            disabled={cancellingOrderId !== null || printingShippingId === String(pedido?.shipping_id || '').trim()}
                                                             className="rounded-md border border-cyan-500/60 bg-cyan-700/20 px-3 py-1.5 text-xs font-semibold text-cyan-100 transition hover:bg-cyan-700/35 disabled:cursor-wait disabled:opacity-60"
                                                             title={`Imprime mediante QZ Tray en ${thermalPrinterName || 'la impresora térmica detectada'}`}
                                                         >
@@ -1006,7 +1038,9 @@ export default function PedidosProcesar({
 
                                                         <a
                                                             href={etiquetaTermicaUrl(pedido, labelBaseUrl)}
-                                                            className="rounded-md border border-slate-500 bg-slate-800 px-3 py-1.5 text-xs font-semibold text-slate-200 transition hover:bg-slate-700"
+                                                            onClick={(event) => { if (cancellingOrderId !== null) event.preventDefault() }}
+                                                            aria-disabled={cancellingOrderId !== null}
+                                                            className={`rounded-md border border-slate-500 bg-slate-800 px-3 py-1.5 text-xs font-semibold text-slate-200 transition hover:bg-slate-700 ${cancellingOrderId !== null ? 'pointer-events-none opacity-50' : ''}`}
                                                             title="Descarga el ZIP/ZPL como respaldo"
                                                         >
                                                             Descargar ZPL
@@ -1017,7 +1051,9 @@ export default function PedidosProcesar({
                                                         href={mlVentaUrl(pedido)}
                                                         target="_blank"
                                                         rel="noreferrer"
-                                                        className="rounded-md border border-amber-500/60 bg-amber-700/20 px-3 py-1.5 text-xs font-semibold text-amber-100 transition hover:bg-amber-700/35"
+                                                        onClick={(event) => { if (cancellingOrderId !== null) event.preventDefault() }}
+                                                        aria-disabled={cancellingOrderId !== null}
+                                                        className={`rounded-md border border-amber-500/60 bg-amber-700/20 px-3 py-1.5 text-xs font-semibold text-amber-100 transition hover:bg-amber-700/35 ${cancellingOrderId !== null ? 'pointer-events-none opacity-50' : ''}`}
                                                         title="Sin shipping_id; abre ventas de ML como respaldo"
                                                     >
                                                         Abrir en Mercado Libre
@@ -1092,6 +1128,7 @@ export default function PedidosProcesar({
                     </div>
                 </div>
             </section>
+            {cancelOrder ? <div role="dialog" aria-modal="true" className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"><div className="w-full max-w-2xl rounded-xl border border-red-500 bg-slate-950 p-6 text-white shadow-2xl"><h2 className="text-2xl font-black text-red-400">CANCELAR COMPRA</h2><dl className="mt-5 grid gap-3 sm:grid-cols-2"><div><dt className="text-xs font-bold uppercase text-slate-400">Cuenta Mercado Libre</dt><dd>{selectedMeliAccountLabel}</dd></div><div><dt className="text-xs font-bold uppercase text-slate-400">Pack</dt><dd>{cancelOrder.pedido.pack_id || 'Sin pack'}</dd></div><div><dt className="text-xs font-bold uppercase text-slate-400">Pedido real</dt><dd>{cancelOrder.order.order_id}</dd></div><div><dt className="text-xs font-bold uppercase text-slate-400">Estado del pedido</dt><dd>{cancelOrder.order.status || '—'}</dd></div><div><dt className="text-xs font-bold uppercase text-slate-400">Estado del envío</dt><dd>{cancelOrder.order.shipping_label || cancelOrder.order.shipping_status || '—'}</dd></div><div><dt className="text-xs font-bold uppercase text-slate-400">Total</dt><dd>{cancelOrder.order.total_amount == null ? 'No disponible' : `${cancelOrder.order.currency_id || ''} $${Number(cancelOrder.order.total_amount).toFixed(2)}`}</dd></div><div className="sm:col-span-2"><dt className="text-xs font-bold uppercase text-slate-400">Producto / SKU / cantidad</dt><dd>{(cancelOrder.order.items || []).map((item) => `${item.titulo} · SKU ${item.sku || 'N/A'} · ${item.cantidad}`).join(' | ') || 'No disponible'}</dd></div></dl><p className="mt-5 rounded-lg border border-red-700 bg-red-950/70 p-4 font-semibold">Esta acción marcará la venta como no concretada y Mercado Libre podrá devolver el dinero al comprador. Una cancelación realizada por el vendedor puede afectar tus métricas/reputación.</p><label className="mt-5 block font-bold" htmlFor="cancel-reason">Motivo de cancelación</label><select id="cancel-reason" value={cancelReason} disabled={cancellingOrderId !== null} onChange={(event) => setCancelReason(event.target.value)} className="mt-2 w-full rounded-lg border border-slate-600 bg-slate-900 p-3"><option value="">Selecciona un motivo</option>{Object.entries(cancelReasons).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>{cancelReason ? <p className="mt-2 text-sm text-slate-300">Se enviará el mensaje seguro definido por el sistema para este motivo.</p> : null}<label className="mt-5 flex gap-3 font-bold"><input type="checkbox" checked={cancelConfirmed} disabled={cancellingOrderId !== null} onChange={(event) => setCancelConfirmed(event.target.checked)} /><span>Confirmo que deseo cancelar esta compra.</span></label><div className="mt-6 flex justify-end gap-3"><button type="button" disabled={cancellingOrderId !== null} onClick={() => setCancelOrder(null)} className="rounded-lg border border-slate-500 px-4 py-2 font-bold disabled:opacity-50">Cerrar</button><button type="button" disabled={!cancelReason || !cancelConfirmed || cancellingOrderId !== null} onClick={confirmCancellation} className="rounded-lg bg-red-700 px-4 py-2 font-black text-white disabled:opacity-40">{cancellingOrderId !== null ? 'Procesando…' : 'Confirmar cancelación'}</button></div></div></div> : null}
         </AppShell>
     )
 }

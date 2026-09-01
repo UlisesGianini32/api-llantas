@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\AmsPedidosController;
 use App\Http\Controllers\AmsSecondaryOrdersController;
+use App\Http\Controllers\MeliOrderCancellationController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\ExcelImportController;
@@ -187,6 +188,11 @@ Route::post(
     '/ams/pedidos-secundaria/sync',
     [AmsSecondaryOrdersController::class, 'sync']
 )->name('ams.secondary.sync');
+
+Route::post(
+    '/ams/pedidos-secundaria/orders/{order}/cancel',
+    [MeliOrderCancellationController::class, 'store']
+)->whereNumber('order')->name('ams.secondary.orders.cancel');
 
 Route::get(
     '/ams/secundaria/pedidos/shipping-label/{shippingId}/print',
