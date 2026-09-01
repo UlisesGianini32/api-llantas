@@ -24,6 +24,7 @@ class UserAccessLevelsTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
+        $this->withoutVite();
 
         config()->set('database.default', 'sqlite');
         config()->set('database.connections.sqlite.database', ':memory:');
@@ -107,9 +108,14 @@ class UserAccessLevelsTest extends TestCase
             'email' => 'operations-default@example.test',
             'password' => 'password',
         ]);
+        $operations->refresh();
         $admin = User::factory()->create()->forceFill(['role' => User::ROLE_ADMIN]);
 
         $this->assertSame(User::ROLE_OPERATIONS, $operations->role);
+        $this->assertDatabaseHas('users', [
+            'id' => $operations->id,
+            'role' => User::ROLE_OPERATIONS,
+        ]);
         $this->assertFalse($this->usersInitiallyHadRole);
         $this->assertTrue(Schema::hasColumn('users', 'role'));
         $this->assertTrue($operations->isOperations());
