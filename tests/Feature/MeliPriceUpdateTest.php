@@ -23,6 +23,8 @@ use Tests\TestCase;
 
 class MeliPriceUpdateTest extends TestCase
 {
+    private const FOCUSED_CATEGORY_ID = 'MLM438195';
+
     private object $foundationMigration;
 
     private object $taxProfileMigration;
@@ -893,7 +895,7 @@ class MeliPriceUpdateTest extends TestCase
             'meli_item_id' => 'MLM1343389489',
             'title' => 'Alfaparf Yellow Liss Mascarilla 500ml',
             'sku' => 'SKU-PRICE-'.fake()->unique()->numerify('####'),
-            'category_id' => 'MLM171894',
+            'category_id' => self::FOCUSED_CATEGORY_ID,
             'listing_type_id' => 'gold_pro',
             'currency_id' => 'MXN',
             'current_price' => '1531.20',

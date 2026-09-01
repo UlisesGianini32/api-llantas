@@ -19,6 +19,8 @@ use Tests\TestCase;
 
 class MeliPriceManagerDashboardTest extends TestCase
 {
+    private const FOCUSED_CATEGORY_ID = 'MLM438195';
+
     private object $foundationMigration;
 
     private object $classificationMigration;
@@ -421,10 +423,10 @@ class MeliPriceManagerDashboardTest extends TestCase
     public function test_category_filter_matches_exact_category_id(): void
     {
         $account = $this->account();
-        $match = $this->categorized($account, ['category_id' => 'MLM1234']);
-        $this->categorized($account, ['category_id' => 'MLM9999']);
+        $match = $this->categorized($account, ['category_id' => self::FOCUSED_CATEGORY_ID]);
+        $this->categorized($account, ['category_id' => 'MLM167994']);
 
-        $this->get(route('meli-price-manager.index', ['account' => $account->id, 'category_id' => 'MLM1234']))
+        $this->get(route('meli-price-manager.index', ['account' => $account->id, 'category_id' => self::FOCUSED_CATEGORY_ID]))
             ->assertInertia(fn (Assert $page) => $page->has('items.data', 1)->where('items.data.0.id', $match->id));
     }
 
@@ -478,7 +480,10 @@ class MeliPriceManagerDashboardTest extends TestCase
     public function test_dashboard_uses_server_side_pagination_with_default_fifty(): void
     {
         $account = $this->account();
-        MeliPriceManagerItem::factory()->count(51)->for($account, 'meliAccount')->create(['classification_status' => 'categorized']);
+        MeliPriceManagerItem::factory()->count(51)->for($account, 'meliAccount')->create([
+            'category_id' => self::FOCUSED_CATEGORY_ID,
+            'classification_status' => 'categorized',
+        ]);
 
         $this->get(route('meli-price-manager.index', ['account' => $account->id]))
             ->assertInertia(fn (Assert $page) => $page
@@ -490,7 +495,10 @@ class MeliPriceManagerDashboardTest extends TestCase
     public function test_per_page_cannot_exceed_allowed_values(): void
     {
         $account = $this->account();
-        MeliPriceManagerItem::factory()->count(51)->for($account, 'meliAccount')->create(['classification_status' => 'categorized']);
+        MeliPriceManagerItem::factory()->count(51)->for($account, 'meliAccount')->create([
+            'category_id' => self::FOCUSED_CATEGORY_ID,
+            'classification_status' => 'categorized',
+        ]);
 
         $this->get(route('meli-price-manager.index', ['account' => $account->id, 'per_page' => 10000]))
             ->assertInertia(fn (Assert $page) => $page->where('items.per_page', 50)->has('items.data', 50));
@@ -556,6 +564,7 @@ class MeliPriceManagerDashboardTest extends TestCase
     {
         $account = $this->account();
         MeliPriceManagerItem::factory()->count(26)->for($account, 'meliAccount')->create([
+            'category_id' => self::FOCUSED_CATEGORY_ID,
             'classification_status' => 'categorized',
             'status' => 'active',
         ]);
@@ -604,6 +613,7 @@ class MeliPriceManagerDashboardTest extends TestCase
     {
         return MeliPriceManagerItem::factory()->for($account, 'meliAccount')->create([
             'meli_item_id' => 'MLM'.fake()->unique()->numberBetween(100000000, 999999999),
+            'category_id' => self::FOCUSED_CATEGORY_ID,
             ...$overrides,
         ]);
     }

@@ -16,6 +16,8 @@ use Tests\TestCase;
 
 class MeliBrandManagementTest extends TestCase
 {
+    private const FOCUSED_CATEGORY_ID = 'MLM438195';
+
     private object $foundationMigration;
 
     private object $classificationMigration;
@@ -470,6 +472,7 @@ class MeliBrandManagementTest extends TestCase
     {
         return MeliPriceManagerItem::factory()->for($account, 'meliAccount')->create([
             'meli_item_id' => 'MLM'.fake()->unique()->numberBetween(100000000, 999999999),
+            'category_id' => self::FOCUSED_CATEGORY_ID,
             ...$overrides,
         ]);
     }
