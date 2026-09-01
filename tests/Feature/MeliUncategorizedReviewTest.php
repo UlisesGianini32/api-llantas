@@ -23,6 +23,8 @@ class MeliUncategorizedReviewTest extends TestCase
 
     private object $classificationMigration;
 
+    private object $categoryMigration;
+
     private User $user;
 
     protected function setUp(): void
@@ -66,6 +68,8 @@ class MeliUncategorizedReviewTest extends TestCase
         $this->foundationMigration->up();
         $this->classificationMigration = require database_path('migrations/2026_08_26_000002_add_brand_classification_audit_to_meli_price_manager_items.php');
         $this->classificationMigration->up();
+        $this->categoryMigration = require database_path('migrations/2026_08_28_000002_create_meli_categories_table.php');
+        $this->categoryMigration->up();
 
         $this->user = User::factory()->create();
         $this->actingAs($this->user);
@@ -73,6 +77,7 @@ class MeliUncategorizedReviewTest extends TestCase
 
     protected function tearDown(): void
     {
+        $this->categoryMigration->down();
         $this->classificationMigration->down();
         $this->foundationMigration->down();
         Schema::dropIfExists('meli_accounts');

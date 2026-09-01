@@ -26,6 +26,8 @@ class MeliPriceManagerDashboardTest extends TestCase
 
     private object $dashboardIndexMigration;
 
+    private object $categoryMigration;
+
     private User $user;
 
     protected function setUp(): void
@@ -73,6 +75,8 @@ class MeliPriceManagerDashboardTest extends TestCase
         $this->classificationMigration->up();
         $this->dashboardIndexMigration = require database_path('migrations/2026_08_26_000003_add_dashboard_index_to_meli_price_manager_items.php');
         $this->dashboardIndexMigration->up();
+        $this->categoryMigration = require database_path('migrations/2026_08_28_000002_create_meli_categories_table.php');
+        $this->categoryMigration->up();
 
         $this->user = User::factory()->create();
         $this->actingAs($this->user);
@@ -81,6 +85,7 @@ class MeliPriceManagerDashboardTest extends TestCase
     protected function tearDown(): void
     {
         Cache::flush();
+        $this->categoryMigration->down();
         $this->dashboardIndexMigration->down();
         $this->classificationMigration->down();
         $this->foundationMigration->down();
@@ -139,8 +144,6 @@ class MeliPriceManagerDashboardTest extends TestCase
     public function test_dashboard_counts_only_items_from_the_focused_catalog_and_exposes_category_labels(): void
     {
         $account = $this->account();
-        $migration = require database_path('migrations/2026_08_28_000002_create_meli_categories_table.php');
-        $migration->up();
         config()->set('meli_price_manager.focused_catalog.allowed_root_category_ids', ['MLM-TEST-BEAUTY-ROOT']);
         MeliCategory::query()->create([
             'category_id' => 'MLM-TEST-SHAMPOO',
