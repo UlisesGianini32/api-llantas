@@ -198,7 +198,10 @@ class MeliOrderCancellationTest extends TestCase
         $ids = [
             '2000000000201' => 'sale',
             '2000000000202' => 'timeout',
+            '2000000000404' => 'generic_404',
+            '2000000001404' => 'order_not_found',
             '2000000000401' => 401,
+            '2000000000403' => 403,
             '2000000000429' => 429,
             '2000000000500' => 500,
             '2000000000203' => 'invalid',
@@ -211,6 +214,8 @@ class MeliOrderCancellationTest extends TestCase
                 $mode = $ids[$id] ?? null;
                 if ($mode === 'sale') return Http::response(['sale' => ['id' => 123], 'purchase' => null]);
                 if ($mode === 'timeout') throw new ConnectionException('feedback timeout');
+                if ($mode === 'generic_404') return Http::response(['message' => 'Resource not found'], 404);
+                if ($mode === 'order_not_found') return Http::response(['error' => 'order_not_found', 'message' => 'Order not found'], 404);
                 if (is_int($mode)) return Http::response([], $mode);
                 return Http::response(['unexpected' => true]);
             }
@@ -227,6 +232,39 @@ class MeliOrderCancellationTest extends TestCase
 
         $this->assertCount(0, collect(Http::recorded())->pluck(0)->filter(fn (Request $request): bool => $request->method() === 'POST'));
         $this->assertSame(0, MeliOrderActionLog::query()->count());
+    }
+
+    public function test_specific_feedback_not_found_404_allows_shipment_preflight_and_one_post(): void
+    {
+        $ids = [
+            '2000000000301' => 'structured',
+            '2000000000302' => 'real_message',
+        ];
+        Http::fake(function (Request $request) use ($ids) {
+            $path = parse_url($request->url(), PHP_URL_PATH);
+            preg_match('#/orders/([^/]+)#', $path, $match);
+            $id = $match[1] ?? '';
+            if ($request->method() === 'POST') return Http::response(['id' => 'feedback-created'], 201);
+            if (str_ends_with($path, '/feedback')) {
+                return $ids[$id] === 'structured'
+                    ? Http::response(['error_code' => 'feedback_not_found'], 404)
+                    : Http::response(['message' => "Feedback doesn't exist."], 404);
+            }
+            if (str_contains($path, '/shipments/')) return Http::response(['status' => 'ready_to_ship', 'substatus' => 'printed']);
+            return Http::response(['id' => $id, 'status' => 'paid', 'shipping' => ['id' => 'SHIP-'.$id], 'tags' => []]);
+        });
+
+        foreach ($ids as $id => $_) {
+            $order = $this->order($this->account(), ['order_id' => $id]);
+            $this->post(route('ams.secondary.orders.cancel', $order), ['reason' => 'BUYER_REGRETS', 'confirmed' => true])->assertSessionHas('success');
+            $requests = collect(Http::recorded())->pluck(0)->filter(fn (Request $request): bool => str_contains($request->url(), $id));
+            $prePost = $requests->takeUntil(fn (Request $request): bool => $request->method() === 'POST')->values();
+            $this->assertSame(['GET', 'GET', 'GET'], $prePost->map(fn (Request $request): string => $request->method())->all());
+            $this->assertStringEndsWith('/orders/'.$id, parse_url($prePost[0]->url(), PHP_URL_PATH));
+            $this->assertStringEndsWith('/orders/'.$id.'/feedback', parse_url($prePost[1]->url(), PHP_URL_PATH));
+            $this->assertStringEndsWith('/shipments/SHIP-'.$id, parse_url($prePost[2]->url(), PHP_URL_PATH));
+            $this->assertCount(1, $requests->filter(fn (Request $request): bool => $request->method() === 'POST'));
+        }
     }
 
     public function test_http_errors_and_timeout_are_attempted_once_and_timeout_is_uncertain(): void
