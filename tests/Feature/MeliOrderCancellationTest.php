@@ -28,7 +28,7 @@ class MeliOrderCancellationTest extends TestCase
         config()->set('database.connections.sqlite.database', ':memory:');
         DB::purge('sqlite');
         Schema::create('users', function (Blueprint $table): void {
-            $table->id(); $table->string('name'); $table->string('email')->unique(); $table->string('password');
+            $table->id(); $table->string('name'); $table->string('email')->unique(); $table->string('password'); $table->string('role', 32)->default('operations');
             $table->timestamp('email_verified_at')->nullable(); $table->rememberToken(); $table->text('two_factor_secret')->nullable();
             $table->text('two_factor_recovery_codes')->nullable(); $table->timestamp('two_factor_confirmed_at')->nullable(); $table->timestamps();
         });
