@@ -127,6 +127,21 @@ class UserAccessLevelsTest extends TestCase
         $this->assertTrue($admin->isAdmin(), 'El rol no debe poder asignarse mediante mass assignment común.');
     }
 
+    public function test_public_registration_is_disabled_while_login_and_password_reset_remain_available(): void
+    {
+        $this->get('/register')->assertNotFound();
+        $this->post('/register', [
+            'name' => 'Bot',
+            'email' => 'bot@example.test',
+            'password' => 'password',
+            'password_confirmation' => 'password',
+        ])->assertNotFound();
+
+        $this->get('/login')->assertOk();
+        $this->get('/forgot-password')->assertOk();
+        $this->assertDatabaseMissing('users', ['email' => 'bot@example.test']);
+    }
+
     public function test_admin_can_access_representative_routes_from_every_requested_area(): void
     {
         $admin = User::factory()->create()->forceFill(['role' => User::ROLE_ADMIN]);
