@@ -795,6 +795,7 @@ class AmsPedidosController extends Controller
                     'group_key' => $p->group_key,
                     'pack_id' => $p->pack_id ?? null,
                     'order_id' => $p->order_id,
+                    'orders' => $p->orders ?? collect(),
                     'display_id' => $p->display_id,
                     'ams_tipo' => $p->ams_tipo ?? 'OTRO',
                     'fecha_pedido' => $p->fecha_pedido,
@@ -880,6 +881,17 @@ class AmsPedidosController extends Controller
         }
 
         return null;
+    }
+
+    protected function isMeliOrderCancelledForPresentation(array $raw, ?string $storedStatus = null): bool
+    {
+        $tags = array_map(fn (mixed $tag): string => strtolower((string) $tag), (array) ($raw['tags'] ?? []));
+        $feedback = is_array($raw['feedback'] ?? null) ? $raw['feedback'] : [];
+
+        return (array_key_exists('cancel_detail', $raw) && $raw['cancel_detail'] !== null)
+            || (array_key_exists('sale', $feedback) && $feedback['sale'] !== null)
+            || in_array('unfulfilled', $tags, true)
+            || in_array(strtolower((string) ($raw['status'] ?? $storedStatus ?? '')), ['cancelled', 'canceled'], true);
     }
 
     /**
@@ -980,6 +992,7 @@ class AmsPedidosController extends Controller
                 'group_key' => $groupKey,
                 'pack_id' => $packId,
                 'id_local' => (int) $row->id_local,
+                'item_row_id' => (int) ($row->item_row_id ?? 0),
                 'ml_display_id' => isset($row->ml_display_id) && $row->ml_display_id !== null && (string) $row->ml_display_id !== ''
                     ? (string) $row->ml_display_id
                     : null,
@@ -997,17 +1010,46 @@ class AmsPedidosController extends Controller
                     ? Carbon::parse($row->fecha_pedido)->format('d/m/Y H:i')
                     : null,
                 'ams_tipo' => $amsTipo,
+                'order_status' => (string) ($row->order_status ?? ''),
+                'order_cancelled' => $this->isMeliOrderCancelledForPresentation($raw, $row->order_status ?? null),
+                'order_total_amount' => is_numeric($raw['total_amount'] ?? null) ? (float) $raw['total_amount'] : null,
+                'order_currency_id' => filled($raw['currency_id'] ?? null) ? (string) $raw['currency_id'] : null,
                 'ml_envio_status' => $effEnvio['status'],
                 'ml_envio_substatus' => $effEnvio['substatus'],
                 'ml_envio_label' => $effEnvio['label'],
             ];
         });
 
+        $ordersByGroup = $items->groupBy('group_key')->map(fn (Collection $group) => $group
+            ->groupBy('id_local')->map(function (Collection $orderItems): array {
+                $first = $orderItems->first();
+                $individualItems = $orderItems->unique(fn (object $item): string => $item->item_row_id > 0
+                    ? 'row_'.$item->item_row_id
+                    : implode('|', [$item->item_id, $item->sku, $item->cantidad, $item->precio_unitario]));
+
+                return [
+                    'id' => $first->id_local,
+                    'order_id' => $first->order_id,
+                    'status' => $first->order_status,
+                    'cancelled' => $first->order_cancelled,
+                    'shipping_id' => $first->shipping_id,
+                    'shipping_status' => $first->ml_envio_status,
+                    'shipping_label' => $first->ml_envio_label,
+                    'total_amount' => $first->order_total_amount ?? ($individualItems->isNotEmpty() ? (float) $individualItems->sum('total_linea') : null),
+                    'currency_id' => $first->order_currency_id,
+                    'items' => $individualItems->map(fn (object $item): array => [
+                        'titulo' => $item->titulo,
+                        'sku' => $item->sku,
+                        'cantidad' => $item->cantidad,
+                    ])->values()->all(),
+                ];
+            })->values());
+
         $items = $this->removeDuplicateItems($items);
 
         $pedidosAgrupados = $items
             ->groupBy('group_key')
-            ->map(function (Collection $group) {
+            ->map(function (Collection $group) use ($ordersByGroup) {
                 $primer = $group->sortByDesc('fecha_pedido')->first();
 
                 $headerLabel = $primer->ml_display_id
@@ -1018,6 +1060,7 @@ class AmsPedidosController extends Controller
                     'group_key' => $primer->group_key,
                     'pack_id' => $primer->pack_id,
                     'order_id' => $primer->order_id,
+                    'orders' => $ordersByGroup->get($primer->group_key, collect()),
                     'display_id' => $headerLabel,
                     'ams_tipo' => $primer->ams_tipo ?? 'OTRO',
                     'fecha_pedido' => $primer->fecha_pedido,
@@ -1055,6 +1098,8 @@ class AmsPedidosController extends Controller
                 $row = [
                     'group_key' => $p->group_key,
                     'order_id' => (string) $p->order_id,
+                    'pack_id' => isset($p->pack_id) ? (string) $p->pack_id : null,
+                    'orders' => collect($p->orders ?? [])->map(fn (mixed $order): array => (array) $order)->values()->all(),
                     'display_id' => $p->display_id,
                     'ams_tipo' => $p->ams_tipo ?? 'OTRO',
                     'fecha_pedido_formateada' => $p->fecha_pedido_formateada,

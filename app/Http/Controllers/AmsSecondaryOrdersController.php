@@ -6,6 +6,7 @@ use App\Models\MeliAccount;
 use App\Models\MeliOrder;
 use App\Models\User;
 use App\Services\MeliOrderSyncService;
+use App\Services\MercadoLibre\Orders\MeliOrderCancellationPolicy;
 use Carbon\Carbon;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -137,6 +138,7 @@ class AmsSecondaryOrdersController extends AmsPedidosController
             'meliAccounts' => $accountOptions,
             'selectedMeliAccountId' => $selectedAccount?->id,
             'selectedMeliAccountLabel' => $selectedLabel,
+            'cancelReasons' => MeliOrderCancellationPolicy::REASONS,
         ]);
     }
 
