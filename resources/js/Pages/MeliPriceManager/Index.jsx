@@ -1,7 +1,8 @@
 import AppShell from '@/Components/layout/AppShell'
+import { selectionScopeKey } from '@/lib/meliPriceManagerSelection'
 import { canContinueWithSimulation, currentReceivableForItem, initialSimulationPrice, shippingPresentation, simulationMatchesDraft, simulationResultPresentation } from '@/lib/meliPriceSimulation'
 import { Head, Link, router } from '@inertiajs/react'
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 const fieldClass =
     'w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 dark:border-neutral-700 dark:bg-neutral-950 dark:text-white'
@@ -233,6 +234,21 @@ function BrandChangeModal({ item, brands, brandId, processing, error, onBrandCha
     </div>
 }
 
+function BulkBrandChangeModal({ count, brands, brandId, confirmed, processing, error, onBrandChange, onConfirmedChange, onConfirm, onClose }) {
+    if (count < 1) return null
+
+    return <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4" role="dialog" aria-modal="true" aria-labelledby="bulk-brand-change-title">
+        <div className="w-full max-w-lg rounded-2xl bg-white p-5 shadow-2xl dark:bg-neutral-900">
+            <div className="flex items-start justify-between gap-4"><div><p className="text-xs font-bold uppercase tracking-wide text-indigo-600">Clasificación interna</p><h2 id="bulk-brand-change-title" className="mt-1 text-xl font-bold">Cambiar marca de {number(count)} publicaciones</h2></div><button type="button" onClick={onClose} disabled={processing} className={secondaryButton}>Cerrar</button></div>
+            <label className="mt-5 block"><span className="mb-1 block text-sm font-bold">Nueva marca interna</span><select value={brandId} onChange={(event) => onBrandChange(event.target.value)} disabled={processing} className={fieldClass}><option value="">Seleccionar</option>{brands.map((brand) => <option key={brand.id} value={brand.id}>{brand.name}</option>)}</select></label>
+            <p className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-800 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-200">Este cambio sólo modifica la clasificación interna. No cambia la marca ni el precio en Mercado Libre.</p>
+            <label className="mt-4 flex items-start gap-3 text-sm font-semibold"><input type="checkbox" checked={confirmed} onChange={(event) => onConfirmedChange(event.target.checked)} disabled={processing} className="mt-1" /><span>Confirmo el cambio de marca interna para {number(count)} publicaciones seleccionadas.</span></label>
+            {error && <p className="mt-3 rounded-xl bg-rose-50 p-3 text-sm font-semibold text-rose-700 dark:bg-rose-500/10 dark:text-rose-200">{error}</p>}
+            <div className="mt-5 flex justify-end gap-2"><button type="button" onClick={onClose} disabled={processing} className={secondaryButton}>Cancelar</button><button type="button" onClick={onConfirm} disabled={processing || !brandId || !confirmed} className={primaryButton}>{processing ? 'Cambiando…' : 'Cambiar marca'}</button></div>
+        </div>
+    </div>
+}
+
 function StatusBadge({ status, stock }) {
     const label = stock !== null && stock <= 0 ? 'Sin stock' : ({ active: 'Activo', paused: 'Pausado', closed: 'Cerrado', under_review: 'En revisión' }[status] || status || 'Sin estado')
     const tone = stock !== null && stock <= 0
@@ -334,15 +350,54 @@ export default function Index({
     const [brandChangeId, setBrandChangeId] = useState('')
     const [brandChangeProcessing, setBrandChangeProcessing] = useState(false)
     const [brandChangeError, setBrandChangeError] = useState('')
+    const [bulkBrandOpen, setBulkBrandOpen] = useState(false)
+    const [bulkBrandId, setBulkBrandId] = useState('')
+    const [bulkBrandConfirmed, setBulkBrandConfirmed] = useState(false)
+    const [bulkBrandProcessing, setBulkBrandProcessing] = useState(false)
+    const [bulkBrandError, setBulkBrandError] = useState('')
     const simulationRequestId = useRef(0)
     const allSelected = items.data.length > 0 && items.data.every((item) => selectedIds.includes(item.id))
     const selectedAccount = useMemo(() => accounts.find((account) => Number(account.id) === Number(selectedAccountId)), [accounts, selectedAccountId])
+    const selectionScope = selectionScopeKey({
+        accountId: selectedAccountId,
+        brandId: selectedBrandId,
+        page: items.current_page,
+        filters,
+    })
+
+    useEffect(() => {
+        setSelectedIds([])
+        setBulkBrandOpen(false)
+        setBulkBrandId('')
+        setBulkBrandConfirmed(false)
+        setBulkBrandError('')
+    }, [selectionScope])
 
     const visit = (overrides = {}, preserveState = true) => router.get(
         '/meli-price-manager',
         { account: selectedAccountId, brand: selectedBrandId, ...filterData, ...overrides },
-        { preserveState, preserveScroll: true, replace: true, onSuccess: () => setSelectedIds([]) },
+        {
+            preserveState,
+            preserveScroll: true,
+            replace: true,
+            onSuccess: () => {
+                setSelectedIds([])
+                setBulkBrandOpen(false)
+            },
+        },
     )
+
+    const changeAccount = (event) => {
+        setSelectedIds([])
+        setBulkBrandOpen(false)
+        router.get('/meli-price-manager', { account: event.target.value })
+    }
+
+    const clearFilters = () => {
+        setSelectedIds([])
+        setBulkBrandOpen(false)
+        router.get('/meli-price-manager', { account: selectedAccountId })
+    }
 
     const sync = () => {
         if (!selectedAccountId || syncStatus.queued) return
@@ -367,6 +422,49 @@ export default function Index({
             onSuccess: () => setBrandChangeItem(null),
             onError: (errors) => setBrandChangeError(errors.brand_group_id || errors.item || 'No fue posible cambiar la marca.'),
             onFinish: () => setBrandChangeProcessing(false),
+        })
+    }
+
+    const openBulkBrandChange = () => {
+        if (selectedIds.length < 1) return
+        setBulkBrandId('')
+        setBulkBrandConfirmed(false)
+        setBulkBrandError('')
+        setBulkBrandOpen(true)
+    }
+
+    const closeBulkBrandChange = () => {
+        if (bulkBrandProcessing) return
+        setBulkBrandOpen(false)
+        setBulkBrandError('')
+    }
+
+    const confirmBulkBrandChange = () => {
+        if (!selectedAccountId || selectedIds.length < 1 || !bulkBrandId || !bulkBrandConfirmed || bulkBrandProcessing) return
+
+        setBulkBrandProcessing(true)
+        setBulkBrandError('')
+        router.post('/meli-price-manager/items/bulk-brand', {
+            meli_account_id: selectedAccountId,
+            item_ids: selectedIds,
+            brand_group_id: bulkBrandId,
+            confirm: bulkBrandConfirmed,
+        }, {
+            preserveScroll: true,
+            onSuccess: () => {
+                setBulkBrandOpen(false)
+                setBulkBrandId('')
+                setBulkBrandConfirmed(false)
+                setSelectedIds([])
+            },
+            onError: (errors) => setBulkBrandError(
+                errors.item_ids
+                || errors.brand_group_id
+                || errors.meli_account_id
+                || errors.confirm
+                || 'No fue posible cambiar la marca de las publicaciones seleccionadas.',
+            ),
+            onFinish: () => setBulkBrandProcessing(false),
         })
     }
 
@@ -476,7 +574,7 @@ export default function Index({
 
                 <section className="rounded-2xl border border-slate-200 bg-white p-5 dark:border-neutral-800 dark:bg-neutral-900">
                     <div className="grid gap-4 lg:grid-cols-[minmax(18rem,1fr)_minmax(0,2fr)_auto] lg:items-end">
-                        <label><span className="mb-1 block text-xs font-bold">Cuenta de Mercado Libre</span><select value={selectedAccountId ?? ''} onChange={(event) => router.get('/meli-price-manager', { account: event.target.value })} disabled={!accounts.length} className={fieldClass}>{!accounts.length && <option value="">Sin cuentas vinculadas</option>}{accounts.map((account) => <option key={account.id} value={account.id}>{account.nickname || `Cuenta #${account.id}`}{account.is_default ? ' · predeterminada' : ''}</option>)}</select></label>
+                        <label><span className="mb-1 block text-xs font-bold">Cuenta de Mercado Libre</span><select value={selectedAccountId ?? ''} onChange={changeAccount} disabled={!accounts.length} className={fieldClass}>{!accounts.length && <option value="">Sin cuentas vinculadas</option>}{accounts.map((account) => <option key={account.id} value={account.id}>{account.nickname || `Cuenta #${account.id}`}{account.is_default ? ' · predeterminada' : ''}</option>)}</select></label>
                         <div><p className="text-sm font-semibold">Última sincronización: {dateTime(summary.last_synced_at)}</p><p className="mt-1 text-xs text-slate-500">{number(summary.recently_synced)} registros sincronizados en las últimas {syncStatus.stale_after_hours}h · {number(summary.never_synced)} nunca sincronizados.</p><p className="mt-1 text-xs font-semibold text-indigo-600">Sincronizar solo descarga el estado actual; no modifica publicaciones en Mercado Libre.</p></div>
                         <button type="button" onClick={sync} disabled={!selectedAccountId || syncStatus.queued} className={primaryButton}>{syncStatus.queued ? 'Sincronización en cola' : 'Sincronizar Mercado Libre'}</button>
                     </div>
@@ -513,11 +611,11 @@ export default function Index({
                         <label><span className="mb-1 block text-xs font-bold">Ordenar</span><select value={filterData.sort} onChange={(event) => setFilterData({ ...filterData, sort: event.target.value })} className={fieldClass}><option value="title">Producto</option><option value="sku">SKU</option><option value="price">Precio</option><option value="stock">Stock</option><option value="last_synced_at">Última sincronización</option></select></label>
                         <label><span className="mb-1 block text-xs font-bold">Dirección</span><select value={filterData.direction} onChange={(event) => setFilterData({ ...filterData, direction: event.target.value })} className={fieldClass}><option value="asc">Ascendente</option><option value="desc">Descendente</option></select></label>
                         <label><span className="mb-1 block text-xs font-bold">Por página</span><select value={filterData.per_page} onChange={(event) => setFilterData({ ...filterData, per_page: event.target.value })} className={fieldClass}><option value="25">25</option><option value="50">50</option><option value="100">100</option></select></label>
-                        <div className="flex items-end gap-2"><button className={primaryButton}>Aplicar</button><button type="button" onClick={() => router.get('/meli-price-manager', { account: selectedAccountId })} className={secondaryButton}>Limpiar filtros</button></div>
+                        <div className="flex items-end gap-2"><button className={primaryButton}>Aplicar</button><button type="button" onClick={clearFilters} className={secondaryButton}>Limpiar filtros</button></div>
                     </form>
                 </section>
 
-                {selectedIds.length > 0 && <div className="rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm font-semibold dark:border-indigo-500/20 dark:bg-indigo-500/10">{selectedIds.length} seleccionadas. Los cambios masivos de precio no están habilitados.</div>}
+                {selectedIds.length > 0 && <div className="flex flex-col justify-between gap-3 rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm dark:border-indigo-500/20 dark:bg-indigo-500/10 sm:flex-row sm:items-center"><div><p className="font-bold">{number(selectedIds.length)} publicaciones seleccionadas</p><p className="mt-1 text-xs text-slate-500">Los cambios masivos de precio permanecen deshabilitados.</p></div><button type="button" onClick={openBulkBrandChange} className={primaryButton}>Cambiar marca</button></div>}
 
                 <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white dark:border-neutral-800 dark:bg-neutral-900">
                     <div className="border-b border-slate-200 px-4 py-3 dark:border-neutral-800"><h2 className="font-bold">Publicaciones categorizadas</h2><p className="text-xs text-slate-500">Solo lectura · {number(items.total)} resultados</p></div>
@@ -531,11 +629,12 @@ export default function Index({
                             </tbody>
                         </table>
                     </div>
-                    {items.links?.length > 0 && <div className="flex flex-wrap gap-2 border-t border-slate-200 p-4 dark:border-neutral-800">{items.links.map((link, index) => <Link key={index} href={link.url ?? '#'} preserveScroll className={`rounded-lg px-3 py-2 text-sm ${link.active ? 'bg-indigo-600 text-white' : 'border border-slate-200 dark:border-neutral-700'} ${!link.url ? 'pointer-events-none opacity-40' : ''}`} dangerouslySetInnerHTML={{ __html: link.label }} />)}</div>}
+                    {items.links?.length > 0 && <div className="flex flex-wrap gap-2 border-t border-slate-200 p-4 dark:border-neutral-800">{items.links.map((link, index) => <Link key={index} href={link.url ?? '#'} preserveScroll onClick={() => { setSelectedIds([]); setBulkBrandOpen(false) }} className={`rounded-lg px-3 py-2 text-sm ${link.active ? 'bg-indigo-600 text-white' : 'border border-slate-200 dark:border-neutral-700'} ${!link.url ? 'pointer-events-none opacity-40' : ''}`} dangerouslySetInnerHTML={{ __html: link.label }} />)}</div>}
                 </section>
             </div>
             <PriceSimulationModal item={simulationItem} price={simulationPrice} simulatedPrice={simulatedPrice} result={simulationResult} loading={simulationLoading} initialLoading={initialSimulationLoading} updating={priceUpdating} confirming={simulationConfirming} success={updateSuccess} error={simulationError} onPriceChange={(value) => { setSimulationPrice(value); setSimulationConfirming(false); setUpdateSuccess(null) }} onSubmit={calculateSimulation} onContinue={() => { if (simulationMatchesDraft(simulationPrice, simulatedPrice) && !simulationError) setSimulationConfirming(true) }} onCancelConfirmation={() => setSimulationConfirming(false)} onConfirm={confirmPriceUpdate} onClose={closeSimulation} />
             <BrandChangeModal item={brandChangeItem} brands={brandOptions} brandId={brandChangeId} processing={brandChangeProcessing} error={brandChangeError} onBrandChange={setBrandChangeId} onConfirm={confirmBrandChange} onClose={() => { if (!brandChangeProcessing) setBrandChangeItem(null) }} />
+            {bulkBrandOpen && <BulkBrandChangeModal count={selectedIds.length} brands={brandOptions} brandId={bulkBrandId} confirmed={bulkBrandConfirmed} processing={bulkBrandProcessing} error={bulkBrandError} onBrandChange={(value) => { setBulkBrandId(value); setBulkBrandError('') }} onConfirmedChange={setBulkBrandConfirmed} onConfirm={confirmBulkBrandChange} onClose={closeBulkBrandChange} />}
         </AppShell>
     )
 }

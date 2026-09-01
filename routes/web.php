@@ -20,6 +20,7 @@ use App\Http\Controllers\MeliPriceManager\MeliCategorizedItemBrandController;
 use App\Http\Controllers\MeliPriceManager\MeliBrandAliasController;
 use App\Http\Controllers\MeliPriceManager\MeliBrandGroupController;
 use App\Http\Controllers\MeliPriceManager\MeliBrandReclassificationController;
+use App\Http\Controllers\MeliPriceManager\MeliBulkCategorizedItemBrandController;
 use App\Http\Controllers\MeliPriceManager\MeliItemClassificationActionController;
 use App\Http\Controllers\MeliPriceManager\MeliPriceManagerDashboardController;
 use App\Http\Controllers\MeliPriceManager\MeliPriceSimulationController;
@@ -260,6 +261,8 @@ Route::get(
         Route::post('/items/{item}/brand', MeliCategorizedItemBrandController::class)
             ->whereNumber('item')
             ->name('items.brand.update');
+        Route::post('/items/bulk-brand', MeliBulkCategorizedItemBrandController::class)
+            ->name('items.brand.bulk');
 
         Route::get('/brands', [MeliBrandGroupController::class, 'index'])->name('brands.index');
         Route::post('/brands', [MeliBrandGroupController::class, 'store'])->name('brands.store');
