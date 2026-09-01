@@ -28,6 +28,7 @@ class HandleInertiaRequests extends Middleware
                         'id' => $user->id,
                         'name' => $user->name,
                         'email' => $user->email,
+                        'role' => $user->role,
                         'meli_id' => $user->meli_id,
                         // No mandar access_token al JS ($hidden). Bandera explícita para la UI:
                         'meli_linked' => filled($user->meli_id),

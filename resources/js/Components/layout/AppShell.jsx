@@ -1,4 +1,5 @@
 import FlashToasts from '@/Components/ui/FlashToasts'
+import { sidebarSectionsForRole } from '@/lib/userAccessNavigation'
 import { Head, Link, usePage } from '@inertiajs/react'
 import { useEffect, useRef, useState } from 'react'
 
@@ -119,7 +120,9 @@ function SidebarBrand() {
     )
 }
 
-function SidebarNav({ currentPath, onNavigate, pendingQuestions = 0 }) {
+function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
+    const isAdmin = sidebarSectionsForRole(role).some((section) => section.key === 'inventory')
+
     return (
         <nav className="space-y-6">
             <div>
@@ -133,7 +136,7 @@ function SidebarNav({ currentPath, onNavigate, pendingQuestions = 0 }) {
                 </div>
             </div>
 
-            <div>
+            {isAdmin && <div>
                 <p className="mb-2 px-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">
                     Inventario
                 </p>
@@ -199,7 +202,7 @@ function SidebarNav({ currentPath, onNavigate, pendingQuestions = 0 }) {
                         Llantas no actualizadas
                     </NavItem>
                 </div>
-            </div>
+            </div>}
 
             <div>
                 <p className="mb-2 px-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">
@@ -245,6 +248,7 @@ function SidebarNav({ currentPath, onNavigate, pendingQuestions = 0 }) {
                         Publicaciones Mercado Libre
                     </NavItem>
 
+                    {isAdmin && <>
                     <NavItem
                         href="/meli-price-manager"
                         active={currentPath === '/meli-price-manager'}
@@ -268,6 +272,8 @@ function SidebarNav({ currentPath, onNavigate, pendingQuestions = 0 }) {
                     >
                         Pendientes de clasificación
                     </NavItem>
+
+                    </>}
 
                     <NavItem
                         href="/meli/full"
@@ -313,7 +319,7 @@ function SidebarNav({ currentPath, onNavigate, pendingQuestions = 0 }) {
                 </div>
             </div>
 
-            <div>
+            {isAdmin && <div>
                 <p className="mb-2 px-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">
                     Sistema
                 </p>
@@ -345,7 +351,7 @@ function SidebarNav({ currentPath, onNavigate, pendingQuestions = 0 }) {
                     </NavItem>
 
                 </div>
-            </div>
+            </div>}
 
         </nav>
     )
@@ -424,6 +430,7 @@ export default function AppShell({ title = 'Dashboard', children }) {
                                 <div className="min-h-0 flex-1 overflow-y-auto">
                                     <SidebarNav
                                         currentPath={currentPath}
+                                        role={auth?.user?.role}
                                         onNavigate={closeMobile}
                                         pendingQuestions={meli_questions_pending}
                                     />
@@ -436,7 +443,7 @@ export default function AppShell({ title = 'Dashboard', children }) {
                     <aside className="hidden w-72 shrink-0 border-r border-slate-200 bg-white lg:block dark:border-neutral-800 dark:bg-neutral-900">
                         <div className="flex h-full flex-col p-4">
                             <SidebarBrand />
-                            <SidebarNav currentPath={currentPath} pendingQuestions={meli_questions_pending} />
+                            <SidebarNav currentPath={currentPath} role={auth?.user?.role} pendingQuestions={meli_questions_pending} />
                             <SidebarFooter user={auth?.user} />
                         </div>
                     </aside>

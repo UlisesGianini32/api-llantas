@@ -33,6 +33,7 @@ use App\Http\Controllers\ProductoCompuestoController;
 use App\Http\Controllers\ProductoController;
 use App\Http\Controllers\ProductoSyncController;
 use App\Http\Controllers\Settings\ProfileController;
+use App\Http\Controllers\Settings\PasswordController;
 use App\Http\Controllers\SyscomMeliController;
 use App\Http\Controllers\SystemHealthController;
 use App\Http\Controllers\SystemActionController;
@@ -47,7 +48,7 @@ use Laravel\Fortify\Features;
 Route::get('/auth/meli/callback', [AuthController::class, 'handleMeliCallback'])
     ->name('meli.callback');
 
-Route::middleware('auth')->group(function () {
+Route::middleware(['auth', 'role'])->group(function () {
     // SISTEMA
     Route::get('/sistema/estado', [SystemHealthController::class, 'index'])
         ->name('system.health.index');
@@ -483,7 +484,7 @@ Route::get(
     Route::post('/price-rules/test', [PriceRulesController::class, 'test'])->name('price_rules.test');
 
     // SETTINGS
-    Route::redirect('settings', 'settings/profile');
+    Route::redirect('settings', 'settings/profile')->name('settings.index');
 
     Route::get('settings/profile', function () {
         return inertia('Settings/Profile');
@@ -495,6 +496,9 @@ Route::get(
     Route::get('settings/password', function () {
         return inertia('Settings/Password');
     })->name('user-password.edit');
+
+    Route::patch('settings/password', [PasswordController::class, 'update'])
+        ->name('user-password.update');
 
     Route::get('settings/appearance', function () {
         return inertia('Settings/Appearance');
