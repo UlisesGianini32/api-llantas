@@ -890,6 +890,7 @@ class AmsPedidosController extends Controller
 
         return (array_key_exists('cancel_detail', $raw) && $raw['cancel_detail'] !== null)
             || (array_key_exists('sale', $feedback) && $feedback['sale'] !== null)
+            || (array_key_exists('seller', $feedback) && $feedback['seller'] !== null)
             || in_array('unfulfilled', $tags, true)
             || in_array(strtolower((string) ($raw['status'] ?? $storedStatus ?? '')), ['cancelled', 'canceled'], true);
     }

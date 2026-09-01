@@ -7,6 +7,7 @@ use App\Models\MeliAccount;
 use App\Models\MeliOrder;
 use App\Models\MeliOrderActionLog;
 use App\Models\User;
+use App\Services\MercadoLibre\Orders\MeliOrderCancellationPolicy;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Request;
@@ -78,7 +79,13 @@ class MeliOrderCancellationTest extends TestCase
             if ($request->method() === 'POST') { $postSeen = true; return Http::response(['id' => 'feedback-1'], 201); }
             if (str_ends_with($path, '/feedback')) return Http::response(['sale' => null, 'purchase' => null]);
             if (str_contains($path, '/shipments/')) return Http::response(['id' => 'SHIP-1', 'status' => 'ready_to_ship', 'substatus' => 'ready_to_print']);
-            return Http::response(['id' => 2000014797513923, 'status' => 'paid', 'shipping' => ['id' => 'SHIP-1'], 'tags' => $postSeen ? ['unfulfilled'] : []]);
+            return Http::response([
+                'id' => 2000014797513923,
+                'status' => 'paid',
+                'shipping' => ['id' => 'SHIP-1'],
+                'tags' => ['paid', 'not_delivered', 'pack_order'],
+                'feedback' => $postSeen ? ['seller' => ['id' => 9042111415111], 'buyer' => null] : ['seller' => null, 'buyer' => null],
+            ]);
         });
 
         $this->post(route('ams.secondary.orders.cancel', $order), ['reason' => 'OUT_OF_STOCK', 'confirmed' => true])->assertSessionHas('success');
@@ -98,8 +105,26 @@ class MeliOrderCancellationTest extends TestCase
         $this->assertTrue($requests->skipUntil(fn (Request $request): bool => $request->method() === 'POST')->skip(1)->contains(fn (Request $request): bool => $request->method() === 'GET'));
         $this->assertDatabaseHas('meli_order_action_logs', ['meli_order_id' => $order->id, 'remote_order_id' => '2000014797513923', 'action' => 'cancel_sale', 'success' => true]);
         $this->assertDatabaseHas('meli_orders', ['id' => $order->id]);
+        $refreshedOrder = $order->fresh();
+        $this->assertSame(9042111415111, $refreshedOrder->raw['feedback']['seller']['id']);
+        $this->assertTrue($this->presentationMarksCancelled($refreshedOrder->raw, $refreshedOrder->status));
         $this->assertStringNotContainsString('secondary-token', MeliOrderActionLog::query()->sole()->toJson());
         $this->assertFalse($requests->contains(fn (Request $request): bool => $request->method() === 'DELETE' || str_contains($request->url(), 'mercadopago') || str_contains($request->url(), '/claims')));
+    }
+
+    public function test_order_feedback_seller_and_sale_mark_cancelled_but_buyer_does_not(): void
+    {
+        $policy = app(MeliOrderCancellationPolicy::class);
+        $sellerFeedback = ['status' => 'paid', 'tags' => ['paid'], 'feedback' => ['seller' => ['id' => 101], 'buyer' => null]];
+        $saleFeedback = ['status' => 'paid', 'tags' => ['paid'], 'feedback' => ['sale' => ['id' => 102], 'buyer' => null]];
+        $buyerFeedback = ['status' => 'paid', 'tags' => ['paid'], 'feedback' => ['buyer' => ['id' => 103]]];
+
+        $this->assertTrue($policy->isAlreadyCancelled($sellerFeedback));
+        $this->assertTrue($policy->isAlreadyCancelled($saleFeedback));
+        $this->assertFalse($policy->isAlreadyCancelled($buyerFeedback));
+        $this->assertTrue($this->presentationMarksCancelled($sellerFeedback));
+        $this->assertTrue($this->presentationMarksCancelled($saleFeedback));
+        $this->assertFalse($this->presentationMarksCancelled($buyerFeedback));
     }
 
     public function test_invalid_reason_and_frontend_payload_fields_make_zero_http_posts(): void
@@ -308,6 +333,19 @@ class MeliOrderCancellationTest extends TestCase
 
         $this->assertDatabaseHas('meli_order_action_logs', ['meli_order_id' => $order->id, 'success' => true, 'remote_status' => 201]);
         $this->assertCount(1, collect(Http::recorded())->pluck(0)->filter(fn (Request $request): bool => $request->method() === 'POST'));
+    }
+
+    private function presentationMarksCancelled(array $raw, ?string $storedStatus = null): bool
+    {
+        $controller = new class extends AmsPedidosController
+        {
+            public function cancelled(array $raw, ?string $storedStatus): bool
+            {
+                return $this->isMeliOrderCancelledForPresentation($raw, $storedStatus);
+            }
+        };
+
+        return $controller->cancelled($raw, $storedStatus);
     }
 
     private function account(array $overrides = []): MeliAccount
