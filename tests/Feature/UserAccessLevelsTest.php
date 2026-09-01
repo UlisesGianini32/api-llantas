@@ -6,16 +6,99 @@ use App\Http\Middleware\RequireRole;
 use App\Models\MeliPriceManagerItem;
 use App\Models\User;
 use App\Support\UserAccess;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Route;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Schema;
 use Tests\TestCase;
 
 class UserAccessLevelsTest extends TestCase
 {
-    use RefreshDatabase;
+    private object $roleMigration;
+
+    private bool $usersInitiallyHadRole;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        config()->set('database.default', 'sqlite');
+        config()->set('database.connections.sqlite.database', ':memory:');
+        DB::purge('sqlite');
+
+        Schema::create('users', function (Blueprint $table): void {
+            $table->id();
+            $table->string('name');
+            $table->string('email')->unique();
+            $table->timestamp('email_verified_at')->nullable();
+            $table->string('password');
+            $table->rememberToken();
+            $table->text('two_factor_secret')->nullable();
+            $table->text('two_factor_recovery_codes')->nullable();
+            $table->timestamp('two_factor_confirmed_at')->nullable();
+            $table->timestamps();
+        });
+
+        $this->usersInitiallyHadRole = Schema::hasColumn('users', 'role');
+        $this->roleMigration = require database_path('migrations/2026_09_04_000001_add_role_to_users_table.php');
+        $this->roleMigration->up();
+
+        Schema::create('meli_accounts', function (Blueprint $table): void {
+            $table->id();
+            $table->foreignId('user_id');
+            $table->string('meli_user_id');
+            $table->string('nickname')->nullable();
+            $table->unsignedBigInteger('official_store_id')->nullable();
+            $table->text('access_token')->nullable();
+            $table->text('refresh_token')->nullable();
+            $table->timestamp('expires_at')->nullable();
+            $table->boolean('is_default')->default(false);
+            $table->timestamps();
+        });
+
+        Schema::create('meli_price_manager_items', function (Blueprint $table): void {
+            $table->id();
+            $table->foreignId('meli_account_id');
+            $table->string('meli_item_id', 64);
+            $table->string('sku')->nullable();
+            $table->string('title');
+            $table->string('category_id', 64)->nullable();
+            $table->string('listing_type_id', 64)->nullable();
+            $table->string('catalog_product_id', 128)->nullable();
+            $table->string('meli_brand')->nullable();
+            $table->string('normalized_brand')->nullable();
+            $table->unsignedBigInteger('brand_group_id')->nullable();
+            $table->string('classification_status')->default('uncategorized');
+            $table->string('classification_source', 64)->nullable();
+            $table->decimal('classification_confidence', 5, 4)->nullable();
+            $table->decimal('current_price', 15, 2);
+            $table->decimal('original_price', 15, 2)->nullable();
+            $table->integer('available_quantity')->nullable();
+            $table->unsignedInteger('sold_quantity')->nullable();
+            $table->string('currency_id', 8)->nullable();
+            $table->string('status', 64)->nullable();
+            $table->string('permalink', 2048)->nullable();
+            $table->string('thumbnail', 2048)->nullable();
+            $table->json('raw_attributes')->nullable();
+            $table->json('raw_item')->nullable();
+            $table->timestamp('last_synced_at')->nullable();
+            $table->timestamps();
+        });
+    }
+
+    protected function tearDown(): void
+    {
+        Schema::dropIfExists('meli_price_manager_items');
+        Schema::dropIfExists('meli_accounts');
+        $this->roleMigration->down();
+        Schema::dropIfExists('users');
+        DB::purge('sqlite');
+
+        parent::tearDown();
+    }
 
     public function test_users_default_to_operations_and_role_helpers_are_explicit(): void
     {
@@ -27,6 +110,8 @@ class UserAccessLevelsTest extends TestCase
         $admin = User::factory()->create()->forceFill(['role' => User::ROLE_ADMIN]);
 
         $this->assertSame(User::ROLE_OPERATIONS, $operations->role);
+        $this->assertFalse($this->usersInitiallyHadRole);
+        $this->assertTrue(Schema::hasColumn('users', 'role'));
         $this->assertTrue($operations->isOperations());
         $this->assertFalse($operations->isAdmin());
         $this->assertTrue($admin->isAdmin());
@@ -41,17 +126,9 @@ class UserAccessLevelsTest extends TestCase
         $admin = User::factory()->create()->forceFill(['role' => User::ROLE_ADMIN]);
 
         foreach (['dashboard', 'meli-price-manager.index', 'meli-price-manager.brands.index', 'system.logs.index', 'ams.pedidos.index', 'meli.claims.index'] as $routeName) {
+            $this->assertRouteUsesAuthAndRole($routeName);
             $this->assertSame(200, $this->middlewareStatus($admin, $routeName), $routeName);
         }
-
-        $this->assertNamedRoutesOpenOverHttp($admin, [
-            'dashboard',
-            'meli-price-manager.index',
-            'meli-price-manager.brands.index',
-            'system.logs.index',
-            'ams.pedidos.index',
-            'meli.claims.index',
-        ]);
     }
 
     public function test_operations_can_access_only_the_complete_allowed_route_groups(): void
@@ -109,25 +186,23 @@ class UserAccessLevelsTest extends TestCase
             'two-factor.secret-key',
             'two-factor.recovery-codes',
         ];
+        $fortifyTwoFactorRoutes = [
+            'two-factor.enable',
+            'two-factor.confirm',
+            'two-factor.disable',
+            'two-factor.qr-code',
+            'two-factor.secret-key',
+            'two-factor.recovery-codes',
+        ];
 
         foreach ($allowed as $routeName) {
+            $this->assertNotNull($this->routeByName($routeName), "La ruta {$routeName} debe existir en la aplicación.");
+            if (! in_array($routeName, $fortifyTwoFactorRoutes, true)) {
+                $this->assertRouteUsesAuthAndRole($routeName);
+            }
             $this->assertTrue(UserAccess::canAccessRoute($operations, $routeName), $routeName);
             $this->assertSame(200, $this->middlewareStatus($operations, $routeName), $routeName);
         }
-
-
-        $this->assertNamedRoutesOpenOverHttp($operations, [
-            'dashboard',
-            'meli.questions.index',
-            'meli.messaging.index',
-            'meli.claims.index',
-            'meli.publications.index',
-            'meli.full.index',
-            'ams.pedidos.index',
-            'ams.pedidos.procesar',
-            'ams.secondary.procesar',
-            'ams.pedidos.manana',
-        ]);
     }
 
     public function test_operations_receive_403_for_admin_only_routes(): void
@@ -150,11 +225,12 @@ class UserAccessLevelsTest extends TestCase
         ];
 
         foreach ($forbidden as $routeName) {
+            $this->assertRouteUsesAuthAndRole($routeName);
             $this->assertFalse(UserAccess::canAccessRoute($operations, $routeName), $routeName);
             $this->assertSame(403, $this->middlewareStatus($operations, $routeName), $routeName);
         }
 
-        $this->assertSame(403, $this->middlewareStatus($operations, 'future.unclassified.route'));
+        $this->assertSame(403, $this->syntheticMiddlewareStatus($operations, 'future.unclassified.route'));
     }
 
     public function test_operations_cannot_execute_price_manager_post_or_modify_data_or_call_http(): void
@@ -238,6 +314,7 @@ class UserAccessLevelsTest extends TestCase
 
         $admin = User::factory()->create(['role' => User::ROLE_ADMIN]);
         foreach (['system.health.index', 'system.logs.index', 'system.queues.index', 'system.actions.index'] as $routeName) {
+            $this->assertRouteUsesAuthAndRole($routeName);
             $this->assertSame(200, $this->middlewareStatus($admin, $routeName), $routeName);
         }
     }
@@ -258,6 +335,21 @@ class UserAccessLevelsTest extends TestCase
 
     private function middlewareStatus(User $user, string $routeName): int
     {
+        $route = $this->routeByName($routeName);
+        $this->assertNotNull($route, "La ruta {$routeName} debe existir en la aplicación.");
+        $request = Request::create('/'.$route->uri());
+        $request->setRouteResolver(fn (): Route => $route);
+        $request->setUserResolver(fn (): User => $user);
+
+        try {
+            return app(RequireRole::class)->handle($request, fn () => response('', 200))->getStatusCode();
+        } catch (\Symfony\Component\HttpKernel\Exception\HttpException $exception) {
+            return $exception->getStatusCode();
+        }
+    }
+
+    private function syntheticMiddlewareStatus(User $user, string $routeName): int
+    {
         $request = Request::create('/_role-test');
         $route = (new Route(['GET'], '/_role-test', fn () => null))->name($routeName);
         $request->setRouteResolver(fn (): Route => $route);
@@ -270,18 +362,18 @@ class UserAccessLevelsTest extends TestCase
         }
     }
 
-    /** @param list<string> $routeNames */
-    private function assertNamedRoutesOpenOverHttp(User $user, array $routeNames): void
+    private function routeByName(string $routeName): ?Route
     {
-        $this->actingAs($user);
+        return app('router')->getRoutes()->getByName($routeName);
+    }
 
-        foreach ($routeNames as $index => $routeName) {
-            $path = '/_role-access-test/'.$index;
-            app('router')->get($path, fn () => response('', 200))
-                ->middleware(['web', 'auth', 'role'])
-                ->name($routeName);
+    private function assertRouteUsesAuthAndRole(string $routeName): void
+    {
+        $route = $this->routeByName($routeName);
+        $this->assertNotNull($route, "La ruta {$routeName} debe existir en la aplicación.");
+        $middleware = $route->gatherMiddleware();
 
-            $this->get($path)->assertOk();
-        }
+        $this->assertContains('auth', $middleware, "La ruta {$routeName} debe usar auth.");
+        $this->assertContains('role', $middleware, "La ruta {$routeName} debe usar role.");
     }
 }
