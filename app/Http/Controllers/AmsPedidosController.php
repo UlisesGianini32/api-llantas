@@ -1727,6 +1727,7 @@ class AmsPedidosController extends Controller
 
         $footer =
             "\r\n"
+            ."REVERSE 0,0,812,1624\r\n"
             ."PRINT 1,1\r\n";
 
         $tspl = $header
