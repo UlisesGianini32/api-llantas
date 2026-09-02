@@ -1647,12 +1647,15 @@ class AmsPedidosController extends Controller
         imagedestroy($source);
 
         /*
-         * Generar datos BITMAP para KAMO / TSPL.
+         * Generar datos BITMAP.
          *
-         * Polaridad comprobada físicamente:
+         * IMPORTANTE:
+         * Conservamos esta polaridad porque es la que RawBT/PRN Viewer
+         * logró transportar completa hacia la KAMO.
          *
-         * 1 = negro
-         * 0 = blanco
+         * El resultado de este BITMAP llega invertido físicamente
+         * (fondo negro / contenido blanco), por lo que al final usamos
+         * REVERSE para corregirlo dentro de la propia impresora.
          */
         $bitmap = '';
 
@@ -1666,10 +1669,9 @@ class AmsPedidosController extends Controller
                     /*
                      * Los cuatro píxeles extra de padding
                      * deben permanecer blancos.
-                     *
-                     * Blanco = 0, por lo que no prendemos el bit.
                      */
                     if ($x >= $width) {
+                        $byte |= (1 << (7 - $bit));
                         continue;
                     }
 
@@ -1693,12 +1695,12 @@ class AmsPedidosController extends Controller
                     ) / 1000;
 
                     /*
-                     * Píxel oscuro = negro = bit 1.
+                     * Fondo blanco = bit 1.
                      *
-                     * Umbral relativamente alto para conservar
-                     * texto fino, códigos de barras y QR.
+                     * Umbral relativamente alto para
+                     * conservar texto fino y códigos.
                      */
-                    if ($gray < 180) {
+                    if ($gray >= 180) {
                         $byte |= (1 << (7 - $bit));
                     }
                 }
@@ -1728,6 +1730,12 @@ class AmsPedidosController extends Controller
 
         $footer =
             "\r\n"
+            /*
+             * El BITMAP que RawBT sí logra transportar llega como
+             * negativo en esta KAMO. Invertimos toda el área 4x8
+             * dentro de la impresora antes de imprimir.
+             */
+            ."REVERSE 0,0,812,1624\r\n"
             ."PRINT 1,1\r\n";
 
         $tspl = $header
