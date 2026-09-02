@@ -1649,10 +1649,14 @@ class AmsPedidosController extends Controller
         /*
          * Generar datos BITMAP para KAMO / TSPL.
          *
-         * Polaridad comprobada físicamente:
+         * Conservamos la polaridad que RawBT / PRN Viewer
+         * sí logró transportar completa:
          *
-         * 1 = negro
-         * 0 = blanco
+         * 1 = blanco de la imagen fuente
+         * 0 = negro de la imagen fuente
+         *
+         * La inversión final se realiza dentro de la impresora
+         * usando fondo negro + BITMAP en modo XOR (2).
          */
         $bitmap = '';
 
@@ -1665,11 +1669,10 @@ class AmsPedidosController extends Controller
 
                     /*
                      * Los cuatro píxeles extra de padding
-                     * deben permanecer blancos.
-                     *
-                     * Blanco = 0, por lo que no prendemos el bit.
+                     * deben permanecer blancos en la imagen fuente.
                      */
                     if ($x >= $width) {
+                        $byte |= (1 << (7 - $bit));
                         continue;
                     }
 
@@ -1693,12 +1696,12 @@ class AmsPedidosController extends Controller
                     ) / 1000;
 
                     /*
-                     * Píxel oscuro = negro = bit 1.
+                     * Blanco de la imagen fuente = bit 1.
                      *
-                     * Umbral relativamente alto para conservar
-                     * texto fino, códigos de barras y QR.
+                     * El XOR sobre el fondo negro deja el fondo
+                     * blanco y mantiene en negro texto, barras y QR.
                      */
-                    if ($gray < 180) {
+                    if ($gray >= 180) {
                         $byte |= (1 << (7 - $bit));
                     }
                 }
@@ -1720,15 +1723,19 @@ class AmsPedidosController extends Controller
             ."GAP 0,0\r\n"
             ."DIRECTION 1\r\n"
             ."CLS\r\n"
+            /*
+             * Invertimos dentro de la KAMO sin usar REVERSE:
+             * fondo negro + BITMAP en modo XOR (2).
+             */
+            ."BAR 0,0,812,1624\r\n"
             ."BITMAP 0,0,"
             .$bytesPerRow
             .","
             .$height
-            .",0,";
+            .",2,";
 
         $footer =
             "\r\n"
-            ."REVERSE 0,0,812,1624\r\n"
             ."PRINT 1,1\r\n";
 
         $tspl = $header
