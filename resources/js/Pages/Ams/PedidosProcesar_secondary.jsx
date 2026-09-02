@@ -1,5 +1,5 @@
 import AppShell from '@/Components/layout/AppShell'
-import { esAndroid, prepararBinarioParaRawBt } from '@/lib/rawBtPng'
+import { bytesToBase64, esAndroid, rawBtBase64Url } from '@/lib/rawBtPng'
 import { router, usePage } from '@inertiajs/react'
 import qz from 'qz-tray'
 import { useRef, useState } from 'react'
@@ -538,23 +538,30 @@ export default function PedidosProcesar({
 
         try {
             if (android) {
-                const kamoUrl = etiquetaKamoTsplUrl(
-                    pedido,
-                    labelBaseUrl,
-                    selectedMeliAccountId
-                )
+                /*
+                 * PRUEBA TEMPORAL RAWBT:
+                 *
+                 * Enviamos un TSPL muy pequeño mediante rawbt:base64
+                 * para comprobar que Chrome -> RawBT -> raw_transfer
+                 * funciona antes de volver a mandar el BITMAP completo.
+                 */
+                const tspl = [
+                    'SIZE 4 in,8 in',
+                    'GAP 0,0',
+                    'DIRECTION 1',
+                    'CLS',
+                    'TEXT 50,50,"3",0,2,2,"PRUEBA DESDE SISTEMA"',
+                    'PRINT 1,1',
+                    '',
+                ].join('\r\n')
 
-                if (!kamoUrl) {
-                    throw new Error('No se pudo generar la URL TSPL de la KAMO.')
-                }
+                const bytes =
+                    new TextEncoder().encode(tspl)
 
-                const rawBtUrl = await prepararBinarioParaRawBt(
-                    kamoUrl,
-                    {
-                        accept: 'application/octet-stream',
-                        minimumBytes: 1000,
-                    }
-                )
+                const rawBtUrl =
+                    rawBtBase64Url(
+                        bytesToBase64(bytes)
+                    )
 
                 setPreparedRawBtLabel({
                     shippingId,
@@ -1000,8 +1007,8 @@ export default function PedidosProcesar({
                         {android ? (
                             <div className="mt-5 border border-cyan-700/70 bg-cyan-950/30 p-4">
                                 <p className="text-xs font-medium uppercase tracking-wide text-cyan-200">Impresión térmica en Android</p>
-                                <p className="mt-1 text-sm font-semibold text-cyan-50">Envía el PNG 4x8 directamente a RawBT.</p>
-                                <p className="mt-1 text-xs text-cyan-100/80">RawBT convertirá la imagen una sola vez y utilizará la impresora predeterminada configurada en la tablet.</p>
+                                <p className="mt-1 text-sm font-semibold text-cyan-50">Prueba temporal: envía un TSPL pequeño directamente a RawBT.</p>
+                                <p className="mt-1 text-xs text-cyan-100/80">Debe imprimir únicamente el texto “PRUEBA DESDE SISTEMA” usando la impresora seleccionada en RawBT.</p>
                             </div>
                         ) : (
                             <div className="mt-5 flex flex-col gap-3 border border-cyan-700/70 bg-cyan-950/30 p-4 lg:flex-row lg:items-end">
@@ -1142,11 +1149,11 @@ export default function PedidosProcesar({
                                                                 : printingShippingId === String(pedido?.shipping_id || '').trim())}
                                                             className="rounded-md border border-cyan-500/60 bg-cyan-700/20 px-3 py-1.5 text-xs font-semibold text-cyan-100 transition hover:bg-cyan-700/35 disabled:cursor-wait disabled:opacity-60"
                                                             title={android
-                                                                ? 'Prepara la etiqueta KAMO 4x8 para abrirla en RawBT'
+                                                                ? 'Prepara una prueba TSPL corta para abrirla en RawBT'
                                                                 : `Imprime mediante QZ Tray en ${thermalPrinterName || 'la impresora térmica detectada'}`}
                                                         >
                                                             {printingShippingId === String(pedido?.shipping_id || '').trim()
-                                                                ? (android ? 'Preparando KAMO...' : 'Imprimiendo...')
+                                                                ? (android ? 'Preparando prueba...' : 'Imprimiendo...')
                                                                 : (android ? 'Preparar impresión' : 'Imprimir térmica')}
                                                         </button>
 
@@ -1154,7 +1161,7 @@ export default function PedidosProcesar({
                                                         && preparedRawBtLabel?.shippingId === String(pedido?.shipping_id || '').trim() ? (
                                                             <>
                                                                 <span className="text-xs font-semibold text-cyan-100">
-                                                                    Etiqueta lista. Pulsa Abrir RawBT
+                                                                    Prueba lista. Pulsa Abrir RawBT
                                                                 </span>
                                                                 <a
                                                                     href={preparedRawBtLabel.url}
