@@ -1647,12 +1647,12 @@ class AmsPedidosController extends Controller
         imagedestroy($source);
 
         /*
-         * Generar datos BITMAP.
+         * Generar datos BITMAP para KAMO / TSPL.
          *
-         * POLARIDAD KAMO COMPROBADA:
+         * Polaridad comprobada físicamente:
          *
-         * 1 = blanco
-         * 0 = negro
+         * 1 = negro
+         * 0 = blanco
          */
         $bitmap = '';
 
@@ -1666,9 +1666,10 @@ class AmsPedidosController extends Controller
                     /*
                      * Los cuatro píxeles extra de padding
                      * deben permanecer blancos.
+                     *
+                     * Blanco = 0, por lo que no prendemos el bit.
                      */
                     if ($x >= $width) {
-                        $byte |= (1 << (7 - $bit));
                         continue;
                     }
 
@@ -1692,12 +1693,12 @@ class AmsPedidosController extends Controller
                     ) / 1000;
 
                     /*
-                     * Fondo blanco = bit 1.
+                     * Píxel oscuro = negro = bit 1.
                      *
-                     * Umbral relativamente alto para
-                     * conservar texto fino y códigos.
+                     * Umbral relativamente alto para conservar
+                     * texto fino, códigos de barras y QR.
                      */
-                    if ($gray >= 180) {
+                    if ($gray < 180) {
                         $byte |= (1 << (7 - $bit));
                     }
                 }
