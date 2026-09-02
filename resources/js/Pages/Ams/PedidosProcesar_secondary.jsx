@@ -1,5 +1,5 @@
 import AppShell from '@/Components/layout/AppShell'
-import { esAndroid, prepararPngParaRawBt } from '@/lib/rawBtPng'
+import { esAndroid, prepararBinarioParaRawBt } from '@/lib/rawBtPng'
 import { router, usePage } from '@inertiajs/react'
 import qz from 'qz-tray'
 import { useRef, useState } from 'react'
@@ -538,13 +538,23 @@ export default function PedidosProcesar({
 
         try {
             if (android) {
-                const kamoUrl = etiquetaKamoPngUrl(
+                const kamoUrl = etiquetaKamoTsplUrl(
                     pedido,
                     labelBaseUrl,
                     selectedMeliAccountId
                 )
 
-                const rawBtUrl = await prepararPngParaRawBt(kamoUrl)
+                if (!kamoUrl) {
+                    throw new Error('No se pudo generar la URL TSPL de la KAMO.')
+                }
+
+                const rawBtUrl = await prepararBinarioParaRawBt(
+                    kamoUrl,
+                    {
+                        accept: 'application/octet-stream',
+                        minimumBytes: 1000,
+                    }
+                )
 
                 setPreparedRawBtLabel({
                     shippingId,
@@ -628,6 +638,24 @@ export default function PedidosProcesar({
                         port: 9100,
                     })
 
+                let binary = ''
+                const chunkSize = 0x8000
+
+                for (
+                    let offset = 0;
+                    offset < bytes.length;
+                    offset += chunkSize
+                ) {
+                    const chunk = bytes.subarray(
+                        offset,
+                        Math.min(offset + chunkSize, bytes.length)
+                    )
+
+                    binary += String.fromCharCode(...chunk)
+                }
+
+                const base64 = window.btoa(binary)
+
                 await qz.print(
                     config,
                     [
@@ -635,7 +663,7 @@ export default function PedidosProcesar({
                             type: 'raw',
                             format: 'command',
                             flavor: 'base64',
-                            data: bytes,
+                            data: base64,
                         },
                     ]
                 )
@@ -719,8 +747,8 @@ export default function PedidosProcesar({
                     : String(error)
 
             if (android) {
-                console.error('Error al preparar PNG para RawBT:', error)
-                window.alert(`No se pudo preparar la imagen PNG para RawBT. ${message}`)
+                console.error('Error al preparar TSPL para RawBT:', error)
+                window.alert(`No se pudo preparar la etiqueta KAMO para RawBT. ${message}`)
 
                 return
             }
@@ -1114,11 +1142,11 @@ export default function PedidosProcesar({
                                                                 : printingShippingId === String(pedido?.shipping_id || '').trim())}
                                                             className="rounded-md border border-cyan-500/60 bg-cyan-700/20 px-3 py-1.5 text-xs font-semibold text-cyan-100 transition hover:bg-cyan-700/35 disabled:cursor-wait disabled:opacity-60"
                                                             title={android
-                                                                ? 'Prepara el PNG 4x8 para abrirlo en RawBT'
+                                                                ? 'Prepara la etiqueta KAMO 4x8 para abrirla en RawBT'
                                                                 : `Imprime mediante QZ Tray en ${thermalPrinterName || 'la impresora térmica detectada'}`}
                                                         >
                                                             {printingShippingId === String(pedido?.shipping_id || '').trim()
-                                                                ? (android ? 'Preparando PNG...' : 'Imprimiendo...')
+                                                                ? (android ? 'Preparando KAMO...' : 'Imprimiendo...')
                                                                 : (android ? 'Preparar impresión' : 'Imprimir térmica')}
                                                         </button>
 
