@@ -48,7 +48,7 @@ export function rawBtPngUrl(base64) {
         throw new Error('No se pudo codificar la imagen PNG para RawBT.')
     }
 
-    return `rawbt:data:image/png;base64,${base64}`
+    return `rawbt:base64,${base64}`
 }
 
 export async function imprimirPngConRawBt(pngUrl) {

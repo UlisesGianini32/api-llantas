@@ -42,9 +42,9 @@ test('convierte todos los bytes PNG por bloques sin tratarlos como UTF-8', () =>
     assert.equal(base64, Buffer.from(bytes).toString('base64'))
 })
 
-test('construye exactamente el esquema data PNG esperado por RawBT', () => {
+test('construye exactamente el esquema base64 esperado por RawBT', () => {
     assert.equal(
         rawBtPngUrl('iVBORw0KGgo='),
-        'rawbt:data:image/png;base64,iVBORw0KGgo='
+        'rawbt:base64,iVBORw0KGgo='
     )
 })
