@@ -51,7 +51,7 @@ export function rawBtPngUrl(base64) {
     return `rawbt:base64,${base64}`
 }
 
-export async function imprimirPngConRawBt(pngUrl) {
+export async function prepararPngParaRawBt(pngUrl) {
     if (!pngUrl) {
         throw new Error('No se pudo generar la URL de la imagen PNG.')
     }
@@ -73,14 +73,6 @@ export async function imprimirPngConRawBt(pngUrl) {
     validarPngContentType(response.headers.get('content-type'))
 
     const bytes = new Uint8Array(await response.arrayBuffer())
-    const rawBtUrl = rawBtPngUrl(pngBytesToBase64(bytes))
 
-    try {
-        window.location.assign(rawBtUrl)
-    } catch (error) {
-        throw new Error(
-            'No se pudo abrir RawBT. Verifica que esté instalada y permitida para abrir enlaces rawbt.',
-            { cause: error }
-        )
-    }
+    return rawBtPngUrl(pngBytesToBase64(bytes))
 }

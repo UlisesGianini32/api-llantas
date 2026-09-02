@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { esAndroid, pngBytesToBase64, rawBtPngUrl, validarPngBytes, validarPngContentType } from '../../resources/js/lib/rawBtPng.js'
+import { esAndroid, pngBytesToBase64, prepararPngParaRawBt, rawBtPngUrl, validarPngBytes, validarPngContentType } from '../../resources/js/lib/rawBtPng.js'
 
 const pngBytes = (length = 64) => {
     const bytes = new Uint8Array(length)
@@ -47,4 +47,62 @@ test('construye exactamente el esquema base64 esperado por RawBT', () => {
         rawBtPngUrl('iVBORw0KGgo='),
         'rawbt:base64,iVBORw0KGgo='
     )
+})
+
+test('prepara el PNG para RawBT sin navegar automáticamente', async () => {
+    const bytes = pngBytes()
+    const expectedBase64 = Buffer.from(bytes).toString('base64')
+    const originalFetch = globalThis.fetch
+    const hadWindow = Object.prototype.hasOwnProperty.call(globalThis, 'window')
+    const originalWindow = globalThis.window
+    let navigationAttempts = 0
+    let requestedUrl = null
+    let requestedOptions = null
+
+    globalThis.window = {
+        btoa: (binary) => Buffer.from(binary, 'latin1').toString('base64'),
+        location: {
+            assign: () => {
+                navigationAttempts++
+            },
+        },
+        open: () => {
+            navigationAttempts++
+        },
+    }
+    globalThis.fetch = async (url, options) => {
+        requestedUrl = url
+        requestedOptions = options
+
+        return {
+            ok: true,
+            headers: {
+                get: (name) => name.toLowerCase() === 'content-type' ? 'image/png' : null,
+            },
+            arrayBuffer: async () => bytes.buffer,
+        }
+    }
+
+    try {
+        const rawBtUrl = await prepararPngParaRawBt('/ams/pedidos/123/kamo-png')
+
+        assert.equal(rawBtUrl, `rawbt:base64,${expectedBase64}`)
+        assert.equal(navigationAttempts, 0)
+        assert.equal(requestedUrl, '/ams/pedidos/123/kamo-png')
+        assert.deepEqual(requestedOptions, {
+            credentials: 'same-origin',
+            cache: 'no-store',
+            headers: {
+                Accept: 'image/png',
+            },
+        })
+    } finally {
+        globalThis.fetch = originalFetch
+
+        if (hadWindow) {
+            globalThis.window = originalWindow
+        } else {
+            delete globalThis.window
+        }
+    }
 })

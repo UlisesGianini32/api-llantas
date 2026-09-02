@@ -1,5 +1,5 @@
 import AppShell from '@/Components/layout/AppShell'
-import { esAndroid, imprimirPngConRawBt } from '@/lib/rawBtPng'
+import { esAndroid, prepararPngParaRawBt } from '@/lib/rawBtPng'
 import { router, usePage } from '@inertiajs/react'
 import qz from 'qz-tray'
 import { useRef, useState } from 'react'
@@ -374,6 +374,7 @@ export default function PedidosProcesar({
     const android = esAndroid()
     const rawBtPreparingRef = useRef(false)
     const [printingShippingId, setPrintingShippingId] = useState(null)
+    const [preparedRawBtLabel, setPreparedRawBtLabel] = useState(null)
     const [thermalPrinterName, setThermalPrinterName] = useState(storedThermalPrinterName)
     const [thermalPrinters, setThermalPrinters] = useState([])
     const [loadingThermalPrinters, setLoadingThermalPrinters] = useState(false)
@@ -530,6 +531,7 @@ export default function PedidosProcesar({
 
         if (android) {
             rawBtPreparingRef.current = true
+            setPreparedRawBtLabel(null)
         }
 
         setPrintingShippingId(shippingId)
@@ -542,7 +544,12 @@ export default function PedidosProcesar({
                     selectedMeliAccountId
                 )
 
-                await imprimirPngConRawBt(kamoUrl)
+                const rawBtUrl = await prepararPngParaRawBt(kamoUrl)
+
+                setPreparedRawBtLabel({
+                    shippingId,
+                    url: rawBtUrl,
+                })
 
                 return
             }
@@ -712,8 +719,8 @@ export default function PedidosProcesar({
                     : String(error)
 
             if (android) {
-                console.error('Error al enviar PNG a RawBT:', error)
-                window.alert(`No se pudo enviar la imagen PNG a RawBT. ${message}`)
+                console.error('Error al preparar PNG para RawBT:', error)
+                window.alert(`No se pudo preparar la imagen PNG para RawBT. ${message}`)
 
                 return
             }
@@ -1107,13 +1114,40 @@ export default function PedidosProcesar({
                                                                 : printingShippingId === String(pedido?.shipping_id || '').trim())}
                                                             className="rounded-md border border-cyan-500/60 bg-cyan-700/20 px-3 py-1.5 text-xs font-semibold text-cyan-100 transition hover:bg-cyan-700/35 disabled:cursor-wait disabled:opacity-60"
                                                             title={android
-                                                                ? 'Envía el PNG 4x8 directamente a RawBT'
+                                                                ? 'Prepara el PNG 4x8 para abrirlo en RawBT'
                                                                 : `Imprime mediante QZ Tray en ${thermalPrinterName || 'la impresora térmica detectada'}`}
                                                         >
                                                             {printingShippingId === String(pedido?.shipping_id || '').trim()
                                                                 ? (android ? 'Preparando PNG...' : 'Imprimiendo...')
-                                                                : (android ? 'Imprimir con RawBT' : 'Imprimir térmica')}
+                                                                : (android ? 'Preparar impresión' : 'Imprimir térmica')}
                                                         </button>
+
+                                                        {android
+                                                        && preparedRawBtLabel?.shippingId === String(pedido?.shipping_id || '').trim() ? (
+                                                            <>
+                                                                <span className="text-xs font-semibold text-cyan-100">
+                                                                    Etiqueta lista. Pulsa Abrir RawBT
+                                                                </span>
+                                                                <a
+                                                                    href={preparedRawBtLabel.url}
+                                                                    onClick={() => {
+                                                                        const preparedLabel = preparedRawBtLabel
+
+                                                                        window.setTimeout(() => {
+                                                                            setPreparedRawBtLabel((current) => (
+                                                                                current?.shippingId === preparedLabel.shippingId
+                                                                                && current?.url === preparedLabel.url
+                                                                                    ? null
+                                                                                    : current
+                                                                            ))
+                                                                        }, 1500)
+                                                                    }}
+                                                                    className="rounded-md border border-cyan-400 bg-cyan-600 px-3 py-1.5 text-xs font-bold text-white transition hover:bg-cyan-500"
+                                                                >
+                                                                    Abrir RawBT
+                                                                </a>
+                                                            </>
+                                                        ) : null}
 
                                                         <a
                                                             href={etiquetaTermicaUrl(pedido, labelBaseUrl)}
