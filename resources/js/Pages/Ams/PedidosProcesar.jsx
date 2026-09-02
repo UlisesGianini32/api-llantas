@@ -1,5 +1,5 @@
 import AppShell from '@/Components/layout/AppShell'
-import { esAndroid, prepararPngParaRawBt } from '@/lib/rawBtPng'
+import { esAndroid, prepararBinarioParaRawBt } from '@/lib/rawBtPng'
 import { useRef, useState } from 'react'
 import { router } from '@inertiajs/react'
 import qz from 'qz-tray'
@@ -8,6 +8,10 @@ let qzSecurityConfigured = false
 
 // AMS_PRIMARY_THERMAL_PRINTER_V2
 const THERMAL_PRINTER_STORAGE_KEY = 'ams_primary_thermal_printer_v2'
+
+function normalizePrinterName(value) {
+    return String(value || '').trim().toLocaleLowerCase()
+}
 
 function csrfToken() {
     const metaToken = document
@@ -414,7 +418,7 @@ export default function PedidosProcesar({
             labelBaseUrl
         )
 
-        const kamoUrl = etiquetaKamoPngUrl(
+        const kamoTsplUrl = etiquetaKamoTsplUrl(
             pedido,
             labelBaseUrl
         )
@@ -439,7 +443,17 @@ export default function PedidosProcesar({
 
         try {
             if (android) {
-                const rawBtUrl = await prepararPngParaRawBt(kamoUrl)
+                if (!kamoTsplUrl) {
+                    throw new Error('No se pudo generar la URL TSPL de la KAMO.')
+                }
+
+                const rawBtUrl = await prepararBinarioParaRawBt(
+                    kamoTsplUrl,
+                    {
+                        accept: 'application/octet-stream',
+                        minimumBytes: 1000,
+                    }
+                )
 
                 setPreparedRawBtLabel({
                     shippingId,
@@ -635,8 +649,8 @@ export default function PedidosProcesar({
                     : String(error)
 
             if (android) {
-                console.error('Error al preparar PNG para RawBT:', error)
-                window.alert(`No se pudo preparar la imagen PNG para RawBT. ${message}`)
+                console.error('Error al preparar TSPL para RawBT:', error)
+                window.alert(`No se pudo preparar la etiqueta KAMO para RawBT. ${message}`)
 
                 return
             }
@@ -991,11 +1005,11 @@ export default function PedidosProcesar({
                                                                 : printingShippingId === String(pedido?.shipping_id || '').trim()}
                                                             className="rounded-md border border-cyan-500/60 bg-cyan-700/20 px-3 py-1.5 text-xs font-semibold text-cyan-100 transition hover:bg-cyan-700/35 disabled:cursor-wait disabled:opacity-60"
                                                             title={android
-                                                                ? 'Prepara el PNG 4x8 para abrirlo en RawBT'
+                                                                ? 'Prepara la etiqueta KAMO 4x8 para abrirla en RawBT'
                                                                 : 'Imprime la etiqueta modificada mediante QZ Tray'}
                                                         >
                                                             {printingShippingId === String(pedido?.shipping_id || '').trim()
-                                                                ? (android ? 'Preparando PNG...' : 'Imprimiendo...')
+                                                                ? (android ? 'Preparando KAMO...' : 'Imprimiendo...')
                                                                 : (android ? 'Preparar impresión' : 'Imprimir térmica')}
                                                         </button>
 
