@@ -1,8 +1,8 @@
 import AppShell from '@/Components/layout/AppShell'
-import { esAndroid, imprimirTsplConRawBt } from '@/lib/rawBtTspl'
+import { esAndroid, imprimirPngConRawBt } from '@/lib/rawBtPng'
 import { router, usePage } from '@inertiajs/react'
 import qz from 'qz-tray'
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 
 
 let qzSecurityConfigured = false
@@ -320,6 +320,39 @@ function etiquetaKamoTsplUrl(
         + (query ? `?${query}` : '')
 }
 
+function etiquetaKamoPngUrl(
+    pedido,
+    labelBaseUrl,
+    selectedMeliAccountId
+) {
+    const shippingId = String(
+        pedido?.shipping_id || ''
+    ).trim()
+
+    if (!shippingId) {
+        return null
+    }
+
+    const base = String(
+        labelBaseUrl
+        || '/ams/secundaria/pedidos/shipping-label'
+    ).replace(/\/+$/, '')
+
+    const params = new URLSearchParams()
+
+    if (selectedMeliAccountId) {
+        params.set(
+            'account_id',
+            String(selectedMeliAccountId)
+        )
+    }
+
+    const query = params.toString()
+
+    return `${base}/${encodeURIComponent(shippingId)}/kamo-png`
+        + (query ? `?${query}` : '')
+}
+
 
 export default function PedidosProcesar({
     pedidos = [],
@@ -339,6 +372,7 @@ export default function PedidosProcesar({
     cancelReasons = {},
 }) {
     const android = esAndroid()
+    const rawBtPreparingRef = useRef(false)
     const [printingShippingId, setPrintingShippingId] = useState(null)
     const [thermalPrinterName, setThermalPrinterName] = useState(storedThermalPrinterName)
     const [thermalPrinters, setThermalPrinters] = useState([])
@@ -490,17 +524,25 @@ export default function PedidosProcesar({
             return
         }
 
+        if (android && rawBtPreparingRef.current) {
+            return
+        }
+
+        if (android) {
+            rawBtPreparingRef.current = true
+        }
+
         setPrintingShippingId(shippingId)
 
         try {
             if (android) {
-                const kamoUrl = etiquetaKamoTsplUrl(
+                const kamoUrl = etiquetaKamoPngUrl(
                     pedido,
                     labelBaseUrl,
                     selectedMeliAccountId
                 )
 
-                await imprimirTsplConRawBt(kamoUrl)
+                await imprimirPngConRawBt(kamoUrl)
 
                 return
             }
@@ -670,8 +712,8 @@ export default function PedidosProcesar({
                     : String(error)
 
             if (android) {
-                console.error('Error al enviar TSPL a RawBT:', error)
-                window.alert(`No se pudo enviar el TSPL a RawBT. ${message}`)
+                console.error('Error al enviar PNG a RawBT:', error)
+                window.alert(`No se pudo enviar la imagen PNG a RawBT. ${message}`)
 
                 return
             }
@@ -685,6 +727,10 @@ export default function PedidosProcesar({
                 `No se pudo imprimir la etiqueta térmica. ${message}`
             )
         } finally {
+            if (android) {
+                rawBtPreparingRef.current = false
+            }
+
             setPrintingShippingId(null)
         }
     }
@@ -919,8 +965,8 @@ export default function PedidosProcesar({
                         {android ? (
                             <div className="mt-5 border border-cyan-700/70 bg-cyan-950/30 p-4">
                                 <p className="text-xs font-medium uppercase tracking-wide text-cyan-200">Impresión térmica en Android</p>
-                                <p className="mt-1 text-sm font-semibold text-cyan-50">Envía el TSPL directamente a RawBT.</p>
-                                <p className="mt-1 text-xs text-cyan-100/80">RawBT utilizará la impresora predeterminada configurada en la tablet.</p>
+                                <p className="mt-1 text-sm font-semibold text-cyan-50">Envía el PNG 4x8 directamente a RawBT.</p>
+                                <p className="mt-1 text-xs text-cyan-100/80">RawBT convertirá la imagen una sola vez y utilizará la impresora predeterminada configurada en la tablet.</p>
                             </div>
                         ) : (
                             <div className="mt-5 flex flex-col gap-3 border border-cyan-700/70 bg-cyan-950/30 p-4 lg:flex-row lg:items-end">
@@ -1056,15 +1102,17 @@ export default function PedidosProcesar({
                                                         <button
                                                             type="button"
                                                             onClick={() => imprimirTermica(pedido)}
-                                                            disabled={cancellingOrderId !== null || printingShippingId === String(pedido?.shipping_id || '').trim()}
+                                                            disabled={cancellingOrderId !== null || (android
+                                                                ? printingShippingId !== null
+                                                                : printingShippingId === String(pedido?.shipping_id || '').trim())}
                                                             className="rounded-md border border-cyan-500/60 bg-cyan-700/20 px-3 py-1.5 text-xs font-semibold text-cyan-100 transition hover:bg-cyan-700/35 disabled:cursor-wait disabled:opacity-60"
                                                             title={android
-                                                                ? 'Envía el TSPL directamente a RawBT'
+                                                                ? 'Envía el PNG 4x8 directamente a RawBT'
                                                                 : `Imprime mediante QZ Tray en ${thermalPrinterName || 'la impresora térmica detectada'}`}
                                                         >
                                                             {printingShippingId === String(pedido?.shipping_id || '').trim()
-                                                                ? (android ? 'Preparando TSPL...' : 'Imprimiendo...')
-                                                                : (android ? 'Imprimir TSPL' : 'Imprimir térmica')}
+                                                                ? (android ? 'Preparando PNG...' : 'Imprimiendo...')
+                                                                : (android ? 'Imprimir con RawBT' : 'Imprimir térmica')}
                                                         </button>
 
                                                         <a

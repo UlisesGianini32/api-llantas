@@ -1,6 +1,6 @@
 import AppShell from '@/Components/layout/AppShell'
-import { esAndroid, imprimirTsplConRawBt } from '@/lib/rawBtTspl'
-import { useState } from 'react'
+import { esAndroid, imprimirPngConRawBt } from '@/lib/rawBtPng'
+import { useRef, useState } from 'react'
 import { router } from '@inertiajs/react'
 import qz from 'qz-tray'
 
@@ -231,6 +231,7 @@ export default function PedidosProcesar({
     selectedMeliAccountLabel = '',
 }) {
     const android = esAndroid()
+    const rawBtPreparingRef = useRef(false)
     const [printingShippingId, setPrintingShippingId] = useState(null)
     const [printerBusy, setPrinterBusy] = useState(false)
     const [selectedThermalPrinter, setSelectedThermalPrinter] = useState(() => {
@@ -424,16 +425,19 @@ export default function PedidosProcesar({
             return
         }
 
+        if (android && rawBtPreparingRef.current) {
+            return
+        }
+
+        if (android) {
+            rawBtPreparingRef.current = true
+        }
+
         setPrintingShippingId(shippingId)
 
         try {
             if (android) {
-                const kamoTsplUrl = etiquetaKamoTsplUrl(
-                    pedido,
-                    labelBaseUrl
-                )
-
-                await imprimirTsplConRawBt(kamoTsplUrl)
+                await imprimirPngConRawBt(kamoUrl)
 
                 return
             }
@@ -624,8 +628,8 @@ export default function PedidosProcesar({
                     : String(error)
 
             if (android) {
-                console.error('Error al enviar TSPL a RawBT:', error)
-                window.alert(`No se pudo enviar el TSPL a RawBT. ${message}`)
+                console.error('Error al enviar PNG a RawBT:', error)
+                window.alert(`No se pudo enviar la imagen PNG a RawBT. ${message}`)
 
                 return
             }
@@ -639,6 +643,10 @@ export default function PedidosProcesar({
                 `No se pudo imprimir la etiqueta térmica. ${message}`
             )
         } finally {
+            if (android) {
+                rawBtPreparingRef.current = false
+            }
+
             setPrintingShippingId(null)
         }
     }
@@ -971,15 +979,17 @@ export default function PedidosProcesar({
                                                         <button
                                                             type="button"
                                                             onClick={() => imprimirTermica(pedido)}
-                                                            disabled={printingShippingId === String(pedido?.shipping_id || '').trim()}
+                                                            disabled={android
+                                                                ? printingShippingId !== null
+                                                                : printingShippingId === String(pedido?.shipping_id || '').trim()}
                                                             className="rounded-md border border-cyan-500/60 bg-cyan-700/20 px-3 py-1.5 text-xs font-semibold text-cyan-100 transition hover:bg-cyan-700/35 disabled:cursor-wait disabled:opacity-60"
                                                             title={android
-                                                                ? 'Envía el TSPL directamente a RawBT'
+                                                                ? 'Envía el PNG 4x8 directamente a RawBT'
                                                                 : 'Imprime la etiqueta modificada mediante QZ Tray'}
                                                         >
                                                             {printingShippingId === String(pedido?.shipping_id || '').trim()
-                                                                ? (android ? 'Preparando TSPL...' : 'Imprimiendo...')
-                                                                : (android ? 'Imprimir TSPL' : 'Imprimir térmica')}
+                                                                ? (android ? 'Preparando PNG...' : 'Imprimiendo...')
+                                                                : (android ? 'Imprimir con RawBT' : 'Imprimir térmica')}
                                                         </button>
                                                     </>
                                                 ) : (
