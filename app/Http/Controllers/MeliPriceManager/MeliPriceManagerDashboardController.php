@@ -96,7 +96,7 @@ class MeliPriceManagerDashboardController extends Controller
             ->focusedCatalog()
             ->select([
                 'id', 'meli_account_id', 'meli_item_id', 'sku', 'title', 'category_id', 'meli_brand',
-                'brand_group_id', 'classification_status', 'current_price', 'available_quantity',
+                'brand_group_id', 'classification_status', 'current_price', 'listing_type_id', 'available_quantity',
                 'estimated_receivable', 'estimated_receivable_price', 'estimated_receivable_calculated_at',
                 'currency_id', 'status', 'permalink', 'thumbnail', 'last_synced_at',
                 'user_product_id', 'inventory_id', 'catalog_listing', 'price_sync_status',

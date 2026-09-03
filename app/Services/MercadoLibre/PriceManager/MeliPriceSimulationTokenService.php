@@ -32,6 +32,8 @@ class MeliPriceSimulationTokenService
             'meli_item_id' => (string) $item->meli_item_id,
             'current_price' => round((float) $simulation['current_price'], 2),
             'proposed_price' => round((float) $simulation['proposed_price'], 2),
+            'current_listing_type_id' => $simulation['current_listing_type_id'] ?? $item->listing_type_id,
+            'proposed_listing_type_id' => $simulation['listing_type_id'] ?? null,
             'simulation' => $simulation,
             'created_at' => now()->toISOString(),
             'expires_at' => $expiresAt->toISOString(),
@@ -46,7 +48,7 @@ class MeliPriceSimulationTokenService
         $snapshot = Cache::get($this->key($token));
         if (! is_array($snapshot)) {
             throw new MeliPriceUpdateException(
-                'La simulación expiró o ya fue utilizada. Vuelve a calcular los cargos antes de confirmar.',
+                'La proyección expiró o ya fue utilizada. Vuelve a calcular el resultado antes de confirmar.',
                 'simulation_expired',
             );
         }
@@ -56,7 +58,7 @@ class MeliPriceSimulationTokenService
             Cache::forget($this->key($token));
 
             throw new MeliPriceUpdateException(
-                'La simulación expiró. Vuelve a calcular los cargos antes de confirmar.',
+                'La proyección expiró. Vuelve a calcular el resultado antes de confirmar.',
                 'simulation_expired',
             );
         }

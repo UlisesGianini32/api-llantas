@@ -26,21 +26,44 @@ class MeliPriceUpdateService
         private readonly MeliEstimatedReceivableSnapshotService $receivableSnapshots,
     ) {}
 
-    /** @return array<string, float|int|string> */
+    /** @return array<string, mixed> */
     public function update(
         int $userId,
         MeliAccount $account,
         MeliPriceManagerItem $item,
         string $simulationToken,
         ?float $submittedPrice = null,
+        ?string $submittedListingTypeId = null,
     ): array {
         $snapshot = $this->tokens->resolve($simulationToken);
-        $this->validateSnapshot($snapshot, $userId, $account, $item, $submittedPrice);
+        $this->validateSnapshot(
+            $snapshot,
+            $userId,
+            $account,
+            $item,
+            $submittedPrice,
+            $submittedListingTypeId,
+        );
+        $changes = $this->requestedChanges($snapshot);
+
+        if ($changes['price'] && $changes['listing_type']) {
+            throw new MeliPriceUpdateException(
+                'Mercado Libre requiere actualizar el precio y el tipo de publicación mediante operaciones separadas. Por seguridad, aplica primero uno de los cambios y después realiza el otro.',
+                'combined_update_not_supported',
+                422,
+            );
+        }
+
+        if (! $changes['price'] && ! $changes['listing_type']) {
+            $this->tokens->consume($simulationToken);
+
+            return $this->noOpResult($item, $snapshot);
+        }
 
         $lock = Cache::lock($this->lockKey($item), self::LOCK_SECONDS);
         if (! $lock->get()) {
             throw new MeliPriceUpdateException(
-                'Ya existe una actualización de precio en proceso para esta publicación.',
+                'Ya existe una actualización en proceso para esta publicación.',
                 'update_in_progress',
                 409,
             );
@@ -48,12 +71,33 @@ class MeliPriceUpdateService
 
         try {
             $snapshot = $this->tokens->resolve($simulationToken);
-            $this->validateSnapshot($snapshot, $userId, $account, $item, $submittedPrice);
+            $item->refresh();
+            $this->validateSnapshot(
+                $snapshot,
+                $userId,
+                $account,
+                $item,
+                $submittedPrice,
+                $submittedListingTypeId,
+            );
+            $changes = $this->requestedChanges($snapshot);
+            if ($changes['price'] && $changes['listing_type']) {
+                throw new MeliPriceUpdateException(
+                    'Mercado Libre requiere actualizar el precio y el tipo de publicación mediante operaciones separadas. Por seguridad, aplica primero uno de los cambios y después realiza el otro.',
+                    'combined_update_not_supported',
+                    422,
+                );
+            }
+            if (! $changes['price'] && ! $changes['listing_type']) {
+                $this->tokens->consume($simulationToken);
+
+                return $this->noOpResult($item, $snapshot);
+            }
             $this->assertWritable($account, $item);
 
             [$batch, $change] = $this->createAudit($userId, $account, $item, $snapshot, $simulationToken);
 
-            return $this->performUpdate($account, $item, $snapshot, $simulationToken, $batch, $change);
+            return $this->performUpdate($account, $item, $snapshot, $changes, $simulationToken, $batch, $change);
         } finally {
             $this->releaseLock($lock);
         }
@@ -61,31 +105,50 @@ class MeliPriceUpdateService
 
     /**
      * @param  array<string, mixed>  $snapshot
-     * @return array<string, float|int|string>
+     * @param  array{price: bool, listing_type: bool}  $changes
+     * @return array<string, mixed>
      */
     private function performUpdate(
         MeliAccount $account,
         MeliPriceManagerItem $item,
         array $snapshot,
+        array $changes,
         string $simulationToken,
         MeliPriceChangeBatch $batch,
         MeliPriceChange $change,
     ): array {
         $requestedPrice = round((float) $snapshot['proposed_price'], 2);
+        $currentListingTypeId = trim((string) ($snapshot['current_listing_type_id'] ?? $item->listing_type_id));
+        $requestedListingTypeId = trim((string) ($snapshot['proposed_listing_type_id'] ?? data_get($snapshot, 'simulation.listing_type_id')));
         $remoteConfirmed = false;
+        $listingTypeWriteAttempted = false;
 
         try {
             $this->api->ensureFreshAccessToken($account);
-            $this->assertNoPricingAutomation($account, $item);
-            $priceRelation = $this->linkedPublications->refreshPriceRelations($account, $item);
+            $priceRelation = ['linked' => false, 'items' => []];
+            if ($changes['price']) {
+                $this->assertNoPricingAutomation($account, $item);
+                $priceRelation = $this->linkedPublications->refreshPriceRelations($account, $item);
 
-            $remoteOldPrice = $this->remoteStandardPrice($account, $item);
-            if (! $this->samePrice($remoteOldPrice, (float) $snapshot['current_price'])) {
-                throw new MeliPriceUpdateException(
-                    'El precio de Mercado Libre cambió mientras revisabas la simulación. Vuelve a calcular antes de confirmar.',
-                    'concurrent_price_change',
-                    409,
-                );
+                $remoteOldPrice = $this->remoteStandardPrice($account, $item);
+                if (! $this->samePrice($remoteOldPrice, (float) $snapshot['current_price'])) {
+                    throw new MeliPriceUpdateException(
+                        'El precio de Mercado Libre cambió mientras revisabas la proyección. Vuelve a calcular antes de confirmar.',
+                        'concurrent_price_change',
+                        409,
+                    );
+                }
+            }
+
+            if ($changes['listing_type']) {
+                $remoteOldListingTypeId = $this->remoteListingType($account, $item);
+                if ($remoteOldListingTypeId !== $currentListingTypeId) {
+                    throw new MeliPriceUpdateException(
+                        'El tipo de publicación de Mercado Libre cambió mientras revisabas la proyección. Vuelve a calcular antes de confirmar.',
+                        'concurrent_listing_type_change',
+                        409,
+                    );
+                }
             }
 
             // The catalog may change while the user confirms or while the remote checks run.
@@ -93,14 +156,30 @@ class MeliPriceUpdateService
             $this->assertWritable($account, $item);
 
             try {
-                $response = $this->api->request(
-                    $account,
-                    'put',
-                    '/items/'.rawurlencode((string) $item->meli_item_id),
-                    ['price' => $requestedPrice],
-                );
+                if ($changes['listing_type']) {
+                    // Changing listing type is a non-idempotent remote operation. From the
+                    // moment the POST is attempted, this projection token must never be
+                    // reusable, even if the HTTP outcome is ambiguous (for example, a
+                    // timeout after Mercado Libre applied the change).
+                    $listingTypeWriteAttempted = true;
+                    $response = $this->api->request(
+                        $account,
+                        'post',
+                        '/items/'.rawurlencode((string) $item->meli_item_id).'/listing_type',
+                        ['id' => $requestedListingTypeId],
+                        refreshAfterUnauthorized: false,
+                        maxAttempts: 1,
+                    );
+                } else {
+                    $response = $this->api->request(
+                        $account,
+                        'put',
+                        '/items/'.rawurlencode((string) $item->meli_item_id),
+                        ['price' => $requestedPrice],
+                    );
+                }
             } catch (MeliApiRequestException $exception) {
-                if ($this->containsPriceNotModifiable($exception->getMessage())) {
+                if ($changes['price'] && $this->containsPriceNotModifiable($exception->getMessage())) {
                     throw new MeliPriceUpdateException(
                         'Mercado Libre tiene una automatización de precios activa para esta publicación. El precio no fue modificado.',
                         'pricing_automation_active',
@@ -110,14 +189,17 @@ class MeliPriceUpdateService
                 }
 
                 throw new MeliPriceUpdateException(
-                    'Mercado Libre rechazó el cambio de precio: '.$this->api->sanitizeMessage($exception->getMessage()),
-                    'meli_api_error',
+                    ($changes['listing_type']
+                        ? 'Mercado Libre no permitió cambiar el tipo de publicación: '
+                        : 'Mercado Libre rechazó el cambio de precio: ')
+                        .$this->api->sanitizeMessage($exception->getMessage()),
+                    $changes['listing_type'] ? 'listing_type_change_rejected' : 'meli_api_error',
                     502,
                     $exception,
                 );
             }
 
-            if ($this->containsPriceNotModifiable($response->json())) {
+            if ($changes['price'] && $this->containsPriceNotModifiable($response->json())) {
                 throw new MeliPriceUpdateException(
                     'Mercado Libre informó que el precio no es modificable por una automatización activa. El precio no fue modificado.',
                     'pricing_automation_active',
@@ -125,18 +207,36 @@ class MeliPriceUpdateService
                 );
             }
 
-            $confirmedPrice = $this->remoteStandardPrice($account, $item);
-            if (! $this->samePrice($confirmedPrice, $requestedPrice)) {
-                throw new MeliPriceUpdateException(
-                    'Mercado Libre respondió, pero el precio confirmado no coincide con el solicitado. El cambio se registró como fallido.',
-                    'remote_price_not_updated',
-                    502,
-                );
+            $confirmedPrice = round((float) $snapshot['current_price'], 2);
+            $confirmedListingTypeId = $currentListingTypeId;
+            if ($changes['price']) {
+                $confirmedPrice = $this->remoteStandardPrice($account, $item);
+                if (! $this->samePrice($confirmedPrice, $requestedPrice)) {
+                    throw new MeliPriceUpdateException(
+                        'Mercado Libre respondió, pero el precio confirmado no coincide con el solicitado. El cambio se registró como fallido.',
+                        'remote_price_not_updated',
+                        502,
+                    );
+                }
+            }
+            if ($changes['listing_type']) {
+                $listingTypePayload = $response->json();
+                $confirmedListingTypeId = is_array($listingTypePayload)
+                    ? trim((string) ($listingTypePayload['listing_type_id'] ?? ''))
+                    : '';
+
+                if ($confirmedListingTypeId === '' || $confirmedListingTypeId !== $requestedListingTypeId) {
+                    throw new MeliPriceUpdateException(
+                        'Mercado Libre respondió al cambio de tipo, pero no fue posible confirmar de forma segura el tipo aplicado. No se repetirá la operación; sincroniza la publicación antes de intentar otro cambio.',
+                        'listing_type_change_unconfirmed',
+                        502,
+                    );
+                }
             }
 
             $remoteConfirmed = true;
             $relatedPrices = [];
-            if ($priceRelation['linked'] ?? false) {
+            if ($changes['price'] && ($priceRelation['linked'] ?? false)) {
                 foreach ((array) ($priceRelation['items'] ?? []) as $member) {
                     $snapshotItem = MeliPriceManagerItem::query()
                         ->where('meli_account_id', $account->id)
@@ -147,7 +247,7 @@ class MeliPriceUpdateService
                     }
                 }
             }
-            foreach (($priceRelation['linked'] ?? false) ? (array) ($priceRelation['items'] ?? []) : [] as $member) {
+            foreach (($changes['price'] && ($priceRelation['linked'] ?? false)) ? (array) ($priceRelation['items'] ?? []) : [] as $member) {
                 $relatedId = (string) ($member['meli_item_id'] ?? '');
                 if ($relatedId === '' || $relatedId === (string) $item->meli_item_id) {
                     continue;
@@ -160,13 +260,29 @@ class MeliPriceUpdateService
                     $relatedPrices[$relatedId] = $this->remoteStandardPrice($account, $relatedItem);
                 }
             }
-            $priceRelation = $this->linkedPublications->refreshPriceRelations($account, $item);
+            if ($changes['price']) {
+                $priceRelation = $this->linkedPublications->refreshPriceRelations($account, $item);
+            }
             $pricePropagated = collect($relatedPrices)->every(
                 fn (float $price): bool => $this->samePrice($price, $requestedPrice),
             );
 
-            DB::transaction(function () use ($item, $confirmedPrice, $relatedPrices, $account, $change, $batch): void {
-                $item->forceFill(['current_price' => $confirmedPrice])->save();
+            DB::transaction(function () use ($item, $changes, $confirmedPrice, $confirmedListingTypeId, $relatedPrices, $account, $change, $batch): void {
+                $localUpdates = [];
+                if ($changes['price']) {
+                    $localUpdates['current_price'] = $confirmedPrice;
+                }
+                if ($changes['listing_type']) {
+                    $localUpdates['listing_type_id'] = $confirmedListingTypeId;
+
+                    // A receivable snapshot is only valid for the listing type under
+                    // which it was calculated. Clear the previous snapshot before
+                    // trying to persist the newly confirmed projection below.
+                    $localUpdates['estimated_receivable'] = null;
+                    $localUpdates['estimated_receivable_price'] = null;
+                    $localUpdates['estimated_receivable_calculated_at'] = null;
+                }
+                $item->forceFill($localUpdates)->save();
                 foreach ($relatedPrices as $relatedId => $relatedPrice) {
                     MeliPriceManagerItem::query()
                         ->where('meli_account_id', $account->id)
@@ -197,13 +313,22 @@ class MeliPriceUpdateService
                 'meli_item_id' => (string) $item->meli_item_id,
                 'old_price' => round((float) $snapshot['current_price'], 2),
                 'new_price' => round($confirmedPrice, 2),
+                'old_listing_type_id' => $currentListingTypeId,
+                'new_listing_type_id' => $confirmedListingTypeId,
+                'listing_type_name' => MeliPriceManagerItem::listingTypeName($confirmedListingTypeId),
+                'price_changed' => $changes['price'],
+                'listing_type_changed' => $changes['listing_type'],
+                'no_op' => false,
                 'updated_at' => now()->toISOString(),
                 'price_propagated' => $pricePropagated,
                 'price_relations' => $priceRelation,
                 'receivable_snapshot' => $receivableSnapshot,
             ];
         } catch (Throwable $exception) {
-            if ($remoteConfirmed) {
+            if ($remoteConfirmed || $listingTypeWriteAttempted) {
+                // Never allow the same token to repeat a listing-type POST after the
+                // remote write was attempted. The remote outcome may be uncertain even
+                // when the client receives an error or an unexpected response body.
                 $this->tokens->consume($simulationToken);
             }
 
@@ -235,7 +360,7 @@ class MeliPriceUpdateService
             }
 
             throw new MeliPriceUpdateException(
-                'No fue posible completar el cambio de precio.',
+                'No fue posible completar el cambio solicitado.',
                 'price_update_failed',
                 500,
                 $exception,
@@ -250,26 +375,91 @@ class MeliPriceUpdateService
         MeliAccount $account,
         MeliPriceManagerItem $item,
         ?float $submittedPrice,
+        ?string $submittedListingTypeId,
     ): void {
         if ((int) ($snapshot['user_id'] ?? 0) !== $userId) {
-            throw new MeliPriceUpdateException('La simulación pertenece a otro usuario.', 'simulation_user_mismatch', 403);
+            throw new MeliPriceUpdateException('La proyección pertenece a otro usuario.', 'simulation_user_mismatch', 403);
         }
 
         if ((int) ($snapshot['account_id'] ?? 0) !== (int) $account->id) {
-            throw new MeliPriceUpdateException('La simulación pertenece a otra cuenta.', 'simulation_account_mismatch', 403);
+            throw new MeliPriceUpdateException('La proyección pertenece a otra cuenta.', 'simulation_account_mismatch', 403);
         }
 
         if ((int) ($snapshot['item_id'] ?? 0) !== (int) $item->id
             || (string) ($snapshot['meli_item_id'] ?? '') !== (string) $item->meli_item_id) {
-            throw new MeliPriceUpdateException('La simulación pertenece a otra publicación.', 'simulation_item_mismatch', 403);
+            throw new MeliPriceUpdateException('La proyección pertenece a otra publicación.', 'simulation_item_mismatch', 403);
         }
 
         if ($submittedPrice !== null && ! $this->samePrice($submittedPrice, (float) $snapshot['proposed_price'])) {
             throw new MeliPriceUpdateException(
-                'El precio enviado no coincide con la simulación. Vuelve a calcular los cargos.',
+                'El precio enviado no coincide con la proyección. Vuelve a calcular el resultado.',
                 'simulation_price_mismatch',
             );
         }
+
+        $proposedListingTypeId = trim((string) ($snapshot['proposed_listing_type_id'] ?? data_get($snapshot, 'simulation.listing_type_id')));
+        if (! in_array($proposedListingTypeId, MeliPriceManagerItem::SUPPORTED_LISTING_TYPE_IDS, true)) {
+            throw new MeliPriceUpdateException(
+                'La proyección no contiene un tipo de publicación compatible.',
+                'simulation_listing_type_invalid',
+            );
+        }
+
+        if ($submittedListingTypeId !== null && $submittedListingTypeId !== $proposedListingTypeId) {
+            throw new MeliPriceUpdateException(
+                'El tipo de publicación enviado no coincide con la proyección. Vuelve a calcular el resultado.',
+                'simulation_listing_type_mismatch',
+            );
+        }
+
+        $snapshotListingTypeId = trim((string) ($snapshot['current_listing_type_id'] ?? $item->listing_type_id));
+        if (! $this->samePrice((float) $item->current_price, (float) $snapshot['current_price'])
+            || trim((string) $item->listing_type_id) !== $snapshotListingTypeId) {
+            throw new MeliPriceUpdateException(
+                'La publicación cambió mientras revisabas la proyección. Vuelve a calcular antes de confirmar.',
+                'concurrent_local_change',
+                409,
+            );
+        }
+    }
+
+    /**
+     * @param  array<string, mixed>  $snapshot
+     * @return array{price: bool, listing_type: bool}
+     */
+    private function requestedChanges(array $snapshot): array
+    {
+        return [
+            'price' => ! $this->samePrice(
+                (float) $snapshot['current_price'],
+                (float) $snapshot['proposed_price'],
+            ),
+            'listing_type' => trim((string) ($snapshot['current_listing_type_id'] ?? ''))
+                !== trim((string) ($snapshot['proposed_listing_type_id'] ?? data_get($snapshot, 'simulation.listing_type_id'))),
+        ];
+    }
+
+    /** @param array<string, mixed> $snapshot
+     * @return array<string, mixed>
+     */
+    private function noOpResult(MeliPriceManagerItem $item, array $snapshot): array
+    {
+        $price = round((float) $snapshot['current_price'], 2);
+        $listingTypeId = trim((string) ($snapshot['current_listing_type_id'] ?? $item->listing_type_id));
+
+        return [
+            'item_id' => (int) $item->id,
+            'meli_item_id' => (string) $item->meli_item_id,
+            'old_price' => $price,
+            'new_price' => $price,
+            'old_listing_type_id' => $listingTypeId,
+            'new_listing_type_id' => $listingTypeId,
+            'listing_type_name' => MeliPriceManagerItem::listingTypeName($listingTypeId),
+            'price_changed' => false,
+            'listing_type_changed' => false,
+            'no_op' => true,
+            'updated_at' => now()->toISOString(),
+        ];
     }
 
     private function assertWritable(MeliAccount $account, MeliPriceManagerItem $item): void
@@ -293,7 +483,7 @@ class MeliPriceUpdateService
 
         if (! in_array((string) $item->status, ['active', 'paused'], true)) {
             throw new MeliPriceUpdateException(
-                'El estado actual de la publicación no permite modificar su precio.',
+                'El estado actual de la publicación no permite modificarla.',
                 'item_status_not_writable',
                 409,
             );
@@ -392,6 +582,26 @@ class MeliPriceUpdateService
         return round((float) $selected['amount'], 2);
     }
 
+    private function remoteListingType(MeliAccount $account, MeliPriceManagerItem $item): string
+    {
+        $payload = $this->api->request(
+            $account,
+            'get',
+            '/items/'.rawurlencode((string) $item->meli_item_id),
+        )->json();
+        $listingTypeId = is_array($payload) ? trim((string) ($payload['listing_type_id'] ?? '')) : '';
+
+        if ($listingTypeId === '') {
+            throw new MeliPriceUpdateException(
+                'Mercado Libre no devolvió el tipo actual de la publicación. No se realizó ningún cambio.',
+                'remote_listing_type_unavailable',
+                502,
+            );
+        }
+
+        return $listingTypeId;
+    }
+
     private function refreshItemSnapshot(MeliAccount $account, MeliPriceManagerItem $item): void
     {
         $remote = (array) $this->api->request(
@@ -445,6 +655,8 @@ class MeliPriceUpdateService
                     'source' => 'meli_price_manager_phase_7c',
                     'simulation_token_sha256' => hash('sha256', $simulationToken),
                     'simulation_calculated_at' => $simulation['calculated_at'] ?? null,
+                    'current_listing_type_id' => $snapshot['current_listing_type_id'] ?? $item->listing_type_id,
+                    'proposed_listing_type_id' => $snapshot['proposed_listing_type_id'] ?? data_get($simulation, 'listing_type_id'),
                     'estimated_total_charges' => $totalCharges,
                     'tax_profile_snapshot' => data_get($simulation, 'charges.taxes.profile'),
                     'tax_rule_snapshot' => data_get($simulation, 'charges.taxes.rule'),

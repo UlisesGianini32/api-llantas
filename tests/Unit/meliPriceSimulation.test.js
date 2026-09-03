@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
-import { canContinueWithSimulation, currentReceivableForItem, initialSimulationPrice, priceInCents, shippingPresentation, simulationMatchesDraft, simulationResultPresentation } from '../../resources/js/lib/meliPriceSimulation.js'
+import { canContinueWithSimulation, canReviewProjection, currentReceivableForItem, initialSimulationPrice, listingTypeName, priceInCents, projectionChanges, projectionMatchesDraft, projectionResponseIsCurrent, shippingPresentation, simulationMatchesDraft, simulationResultPresentation } from '../../resources/js/lib/meliPriceSimulation.js'
+
+const priceManagerSource = readFileSync(new URL('../../resources/js/Pages/MeliPriceManager/Index.jsx', import.meta.url), 'utf8')
 
 test('la apertura usa el precio actual o el último precio confirmado localmente', () => {
     const item = { id: 7, current_price: '200.00' }
@@ -57,4 +60,53 @@ test('presenta envío disponible, cero y no disponible sin confundir null con ce
     const unavailable = shippingPresentation({ charges: { shipping: { available: false, cost: null, error: 'No disponible' } } })
     assert.equal(unavailable.cost, null)
     assert.equal(unavailable.warning, 'No disponible')
+})
+
+test('presenta los listing types soportados con sus nombres de negocio', () => {
+    assert.equal(listingTypeName('gold_special'), 'Clásica')
+    assert.equal(listingTypeName('gold_pro'), 'Premium')
+    assert.equal(listingTypeName('gold_unknown'), null)
+})
+
+test('precio y listing type deben coincidir con la última proyección', () => {
+    assert.equal(projectionMatchesDraft(198, 'gold_special', 198, 'gold_special'), true)
+    assert.equal(projectionMatchesDraft(220, 'gold_special', 198, 'gold_special'), false)
+    assert.equal(projectionMatchesDraft(198, 'gold_pro', 198, 'gold_special'), false)
+    assert.equal(canReviewProjection(198, 'gold_pro', { proposed_price: 198, listing_type_id: 'gold_pro' }), true)
+    assert.equal(canReviewProjection(198, 'gold_pro', { proposed_price: 198, listing_type_id: 'gold_special' }), false)
+})
+
+test('una respuesta vieja o de otros parámetros nunca queda vigente', () => {
+    const result = { proposed_price: 198, listing_type_id: 'gold_special' }
+
+    assert.equal(projectionResponseIsCurrent(2, 2, 198, 'gold_special', result), true)
+    assert.equal(projectionResponseIsCurrent(1, 2, 198, 'gold_special', result), false)
+    assert.equal(projectionResponseIsCurrent(2, 2, 220, 'gold_special', result), false)
+    assert.equal(projectionResponseIsCurrent(2, 2, 198, 'gold_pro', result), false)
+})
+
+test('detecta precio, tipo, cambio combinado y no-op por separado', () => {
+    assert.deepEqual(projectionChanges(198, 'gold_special', 220, 'gold_special'), {
+        priceChanged: true,
+        listingTypeChanged: false,
+        combined: false,
+        none: false,
+    })
+    assert.deepEqual(projectionChanges(198, 'gold_special', 198, 'gold_pro'), {
+        priceChanged: false,
+        listingTypeChanged: true,
+        combined: false,
+        none: false,
+    })
+    assert.equal(projectionChanges(198, 'gold_special', 220, 'gold_pro').combined, true)
+    assert.equal(projectionChanges(198, 'gold_special', 198, 'gold_special').none, true)
+})
+
+test('la interfaz usa la terminología de Proyección de venta', () => {
+    for (const expected of ['Proyección de venta', 'Calcular resultado', 'Revisar cambios', 'Confirmar cambios']) {
+        assert.match(priceManagerSource, new RegExp(expected, 'i'))
+    }
+    for (const obsolete of ['Simulación de precio', 'Simulación de cargos', 'Calcular cargos', 'Continuar con cambio']) {
+        assert.doesNotMatch(priceManagerSource, new RegExp(obsolete, 'i'))
+    }
 })

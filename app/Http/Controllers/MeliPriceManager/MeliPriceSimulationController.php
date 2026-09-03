@@ -34,7 +34,12 @@ class MeliPriceSimulationController extends Controller
             ->firstOrFail();
 
         try {
-            $simulation = $service->simulate($account, $publication, (float) $request->validated('price'));
+            $simulation = $service->simulate(
+                $account,
+                $publication,
+                (float) $request->validated('price'),
+                (string) $request->validated('listing_type_id'),
+            );
             $simulation['receivable_snapshot'] = $receivableSnapshots->storeForCurrentPrice($publication, $simulation);
             $issuedToken = $tokens->issue((int) $request->user()->id, $account, $publication, $simulation);
             $simulation['simulation_token'] = $issuedToken['token'];
@@ -44,7 +49,7 @@ class MeliPriceSimulationController extends Controller
             return response()->json(['message' => $exception->getMessage()], 422);
         } catch (MeliApiRequestException|UnexpectedValueException) {
             return response()->json([
-                'message' => 'No fue posible calcular los cargos con Mercado Libre. Intenta nuevamente.',
+                'message' => 'No fue posible calcular la proyección con Mercado Libre. Intenta nuevamente.',
             ], 502);
         }
 

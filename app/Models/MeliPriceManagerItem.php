@@ -16,6 +16,24 @@ class MeliPriceManagerItem extends Model
 
     public const CLASSIFICATION_STATUSES = ['categorized', 'suggested', 'uncategorized', 'ignored'];
 
+    public const LISTING_TYPE_CLASSIC = 'gold_special';
+
+    public const LISTING_TYPE_PREMIUM = 'gold_pro';
+
+    public const SUPPORTED_LISTING_TYPE_IDS = [
+        self::LISTING_TYPE_CLASSIC,
+        self::LISTING_TYPE_PREMIUM,
+    ];
+
+    public static function listingTypeName(?string $listingTypeId): ?string
+    {
+        return match ($listingTypeId) {
+            self::LISTING_TYPE_CLASSIC => 'Clásica',
+            self::LISTING_TYPE_PREMIUM => 'Premium',
+            default => null,
+        };
+    }
+
     protected $fillable = [
         'meli_account_id', 'meli_item_id', 'sku', 'title', 'category_id', 'listing_type_id',
         'catalog_product_id', 'user_product_id', 'inventory_id', 'catalog_listing',

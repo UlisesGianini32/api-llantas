@@ -142,13 +142,15 @@ class MeliPriceUpdateTest extends TestCase
         $this->putJson(route('meli-price-manager.items.price.update', $item), [
             'simulation_token' => $token,
             'price' => 1600,
+            'listing_type_id' => 'gold_pro',
         ])->assertOk()
-            ->assertJsonPath('message', 'Precio actualizado correctamente en Mercado Libre.')
+            ->assertJsonPath('message', 'Cambios actualizados correctamente en Mercado Libre.')
             ->assertJsonPath('data.meli_item_id', 'MLM1343389489')
             ->assertJsonPath('data.old_price', 1531.2)
             ->assertJsonPath('data.new_price', 1600);
 
         $this->assertSame('1600.00', $item->fresh()->current_price);
+        $this->assertSame('gold_pro', $item->fresh()->listing_type_id);
         $this->assertSame('1270.25', $item->fresh()->estimated_receivable);
         $this->assertSame('1600.00', $item->fresh()->estimated_receivable_price);
         $this->assertNotNull($item->fresh()->estimated_receivable_calculated_at);
@@ -200,6 +202,7 @@ class MeliPriceUpdateTest extends TestCase
         $this->putJson(route('meli-price-manager.items.price.update', $item), [
             'simulation_token' => str_repeat('x', 64),
             'price' => 1600,
+            'listing_type_id' => 'gold_pro',
         ])->assertNotFound();
 
         Http::assertNothingSent();
@@ -240,6 +243,7 @@ class MeliPriceUpdateTest extends TestCase
         $this->putJson(route('meli-price-manager.items.price.update', $item), [
             'simulation_token' => $this->token($account, $item, 600),
             'price' => 600,
+            'listing_type_id' => 'gold_pro',
         ])->assertOk()->assertJsonPath('data.old_price', 599)->assertJsonPath('data.new_price', 600);
 
         $this->assertSame(2, $priceReads);
@@ -262,7 +266,7 @@ class MeliPriceUpdateTest extends TestCase
         try {
             $resolved = $method->invoke(app(MeliPriceUpdateService::class), $account, $item);
             if ($expected === null) {
-                $this->fail('La respuesta ambigua debió bloquearse.');
+                $this->fail('La respuesta ambigua debiÃ³ bloquearse.');
             }
 
             $this->assertSame($expected, $resolved);
@@ -326,19 +330,21 @@ class MeliPriceUpdateTest extends TestCase
     public function test_audit_preserves_the_historical_tax_rule_snapshot_and_the_699_net_amount(): void
     {
         $account = $this->account();
-        $item = $this->item($account, ['current_price' => 699]);
+        $item = $this->item($account, ['current_price' => 698]);
         $simulation = $this->taxSimulation();
+        $simulation['current_price'] = 698;
         $token = app(MeliPriceSimulationTokenService::class)->issue(
             $this->user->id,
             $account,
             $item,
             $simulation,
         )['token'];
-        $this->fakeSuccessfulUpdate(699, 699);
+        $this->fakeSuccessfulUpdate(698, 699);
 
         $this->putJson(route('meli-price-manager.items.price.update', $item), [
             'simulation_token' => $token,
             'price' => 699,
+            'listing_type_id' => 'gold_pro',
         ])->assertOk();
 
         $change = MeliPriceChange::query()->sole();
@@ -388,6 +394,7 @@ class MeliPriceUpdateTest extends TestCase
             $this->putJson(route('meli-price-manager.items.price.update', $case['item']), [
                 'simulation_token' => $this->token($account, $case['item'], 1600),
                 'price' => 1600,
+                'listing_type_id' => 'gold_pro',
             ])->assertNotFound();
         }
 
@@ -433,6 +440,7 @@ class MeliPriceUpdateTest extends TestCase
         $this->putJson(route('meli-price-manager.items.price.update', $item), [
             'simulation_token' => str_repeat('x', 64),
             'price' => 1600,
+            'listing_type_id' => 'gold_pro',
         ])->assertUnprocessable()->assertJsonPath('code', 'simulation_expired');
 
         $expiredToken = $this->token($account, $item, 1600);
@@ -440,6 +448,7 @@ class MeliPriceUpdateTest extends TestCase
         $this->putJson(route('meli-price-manager.items.price.update', $item), [
             'simulation_token' => $expiredToken,
             'price' => 1600,
+            'listing_type_id' => 'gold_pro',
         ])->assertUnprocessable()->assertJsonPath('code', 'simulation_expired');
         $this->travelBack();
 
@@ -452,6 +461,7 @@ class MeliPriceUpdateTest extends TestCase
         $this->putJson(route('meli-price-manager.items.price.update', $item), [
             'simulation_token' => $otherUserToken,
             'price' => 1600,
+            'listing_type_id' => 'gold_pro',
         ])->assertForbidden()->assertJsonPath('code', 'simulation_user_mismatch');
 
         $otherAccount = $this->account(['meli_user_id' => '987654321']);
@@ -460,6 +470,7 @@ class MeliPriceUpdateTest extends TestCase
         $this->putJson(route('meli-price-manager.items.price.update', $item), [
             'simulation_token' => $otherAccountToken,
             'price' => 1600,
+            'listing_type_id' => 'gold_pro',
         ])->assertForbidden()->assertJsonPath('code', 'simulation_account_mismatch');
 
         $otherItem = $this->item($account, ['meli_item_id' => 'MLM-OTHER-ITEM', 'sku' => 'OTHER-ITEM']);
@@ -467,13 +478,22 @@ class MeliPriceUpdateTest extends TestCase
         $this->putJson(route('meli-price-manager.items.price.update', $item), [
             'simulation_token' => $otherItemToken,
             'price' => 1600,
+            'listing_type_id' => 'gold_pro',
         ])->assertForbidden()->assertJsonPath('code', 'simulation_item_mismatch');
 
         $manipulatedToken = $this->token($account, $item, 1600);
         $this->putJson(route('meli-price-manager.items.price.update', $item), [
             'simulation_token' => $manipulatedToken,
             'price' => 1900,
+            'listing_type_id' => 'gold_pro',
         ])->assertUnprocessable()->assertJsonPath('code', 'simulation_price_mismatch');
+
+        $manipulatedListingTypeToken = $this->token($account, $item, 1600, 'gold_special');
+        $this->putJson(route('meli-price-manager.items.price.update', $item), [
+            'simulation_token' => $manipulatedListingTypeToken,
+            'price' => 1600,
+            'listing_type_id' => 'gold_pro',
+        ])->assertUnprocessable()->assertJsonPath('code', 'simulation_listing_type_mismatch');
 
         Http::assertNothingSent();
         $this->assertDatabaseCount('meli_price_changes', 0);
@@ -494,6 +514,7 @@ class MeliPriceUpdateTest extends TestCase
         $this->putJson(route('meli-price-manager.items.price.update', $item), [
             'simulation_token' => $this->token($account, $item, 1600),
             'price' => 1600,
+            'listing_type_id' => 'gold_pro',
         ])->assertConflict()->assertJsonPath('code', 'concurrent_price_change');
 
         Http::assertNotSent(fn (Request $request): bool => $request->method() === 'PUT');
@@ -519,6 +540,7 @@ class MeliPriceUpdateTest extends TestCase
         $this->putJson(route('meli-price-manager.items.price.update', $tagged), [
             'simulation_token' => $this->token($account, $tagged, 1600),
             'price' => 1600,
+            'listing_type_id' => 'gold_pro',
         ])->assertConflict()->assertJsonPath('code', 'pricing_automation_active');
         Http::assertNothingSent();
 
@@ -526,6 +548,7 @@ class MeliPriceUpdateTest extends TestCase
         $this->putJson(route('meli-price-manager.items.price.update', $active), [
             'simulation_token' => $this->token($account, $active, 1600),
             'price' => 1600,
+            'listing_type_id' => 'gold_pro',
         ])->assertConflict()->assertJsonPath('code', 'pricing_automation_active');
         Http::assertNotSent(fn (Request $request): bool => $request->method() === 'PUT');
 
@@ -533,6 +556,7 @@ class MeliPriceUpdateTest extends TestCase
         $this->putJson(route('meli-price-manager.items.price.update', $unknown), [
             'simulation_token' => $this->token($account, $unknown, 1600),
             'price' => 1600,
+            'listing_type_id' => 'gold_pro',
         ])->assertStatus(502)->assertJsonPath('code', 'pricing_automation_check_failed');
         Http::assertNotSent(fn (Request $request): bool => $request->method() === 'PUT');
         $this->assertSame(5, collect(Http::recorded())->filter(fn (array $pair): bool => str_contains($pair[0]->url(), 'MLM-AUTOMATION-ERROR'))->count());
@@ -568,6 +592,7 @@ class MeliPriceUpdateTest extends TestCase
             $this->putJson(route('meli-price-manager.items.price.update', $item), [
                 'simulation_token' => $this->token($account, $item, 1600),
                 'price' => 1600,
+                'listing_type_id' => 'gold_pro',
             ])->assertConflict()->assertJsonPath('code', 'pricing_automation_active');
             $this->assertSame(1, $priceReads[$status]);
             $this->assertSame('1531.20', $item->fresh()->current_price);
@@ -605,6 +630,7 @@ class MeliPriceUpdateTest extends TestCase
         $this->putJson(route('meli-price-manager.items.price.update', $ambiguous), [
             'simulation_token' => $this->token($account, $ambiguous, 1600),
             'price' => 1600,
+            'listing_type_id' => 'gold_pro',
         ])->assertConflict()->assertJsonPath('code', 'ambiguous_standard_price');
         Http::assertNotSent(fn (Request $request): bool => $request->method() === 'PUT');
 
@@ -612,6 +638,7 @@ class MeliPriceUpdateTest extends TestCase
         $this->putJson(route('meli-price-manager.items.price.update', $unconfirmed), [
             'simulation_token' => $this->token($account, $unconfirmed, 1600),
             'price' => 1600,
+            'listing_type_id' => 'gold_pro',
         ])->assertStatus(502)->assertJsonPath('code', 'remote_price_not_updated');
         $this->assertSame('1531.20', $unconfirmed->fresh()->current_price);
         $this->assertSame('failed', MeliPriceChange::query()->latest('id')->firstOrFail()->status);
@@ -655,6 +682,7 @@ class MeliPriceUpdateTest extends TestCase
         $this->putJson(route('meli-price-manager.items.price.update', $item), [
             'simulation_token' => $this->token($account, $item, 1600),
             'price' => 1600,
+            'listing_type_id' => 'gold_pro',
         ])->assertOk();
 
         $this->assertSame('new-access', $account->fresh()->access_token);
@@ -699,6 +727,7 @@ class MeliPriceUpdateTest extends TestCase
             $response = $this->putJson(route('meli-price-manager.items.price.update', $item), [
                 'simulation_token' => $this->token($account, $item, 1600),
                 'price' => 1600,
+                'listing_type_id' => 'gold_pro',
             ])->assertStatus(502)->assertJsonPath('code', 'meli_api_error');
 
             $this->assertSame($failure === '400' ? 1 : 5, $putCalls[$failure]);
@@ -722,6 +751,7 @@ class MeliPriceUpdateTest extends TestCase
         $this->putJson(route('meli-price-manager.items.price.update', $item), [
             'simulation_token' => $token,
             'price' => 1600,
+            'listing_type_id' => 'gold_pro',
         ])->assertConflict()->assertJsonPath('code', 'update_in_progress');
         Http::assertNothingSent();
         $lock->release();
@@ -729,10 +759,12 @@ class MeliPriceUpdateTest extends TestCase
         $this->putJson(route('meli-price-manager.items.price.update', $item), [
             'simulation_token' => $token,
             'price' => 1600,
+            'listing_type_id' => 'gold_pro',
         ])->assertOk();
         $this->putJson(route('meli-price-manager.items.price.update', $item), [
             'simulation_token' => $token,
             'price' => 1600,
+            'listing_type_id' => 'gold_pro',
         ])->assertUnprocessable()->assertJsonPath('code', 'simulation_expired');
 
         $this->assertSame(1, collect(Http::recorded())->filter(fn (array $pair): bool => $pair[0]->method() === 'PUT')->count());
@@ -763,14 +795,295 @@ class MeliPriceUpdateTest extends TestCase
         $foreignItem = $this->item($foreignAccount, ['meli_item_id' => 'MLM-FOREIGN', 'sku' => 'FOREIGN']);
         $this->putJson(route('meli-price-manager.items.price.update', $foreignItem), [
             'simulation_token' => str_repeat('x', 64),
+            'price' => 1600,
+            'listing_type_id' => 'gold_pro',
         ])->assertNotFound();
 
         $closed = $this->item($account, ['meli_item_id' => 'MLM-CLOSED', 'sku' => 'CLOSED', 'status' => 'closed']);
         $this->putJson(route('meli-price-manager.items.price.update', $closed), [
             'simulation_token' => $this->token($account, $closed, 1600),
             'price' => 1600,
+            'listing_type_id' => 'gold_pro',
         ])->assertConflict()->assertJsonPath('code', 'item_status_not_writable');
 
+        Http::assertNothingSent();
+    }
+
+    public function test_listing_type_only_uses_one_post_and_updates_only_listing_type_after_remote_confirmation(): void
+    {
+        $account = $this->account();
+        $item = $this->item($account, [
+            'current_price' => 198,
+            'listing_type_id' => 'gold_special',
+        ]);
+        $token = $this->token($account, $item, 198, 'gold_pro');
+        $listingReads = 0;
+        Http::fake(function (Request $request) use (&$listingReads) {
+            if ($request->method() === 'GET' && str_ends_with($request->url(), '/items/MLM1343389489')) {
+                $listingReads++;
+
+                return Http::response([
+                    'id' => 'MLM1343389489',
+                    'listing_type_id' => $listingReads === 1 ? 'gold_special' : 'gold_pro',
+                ]);
+            }
+            if ($request->method() === 'POST' && str_ends_with($request->url(), '/items/MLM1343389489/listing_type')) {
+                return Http::response(['id' => 'MLM1343389489', 'listing_type_id' => 'gold_pro']);
+            }
+
+            return Http::response(['message' => 'Unexpected test request'], 500);
+        });
+
+        $this->putJson(route('meli-price-manager.items.price.update', $item), [
+            'simulation_token' => $token,
+            'price' => 198,
+            'listing_type_id' => 'gold_pro',
+        ])->assertOk()
+            ->assertJsonPath('data.price_changed', false)
+            ->assertJsonPath('data.listing_type_changed', true)
+            ->assertJsonPath('data.old_listing_type_id', 'gold_special')
+            ->assertJsonPath('data.new_listing_type_id', 'gold_pro');
+
+        $item->refresh();
+        $this->assertSame('198.00', $item->current_price);
+        $this->assertSame('gold_pro', $item->listing_type_id);
+        $this->assertSame(1, $listingReads);
+        $posts = collect(Http::recorded())->filter(fn (array $pair): bool => $pair[0]->method() === 'POST');
+        $this->assertCount(1, $posts);
+        $this->assertStringEndsWith('/items/MLM1343389489/listing_type', $posts->first()[0]->url());
+        $this->assertSame(['id' => 'gold_pro'], $posts->first()[0]->data());
+        Http::assertNotSent(fn (Request $request): bool => $request->method() === 'PUT');
+    }
+
+    public function test_rejected_listing_type_change_preserves_local_type_and_price(): void
+    {
+        $account = $this->account();
+        $item = $this->item($account, [
+            'current_price' => 198,
+            'listing_type_id' => 'gold_special',
+        ]);
+        Http::fake(function (Request $request) {
+            if ($request->method() === 'GET') {
+                return Http::response(['id' => 'MLM1343389489', 'listing_type_id' => 'gold_special']);
+            }
+            if ($request->method() === 'POST') {
+                return Http::response(['message' => 'listing type not allowed'], 400);
+            }
+
+            return Http::response(['message' => 'Unexpected test request'], 500);
+        });
+
+        $this->putJson(route('meli-price-manager.items.price.update', $item), [
+            'simulation_token' => $this->token($account, $item, 198, 'gold_pro'),
+            'price' => 198,
+            'listing_type_id' => 'gold_pro',
+        ])->assertStatus(502)
+            ->assertJsonPath('code', 'listing_type_change_rejected');
+
+        $item->refresh();
+        $this->assertSame('198.00', $item->current_price);
+        $this->assertSame('gold_special', $item->listing_type_id);
+        $this->assertSame('failed', MeliPriceChange::query()->sole()->status);
+        $this->assertCount(1, collect(Http::recorded())->filter(fn (array $pair): bool => $pair[0]->method() === 'POST'));
+        Http::assertNotSent(fn (Request $request): bool => $request->method() === 'PUT');
+    }
+
+    public function test_listing_type_change_with_missing_confirmation_is_not_retried_or_persisted_and_consumes_token(): void
+    {
+        $account = $this->account();
+        $item = $this->item($account, [
+            'current_price' => 198,
+            'listing_type_id' => 'gold_special',
+            'estimated_receivable' => 150,
+            'estimated_receivable_price' => 198,
+            'estimated_receivable_calculated_at' => now(),
+        ]);
+        $token = $this->token($account, $item, 198, 'gold_pro');
+
+        Http::fake(function (Request $request) {
+            if ($request->method() === 'GET' && str_ends_with($request->url(), '/items/MLM1343389489')) {
+                return Http::response([
+                    'id' => 'MLM1343389489',
+                    'listing_type_id' => 'gold_special',
+                ]);
+            }
+
+            if ($request->method() === 'POST' && str_ends_with($request->url(), '/items/MLM1343389489/listing_type')) {
+                return Http::response([
+                    'id' => 'MLM1343389489',
+                ]);
+            }
+
+            return Http::response(['message' => 'Unexpected test request'], 500);
+        });
+
+        $this->putJson(route('meli-price-manager.items.price.update', $item), [
+            'simulation_token' => $token,
+            'price' => 198,
+            'listing_type_id' => 'gold_pro',
+        ])->assertStatus(502)
+            ->assertJsonPath('code', 'listing_type_change_unconfirmed');
+
+        $item->refresh();
+        $this->assertSame('198.00', $item->current_price);
+        $this->assertSame('gold_special', $item->listing_type_id);
+        $this->assertSame('150.00', $item->estimated_receivable);
+        $this->assertSame('198.00', $item->estimated_receivable_price);
+        $this->assertNotNull($item->estimated_receivable_calculated_at);
+        $this->assertSame('failed', MeliPriceChange::query()->sole()->status);
+        $this->assertFalse(Cache::has(app(MeliPriceSimulationTokenService::class)->cacheKey($token)));
+
+        $posts = collect(Http::recorded())->filter(fn (array $pair): bool => $pair[0]->method() === 'POST');
+        $this->assertCount(1, $posts);
+        Http::assertNotSent(fn (Request $request): bool => $request->method() === 'PUT');
+
+        $this->putJson(route('meli-price-manager.items.price.update', $item), [
+            'simulation_token' => $token,
+            'price' => 198,
+            'listing_type_id' => 'gold_pro',
+        ])->assertUnprocessable()
+            ->assertJsonPath('code', 'simulation_expired');
+
+        $this->assertCount(
+            1,
+            collect(Http::recorded())->filter(fn (array $pair): bool => $pair[0]->method() === 'POST'),
+        );
+        $this->assertDatabaseCount('meli_price_changes', 1);
+    }
+
+    public function test_listing_type_change_with_mismatched_confirmation_is_not_retried_or_persisted_and_consumes_token(): void
+    {
+        $account = $this->account();
+        $item = $this->item($account, [
+            'current_price' => 198,
+            'listing_type_id' => 'gold_special',
+            'estimated_receivable' => 150,
+            'estimated_receivable_price' => 198,
+            'estimated_receivable_calculated_at' => now(),
+        ]);
+        $token = $this->token($account, $item, 198, 'gold_pro');
+
+        Http::fake(function (Request $request) {
+            if ($request->method() === 'GET' && str_ends_with($request->url(), '/items/MLM1343389489')) {
+                return Http::response([
+                    'id' => 'MLM1343389489',
+                    'listing_type_id' => 'gold_special',
+                ]);
+            }
+
+            if ($request->method() === 'POST' && str_ends_with($request->url(), '/items/MLM1343389489/listing_type')) {
+                return Http::response([
+                    'id' => 'MLM1343389489',
+                    'listing_type_id' => 'gold_special',
+                ]);
+            }
+
+            return Http::response(['message' => 'Unexpected test request'], 500);
+        });
+
+        $this->putJson(route('meli-price-manager.items.price.update', $item), [
+            'simulation_token' => $token,
+            'price' => 198,
+            'listing_type_id' => 'gold_pro',
+        ])->assertStatus(502)
+            ->assertJsonPath('code', 'listing_type_change_unconfirmed');
+
+        $item->refresh();
+        $this->assertSame('198.00', $item->current_price);
+        $this->assertSame('gold_special', $item->listing_type_id);
+        $this->assertSame('150.00', $item->estimated_receivable);
+        $this->assertSame('198.00', $item->estimated_receivable_price);
+        $this->assertNotNull($item->estimated_receivable_calculated_at);
+        $this->assertSame('failed', MeliPriceChange::query()->sole()->status);
+        $this->assertFalse(Cache::has(app(MeliPriceSimulationTokenService::class)->cacheKey($token)));
+
+        $posts = collect(Http::recorded())->filter(fn (array $pair): bool => $pair[0]->method() === 'POST');
+        $this->assertCount(1, $posts);
+        Http::assertNotSent(fn (Request $request): bool => $request->method() === 'PUT');
+
+        $this->putJson(route('meli-price-manager.items.price.update', $item), [
+            'simulation_token' => $token,
+            'price' => 198,
+            'listing_type_id' => 'gold_pro',
+        ])->assertUnprocessable()
+            ->assertJsonPath('code', 'simulation_expired');
+
+        $this->assertCount(
+            1,
+            collect(Http::recorded())->filter(fn (array $pair): bool => $pair[0]->method() === 'POST'),
+        );
+        $this->assertDatabaseCount('meli_price_changes', 1);
+    }
+
+    public function test_combined_change_is_blocked_before_any_http_or_local_modification(): void
+    {
+        Http::fake();
+        $account = $this->account();
+        $item = $this->item($account, [
+            'current_price' => 198,
+            'listing_type_id' => 'gold_special',
+        ]);
+
+        $this->putJson(route('meli-price-manager.items.price.update', $item), [
+            'simulation_token' => $this->token($account, $item, 220, 'gold_pro'),
+            'price' => 220,
+            'listing_type_id' => 'gold_pro',
+        ])->assertUnprocessable()
+            ->assertJsonPath('code', 'combined_update_not_supported');
+
+        $item->refresh();
+        $this->assertSame('198.00', $item->current_price);
+        $this->assertSame('gold_special', $item->listing_type_id);
+        $this->assertDatabaseCount('meli_price_changes', 0);
+        Http::assertNothingSent();
+    }
+
+    public function test_no_op_returns_message_without_http_audit_or_local_modification(): void
+    {
+        Http::fake();
+        $account = $this->account();
+        $item = $this->item($account, [
+            'current_price' => 198,
+            'listing_type_id' => 'gold_special',
+        ]);
+
+        $this->putJson(route('meli-price-manager.items.price.update', $item), [
+            'simulation_token' => $this->token($account, $item, 198),
+            'price' => 198,
+            'listing_type_id' => 'gold_special',
+        ])->assertOk()
+            ->assertJsonPath('message', 'No hay cambios por aplicar.')
+            ->assertJsonPath('data.no_op', true);
+
+        $item->refresh();
+        $this->assertSame('198.00', $item->current_price);
+        $this->assertSame('gold_special', $item->listing_type_id);
+        $this->assertDatabaseCount('meli_price_changes', 0);
+        Http::assertNothingSent();
+    }
+
+    public function test_invalid_listing_type_and_operations_are_rejected_without_http_or_changes(): void
+    {
+        Http::fake();
+        $account = $this->account();
+        $item = $this->item($account, ['listing_type_id' => 'gold_special']);
+
+        $this->putJson(route('meli-price-manager.items.price.update', $item), [
+            'simulation_token' => $this->token($account, $item, 1600, 'gold_pro'),
+            'price' => 1600,
+            'listing_type_id' => 'inventado',
+        ])->assertUnprocessable()->assertJsonValidationErrors('listing_type_id');
+
+        $operations = User::factory()->create(['role' => User::ROLE_OPERATIONS]);
+        $this->actingAs($operations)->putJson(route('meli-price-manager.items.price.update', $item), [
+            'simulation_token' => str_repeat('x', 64),
+            'price' => 1600,
+            'listing_type_id' => 'gold_pro',
+        ])->assertForbidden();
+
+        $item->refresh();
+        $this->assertSame('1531.20', $item->current_price);
+        $this->assertSame('gold_special', $item->listing_type_id);
         Http::assertNothingSent();
     }
 
@@ -783,6 +1096,7 @@ class MeliPriceUpdateTest extends TestCase
         $response = $this->putJson(route('meli-price-manager.items.price.update', $a), [
             'simulation_token' => $this->token($account, $a, 420),
             'price' => 420,
+            'listing_type_id' => 'gold_pro',
         ])->assertOk()->assertJsonPath('data.price_propagated', true);
 
         $this->assertSame('420.00', $a->fresh()->current_price);
@@ -810,6 +1124,7 @@ class MeliPriceUpdateTest extends TestCase
         $this->putJson(route('meli-price-manager.items.price.update', $a), [
             'simulation_token' => $this->token($account, $a, 420),
             'price' => 420,
+            'listing_type_id' => 'gold_pro',
         ])->assertOk()->assertJsonPath('data.price_propagated', false);
 
         $this->assertSame('420.00', $a->fresh()->current_price);
@@ -827,6 +1142,7 @@ class MeliPriceUpdateTest extends TestCase
         $this->putJson(route('meli-price-manager.items.price.update', $a), [
             'simulation_token' => $this->token($account, $a, 420),
             'price' => 420,
+            'listing_type_id' => 'gold_pro',
         ])->assertOk()->assertJsonPath('data.price_relations.linked', false)
             ->assertJsonPath('data.price_relations.detected', true);
 
@@ -906,23 +1222,42 @@ class MeliPriceUpdateTest extends TestCase
         ]);
     }
 
-    private function token(MeliAccount $account, MeliPriceManagerItem $item, float $proposedPrice): string
+    private function token(
+        MeliAccount $account,
+        MeliPriceManagerItem $item,
+        float $proposedPrice,
+        ?string $proposedListingTypeId = null,
+    ): string
     {
         return app(MeliPriceSimulationTokenService::class)->issue(
             $this->user->id,
             $account,
             $item,
-            $this->simulation((float) $item->current_price, $proposedPrice),
+            $this->simulation(
+                (float) $item->current_price,
+                $proposedPrice,
+                (string) $item->listing_type_id,
+                $proposedListingTypeId ?? (string) $item->listing_type_id,
+            ),
         )['token'];
     }
 
     /** @return array<string, mixed> */
-    private function simulation(float $currentPrice, float $proposedPrice): array
+    private function simulation(
+        float $currentPrice,
+        float $proposedPrice,
+        string $currentListingTypeId = 'gold_pro',
+        string $proposedListingTypeId = 'gold_pro',
+    ): array
     {
         return [
             'meli_item_id' => 'MLM1343389489',
             'current_price' => $currentPrice,
             'proposed_price' => $proposedPrice,
+            'current_listing_type_id' => $currentListingTypeId,
+            'current_listing_type_name' => MeliPriceManagerItem::listingTypeName($currentListingTypeId),
+            'listing_type_id' => $proposedListingTypeId,
+            'listing_type_name' => MeliPriceManagerItem::listingTypeName($proposedListingTypeId),
             'sale_fee' => 248.00,
             'shipping_cost' => 74.50,
             'listing_fee' => 7.25,
@@ -975,6 +1310,10 @@ class MeliPriceUpdateTest extends TestCase
             'meli_item_id' => 'MLM1343389489',
             'current_price' => 699,
             'proposed_price' => 699,
+            'current_listing_type_id' => 'gold_pro',
+            'current_listing_type_name' => 'Premium',
+            'listing_type_id' => 'gold_pro',
+            'listing_type_name' => 'Premium',
             'sale_fee' => 101.36,
             'shipping_cost' => 70,
             'listing_fee' => 0,
@@ -1060,7 +1399,7 @@ class MeliPriceUpdateTest extends TestCase
     {
         try {
             $callback();
-            $this->fail('Se esperaba que la actualización fuera rechazada.');
+            $this->fail('Se esperaba que la actualizaciÃ³n fuera rechazada.');
         } catch (MeliPriceUpdateException $exception) {
             $this->assertSame($errorCode, $exception->errorCode());
         }
