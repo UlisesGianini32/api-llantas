@@ -142,6 +142,54 @@ class MeliPriceSimulationTest extends TestCase
         }
     }
 
+    public function test_projection_uses_selected_classic_or_premium_listing_type_without_modifying_item(): void
+    {
+        $account = $this->account();
+        $item = $this->item($account, [
+            'current_price' => 198,
+            'listing_type_id' => 'gold_special',
+        ]);
+        Http::fake(function (Request $request) {
+            if (str_contains($request->url(), '/listing_prices')) {
+                $listingTypeId = (string) $request['listing_type_id'];
+
+                return Http::response([[
+                    'listing_type_id' => $listingTypeId,
+                    'listing_type_name' => $listingTypeId === 'gold_special' ? 'Clásica' : 'Premium',
+                    'sale_fee_amount' => $listingTypeId === 'gold_special' ? 28 : 39,
+                ]]);
+            }
+
+            return Http::response(['coverage' => ['all_country' => [
+                'list_cost' => 0,
+                'currency_id' => 'MXN',
+            ]]]);
+        });
+
+        foreach ([
+            'gold_special' => 'Clásica',
+            'gold_pro' => 'Premium',
+        ] as $listingTypeId => $name) {
+            $result = $this->service()->simulate($account, $item, 198, $listingTypeId);
+
+            $this->assertSame('gold_special', $result['current_listing_type_id']);
+            $this->assertSame($listingTypeId, $result['listing_type_id']);
+            $this->assertSame($name, $result['listing_type_name']);
+        }
+
+        $requests = collect(Http::recorded());
+        foreach (['gold_special', 'gold_pro'] as $listingTypeId) {
+            $this->assertTrue($requests->contains(fn (array $pair): bool => str_contains($pair[0]->url(), '/listing_prices')
+                && $pair[0]['listing_type_id'] === $listingTypeId));
+            $this->assertTrue($requests->contains(fn (array $pair): bool => str_contains($pair[0]->url(), '/shipping_options/free')
+                && $pair[0]['listing_type_id'] === $listingTypeId));
+        }
+
+        $item->refresh();
+        $this->assertSame('198.00', $item->current_price);
+        $this->assertSame('gold_special', $item->listing_type_id);
+    }
+
     public function test_account_tax_profile_reproduces_the_observed_699_receivable_without_double_counting(): void
     {
         $account = $this->account();
@@ -655,10 +703,26 @@ class MeliPriceSimulationTest extends TestCase
 
         $this->actingAs($this->user);
         foreach ([null, 0, -10, 'invalid'] as $price) {
-            $this->postJson(route('meli-price-manager.items.price.simulate', $item), ['price' => $price])
+            $this->postJson(route('meli-price-manager.items.price.simulate', $item), [
+                'price' => $price,
+                'listing_type_id' => 'gold_pro',
+            ])
                 ->assertUnprocessable()
                 ->assertJsonValidationErrors('price');
         }
+
+        Http::assertNothingSent();
+    }
+
+    public function test_simulation_endpoint_rejects_unsupported_listing_type_without_http(): void
+    {
+        Http::fake();
+        $item = $this->item($this->account());
+
+        $this->postJson(route('meli-price-manager.items.price.simulate', $item), [
+            'price' => 1500,
+            'listing_type_id' => 'gold_fake',
+        ])->assertUnprocessable()->assertJsonValidationErrors('listing_type_id');
 
         Http::assertNothingSent();
     }
@@ -671,11 +735,17 @@ class MeliPriceSimulationTest extends TestCase
         ]);
         $foreignItem = $this->item($foreignAccount);
 
-        $this->postJson(route('meli-price-manager.items.price.simulate', $foreignItem), ['price' => 1500])->assertNotFound();
+        $this->postJson(route('meli-price-manager.items.price.simulate', $foreignItem), [
+            'price' => 1500,
+            'listing_type_id' => 'gold_pro',
+        ])->assertNotFound();
 
         $ownItem = $this->item($this->account(), ['meli_item_id' => 'MLM-EXCLUDED']);
         DB::table('llantas')->insert(['MLM' => $ownItem->meli_item_id]);
-        $this->postJson(route('meli-price-manager.items.price.simulate', $ownItem), ['price' => 1500])->assertNotFound();
+        $this->postJson(route('meli-price-manager.items.price.simulate', $ownItem), [
+            'price' => 1500,
+            'listing_type_id' => 'gold_pro',
+        ])->assertNotFound();
 
         Http::assertNothingSent();
     }
@@ -692,7 +762,10 @@ class MeliPriceSimulationTest extends TestCase
         ]);
 
         $this->assertFalse(MeliPriceManagerItem::query()->managedCatalog()->whereKey($item)->exists());
-        $this->postJson(route('meli-price-manager.items.price.simulate', $item), ['price' => 1500])->assertNotFound();
+        $this->postJson(route('meli-price-manager.items.price.simulate', $item), [
+            'price' => 1500,
+            'listing_type_id' => 'gold_pro',
+        ])->assertNotFound();
 
         Http::assertNothingSent();
     }
@@ -702,7 +775,10 @@ class MeliPriceSimulationTest extends TestCase
         $item = $this->item($this->account());
         $this->fakeSuccessfulResponses();
 
-        $response = $this->postJson(route('meli-price-manager.items.price.simulate', $item), ['price' => 1600]);
+        $response = $this->postJson(route('meli-price-manager.items.price.simulate', $item), [
+            'price' => 1600,
+            'listing_type_id' => 'gold_pro',
+        ]);
         $response->assertOk()
             ->assertJsonPath('data.meli_item_id', 'MLM1343389489')
             ->assertJsonPath('data.proposed_price', 1600)
@@ -726,7 +802,10 @@ class MeliPriceSimulationTest extends TestCase
         $item = $this->item($this->account());
         $this->fakeSuccessfulResponses();
 
-        $response = $this->postJson(route('meli-price-manager.items.price.simulate', $item), ['price' => 1531.20])
+        $response = $this->postJson(route('meli-price-manager.items.price.simulate', $item), [
+            'price' => 1531.20,
+            'listing_type_id' => 'gold_pro',
+        ])
             ->assertOk();
         $receivable = (float) $response->json('data.estimated_receivable');
 
@@ -754,12 +833,21 @@ class MeliPriceSimulationTest extends TestCase
         $this->assertSame(113.90, $snapshots->currentAmount($item->refresh()));
         $this->assertNull($snapshots->storeForCurrentPrice($item, [
             'proposed_price' => 200,
+            'listing_type_id' => 'gold_pro',
             'estimated_receivable' => 150,
             'charges' => ['shipping' => ['available' => false, 'cost' => null]],
         ]));
         $this->assertSame('113.90', $item->fresh()->estimated_receivable);
+        $this->assertNull($snapshots->storeForCurrentPrice($item, [
+            'proposed_price' => 200,
+            'listing_type_id' => 'gold_special',
+            'estimated_receivable' => 130,
+            'charges' => ['shipping' => ['available' => true, 'cost' => 0]],
+        ]));
+        $this->assertSame('113.90', $item->fresh()->estimated_receivable);
         $stored = $snapshots->storeForCurrentPrice($item, [
             'proposed_price' => 200,
+            'listing_type_id' => 'gold_pro',
             'estimated_receivable' => 120,
             'charges' => ['shipping' => ['available' => true, 'cost' => 0]],
         ]);

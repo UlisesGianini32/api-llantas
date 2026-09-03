@@ -1,6 +1,6 @@
 import AppShell from '@/Components/layout/AppShell'
 import { selectionScopeKey } from '@/lib/meliPriceManagerSelection'
-import { canContinueWithSimulation, currentReceivableForItem, initialSimulationPrice, shippingPresentation, simulationMatchesDraft, simulationResultPresentation } from '@/lib/meliPriceSimulation'
+import { canReviewProjection, currentReceivableForItem, initialSimulationPrice, isSupportedListingType, listingTypeName, projectionChanges, projectionMatchesDraft, projectionResponseIsCurrent, shippingPresentation, SUPPORTED_LISTING_TYPES } from '@/lib/meliPriceSimulation'
 import { Head, Link, router } from '@inertiajs/react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 
@@ -29,7 +29,7 @@ function csrfToken() {
     return document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') ?? ''
 }
 
-async function simulatePrice(itemId, price) {
+async function simulatePrice(itemId, price, listingTypeId) {
     const response = await fetch(`/meli-price-manager/items/${itemId}/simulate-price`, {
         method: 'POST',
         credentials: 'same-origin',
@@ -39,7 +39,7 @@ async function simulatePrice(itemId, price) {
             'X-CSRF-TOKEN': csrfToken(),
             'X-Requested-With': 'XMLHttpRequest',
         },
-        body: JSON.stringify({ price }),
+        body: JSON.stringify({ price, listing_type_id: listingTypeId }),
     })
     const body = await response.json().catch(() => ({}))
 
@@ -51,7 +51,7 @@ async function simulatePrice(itemId, price) {
     return body.data
 }
 
-async function updatePrice(itemId, simulationToken, price) {
+async function updatePrice(itemId, simulationToken, price, listingTypeId) {
     const response = await fetch(`/meli-price-manager/items/${itemId}/price`, {
         method: 'PUT',
         credentials: 'same-origin',
@@ -61,7 +61,7 @@ async function updatePrice(itemId, simulationToken, price) {
             'X-CSRF-TOKEN': csrfToken(),
             'X-Requested-With': 'XMLHttpRequest',
         },
-        body: JSON.stringify({ simulation_token: simulationToken, price }),
+        body: JSON.stringify({ simulation_token: simulationToken, price, listing_type_id: listingTypeId }),
     })
     const body = await response.json().catch(() => ({}))
 
@@ -118,7 +118,7 @@ function ChargesBreakdown({ result, currency }) {
         </dl>
 
         {taxes.available && <p className="text-[11px] font-medium text-slate-500">Fuente fiscal: {historicalTaxes ? (taxes.stale ? 'última regla histórica válida' : 'historial real de Mercado Libre') : 'perfil de la cuenta'}.</p>}
-        {!taxes.available && <p className="text-[11px] font-medium text-amber-700 dark:text-amber-300">{taxes.message || 'Retenciones fiscales no disponibles en esta simulación.'}</p>}
+        {!taxes.available && <p className="text-[11px] font-medium text-amber-700 dark:text-amber-300">{taxes.message || 'Retenciones fiscales no disponibles en esta proyección.'}</p>}
         {!shippingView.available && <p className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs font-semibold text-amber-800 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-200">{shippingView.warning} Este monto todavía no descuenta el envío.</p>}
 
         <div className="rounded-2xl border-2 border-emerald-400 bg-emerald-50 p-4 text-center dark:bg-emerald-500/10"><p className="text-xs font-extrabold uppercase tracking-[0.14em] text-emerald-700 dark:text-emerald-300">{result.estimated_receivable_label || 'Recibes estimado'}</p><p className="mt-1 text-4xl font-black text-emerald-700 dark:text-emerald-300">{money(result.estimated_receivable, currency)}</p><p className="mt-1 text-xs font-semibold text-emerald-800 dark:text-emerald-200">{result.estimated_receivable_message || 'El monto final puede variar al procesarse la venta.'}</p></div>
@@ -161,49 +161,53 @@ function ChargesBreakdown({ result, currency }) {
     </div>
 }
 
-function PriceSimulationModal({ item, price, simulatedPrice, result, loading, initialLoading, updating, confirming, success, error, onPriceChange, onSubmit, onContinue, onCancelConfirmation, onConfirm, onClose }) {
+function PriceSimulationModal({ item, price, listingTypeId, result, loading, initialLoading, updating, confirming, success, error, onPriceChange, onListingTypeChange, onSubmit, onContinue, onCancelConfirmation, onConfirm, onClose }) {
     if (!item) return null
 
     const currency = result?.currency_id || item.currency_id || 'MXN'
-    const priceDifference = result ? Number(result.proposed_price) - Number(result.current_price) : 0
     const busy = loading || updating
-    const resultPresentation = simulationResultPresentation(price, simulatedPrice, Boolean(result))
-    const priceMatchesSimulation = resultPresentation.visible && !resultPresentation.stale
-    const currentSimulation = canContinueWithSimulation(price, simulatedPrice, { hasResult: Boolean(result), error, loading, updating })
+    const currentProjection = canReviewProjection(price, listingTypeId, result, { error, loading, updating })
+    const changes = projectionChanges(item.current_price, item.listing_type_id, price, listingTypeId)
+    const currentListingTypeName = listingTypeName(item.listing_type_id) || item.listing_type_id || 'No informado'
+    const selectedListingTypeName = listingTypeName(listingTypeId) || listingTypeId || 'No informado'
+    const currentListingTypeSupported = isSupportedListingType(item.listing_type_id)
     const priceRelation = result?.price_relations || item.price_relations
     const relatedItems = (priceRelation?.items || []).filter((member) => member.meli_item_id !== item.meli_item_id)
 
-    return <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4" role="dialog" aria-modal="true" aria-labelledby="price-simulation-title">
+    return <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4" role="dialog" aria-modal="true" aria-labelledby="sale-projection-title">
         <div className="max-h-[95vh] w-full max-w-2xl overflow-y-auto rounded-2xl bg-white shadow-2xl dark:bg-neutral-900">
             <div className="flex items-start justify-between gap-4 border-b border-slate-200 p-5 dark:border-neutral-800">
-                <div><p className="text-xs font-bold uppercase tracking-wide text-indigo-600">Simulación de precio</p><h2 id="price-simulation-title" className="mt-1 text-xl font-bold">{item.title}</h2><p className="mt-1 text-xs text-slate-500">{item.meli_item_id} · SKU: {item.sku || '—'}</p></div>
+                <div><p className="text-xs font-bold uppercase tracking-wide text-indigo-600">Proyección de venta</p><h2 id="sale-projection-title" className="mt-1 text-xl font-bold">{item.title}</h2><p className="mt-1 text-xs text-slate-500">{item.meli_item_id} · SKU: {item.sku || '—'}</p></div>
                 <button type="button" onClick={onClose} disabled={updating} className={secondaryButton}>Cerrar</button>
             </div>
 
             {success ? <div className="space-y-5 p-5">
-                <div className="rounded-2xl border-2 border-emerald-400 bg-emerald-50 p-5 dark:bg-emerald-500/10"><p className="text-sm font-extrabold uppercase tracking-wide text-emerald-700 dark:text-emerald-300">Precio actualizado correctamente en Mercado Libre</p><dl className="mt-4 space-y-2 text-sm"><div className="flex justify-between"><dt>MLM</dt><dd className="font-bold">{success.meli_item_id}</dd></div><div className="flex justify-between"><dt>Precio anterior</dt><dd className="font-bold">{money(success.old_price, currency)}</dd></div><div className="flex justify-between"><dt>Precio confirmado</dt><dd className="font-bold text-emerald-700 dark:text-emerald-300">{money(success.new_price, currency)}</dd></div><div className="flex justify-between"><dt>Hora</dt><dd className="font-bold">{dateTime(success.updated_at)}</dd></div></dl></div>
+                <div className="rounded-2xl border-2 border-emerald-400 bg-emerald-50 p-5 dark:bg-emerald-500/10"><p className="text-sm font-extrabold uppercase tracking-wide text-emerald-700 dark:text-emerald-300">Cambios actualizados correctamente en Mercado Libre</p><dl className="mt-4 space-y-2 text-sm"><div className="flex justify-between"><dt>MLM</dt><dd className="font-bold">{success.meli_item_id}</dd></div><div className="flex justify-between"><dt>Precio</dt><dd className="font-bold text-emerald-700 dark:text-emerald-300">{success.price_changed ? `${money(success.old_price, currency)} → ${money(success.new_price, currency)}` : money(success.new_price, currency)}</dd></div><div className="flex justify-between"><dt>Tipo de publicación</dt><dd className="font-bold text-emerald-700 dark:text-emerald-300">{success.listing_type_changed ? `${listingTypeName(success.old_listing_type_id) || success.old_listing_type_id} → ${listingTypeName(success.new_listing_type_id) || success.new_listing_type_id}` : (success.listing_type_name || success.new_listing_type_id)}</dd></div><div className="flex justify-between"><dt>Hora</dt><dd className="font-bold">{dateTime(success.updated_at)}</dd></div></dl></div>
                 <div className="flex justify-end"><button type="button" onClick={onClose} className={primaryButton}>Cerrar</button></div>
             </div> : <>
-            {priceRelation?.linked && <div className="mx-5 mt-5 rounded-xl border border-indigo-200 bg-indigo-50 p-4 text-sm dark:border-indigo-500/30 dark:bg-indigo-500/10"><p className="font-extrabold text-indigo-800 dark:text-indigo-200">Publicación vinculada</p><p className="mt-1">Este precio está sincronizado por Mercado Libre con otra publicación.</p>{relatedItems.map((member) => <div key={member.meli_item_id}><p className="mt-2 font-bold">{item.meli_item_id} ({item.catalog_listing ? 'Catálogo' : 'No catálogo'}) ↔ Mercado Libre SYNC ↔ {member.meli_item_id} ({member.catalog_listing ? 'Catálogo' : 'No catálogo'})</p>{confirming && <p className="mt-2 rounded-lg bg-amber-100 p-2 font-semibold text-amber-900">Este cambio también puede reflejarse automáticamente en {member.meli_item_id} porque Mercado Libre mantiene ambas publicaciones sincronizadas.</p>}</div>)}</div>}
+            {priceRelation?.linked && <div className="mx-5 mt-5 rounded-xl border border-indigo-200 bg-indigo-50 p-4 text-sm dark:border-indigo-500/30 dark:bg-indigo-500/10"><p className="font-extrabold text-indigo-800 dark:text-indigo-200">Publicación vinculada</p><p className="mt-1">Este precio está sincronizado por Mercado Libre con otra publicación.</p>{relatedItems.map((member) => <div key={member.meli_item_id}><p className="mt-2 font-bold">{item.meli_item_id} ({item.catalog_listing ? 'Catálogo' : 'No catálogo'}) ↔ Mercado Libre SYNC ↔ {member.meli_item_id} ({member.catalog_listing ? 'Catálogo' : 'No catálogo'})</p>{confirming && changes.priceChanged && <p className="mt-2 rounded-lg bg-amber-100 p-2 font-semibold text-amber-900">Este cambio también puede reflejarse automáticamente en {member.meli_item_id} porque Mercado Libre mantiene ambas publicaciones sincronizadas.</p>}</div>)}</div>}
             {priceRelation?.detected && !priceRelation?.linked && <div className="mx-5 mt-5 rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm font-semibold text-amber-900 dark:bg-amber-500/10 dark:text-amber-200">Relación detectada, pero Mercado Libre no indica sincronización activa.</div>}
-            {initialLoading && <p className="mx-5 mt-5 rounded-xl bg-slate-50 p-3 text-sm font-semibold text-slate-600 dark:bg-neutral-800 dark:text-slate-300">Calculando cargos del precio actual…</p>}
+            {initialLoading && <p className="mx-5 mt-5 rounded-xl bg-slate-50 p-3 text-sm font-semibold text-slate-600 dark:bg-neutral-800 dark:text-slate-300">Calculando la proyección actual…</p>}
             <form onSubmit={onSubmit} className="grid gap-4 border-b border-slate-200 p-5 sm:grid-cols-2 dark:border-neutral-800">
                 <div><p className="text-xs font-bold text-slate-500">Precio actual</p><p className="mt-1 text-2xl font-bold">{money(item.current_price, currency)}</p></div>
                 <label><span className="mb-1 block text-xs font-bold">Nuevo precio</span><input type="number" min="0.01" max="999999999.99" step="0.01" required autoFocus disabled={confirming || updating} value={price} onChange={(event) => onPriceChange(event.target.value)} className={fieldClass} /></label>
+                <div><p className="text-xs font-bold text-slate-500">Tipo de publicación actual</p><p className="mt-1 text-lg font-bold">{currentListingTypeName}</p>{!currentListingTypeSupported && <p className="mt-1 text-xs font-semibold text-amber-700 dark:text-amber-300">El tipo actual no es compatible con esta herramienta. Selecciona Clásica o Premium para proyectar un cambio.</p>}</div>
+                <label><span className="mb-1 block text-xs font-bold">Tipo de publicación</span><select required disabled={confirming || updating} value={listingTypeId} onChange={(event) => onListingTypeChange(event.target.value)} className={fieldClass}>{!isSupportedListingType(listingTypeId) && <option value={listingTypeId} disabled>{listingTypeId ? `Actual no compatible: ${listingTypeId}` : 'Tipo actual no informado'}</option>}{SUPPORTED_LISTING_TYPES.map((type) => <option key={type.id} value={type.id}>{type.name}</option>)}</select></label>
                 {error && <p className="sm:col-span-2 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm font-semibold text-rose-700 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-200">{error}</p>}
-                <div className="sm:col-span-2 flex justify-end"><button type="submit" disabled={confirming || busy || !price || Number(price) <= 0} className={primaryButton}>{loading ? 'Calculando…' : 'Calcular cargos'}</button></div>
+                <div className="sm:col-span-2 flex justify-end"><button type="submit" disabled={confirming || busy || !price || Number(price) <= 0 || !isSupportedListingType(listingTypeId)} className={primaryButton}>{loading ? 'Calculando…' : 'Calcular resultado'}</button></div>
             </form>
 
             {result && <div className="space-y-4 p-5">
-                <p className="text-xs font-bold text-slate-500">Resultados calculados para {money(simulatedPrice, currency)}</p>
+                <div><p className="text-xs font-bold text-slate-500">Proyección para {money(result.proposed_price, currency)}</p><p className="mt-1 text-sm font-bold">Tipo de publicación: {listingTypeName(result.listing_type_id) || result.listing_type_name || result.listing_type_id}</p></div>
                 <ChargesBreakdown result={result} currency={currency} />
-                {!priceMatchesSimulation && <p className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-800 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-200">El precio cambió. Calcula nuevamente los cargos para continuar.</p>}
-                {!confirming && <div className="flex justify-end"><button type="button" onClick={onContinue} disabled={!currentSimulation} className="rounded-xl bg-amber-500 px-4 py-2 text-sm font-extrabold text-slate-950 transition hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-40">Continuar con cambio</button></div>}
+                {!currentProjection && <p className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-800 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-200">El precio o el tipo de publicación cambió. Pulsa nuevamente Calcular resultado para continuar.</p>}
+                {currentProjection && changes.none && <p className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm font-semibold text-slate-700 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-200">No hay cambios por aplicar.</p>}
+                {!confirming && <div className="flex justify-end"><button type="button" onClick={onContinue} disabled={!currentProjection || changes.none} className="rounded-xl bg-amber-500 px-4 py-2 text-sm font-extrabold text-slate-950 transition hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-40">Revisar cambios</button></div>}
             </div>}
 
-            {result && confirming && <div className="space-y-5 border-t border-slate-200 p-5 dark:border-neutral-800"><div><p className="text-xs font-extrabold uppercase tracking-[0.18em] text-rose-600">Confirmar cambio de precio</p><dl className="mt-3 space-y-3 text-sm"><div className="flex justify-between"><dt>Precio actual</dt><dd className="font-bold">{money(result.current_price, currency)}</dd></div><div className="flex justify-between"><dt>Nuevo precio</dt><dd className="font-bold">{money(simulatedPrice, currency)}</dd></div><div className="flex justify-between"><dt>Diferencia</dt><dd className={`font-bold ${priceDifference >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{priceDifference >= 0 ? '+' : ''}{money(priceDifference, currency)}</dd></div></dl></div><p className="rounded-xl border border-rose-300 bg-rose-50 p-3 text-sm font-bold text-rose-800 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-200">Este cambio modificará el precio real en Mercado Libre.</p><div className="flex flex-wrap justify-end gap-2"><button type="button" onClick={onCancelConfirmation} disabled={updating} className={secondaryButton}>Cancelar</button><button type="button" onClick={onConfirm} disabled={updating || !currentSimulation} className="rounded-xl bg-rose-600 px-4 py-2 text-sm font-extrabold text-white transition hover:bg-rose-700 disabled:opacity-40">{updating ? 'Verificando y actualizando…' : `Confirmar cambio a ${money(simulatedPrice, currency)}`}</button></div></div>}
+            {result && confirming && <div className="space-y-5 border-t border-slate-200 p-5 dark:border-neutral-800"><div><p className="text-xs font-extrabold uppercase tracking-[0.18em] text-rose-600">Revisar cambios</p><dl className="mt-3 space-y-3 text-sm"><div><dt className="text-xs font-bold text-slate-500">Publicación</dt><dd className="font-bold">{item.title}</dd><dd className="text-xs text-slate-500">{item.meli_item_id}</dd></div><div className="flex justify-between gap-4"><dt>Precio</dt><dd className="font-bold">{changes.priceChanged ? `${money(item.current_price, currency)} → ${money(result.proposed_price, currency)}` : money(item.current_price, currency)}</dd></div><div className="flex justify-between gap-4"><dt>Tipo de publicación</dt><dd className="font-bold">{changes.listingTypeChanged ? `${currentListingTypeName} → ${selectedListingTypeName}` : currentListingTypeName}</dd></div><div className="flex justify-between gap-4"><dt>Recibes actual</dt><dd className="font-bold">{money(item.current_estimated_receivable, currency)}</dd></div><div className="flex justify-between gap-4"><dt>Recibes estimado</dt><dd className="font-bold text-emerald-700 dark:text-emerald-300">{money(result.estimated_receivable, currency)}</dd></div></dl></div>{changes.combined ? <p className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm font-bold text-amber-900 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200">Mercado Libre requiere actualizar el precio y el tipo de publicación mediante operaciones separadas. Por seguridad, aplica primero uno de los cambios y después realiza el otro.</p> : <p className="rounded-xl border border-rose-300 bg-rose-50 p-3 text-sm font-bold text-rose-800 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-200">Al confirmar se modificará una propiedad real de la publicación en Mercado Libre.</p>}<div className="flex flex-wrap justify-end gap-2"><button type="button" onClick={onCancelConfirmation} disabled={updating} className={secondaryButton}>{changes.combined ? 'Volver al formulario' : 'Cancelar'}</button>{!changes.combined && <button type="button" onClick={onConfirm} disabled={updating || !currentProjection} className="rounded-xl bg-rose-600 px-4 py-2 text-sm font-extrabold text-white transition hover:bg-rose-700 disabled:opacity-40">{updating ? 'Verificando y actualizando…' : 'Confirmar cambios'}</button>}</div></div>}
 
-            <p className="border-t border-slate-200 px-5 py-4 text-xs font-semibold text-slate-500 dark:border-neutral-800">Esta es una simulación consultada con Mercado Libre. No se ha modificado el precio de la publicación.</p>
+            <p className="border-t border-slate-200 px-5 py-4 text-xs font-semibold text-slate-500 dark:border-neutral-800">Esta proyección utiliza información de Mercado Libre. Aún no se ha modificado la publicación.</p>
             </>}
         </div>
     </div>
@@ -336,7 +340,7 @@ export default function Index({
     const [selectedIds, setSelectedIds] = useState([])
     const [simulationItem, setSimulationItem] = useState(null)
     const [simulationPrice, setSimulationPrice] = useState('')
-    const [simulatedPrice, setSimulatedPrice] = useState(null)
+    const [simulationListingType, setSimulationListingType] = useState('')
     const [simulationResult, setSimulationResult] = useState(null)
     const [simulationLoading, setSimulationLoading] = useState(false)
     const [initialSimulationLoading, setInitialSimulationLoading] = useState(false)
@@ -345,6 +349,7 @@ export default function Index({
     const [updateSuccess, setUpdateSuccess] = useState(null)
     const [simulationError, setSimulationError] = useState('')
     const [updatedPrices, setUpdatedPrices] = useState({})
+    const [updatedListingTypes, setUpdatedListingTypes] = useState({})
     const [updatedReceivables, setUpdatedReceivables] = useState({})
     const [brandChangeItem, setBrandChangeItem] = useState(null)
     const [brandChangeId, setBrandChangeId] = useState('')
@@ -356,6 +361,7 @@ export default function Index({
     const [bulkBrandProcessing, setBulkBrandProcessing] = useState(false)
     const [bulkBrandError, setBulkBrandError] = useState('')
     const simulationRequestId = useRef(0)
+    const projectionDraftRef = useRef({ price: '', listingTypeId: '' })
     const allSelected = items.data.length > 0 && items.data.every((item) => selectedIds.includes(item.id))
     const selectedAccount = useMemo(() => accounts.find((account) => Number(account.id) === Number(selectedAccountId)), [accounts, selectedAccountId])
     const selectionScope = selectionScopeKey({
@@ -470,24 +476,30 @@ export default function Index({
 
     const stale = (item) => !item.last_synced_at || new Date(item.last_synced_at) < new Date(syncStatus.stale_before)
 
-    const runSimulation = async (item, price, initial = false) => {
+    const runSimulation = async (item, price, listingTypeId, initial = false) => {
         const requestId = ++simulationRequestId.current
+        projectionDraftRef.current = { price, listingTypeId }
         setSimulationLoading(true)
         setInitialSimulationLoading(initial)
         setSimulationError('')
         setSimulationConfirming(false)
         setUpdateSuccess(null)
         try {
-            const result = await simulatePrice(item.id, price)
-            if (requestId !== simulationRequestId.current) return
+            const result = await simulatePrice(item.id, price, listingTypeId)
+            if (!projectionResponseIsCurrent(
+                requestId,
+                simulationRequestId.current,
+                projectionDraftRef.current.price,
+                projectionDraftRef.current.listingTypeId,
+                result,
+            )) return
             setSimulationResult(result)
-            setSimulatedPrice(result.proposed_price)
             if (result.receivable_snapshot) {
                 setUpdatedReceivables((current) => ({ ...current, [item.id]: result.receivable_snapshot }))
             }
         } catch (requestError) {
             if (requestId !== simulationRequestId.current) return
-            setSimulationError(requestError instanceof Error ? requestError.message : 'No fue posible calcular los cargos.')
+            setSimulationError(requestError instanceof Error ? requestError.message : 'No fue posible calcular la proyección.')
         } finally {
             if (requestId === simulationRequestId.current) {
                 setSimulationLoading(false)
@@ -498,23 +510,46 @@ export default function Index({
 
     const openSimulation = (item) => {
         const currentPrice = initialSimulationPrice(item, updatedPrices)
-        const selectedItem = { ...item, current_price: currentPrice }
+        const currentListingTypeId = updatedListingTypes[item.id] ?? item.listing_type_id ?? ''
+        const selectedItem = { ...item, current_price: currentPrice, listing_type_id: currentListingTypeId }
         ++simulationRequestId.current
+        projectionDraftRef.current = { price: currentPrice ?? '', listingTypeId: currentListingTypeId }
         setSimulationItem(selectedItem)
         setSimulationPrice(currentPrice ?? '')
+        setSimulationListingType(currentListingTypeId)
         setSimulationResult(null)
-        setSimulatedPrice(null)
         setSimulationConfirming(false)
         setUpdateSuccess(null)
         setSimulationError('')
-        void runSimulation(selectedItem, currentPrice, true)
+        if (isSupportedListingType(currentListingTypeId)) {
+            void runSimulation(selectedItem, currentPrice, currentListingTypeId, true)
+        }
     }
 
     const calculateSimulation = async (event) => {
         event.preventDefault()
-        if (!simulationItem || simulationLoading) return
+        if (!simulationItem || simulationLoading || !isSupportedListingType(simulationListingType)) return
 
-        await runSimulation(simulationItem, simulationPrice)
+        await runSimulation(simulationItem, simulationPrice, simulationListingType)
+    }
+
+    const changeProjectionDraft = ({ price = simulationPrice, listingTypeId = simulationListingType }) => {
+        ++simulationRequestId.current
+        projectionDraftRef.current = { price, listingTypeId }
+        setSimulationLoading(false)
+        setInitialSimulationLoading(false)
+        setSimulationConfirming(false)
+        setUpdateSuccess(null)
+    }
+
+    const changeSimulationPrice = (value) => {
+        setSimulationPrice(value)
+        changeProjectionDraft({ price: value })
+    }
+
+    const changeSimulationListingType = (value) => {
+        setSimulationListingType(value)
+        changeProjectionDraft({ listingTypeId: value })
     }
 
     const closeSimulation = () => {
@@ -522,7 +557,8 @@ export default function Index({
         ++simulationRequestId.current
         setSimulationItem(null)
         setSimulationResult(null)
-        setSimulatedPrice(null)
+        setSimulationListingType('')
+        projectionDraftRef.current = { price: '', listingTypeId: '' }
         setSimulationError('')
         setSimulationLoading(false)
         setInitialSimulationLoading(false)
@@ -531,13 +567,30 @@ export default function Index({
     }
 
     const confirmPriceUpdate = async () => {
-        if (!simulationItem || !canContinueWithSimulation(simulationPrice, simulatedPrice, { hasResult: Boolean(simulationResult), error: simulationError, loading: simulationLoading, updating: priceUpdating })) return
+        if (!simulationItem || !canReviewProjection(simulationPrice, simulationListingType, simulationResult, { error: simulationError, loading: simulationLoading, updating: priceUpdating })) return
+        const changes = projectionChanges(
+            simulationItem.current_price,
+            simulationItem.listing_type_id,
+            simulationPrice,
+            simulationListingType,
+        )
+        if (changes.combined || changes.none) return
 
         setPriceUpdating(true)
         setSimulationError('')
         try {
-            const update = await updatePrice(simulationItem.id, simulationResult.simulation_token, simulationResult.proposed_price)
-            setUpdatedPrices((current) => ({ ...current, [simulationItem.id]: update.new_price }))
+            const update = await updatePrice(
+                simulationItem.id,
+                simulationResult.simulation_token,
+                simulationResult.proposed_price,
+                simulationResult.listing_type_id,
+            )
+            if (update.price_changed) {
+                setUpdatedPrices((current) => ({ ...current, [simulationItem.id]: update.new_price }))
+            }
+            if (update.listing_type_changed) {
+                setUpdatedListingTypes((current) => ({ ...current, [simulationItem.id]: update.new_listing_type_id }))
+            }
             setUpdatedReceivables((current) => ({
                 ...current,
                 [simulationItem.id]: update.receivable_snapshot,
@@ -545,12 +598,12 @@ export default function Index({
             setUpdateSuccess(update)
             setSimulationConfirming(false)
         } catch (requestError) {
-            const requiresNewSimulation = ['simulation_expired', 'simulation_price_mismatch', 'concurrent_price_change'].includes(requestError?.code)
+            const requiresNewSimulation = ['simulation_expired', 'simulation_price_mismatch', 'simulation_listing_type_mismatch', 'concurrent_price_change', 'concurrent_listing_type_change', 'concurrent_local_change', 'listing_type_change_rejected', 'listing_type_change_unconfirmed'].includes(requestError?.code)
             if (requiresNewSimulation) {
                 setSimulationResult(null)
                 setSimulationConfirming(false)
             }
-            setSimulationError(requestError instanceof Error ? requestError.message : 'No fue posible actualizar el precio.')
+            setSimulationError(requestError instanceof Error ? requestError.message : 'No fue posible actualizar la publicación.')
         } finally {
             setPriceUpdating(false)
         }
@@ -564,7 +617,7 @@ export default function Index({
                     <div>
                         <p className="text-xs font-bold uppercase tracking-[0.2em] text-indigo-600 dark:text-indigo-300">Meli Price Manager</p>
                         <h1 className="mt-1 text-3xl font-bold">Publicaciones por marca</h1>
-                        <p className="mt-2 text-sm text-slate-500">Consulta el impacto de un precio y aplica cambios individuales con verificación y confirmación explícita.</p>
+                        <p className="mt-2 text-sm text-slate-500">Proyecta precio, tipo de publicación, cargos y neto antes de aplicar un cambio individual.</p>
                     </div>
                     <nav className="flex flex-wrap gap-2">
                         <Link href={`/meli-price-manager/brands?account=${selectedAccountId ?? ''}`} className={secondaryButton}>Administrar marcas</Link>
@@ -624,7 +677,7 @@ export default function Index({
                             <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500 dark:bg-neutral-950"><tr><th className="px-3 py-3"><input type="checkbox" checked={allSelected} onChange={() => setSelectedIds(allSelected ? [] : items.data.map((item) => item.id))} /></th><th className="px-3 py-3">Imagen</th><th className="px-3 py-3">Producto</th><th className="px-3 py-3">Marca ML</th><th className="px-3 py-3">Marca interna</th><th className="px-3 py-3">Precio</th><th className="px-3 py-3">Recibes</th><th className="px-3 py-3">Stock</th><th className="px-3 py-3">Estado ML</th><th className="px-3 py-3">Sincronización</th><th className="px-3 py-3">Acción</th></tr></thead>
                             <tbody className="divide-y divide-slate-100 dark:divide-neutral-800">
                                 {!items.data.length && <tr><td colSpan="11" className="px-5 py-12 text-center text-slate-500">No hay publicaciones categorizadas para estos filtros.</td></tr>}
-                                {items.data.map((item) => <tr key={item.id}><td className="px-3 py-4"><input type="checkbox" checked={selectedIds.includes(item.id)} onChange={() => setSelectedIds((current) => current.includes(item.id) ? current.filter((id) => id !== item.id) : [...current, item.id])} /></td><td className="px-3 py-4">{item.thumbnail ? <img src={item.thumbnail} alt="" className="h-12 w-12 rounded-lg object-cover" referrerPolicy="no-referrer" /> : <div className="flex h-12 w-12 items-center justify-center rounded-lg bg-slate-100 text-[10px] text-slate-400 dark:bg-neutral-800">Sin imagen</div>}</td><td className="max-w-sm px-3 py-4"><p className="font-semibold">{item.title}</p><p className="mt-1 text-xs text-slate-500">SKU: {item.sku || '—'} · {item.meli_item_id}</p><p className="text-xs text-slate-500">Categoría: {item.category?.name || item.category_id || '—'}{item.category?.name && <span className="ml-1 text-[10px]">({item.category_id})</span>}</p></td><td className="px-3 py-4">{item.meli_brand || 'Sin marca'}</td><td className="px-3 py-4 font-bold text-indigo-700 dark:text-indigo-300">{item.brand_group?.name || '—'}</td><td className="px-3 py-4 font-semibold">{money(updatedPrices[item.id] ?? item.current_price, item.currency_id)}</td><td className="px-3 py-4 font-bold text-emerald-700 dark:text-emerald-300">{money(currentReceivableForItem(item, updatedReceivables, updatedPrices[item.id] ?? item.current_price), item.currency_id)}{currentReceivableForItem(item, updatedReceivables, updatedPrices[item.id] ?? item.current_price) == null && <span className="block text-[10px] font-normal text-slate-400">Pendiente</span>}</td><td className="px-3 py-4">{item.available_quantity ?? '—'}</td><td className="px-3 py-4"><StatusBadge status={item.status} stock={item.available_quantity} /></td><td className="px-3 py-4"><p>{dateTime(item.last_synced_at)}</p>{stale(item) && <span className="mt-1 inline-block rounded-full bg-amber-100 px-2 py-0.5 text-xs font-bold text-amber-800">Desactualizada</span>}</td><td className="px-3 py-4"><div className="flex flex-col items-start gap-2"><button type="button" onClick={() => openSimulation(item)} className={primaryButton}>Simular precio</button><button type="button" onClick={() => openBrandChange(item)} className={secondaryButton}>Cambiar marca</button>{item.permalink && <a href={item.permalink} target="_blank" rel="noreferrer" className={secondaryButton}>Abrir en Mercado Libre</a>}</div></td></tr>)}
+                                {items.data.map((item) => <tr key={item.id}><td className="px-3 py-4"><input type="checkbox" checked={selectedIds.includes(item.id)} onChange={() => setSelectedIds((current) => current.includes(item.id) ? current.filter((id) => id !== item.id) : [...current, item.id])} /></td><td className="px-3 py-4">{item.thumbnail ? <img src={item.thumbnail} alt="" className="h-12 w-12 rounded-lg object-cover" referrerPolicy="no-referrer" /> : <div className="flex h-12 w-12 items-center justify-center rounded-lg bg-slate-100 text-[10px] text-slate-400 dark:bg-neutral-800">Sin imagen</div>}</td><td className="max-w-sm px-3 py-4"><p className="font-semibold">{item.title}</p><p className="mt-1 text-xs text-slate-500">SKU: {item.sku || '—'} · {item.meli_item_id}</p><p className="text-xs text-slate-500">Categoría: {item.category?.name || item.category_id || '—'}{item.category?.name && <span className="ml-1 text-[10px]">({item.category_id})</span>}</p></td><td className="px-3 py-4">{item.meli_brand || 'Sin marca'}</td><td className="px-3 py-4 font-bold text-indigo-700 dark:text-indigo-300">{item.brand_group?.name || '—'}</td><td className="px-3 py-4 font-semibold">{money(updatedPrices[item.id] ?? item.current_price, item.currency_id)}</td><td className="px-3 py-4 font-bold text-emerald-700 dark:text-emerald-300">{money(currentReceivableForItem(item, updatedReceivables, updatedPrices[item.id] ?? item.current_price), item.currency_id)}{currentReceivableForItem(item, updatedReceivables, updatedPrices[item.id] ?? item.current_price) == null && <span className="block text-[10px] font-normal text-slate-400">Pendiente</span>}</td><td className="px-3 py-4">{item.available_quantity ?? '—'}</td><td className="px-3 py-4"><StatusBadge status={item.status} stock={item.available_quantity} /></td><td className="px-3 py-4"><p>{dateTime(item.last_synced_at)}</p>{stale(item) && <span className="mt-1 inline-block rounded-full bg-amber-100 px-2 py-0.5 text-xs font-bold text-amber-800">Desactualizada</span>}</td><td className="px-3 py-4"><div className="flex flex-col items-start gap-2"><button type="button" onClick={() => openSimulation(item)} className={primaryButton}>Proyección de venta</button><button type="button" onClick={() => openBrandChange(item)} className={secondaryButton}>Cambiar marca</button>{item.permalink && <a href={item.permalink} target="_blank" rel="noreferrer" className={secondaryButton}>Abrir en Mercado Libre</a>}</div></td></tr>)}
                                 {items.data.map((item) => (item.price_relations?.linked || item.stock_relations?.shared) && <tr key={`links-${item.id}`} className="bg-slate-50/70 dark:bg-neutral-950/40"><td colSpan="2" /><td colSpan="8" className="px-3 pb-3 text-xs"><div className="flex flex-wrap gap-3">{item.price_relations?.linked && <details><summary className="cursor-pointer rounded-full bg-indigo-100 px-3 py-1 font-bold text-indigo-800">Precio vinculado · {item.price_relations.items.length}</summary><div className="mt-1 rounded-lg border bg-white p-2 dark:bg-neutral-900">{item.price_relations.items.map((member) => <p key={member.meli_item_id}>{member.meli_item_id} · {money(member.price, item.currency_id)} · {member.catalog_listing ? 'Catálogo' : 'No catálogo'}</p>)}</div></details>}{item.stock_relations?.shared && <details><summary className="cursor-pointer rounded-full bg-emerald-100 px-3 py-1 font-bold text-emerald-800">Stock compartido · {item.stock_relations.items.length}</summary><div className="mt-1 rounded-lg border bg-white p-2 dark:bg-neutral-900"><p className="font-bold">Inventario {item.stock_relations.inventory_id}</p>{item.stock_relations.items.map((member) => <p key={member.meli_item_id}>{member.meli_item_id} · {member.stock ?? '—'}</p>)}</div></details>}</div></td></tr>)}
                             </tbody>
                         </table>
@@ -632,7 +685,7 @@ export default function Index({
                     {items.links?.length > 0 && <div className="flex flex-wrap gap-2 border-t border-slate-200 p-4 dark:border-neutral-800">{items.links.map((link, index) => <Link key={index} href={link.url ?? '#'} preserveScroll onClick={() => { setSelectedIds([]); setBulkBrandOpen(false) }} className={`rounded-lg px-3 py-2 text-sm ${link.active ? 'bg-indigo-600 text-white' : 'border border-slate-200 dark:border-neutral-700'} ${!link.url ? 'pointer-events-none opacity-40' : ''}`} dangerouslySetInnerHTML={{ __html: link.label }} />)}</div>}
                 </section>
             </div>
-            <PriceSimulationModal item={simulationItem} price={simulationPrice} simulatedPrice={simulatedPrice} result={simulationResult} loading={simulationLoading} initialLoading={initialSimulationLoading} updating={priceUpdating} confirming={simulationConfirming} success={updateSuccess} error={simulationError} onPriceChange={(value) => { setSimulationPrice(value); setSimulationConfirming(false); setUpdateSuccess(null) }} onSubmit={calculateSimulation} onContinue={() => { if (simulationMatchesDraft(simulationPrice, simulatedPrice) && !simulationError) setSimulationConfirming(true) }} onCancelConfirmation={() => setSimulationConfirming(false)} onConfirm={confirmPriceUpdate} onClose={closeSimulation} />
+            <PriceSimulationModal item={simulationItem} price={simulationPrice} listingTypeId={simulationListingType} result={simulationResult} loading={simulationLoading} initialLoading={initialSimulationLoading} updating={priceUpdating} confirming={simulationConfirming} success={updateSuccess} error={simulationError} onPriceChange={changeSimulationPrice} onListingTypeChange={changeSimulationListingType} onSubmit={calculateSimulation} onContinue={() => { if (canReviewProjection(simulationPrice, simulationListingType, simulationResult, { error: simulationError, loading: simulationLoading, updating: priceUpdating })) setSimulationConfirming(true) }} onCancelConfirmation={() => setSimulationConfirming(false)} onConfirm={confirmPriceUpdate} onClose={closeSimulation} />
             <BrandChangeModal item={brandChangeItem} brands={brandOptions} brandId={brandChangeId} processing={brandChangeProcessing} error={brandChangeError} onBrandChange={setBrandChangeId} onConfirm={confirmBrandChange} onClose={() => { if (!brandChangeProcessing) setBrandChangeItem(null) }} />
             {bulkBrandOpen && <BulkBrandChangeModal count={selectedIds.length} brands={brandOptions} brandId={bulkBrandId} confirmed={bulkBrandConfirmed} processing={bulkBrandProcessing} error={bulkBrandError} onBrandChange={(value) => { setBulkBrandId(value); setBulkBrandError('') }} onConfirmedChange={setBulkBrandConfirmed} onConfirm={confirmBulkBrandChange} onClose={closeBulkBrandChange} />}
         </AppShell>

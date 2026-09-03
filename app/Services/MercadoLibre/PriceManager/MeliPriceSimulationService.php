@@ -25,14 +25,19 @@ class MeliPriceSimulationService
     ) {}
 
     /** @return array<string, mixed> */
-    public function simulate(MeliAccount $account, MeliPriceManagerItem $item, float $price): array
+    public function simulate(
+        MeliAccount $account,
+        MeliPriceManagerItem $item,
+        float $price,
+        ?string $selectedListingTypeId = null,
+    ): array
     {
         if (! is_finite($price) || $price <= 0) {
             throw new InvalidArgumentException('El precio propuesto debe ser mayor que cero.');
         }
 
         if (! $account->exists || ! $item->exists) {
-            throw new InvalidArgumentException('La cuenta y la publicación deben existir antes de simular.');
+            throw new InvalidArgumentException('La cuenta y la publicación deben existir antes de calcular la proyección.');
         }
 
         if ((int) $item->meli_account_id !== (int) $account->id) {
@@ -50,11 +55,16 @@ class MeliPriceSimulationService
         }
 
         $categoryId = trim((string) $item->category_id);
-        $listingTypeId = trim((string) $item->listing_type_id);
+        $currentListingTypeId = trim((string) $item->listing_type_id);
+        $listingTypeId = trim((string) ($selectedListingTypeId ?? $currentListingTypeId));
         $currencyId = trim((string) $item->currency_id);
 
-        if ($categoryId === '' || $listingTypeId === '' || $currencyId === '') {
-            throw new InvalidArgumentException('La publicación no tiene categoría, tipo de publicación o moneda suficiente para simular.');
+        if ($categoryId === '' || $currencyId === '') {
+            throw new InvalidArgumentException('La publicación no tiene categoría o moneda suficiente para calcular la proyección.');
+        }
+
+        if (! in_array($listingTypeId, MeliPriceManagerItem::SUPPORTED_LISTING_TYPE_IDS, true)) {
+            throw new InvalidArgumentException('El tipo de publicación seleccionado no es compatible. Usa Clásica o Premium.');
         }
 
         $rawItem = is_array($item->raw_item) ? $item->raw_item : [];
@@ -126,7 +136,7 @@ class MeliPriceSimulationService
                 $shippingBillableWeight = $this->nullableNumber(data_get($shippingData, 'coverage.all_country.billable_weight'));
 
                 if ($quotedCost === null) {
-                    $shippingError = 'Mercado Libre no devolvió un costo de envío para esta simulación.';
+                    $shippingError = 'Mercado Libre no devolvió un costo de envío para esta proyección.';
                 } elseif (strcasecmp($shippingCurrencyId, $currencyId) !== 0) {
                     $shippingError = 'La moneda de la cotización de envío no coincide con la moneda de la publicación.';
                 } else {
@@ -134,8 +144,8 @@ class MeliPriceSimulationService
                     $shippingCost = round($quotedCost, 2);
                 }
             } catch (MeliApiRequestException $exception) {
-                $shippingError = 'Costo de envío no disponible para esta simulación.';
-                Log::warning('No fue posible cotizar el envío de una simulación de precio.', [
+                $shippingError = 'Costo de envío no disponible para esta proyección.';
+                Log::warning('No fue posible cotizar el envío de una proyección de venta.', [
                     'meli_account_id' => (int) $account->id,
                     'meli_item_id' => (string) $item->meli_item_id,
                     'http_status' => $exception->httpStatus(),
@@ -200,8 +210,11 @@ class MeliPriceSimulationService
             'currency_id' => $currencyId,
             'current_price' => round((float) $item->current_price, 2),
             'proposed_price' => $proposedPrice,
+            'current_listing_type_id' => $currentListingTypeId !== '' ? $currentListingTypeId : null,
+            'current_listing_type_name' => MeliPriceManagerItem::listingTypeName($currentListingTypeId),
             'listing_type_id' => $listingTypeId,
-            'listing_type_name' => $this->nullableString($listing['listing_type_name'] ?? null),
+            'listing_type_name' => MeliPriceManagerItem::listingTypeName($listingTypeId)
+                ?? $this->nullableString($listing['listing_type_name'] ?? null),
             'sale_fee' => $saleFee,
             'sale_fee_percentage' => $percentageFee,
             'sale_fee_meli_percentage' => $meliPercentageFee,
@@ -252,6 +265,11 @@ class MeliPriceSimulationService
         }
 
         if (array_key_exists('sale_fee_amount', $payload)) {
+            $payloadListingTypeId = trim((string) ($payload['listing_type_id'] ?? ''));
+            if ($payloadListingTypeId !== '' && $payloadListingTypeId !== $listingTypeId) {
+                throw new UnexpectedValueException('Mercado Libre devolvió cargos para un tipo de publicación diferente al solicitado.');
+            }
+
             return $payload;
         }
 
@@ -262,13 +280,16 @@ class MeliPriceSimulationService
             }
         }
 
-        foreach ($entries as $entry) {
-            if (is_array($entry) && array_key_exists('sale_fee_amount', $entry)) {
-                return $entry;
-            }
+        $feeEntries = array_values(array_filter(
+            is_array($entries) ? $entries : [],
+            static fn (mixed $entry): bool => is_array($entry) && array_key_exists('sale_fee_amount', $entry),
+        ));
+
+        if (count($feeEntries) === 1 && trim((string) ($feeEntries[0]['listing_type_id'] ?? '')) === '') {
+            return $feeEntries[0];
         }
 
-        throw new UnexpectedValueException('Mercado Libre no devolvió cargos para el tipo de publicación solicitado.');
+        throw new UnexpectedValueException('Mercado Libre no devolvió cargos inequívocos para el tipo de publicación solicitado.');
     }
 
     /** @param array<string, mixed> $rawItem */

@@ -13,10 +13,13 @@ class MeliEstimatedReceivableSnapshotService
     {
         $price = $simulation['proposed_price'] ?? null;
         $receivable = $simulation['estimated_receivable'] ?? null;
+        $listingTypeId = trim((string) ($simulation['listing_type_id'] ?? ''));
         $shippingAvailable = data_get($simulation, 'charges.shipping.available') === true;
 
         if (! is_numeric($price) || ! is_numeric($receivable) || ! $shippingAvailable
-            || ! $this->samePrice((float) $item->current_price, (float) $price)) {
+            || ! $this->samePrice((float) $item->current_price, (float) $price)
+            || $listingTypeId === ''
+            || $listingTypeId !== trim((string) $item->listing_type_id)) {
             return null;
         }
 

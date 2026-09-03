@@ -32,7 +32,8 @@ class MeliPriceUpdateController extends Controller
                 $account,
                 $publication,
                 $data['simulation_token'],
-                isset($data['price']) ? (float) $data['price'] : null,
+                (float) $data['price'],
+                (string) $data['listing_type_id'],
             );
         } catch (MeliPriceUpdateException $exception) {
             return response()->json([
@@ -42,7 +43,9 @@ class MeliPriceUpdateController extends Controller
         }
 
         return response()->json([
-            'message' => 'Precio actualizado correctamente en Mercado Libre.',
+            'message' => ($result['no_op'] ?? false)
+                ? 'No hay cambios por aplicar.'
+                : 'Cambios actualizados correctamente en Mercado Libre.',
             'data' => $result,
         ]);
     }

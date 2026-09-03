@@ -445,6 +445,18 @@ class MeliPriceManagerDashboardTest extends TestCase
                 ->where('accounts.0.nickname', 'Propia'));
     }
 
+    public function test_dashboard_exposes_the_current_listing_type_for_sale_projection(): void
+    {
+        $account = $this->account();
+        $item = $this->categorized($account, ['listing_type_id' => 'gold_special']);
+
+        $this->get(route('meli-price-manager.index', ['account' => $account->id]))
+            ->assertInertia(fn (Assert $page) => $page
+                ->has('items.data', 1)
+                ->where('items.data.0.id', $item->id)
+                ->where('items.data.0.listing_type_id', 'gold_special'));
+    }
+
     public function test_dashboard_rejects_foreign_account_in_query_string(): void
     {
         $foreign = MeliAccount::factory()->create();
