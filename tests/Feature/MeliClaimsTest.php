@@ -117,6 +117,44 @@ class MeliClaimsTest extends TestCase
         $this->assertSame(1, $reasonRequests);
     }
 
+    public function test_general_sync_searches_opened_and_closed_claims_with_required_filters(): void
+    {
+        $account = $this->account();
+        $this->fakeClaimApi('open');
+
+        app(MeliClaimsService::class)->syncAccount($account);
+
+        $searchRequests = collect(Http::recorded())
+            ->pluck(0)
+            ->filter(function (Request $request): bool {
+                return str_ends_with(
+                    (string) parse_url($request->url(), PHP_URL_PATH),
+                    '/post-purchase/v1/claims/search'
+                );
+            })
+            ->values();
+
+        $this->assertCount(2, $searchRequests);
+
+        $statuses = $searchRequests
+            ->map(fn (Request $request): ?string => $request->data()['status'] ?? null)
+            ->sort()
+            ->values()
+            ->all();
+
+        $this->assertSame(['closed', 'opened'], $statuses);
+
+        $this->assertTrue($searchRequests->every(
+            fn (Request $request): bool =>
+                ($request->data()['players.user_id'] ?? null) === (string) $account->meli_user_id
+                && ($request->data()['players.role'] ?? null) === 'respondent'
+                && filled($request->data()['status'] ?? null)
+                && filled($request->data()['range'] ?? null)
+                && ($request->data()['offset'] ?? null) === 0
+                && ($request->data()['limit'] ?? null) === 50
+        ));
+    }
+
     public function test_closed_claim_updates_and_api_error_does_not_delete_local_record(): void
     {
         $account = $this->account();

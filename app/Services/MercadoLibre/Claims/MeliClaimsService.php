@@ -78,38 +78,61 @@ class MeliClaimsService
     public function syncAccount(MeliAccount $account, ?string $status = null, int $days = 30, bool $force = false): array
     {
         $this->api->ensureFreshAccessToken($account);
-        $offset = 0;
         $limit = 50;
         $result = ['received' => 0, 'saved' => 0, 'failed' => 0];
 
-        do {
-            $query = [
-                'players.user_id' => (string) $account->meli_user_id,
-                'players.role' => 'respondent',
-                'offset' => $offset,
-                'limit' => $limit,
-            ];
-            if (filled($status)) $query['status'] = $status;
-            if ($days > 0) $query['range'] = 'date_created:after:'.now()->subDays($days)->toISOString().',before:'.now()->toISOString();
-            $payload = (array) $this->api->getReadOnly($account, self::BASE.'/search', $query)->json();
-            $claims = array_values(array_filter((array) ($payload['data'] ?? $payload['claims'] ?? $payload['results'] ?? []), 'is_array'));
-            $result['received'] += count($claims);
+        $statuses = filled($status)
+            ? [(string) $status]
+            : ['opened', 'closed'];
 
-            foreach ($claims as $raw) {
-                $claimId = trim((string) ($raw['id'] ?? $raw['claim_id'] ?? ''));
-                if ($claimId === '') continue;
-                try {
-                    $this->syncClaim($account, $claimId, $force, $raw);
-                    $result['saved']++;
-                } catch (Throwable $e) {
-                    $result['failed']++;
-                    $this->recordError($account, $claimId, $e);
+        foreach ($statuses as $currentStatus) {
+            $offset = 0;
+
+            do {
+                $query = [
+                    'players.user_id' => (string) $account->meli_user_id,
+                    'players.role' => 'respondent',
+                    'status' => $currentStatus,
+                    'offset' => $offset,
+                    'limit' => $limit,
+                ];
+
+                if ($days > 0) {
+                    $query['range'] = 'date_created:after:'.now()->subDays($days)->toISOString()
+                        .',before:'.now()->toISOString();
                 }
-            }
 
-            $offset += count($claims);
-            $total = (int) data_get($payload, 'paging.total', $offset);
-        } while ($claims !== [] && $offset < $total);
+                $payload = (array) $this->api
+                    ->getReadOnly($account, self::BASE.'/search', $query)
+                    ->json();
+
+                $claims = array_values(array_filter(
+                    (array) ($payload['data'] ?? $payload['claims'] ?? $payload['results'] ?? []),
+                    'is_array'
+                ));
+
+                $result['received'] += count($claims);
+
+                foreach ($claims as $raw) {
+                    $claimId = trim((string) ($raw['id'] ?? $raw['claim_id'] ?? ''));
+
+                    if ($claimId === '') {
+                        continue;
+                    }
+
+                    try {
+                        $this->syncClaim($account, $claimId, $force, $raw);
+                        $result['saved']++;
+                    } catch (Throwable $e) {
+                        $result['failed']++;
+                        $this->recordError($account, $claimId, $e);
+                    }
+                }
+
+                $offset += count($claims);
+                $total = (int) data_get($payload, 'paging.total', $offset);
+            } while ($claims !== [] && $offset < $total);
+        }
 
         return $result;
     }
