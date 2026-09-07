@@ -2,6 +2,10 @@
 
 return [
     'stale_after_hours' => 24,
+    'beauty_scheduled_prices' => [
+        'enabled' => env('MELI_BEAUTY_SCHEDULED_PRICES_ENABLED', false),
+        'default_timezone' => 'America/Hermosillo',
+    ],
     'focused_catalog' => [
         // Populate only with root category IDs verified from real Mercado Libre category paths.
         'allowed_root_category_ids' => [

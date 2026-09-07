@@ -76,7 +76,6 @@ Artisan::command('syscom:order-pago-methods', function (SyscomApiService $api) {
     return 0;
 })->purpose('Lista métodos de pago SYSCOM (GET /carrito/pago)');
 
-
 // ===============================
 // ✅ SCHEDULE (Laravel 12)
 // ===============================
@@ -152,3 +151,10 @@ Schedule::command('ams:refresh-ready-to-print --max=300')
 Schedule::command('system:heartbeat')
     ->everyMinute()
     ->withoutOverlapping();
+
+if (config('meli_price_manager.beauty_scheduled_prices.enabled', false)) {
+    Schedule::command('meli:beauty-scheduled-prices --apply')
+        ->everyMinute()
+        ->withoutOverlapping()
+        ->runInBackground();
+}

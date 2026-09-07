@@ -10,9 +10,12 @@ use Carbon\CarbonInterface;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\Schema;
 use InvalidArgumentException;
+use Throwable;
 
 class MeliBeautyScheduledPriceService
 {
+    public function __construct(private readonly MeliPriceUpdateService $priceUpdates) {}
+
     public function isRuleActiveAt(MeliBeautyScheduledDiscount $rule, ?CarbonInterface $at = null): bool
     {
         if (! $rule->active) {
@@ -119,13 +122,137 @@ class MeliBeautyScheduledPriceService
             return $this->transition('apply', MeliScheduledPriceState::STATUS_ACTIVE, $remotePrice, $promotionalPrice, $promotionalPrice);
         }
 
-        if ($this->samePrice($remotePrice, (float) $state->promotional_price)) {
+        $expectedPromotionalPrice = $this->calculatePromotionalPrice((float) $state->base_price, (float) $rule->discount_percentage);
+        if ($this->samePrice($remotePrice, $expectedPromotionalPrice)) {
             return $this->transition('no_change', MeliScheduledPriceState::STATUS_ACTIVE, (float) $state->base_price, (float) $state->promotional_price, null);
         }
 
-        $promotionalPrice = $this->calculatePromotionalPrice($remotePrice, (float) $rule->discount_percentage);
+        $usesStoredBase = $this->samePrice($remotePrice, (float) $state->promotional_price);
+        $basePrice = $usesStoredBase ? (float) $state->base_price : $remotePrice;
+        $promotionalPrice = $this->calculatePromotionalPrice($basePrice, (float) $rule->discount_percentage);
 
-        return $this->transition('rebase', MeliScheduledPriceState::STATUS_ACTIVE, $remotePrice, $promotionalPrice, $promotionalPrice);
+        return $this->transition('rebase', MeliScheduledPriceState::STATUS_ACTIVE, $basePrice, $promotionalPrice, $promotionalPrice);
+    }
+
+    /** @return array{processed: int, apply: int, restore: int, rebase: int, no_change: int, success: int, blocked: int, failed: int, errors: list<array<string, mixed>>} */
+    public function processRule(MeliBeautyScheduledDiscount $rule, ?string $meliItemId = null, bool $dryRun = false): array
+    {
+        $summary = ['processed' => 0, 'apply' => 0, 'restore' => 0, 'rebase' => 0, 'no_change' => 0, 'success' => 0, 'blocked' => 0, 'failed' => 0, 'errors' => []];
+        $handledRelatedIds = [];
+        $items = $this->eligibleItemsQuery($rule)
+            ->with('scheduledPriceState')
+            ->orderBy('id')
+            ->get();
+
+        if ($meliItemId !== null) {
+            $items = $items->where('meli_item_id', $meliItemId)->values();
+        }
+
+        $stateItems = MeliScheduledPriceState::query()
+            ->where('meli_beauty_scheduled_discount_id', $rule->id)
+            ->whereIn('status', [MeliScheduledPriceState::STATUS_ACTIVE, MeliScheduledPriceState::STATUS_RESTORE_PENDING])
+            ->with('item.scheduledPriceState')
+            ->get()
+            ->pluck('item')
+            ->filter();
+        if ($meliItemId !== null) {
+            $stateItems = $stateItems->where('meli_item_id', $meliItemId)->values();
+        }
+        $items = $items->concat($stateItems)->unique('id')->values();
+
+        foreach ($items as $item) {
+            $summary['processed']++;
+            if (in_array((string) $item->meli_item_id, $handledRelatedIds, true)) {
+                $summary['no_change']++;
+
+                continue;
+            }
+            try {
+                $state = $item->scheduledPriceState;
+                $inWindow = $this->isRuleActiveAt($rule);
+                if ((! $rule->active || ! $inWindow) && ($state === null || $state->status === MeliScheduledPriceState::STATUS_RESTORED)) {
+                    $summary['no_change']++;
+
+                    continue;
+                }
+
+                $remotePrice = $this->priceUpdates->scheduledRemoteStandardPrice($rule->meliAccount, $item);
+                $transition = $this->determineTransition($rule, $state, $rule->active && $inWindow, $remotePrice);
+                $summary[$transition['action']]++;
+                if ($transition['action'] === 'no_change') {
+                    if (! $dryRun && $state !== null) {
+                        $state->forceFill(['last_observed_remote_price' => $remotePrice])->save();
+                    }
+
+                    continue;
+                }
+
+                $result = $this->priceUpdates->updateScheduledPrice(
+                    $rule->meliAccount,
+                    $item,
+                    $rule,
+                    (float) $transition['target_price'],
+                    (string) $transition['action'],
+                    $dryRun,
+                );
+                if (in_array($result['result'], ['success', 'blocked', 'failed'], true)) {
+                    $summary[$result['result']]++;
+                    $handledRelatedIds = array_values(array_unique(array_merge($handledRelatedIds, $result['related_items'])));
+                }
+                if (! $dryRun && $result['result'] === 'success') {
+                    $this->persistConfirmedState($item, $rule, $transition, (float) $result['new_price']);
+                    $this->persistRelatedConfirmedStates($rule, $item, $result['related_items'], $transition, (float) $result['new_price']);
+                }
+            } catch (Throwable $exception) {
+                $blocked = $exception instanceof MeliPriceUpdateException
+                    && in_array($exception->errorCode(), ['pricing_automation_active', 'pricing_automation_present', 'excluded_catalog_item', 'item_status_not_writable'], true);
+                $summary[$blocked ? 'blocked' : 'failed']++;
+                $summary['errors'][] = ['meli_item_id' => (string) $item->meli_item_id, 'message' => $exception->getMessage()];
+                if (! $dryRun && ! $blocked) {
+                    $state = $item->scheduledPriceState;
+                    if ($state !== null) {
+                        $state->forceFill([
+                            'status' => $state->status === MeliScheduledPriceState::STATUS_ACTIVE
+                                ? MeliScheduledPriceState::STATUS_RESTORE_PENDING
+                                : MeliScheduledPriceState::STATUS_FAILED,
+                            'failure_message' => $exception->getMessage(),
+                        ])->save();
+                    }
+                }
+            }
+        }
+
+        return $summary;
+    }
+
+    private function persistConfirmedState(MeliPriceManagerItem $item, MeliBeautyScheduledDiscount $rule, array $transition, float $confirmedPrice): void
+    {
+        $state = $item->scheduledPriceState()->firstOrNew([]);
+        $state->fill([
+            'price_manager_item_id' => $item->id,
+            'meli_beauty_scheduled_discount_id' => $rule->id,
+            'base_price' => $transition['base_price'],
+            'promotional_price' => $transition['promotional_price'] ?? $state->promotional_price,
+            'last_confirmed_remote_price' => $confirmedPrice,
+            'last_observed_remote_price' => $confirmedPrice,
+            'status' => $transition['action'] === 'restore' ? MeliScheduledPriceState::STATUS_RESTORED : MeliScheduledPriceState::STATUS_ACTIVE,
+            'applied_at' => $transition['action'] === 'restore' ? $state->applied_at : ($state->applied_at ?? now()),
+            'restored_at' => $transition['action'] === 'restore' ? now() : null,
+            'failure_message' => null,
+        ])->save();
+    }
+
+    /** @param list<string> $relatedIds */
+    private function persistRelatedConfirmedStates(MeliBeautyScheduledDiscount $rule, MeliPriceManagerItem $leader, array $relatedIds, array $transition, float $confirmedPrice): void
+    {
+        $relatedItems = $this->eligibleItemsQuery($rule)
+            ->whereIn('meli_item_id', $relatedIds)
+            ->where('id', '!=', $leader->id)
+            ->get();
+        foreach ($relatedItems as $relatedItem) {
+            $relatedItem->forceFill(['current_price' => $confirmedPrice, 'last_synced_at' => now()])->save();
+            $this->persistConfirmedState($relatedItem, $rule, $transition, $confirmedPrice);
+        }
     }
 
     private function timePart(mixed $value): string

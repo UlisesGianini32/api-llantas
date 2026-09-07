@@ -80,4 +80,25 @@ class MeliBeautyScheduledPriceServiceTest extends TestCase
         $this->assertSame('restored', $transition['status']);
         $this->assertNull($transition['target_price']);
     }
+
+    public function test_discount_change_recalculates_from_stored_base_not_old_promotion(): void
+    {
+        $rule = new MeliBeautyScheduledDiscount(['discount_percentage' => 15]);
+        $state = new MeliScheduledPriceState([
+            'base_price' => 2000,
+            'promotional_price' => 1800,
+            'status' => MeliScheduledPriceState::STATUS_ACTIVE,
+        ]);
+
+        $transition = $this->service->determineTransition($rule, $state, true, 1800);
+
+        $this->assertSame('rebase', $transition['action']);
+        $this->assertSame(2000.0, $transition['base_price']);
+        $this->assertSame(1700.0, $transition['promotional_price']);
+    }
+
+    public function test_decimal_discount_uses_price_manager_rounding(): void
+    {
+        $this->assertSame(1850.0, $this->service->calculatePromotionalPrice(2000, 7.5));
+    }
 }

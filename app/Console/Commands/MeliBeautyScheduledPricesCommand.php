@@ -1,0 +1,69 @@
+<?php
+
+namespace App\Console\Commands;
+
+use App\Jobs\ProcessMeliBeautyScheduledPriceJob;
+use App\Models\MeliBeautyScheduledDiscount;
+use App\Services\MercadoLibre\PriceManager\MeliBeautyScheduledPriceService;
+use Illuminate\Console\Command;
+
+class MeliBeautyScheduledPricesCommand extends Command
+{
+    protected $signature = 'meli:beauty-scheduled-prices
+        {--dry-run : Simular sin PUT ni cambios locales}
+        {--apply : Encolar cambios reales explícitamente}
+        {--account= : ID interno de meli_accounts}
+        {--discount= : ID de regla}
+        {--item= : MLM específico}';
+
+    protected $description = 'Evalúa descuentos programados Beauty de Meli Price Manager';
+
+    public function handle(MeliBeautyScheduledPriceService $service): int
+    {
+        $apply = (bool) $this->option('apply');
+        if ($apply && $this->option('dry-run')) {
+            $this->error('Usa --dry-run o --apply, no ambos.');
+
+            return self::INVALID;
+        }
+        if ($apply && ! config('meli_price_manager.beauty_scheduled_prices.enabled', false)) {
+            $this->error('La automatización está deshabilitada por MELI_BEAUTY_SCHEDULED_PRICES_ENABLED.');
+
+            return self::FAILURE;
+        }
+
+        $rules = MeliBeautyScheduledDiscount::query()->with('meliAccount')
+            ->when($this->option('account'), fn ($query, $account) => $query->where('meli_account_id', (int) $account))
+            ->when($this->option('discount'), fn ($query, $discount) => $query->whereKey((int) $discount))
+            ->get();
+        if ($rules->isEmpty()) {
+            $this->warn('No se encontraron reglas.');
+
+            return self::SUCCESS;
+        }
+
+        foreach ($rules as $rule) {
+            if ($apply) {
+                ProcessMeliBeautyScheduledPriceJob::dispatch($rule->id, $this->option('item'));
+                $this->info("Regla #{$rule->id} encolada en meli.");
+
+                continue;
+            }
+
+            $summary = $service->processRule($rule, $this->option('item'), true);
+            $this->line(sprintf(
+                'Cuenta %d · %s · APPLY:%d NO_CHANGE:%d RESTORE:%d REBASE:%d BLOCKED:%d ERROR:%d',
+                $rule->meli_account_id,
+                $rule->brandGroup?->name ?? 'Marca',
+                $summary['apply'], $summary['no_change'], $summary['restore'], $summary['rebase'], $summary['blocked'], $summary['failed'],
+            ));
+            if ($this->option('verbose')) {
+                foreach ($summary['errors'] as $error) {
+                    $this->warn(($error['meli_item_id'] ?? 'item').' ERROR '.$error['message']);
+                }
+            }
+        }
+
+        return self::SUCCESS;
+    }
+}

@@ -29,12 +29,18 @@ class MeliBeautyScheduledDiscountController extends Controller
             ? collect()
             : MeliBeautyScheduledDiscount::query()
                 ->where('meli_account_id', $accountId)
-                ->with(['brandGroup:id,name,slug', 'meliAccount:id,nickname'])
+                ->with(['brandGroup:id,name,slug', 'meliAccount:id,nickname', 'priceStates:id,meli_beauty_scheduled_discount_id,status,last_confirmed_remote_price,restored_at,failure_message'])
                 ->orderBy('brand_group_id')
                 ->get()
                 ->map(function (MeliBeautyScheduledDiscount $rule) use ($service): array {
                     $rule->setAttribute('eligible_items_count', $service->eligibleItemsQuery($rule)->count());
                     $rule->setAttribute('window_active', $service->isRuleActiveAt($rule));
+                    $rule->setAttribute('state_summary', [
+                        'active' => $rule->priceStates->where('status', 'active')->count(),
+                        'restore_pending' => $rule->priceStates->where('status', 'restore_pending')->count(),
+                        'failed' => $rule->priceStates->where('status', 'failed')->count(),
+                        'confirmed_prices' => $rule->priceStates->whereNotNull('last_confirmed_remote_price')->count(),
+                    ]);
 
                     return $rule->toArray();
                 });
@@ -73,6 +79,7 @@ class MeliBeautyScheduledDiscountController extends Controller
             'rules' => $rules,
             'brandOptions' => $brandOptions,
             'defaultTimezone' => config('meli_price_manager.beauty.default_timezone'),
+            'automationEnabled' => (bool) config('meli_price_manager.beauty_scheduled_prices.enabled', false),
         ]);
     }
 

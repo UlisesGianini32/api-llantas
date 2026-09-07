@@ -12,10 +12,11 @@ class MeliPriceChangeBatch extends Model
     use HasFactory;
 
     public const TYPES = ['individual', 'percentage', 'fixed', 'excel'];
+
     public const STATUSES = ['draft', 'preview', 'processing', 'completed', 'partial', 'failed', 'cancelled'];
 
     protected $fillable = [
-        'meli_account_id', 'brand_group_id', 'created_by', 'type', 'status', 'notes',
+        'meli_account_id', 'brand_group_id', 'created_by', 'type', 'source', 'meli_beauty_scheduled_discount_id', 'status', 'notes',
         'total_items', 'successful_items', 'failed_items',
     ];
 
@@ -32,6 +33,11 @@ class MeliPriceChangeBatch extends Model
     public function brandGroup(): BelongsTo
     {
         return $this->belongsTo(MeliBrandGroup::class, 'brand_group_id');
+    }
+
+    public function scheduledDiscount(): BelongsTo
+    {
+        return $this->belongsTo(MeliBeautyScheduledDiscount::class, 'meli_beauty_scheduled_discount_id');
     }
 
     public function creator(): BelongsTo

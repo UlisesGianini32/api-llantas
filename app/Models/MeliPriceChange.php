@@ -15,7 +15,7 @@ class MeliPriceChange extends Model
     protected $fillable = [
         'batch_id', 'price_manager_item_id', 'meli_item_id', 'old_price', 'new_price',
         'selling_fee', 'shipping_cost', 'tax_withholding', 'other_charges', 'estimated_net',
-        'status', 'error_message', 'changed_by', 'changed_at',
+        'status', 'source', 'scheduled_action', 'error_message', 'changed_by', 'changed_at',
     ];
 
     protected function casts(): array

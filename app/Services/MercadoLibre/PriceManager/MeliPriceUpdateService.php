@@ -3,12 +3,13 @@
 namespace App\Services\MercadoLibre\PriceManager;
 
 use App\Models\MeliAccount;
+use App\Models\MeliBeautyScheduledDiscount;
 use App\Models\MeliPriceChange;
 use App\Models\MeliPriceChangeBatch;
 use App\Models\MeliPriceManagerItem;
+use App\Services\MercadoLibre\LinkedPublications\MeliLinkedPublicationService;
 use App\Services\MercadoLibre\MeliAccountApiClient;
 use App\Services\MercadoLibre\MeliApiRequestException;
-use App\Services\MercadoLibre\LinkedPublications\MeliLinkedPublicationService;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Cache\Lock;
 use Illuminate\Support\Facades\Cache;
@@ -101,6 +102,86 @@ class MeliPriceUpdateService
         } finally {
             $this->releaseLock($lock);
         }
+    }
+
+    /**
+     * Executes one scheduled price write through the same safety barriers as manual Price Manager updates.
+     * The caller must persist scheduled state only after this method returns confirmed=true.
+     *
+     * @return array{result: string, old_price: float, new_price: float|null, change_id: int|null, batch_id: int|null, related_items: list<string>}
+     */
+    public function updateScheduledPrice(
+        MeliAccount $account,
+        MeliPriceManagerItem $item,
+        MeliBeautyScheduledDiscount $rule,
+        float $targetPrice,
+        string $action,
+        bool $dryRun = false,
+    ): array {
+        $lock = Cache::lock($this->lockKey($item), self::LOCK_SECONDS);
+        if (! $lock->get()) {
+            return ['result' => 'blocked', 'old_price' => (float) $item->current_price, 'new_price' => null, 'change_id' => null, 'batch_id' => null, 'related_items' => []];
+        }
+
+        try {
+            $this->assertWritable($account, $item);
+            $this->api->ensureFreshAccessToken($account);
+            $this->assertNoPricingAutomation($account, $item);
+            $relations = $this->linkedPublications->refreshPriceRelations($account, $item);
+            $remoteOldPrice = $this->remoteStandardPrice($account, $item);
+            $targetPrice = round($targetPrice, 2);
+            $relatedItems = collect((array) ($relations['items'] ?? []))
+                ->pluck('meli_item_id')->filter()->map(fn (mixed $id): string => (string) $id)->values()->all();
+
+            if ($this->samePrice($remoteOldPrice, $targetPrice)) {
+                return ['result' => 'no_change', 'old_price' => $remoteOldPrice, 'new_price' => $targetPrice, 'change_id' => null, 'batch_id' => null, 'related_items' => $relatedItems];
+            }
+
+            if ($dryRun) {
+                return ['result' => 'apply', 'old_price' => $remoteOldPrice, 'new_price' => $targetPrice, 'change_id' => null, 'batch_id' => null, 'related_items' => $relatedItems];
+            }
+
+            [$batch, $change] = $this->createScheduledAudit($account, $item, $rule, $remoteOldPrice, $targetPrice, $action);
+            try {
+                $this->api->request($account, 'put', '/items/'.rawurlencode((string) $item->meli_item_id), ['price' => $targetPrice]);
+                $confirmedPrice = $this->remoteStandardPrice($account, $item);
+                if (! $this->samePrice($confirmedPrice, $targetPrice)) {
+                    throw new MeliPriceUpdateException('El precio programado no coincidió con la confirmación remota.', 'remote_price_not_updated', 502);
+                }
+                foreach (array_values(array_filter($relatedItems, fn (string $relatedId): bool => $relatedId !== (string) $item->meli_item_id)) as $relatedId) {
+                    $relatedItem = MeliPriceManagerItem::query()
+                        ->where('meli_account_id', $account->id)
+                        ->where('meli_item_id', $relatedId)
+                        ->first();
+                    if ($relatedItem !== null && ! $this->samePrice($this->remoteStandardPrice($account, $relatedItem), $targetPrice)) {
+                        throw new MeliPriceUpdateException('Una publicación vinculada no confirmó el precio programado.', 'linked_remote_price_not_updated', 502);
+                    }
+                }
+                DB::transaction(function () use ($item, $confirmedPrice, $change, $batch): void {
+                    $item->forceFill(['current_price' => $confirmedPrice, 'last_synced_at' => now()])->save();
+                    $change->forceFill(['status' => 'success', 'changed_at' => now()])->save();
+                    $batch->forceFill(['status' => 'completed', 'successful_items' => 1])->save();
+                });
+
+                return ['result' => 'success', 'old_price' => $remoteOldPrice, 'new_price' => $confirmedPrice, 'change_id' => (int) $change->id, 'batch_id' => (int) $batch->id, 'related_items' => $relatedItems];
+            } catch (Throwable $exception) {
+                $message = $this->api->sanitizeMessage($exception->getMessage());
+                DB::transaction(function () use ($change, $batch, $message): void {
+                    $change->forceFill(['status' => 'failed', 'error_message' => $message, 'changed_at' => now()])->save();
+                    $batch->forceFill(['status' => 'failed', 'failed_items' => 1])->save();
+                });
+                throw $exception;
+            }
+        } finally {
+            $this->releaseLock($lock);
+        }
+    }
+
+    public function scheduledRemoteStandardPrice(MeliAccount $account, MeliPriceManagerItem $item): float
+    {
+        $this->api->ensureFreshAccessToken($account);
+
+        return $this->remoteStandardPrice($account, $item);
     }
 
     /**
@@ -686,6 +767,41 @@ class MeliPriceUpdateService
                 'error_message' => null,
                 'changed_by' => $userId,
                 'changed_at' => null,
+            ]);
+
+            return [$batch, $change];
+        });
+    }
+
+    /** @return array{0: MeliPriceChangeBatch, 1: MeliPriceChange} */
+    private function createScheduledAudit(
+        MeliAccount $account,
+        MeliPriceManagerItem $item,
+        MeliBeautyScheduledDiscount $rule,
+        float $oldPrice,
+        float $newPrice,
+        string $action,
+    ): array {
+        return DB::transaction(function () use ($account, $item, $rule, $oldPrice, $newPrice, $action): array {
+            $batch = MeliPriceChangeBatch::query()->create([
+                'meli_account_id' => $account->id,
+                'brand_group_id' => $item->brand_group_id,
+                'meli_beauty_scheduled_discount_id' => $rule->id,
+                'type' => 'individual',
+                'source' => 'scheduled_beauty',
+                'status' => 'processing',
+                'notes' => 'Cambio programado Beauty',
+                'total_items' => 1,
+            ]);
+            $change = MeliPriceChange::query()->create([
+                'batch_id' => $batch->id,
+                'price_manager_item_id' => $item->id,
+                'meli_item_id' => $item->meli_item_id,
+                'old_price' => $oldPrice,
+                'new_price' => $newPrice,
+                'status' => 'processing',
+                'source' => 'scheduled_beauty',
+                'scheduled_action' => $action,
             ]);
 
             return [$batch, $change];
