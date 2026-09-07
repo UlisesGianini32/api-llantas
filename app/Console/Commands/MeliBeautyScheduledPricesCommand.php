@@ -10,7 +10,7 @@ use Illuminate\Console\Command;
 class MeliBeautyScheduledPricesCommand extends Command
 {
     protected $signature = 'meli:beauty-scheduled-prices
-        {--dry-run : Simular sin PUT ni cambios locales}
+        {--dry-run : Simular sin escrituras remotas ni cambios locales}
         {--apply : Encolar cambios reales explícitamente}
         {--account= : ID interno de meli_accounts}
         {--discount= : ID de regla}
@@ -29,6 +29,11 @@ class MeliBeautyScheduledPricesCommand extends Command
         }
         if ($apply && ! config('meli_price_manager.beauty_scheduled_prices.enabled', false)) {
             $this->error('La automatización está deshabilitada por MELI_BEAUTY_SCHEDULED_PRICES_ENABLED.');
+
+            return self::FAILURE;
+        }
+        if ($apply && ! config('meli_price_manager.beauty_scheduled_prices.promotional_prices_enabled', false)) {
+            $this->error('Las promociones están deshabilitadas por MELI_BEAUTY_PROMOTIONAL_PRICES_ENABLED.');
 
             return self::FAILURE;
         }
@@ -70,12 +75,18 @@ class MeliBeautyScheduledPricesCommand extends Command
             if ($this->option('verbose')) {
                 foreach ($summary['details'] as $detail) {
                     $this->line(sprintf(
-                        '%s brand=%s base=%s discount=%s%% target=%s action=%s',
+                        '%s brand=%s standard_base=%s promotion_original=%s discount=%s%% target=%s allowed=%s..%s suggested=%s strategy=%s action=%s reason=%s',
                         $detail['meli_item_id'], $detail['brand'],
-                        $detail['base'] === null ? 'n/a' : number_format($detail['base'], 2, '.', ''),
+                        $detail['standard_base'] === null ? 'n/a' : number_format($detail['standard_base'], 2, '.', ''),
+                        $detail['promotion_original'] === null ? 'n/a' : number_format($detail['promotion_original'], 2, '.', ''),
                         number_format($detail['discount'], 2, '.', ''),
                         $detail['target'] === null ? 'n/a' : number_format($detail['target'], 2, '.', ''),
+                        $detail['allowed_min'] === null ? 'n/a' : number_format($detail['allowed_min'], 2, '.', ''),
+                        $detail['allowed_max'] === null ? 'n/a' : number_format($detail['allowed_max'], 2, '.', ''),
+                        $detail['suggested'] === null ? 'n/a' : number_format($detail['suggested'], 2, '.', ''),
+                        $detail['strategy'],
                         $detail['action'],
+                        $detail['reason'] === '' ? 'none' : $detail['reason'],
                     ));
                 }
                 foreach ($summary['errors'] as $error) {

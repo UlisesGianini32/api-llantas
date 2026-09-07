@@ -138,7 +138,6 @@ class MeliBeautyScheduledPriceService
     public function processRule(MeliBeautyScheduledDiscount $rule, ?string $meliItemId = null, bool $dryRun = false): array
     {
         $summary = ['processed' => 0, 'apply' => 0, 'restore' => 0, 'rebase' => 0, 'no_change' => 0, 'success' => 0, 'blocked' => 0, 'failed' => 0, 'errors' => [], 'details' => []];
-        $handledRelatedIds = [];
         $items = $this->eligibleItemsQuery($rule)
             ->with('scheduledPriceState')
             ->orderBy('id')
@@ -162,53 +161,93 @@ class MeliBeautyScheduledPriceService
 
         foreach ($items as $item) {
             $summary['processed']++;
-            if (in_array((string) $item->meli_item_id, $handledRelatedIds, true)) {
-                $summary['no_change']++;
-                $summary['details'][] = $this->detail($rule, $item, null, 'no_change', null);
-
-                continue;
-            }
             try {
                 $state = $item->scheduledPriceState;
                 $inWindow = $this->isRuleActiveAt($rule);
-                if ((! $rule->active || ! $inWindow) && ($state === null || $state->status === MeliScheduledPriceState::STATUS_RESTORED)) {
+                $shouldBeActive = $rule->active && $inWindow;
+                if (! $shouldBeActive && ($state === null || $state->status === MeliScheduledPriceState::STATUS_RESTORED)) {
                     $summary['no_change']++;
-                    $summary['details'][] = $this->detail($rule, $item, null, 'no_change', null);
+                    $summary['details'][] = $this->detail($rule, $item, null, 'no_change', null, []);
 
                     continue;
                 }
 
-                $remotePrice = $this->priceUpdates->scheduledRemoteStandardPrice($rule->meliAccount, $item);
-                $transition = $this->determineTransition($rule, $state, $rule->active && $inWindow, $remotePrice);
-                $summary[$transition['action']]++;
-                $summary['details'][] = $this->detail($rule, $item, $remotePrice, $transition['action'], $transition['target_price']);
-                if ($transition['action'] === 'no_change') {
-                    if (! $dryRun && $state !== null) {
-                        $state->forceFill(['last_observed_remote_price' => $remotePrice])->save();
+                $snapshot = $this->priceUpdates->scheduledPromotionSnapshot($rule->meliAccount, $item, ! $shouldBeActive);
+                $basePrice = (float) $snapshot['standard_base'];
+                if ($shouldBeActive && $state !== null && $state->status !== MeliScheduledPriceState::STATUS_RESTORED) {
+                    $basePrice = (float) $state->base_price;
+                }
+                $targetPrice = $shouldBeActive
+                    ? $this->calculatePromotionalPrice($basePrice, (float) $rule->discount_percentage)
+                    : $basePrice;
+
+                if ($shouldBeActive) {
+                    if ($state !== null
+                        && $state->status === MeliScheduledPriceState::STATUS_ACTIVE
+                        && $this->isConfirmedActivePromotion($snapshot, $basePrice, $targetPrice)) {
+                        $summary['no_change']++;
+                        $summary['details'][] = $this->detail($rule, $item, $snapshot, 'no_change', $targetPrice, []);
+                        if (! $dryRun) {
+                            $state->forceFill(['last_observed_remote_price' => $snapshot['sale_amount']])->save();
+                        }
+
+                        continue;
                     }
 
+                    $reasons = $this->priceUpdates->promotionEligibilityReasons($snapshot, $basePrice, $targetPrice);
+                    if (in_array($snapshot['promotion_status'], ['started', 'active'], true)) {
+                        $reasons[] = 'price_discount_already_active';
+                    }
+                    $reasons = array_values(array_unique($reasons));
+                    if ($reasons !== []) {
+                        $summary['blocked']++;
+                        $summary['details'][] = $this->detail($rule, $item, $snapshot, 'blocked', $targetPrice, $reasons);
+
+                        continue;
+                    }
+
+                    $action = $state !== null && $state->status === MeliScheduledPriceState::STATUS_ACTIVE ? 'rebase' : 'apply';
+                } else {
+                    $action = 'restore';
+                }
+
+                $summary[$action]++;
+                $summary['details'][] = $this->detail($rule, $item, $snapshot, $action, $targetPrice, []);
+                if ($dryRun) {
                     continue;
                 }
 
-                $result = $this->priceUpdates->updateScheduledPrice(
+                $transition = $this->transition(
+                    $action,
+                    $action === 'restore' ? MeliScheduledPriceState::STATUS_RESTORE_PENDING : MeliScheduledPriceState::STATUS_ACTIVE,
+                    $basePrice,
+                    $shouldBeActive ? $targetPrice : null,
+                    $targetPrice,
+                );
+                $result = $this->priceUpdates->updateScheduledPromotion(
                     $rule->meliAccount,
                     $item,
                     $rule,
-                    (float) $transition['target_price'],
-                    (string) $transition['action'],
-                    $dryRun,
+                    $basePrice,
+                    $targetPrice,
+                    $action,
                 );
                 if (in_array($result['result'], ['success', 'blocked', 'failed'], true)) {
                     $summary[$result['result']]++;
-                    $handledRelatedIds = array_values(array_unique(array_merge($handledRelatedIds, $result['related_items'])));
                 }
-                if (! $dryRun && $result['result'] === 'success') {
+                if ($result['result'] === 'success') {
                     $this->persistConfirmedState($item, $rule, $transition, (float) $result['new_price']);
-                    $this->persistRelatedConfirmedStates($rule, $item, $result['related_items'], $transition, (float) $result['new_price']);
                 }
             } catch (Throwable $exception) {
                 $blocked = $exception instanceof MeliPriceUpdateException
-                    && in_array($exception->errorCode(), ['pricing_automation_active', 'pricing_automation_present', 'excluded_catalog_item', 'item_status_not_writable'], true);
+                    && in_array($exception->errorCode(), [
+                        'pricing_automation_active', 'pricing_automation_present', 'excluded_catalog_item',
+                        'item_status_not_writable', 'promotional_prices_feature_disabled',
+                        'promotion_base_mismatch', 'target_outside_promotion_range',
+                        'price_discount_not_candidate', 'promotion_base_unavailable',
+                        'promotion_range_unavailable', 'price_discount_already_active',
+                        'concurrent_standard_price_change',
+                    ], true);
                 $summary[$blocked ? 'blocked' : 'failed']++;
                 $summary['errors'][] = ['meli_item_id' => (string) $item->meli_item_id, 'message' => $exception->getMessage()];
                 if (! $dryRun && ! $blocked) {
@@ -245,19 +284,6 @@ class MeliBeautyScheduledPriceService
         ])->save();
     }
 
-    /** @param list<string> $relatedIds */
-    private function persistRelatedConfirmedStates(MeliBeautyScheduledDiscount $rule, MeliPriceManagerItem $leader, array $relatedIds, array $transition, float $confirmedPrice): void
-    {
-        $relatedItems = $this->eligibleItemsQuery($rule)
-            ->whereIn('meli_item_id', $relatedIds)
-            ->where('id', '!=', $leader->id)
-            ->get();
-        foreach ($relatedItems as $relatedItem) {
-            $relatedItem->forceFill(['current_price' => $confirmedPrice, 'last_synced_at' => now()])->save();
-            $this->persistConfirmedState($relatedItem, $rule, $transition, $confirmedPrice);
-        }
-    }
-
     private function timePart(mixed $value): string
     {
         return substr(trim((string) $value), 0, 8);
@@ -289,16 +315,51 @@ class MeliBeautyScheduledPriceService
         return (int) round($first * 100) === (int) round($second * 100);
     }
 
-    /** @return array{meli_item_id:string,brand:string,base:float|null,discount:float,target:float|null,action:string} */
-    private function detail(MeliBeautyScheduledDiscount $rule, MeliPriceManagerItem $item, ?float $base, string $action, ?float $target): array
+    /** @param array<string, mixed>|null $snapshot
+     *  @param list<string> $reasons
+     *  @return array<string, mixed>
+     */
+    private function detail(
+        MeliBeautyScheduledDiscount $rule,
+        MeliPriceManagerItem $item,
+        ?array $snapshot,
+        string $action,
+        ?float $target,
+        array $reasons,
+    ): array
     {
         return [
             'meli_item_id' => (string) $item->meli_item_id,
             'brand' => (string) ($rule->brandGroup?->name ?? 'Marca'),
-            'base' => $base,
+            'standard_base' => $snapshot['standard_base'] ?? null,
+            'promotion_original' => $snapshot['promotion_original'] ?? null,
+            'configured_discount' => (float) $rule->discount_percentage,
+            'desired_target' => $target,
+            'allowed_min' => $snapshot['allowed_min'] ?? null,
+            'allowed_max' => $snapshot['allowed_max'] ?? null,
+            'suggested' => $snapshot['suggested'] ?? null,
+            'strategy' => 'price_discount',
+            'reason' => implode(',', $reasons),
+            'reasons' => $reasons,
+            // Backwards-compatible aliases for existing console consumers.
+            'base' => $snapshot['standard_base'] ?? null,
             'discount' => (float) $rule->discount_percentage,
             'target' => $target,
             'action' => $action,
         ];
+    }
+
+    /** @param array<string, mixed> $snapshot */
+    private function isConfirmedActivePromotion(array $snapshot, float $basePrice, float $targetPrice): bool
+    {
+        return in_array($snapshot['promotion_status'], ['started', 'active'], true)
+            && is_numeric($snapshot['promotion_original'])
+            && is_numeric($snapshot['promotion_price'])
+            && is_numeric($snapshot['sale_amount'])
+            && is_numeric($snapshot['sale_regular_amount'])
+            && $this->samePrice((float) $snapshot['promotion_original'], $basePrice)
+            && $this->samePrice((float) $snapshot['promotion_price'], $targetPrice)
+            && $this->samePrice((float) $snapshot['sale_amount'], $targetPrice)
+            && $this->samePrice((float) $snapshot['sale_regular_amount'], $basePrice);
     }
 }

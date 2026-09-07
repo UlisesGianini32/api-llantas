@@ -79,8 +79,11 @@ class MeliBeautyScheduledDiscountController extends Controller
             'rules' => $rules,
             'brandOptions' => $brandOptions,
             'defaultTimezone' => config('meli_price_manager.beauty.default_timezone'),
-            'automationEnabled' => (bool) config('meli_price_manager.beauty_scheduled_prices.enabled', false),
+            'automationEnabled' => (bool) config('meli_price_manager.beauty_scheduled_prices.enabled', false)
+                && (bool) config('meli_price_manager.beauty_scheduled_prices.promotional_prices_enabled', false),
+            'promotionalPricesEnabled' => (bool) config('meli_price_manager.beauty_scheduled_prices.promotional_prices_enabled', false),
             'schedulerEnabled' => (bool) config('meli_price_manager.beauty_scheduled_prices.enabled', false)
+                && (bool) config('meli_price_manager.beauty_scheduled_prices.promotional_prices_enabled', false)
                 && (bool) config('meli_price_manager.beauty_scheduled_prices.scheduler_enabled', false),
         ]);
     }

@@ -25,6 +25,7 @@ class MeliPriceUpdateService
         private readonly MeliPriceSimulationTokenService $tokens,
         private readonly MeliLinkedPublicationService $linkedPublications,
         private readonly MeliEstimatedReceivableSnapshotService $receivableSnapshots,
+        private readonly MeliPriceDiscountPromotionService $priceDiscountPromotions,
     ) {}
 
     /** @return array<string, mixed> */
@@ -118,6 +119,12 @@ class MeliPriceUpdateService
         string $action,
         bool $dryRun = false,
     ): array {
+        throw new MeliPriceUpdateException(
+            'El cambio simple de precio está deshabilitado para descuentos programados; usa PRICE_DISCOUNT.',
+            'scheduled_standard_price_strategy_disabled',
+            409,
+        );
+
         $lock = Cache::lock($this->lockKey($item), self::LOCK_SECONDS);
         if (! $lock->get()) {
             return ['result' => 'blocked', 'old_price' => (float) $item->current_price, 'new_price' => null, 'change_id' => null, 'batch_id' => null, 'related_items' => []];
@@ -182,6 +189,132 @@ class MeliPriceUpdateService
         $this->api->ensureFreshAccessToken($account);
 
         return $this->remoteStandardPrice($account, $item);
+    }
+
+    /** @return array<string, mixed> */
+    public function scheduledPromotionSnapshot(
+        MeliAccount $account,
+        MeliPriceManagerItem $item,
+        bool $forRestore = false,
+    ): array {
+        $this->assertWritable($account, $item);
+        $this->api->ensureFreshAccessToken($account);
+        if (! $forRestore) {
+            $this->assertNoPricingAutomation($account, $item);
+        }
+
+        return $this->priceDiscountPromotions->snapshot($account, $item);
+    }
+
+    /** @param array<string, mixed> $snapshot
+     *  @return list<string>
+     */
+    public function promotionEligibilityReasons(array $snapshot, float $basePrice, float $targetPrice): array
+    {
+        return $this->priceDiscountPromotions->eligibilityReasons($snapshot, $basePrice, $targetPrice);
+    }
+
+    /**
+     * Creates or removes an official PRICE_DISCOUNT. It never changes the standard item price.
+     * The caller persists scheduled state only after this method returns success.
+     *
+     * @return array{result: string, old_price: float, new_price: float|null, change_id: int|null, batch_id: int|null, related_items: list<string>}
+     */
+    public function updateScheduledPromotion(
+        MeliAccount $account,
+        MeliPriceManagerItem $item,
+        MeliBeautyScheduledDiscount $rule,
+        float $basePrice,
+        float $targetPrice,
+        string $action,
+    ): array {
+        $lock = Cache::lock($this->lockKey($item), self::LOCK_SECONDS);
+        if (! $lock->get()) {
+            return ['result' => 'blocked', 'old_price' => (float) $item->current_price, 'new_price' => null, 'change_id' => null, 'batch_id' => null, 'related_items' => []];
+        }
+
+        try {
+            if (! config('meli_price_manager.beauty_scheduled_prices.promotional_prices_enabled', false)) {
+                throw new MeliPriceUpdateException(
+                    'La escritura de promociones Beauty está deshabilitada.',
+                    'promotional_prices_feature_disabled',
+                    409,
+                );
+            }
+
+            $this->assertWritable($account, $item);
+            $this->api->ensureFreshAccessToken($account);
+            $basePrice = round($basePrice, 2);
+            $targetPrice = round($targetPrice, 2);
+            if (! in_array($action, ['apply', 'rebase', 'restore'], true)) {
+                throw new MeliPriceUpdateException('Acción programada no válida.', 'invalid_scheduled_action');
+            }
+            $forRestore = $action === 'restore';
+            if (! $forRestore) {
+                $this->assertNoPricingAutomation($account, $item);
+            }
+            $before = $this->priceDiscountPromotions->snapshot($account, $item);
+            if (! $this->samePrice((float) $before['standard_base'], $basePrice)) {
+                throw new MeliPriceUpdateException(
+                    'El precio standard cambió después de calcular la promoción.',
+                    'concurrent_standard_price_change',
+                    409,
+                );
+            }
+
+            if ($forRestore
+                && ! in_array($before['promotion_status'], ['started', 'active'], true)
+                && $before['promotion_price'] === null
+                && is_numeric($before['sale_amount'])
+                && $this->samePrice((float) $before['sale_amount'], $basePrice)) {
+                return ['result' => 'success', 'old_price' => (float) $before['sale_amount'], 'new_price' => $basePrice, 'change_id' => null, 'batch_id' => null, 'related_items' => []];
+            }
+
+            if (! $forRestore) {
+                $reasons = $this->priceDiscountPromotions->eligibilityReasons($before, $basePrice, $targetPrice);
+                if ($reasons !== []) {
+                    throw new MeliPriceUpdateException(
+                        'La promoción dejó de ser elegible: '.implode(',', $reasons),
+                        $reasons[0],
+                        409,
+                    );
+                }
+                if (in_array($before['promotion_status'], ['started', 'active'], true)) {
+                    throw new MeliPriceUpdateException(
+                        'Ya existe un PRICE_DISCOUNT activo que no coincide con el estado confirmado local.',
+                        'price_discount_already_active',
+                        409,
+                    );
+                }
+            }
+
+            $oldPrice = is_numeric($before['sale_amount']) ? (float) $before['sale_amount'] : $basePrice;
+            $newPrice = $forRestore ? $basePrice : $targetPrice;
+            [$batch, $change] = $this->createScheduledAudit($account, $item, $rule, $oldPrice, $newPrice, $action);
+            try {
+                $confirmed = $forRestore
+                    ? $this->priceDiscountPromotions->remove($account, $item)
+                    : $this->priceDiscountPromotions->create($account, $item, $rule, $basePrice, $targetPrice);
+                $confirmedPrice = $forRestore ? (float) $confirmed['standard_base'] : (float) $confirmed['sale_amount'];
+                DB::transaction(function () use ($item, $basePrice, $change, $batch): void {
+                    // PRICE_DISCOUNT does not replace the standard item price.
+                    $item->forceFill(['current_price' => $basePrice, 'last_synced_at' => now()])->save();
+                    $change->forceFill(['status' => 'success', 'changed_at' => now()])->save();
+                    $batch->forceFill(['status' => 'completed', 'successful_items' => 1])->save();
+                });
+
+                return ['result' => 'success', 'old_price' => $oldPrice, 'new_price' => $confirmedPrice, 'change_id' => (int) $change->id, 'batch_id' => (int) $batch->id, 'related_items' => []];
+            } catch (Throwable $exception) {
+                $message = $this->api->sanitizeMessage($exception->getMessage());
+                DB::transaction(function () use ($change, $batch, $message): void {
+                    $change->forceFill(['status' => 'failed', 'error_message' => $message, 'changed_at' => now()])->save();
+                    $batch->forceFill(['status' => 'failed', 'failed_items' => 1])->save();
+                });
+                throw $exception;
+            }
+        } finally {
+            $this->releaseLock($lock);
+        }
     }
 
     /**

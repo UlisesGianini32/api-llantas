@@ -10,6 +10,7 @@ class MeliBeautyScheduledPriceSchedule
     public static function enabled(): bool
     {
         return (bool) config('meli_price_manager.beauty_scheduled_prices.enabled', false)
+            && (bool) config('meli_price_manager.beauty_scheduled_prices.promotional_prices_enabled', false)
             && (bool) config('meli_price_manager.beauty_scheduled_prices.scheduler_enabled', false);
     }
 

@@ -39,7 +39,8 @@ class ProcessMeliBeautyScheduledPriceJob implements ShouldBeUnique, ShouldQueue
 
     public function handle(MeliBeautyScheduledPriceService $service): void
     {
-        if (! config('meli_price_manager.beauty_scheduled_prices.enabled', false)) {
+        if (! config('meli_price_manager.beauty_scheduled_prices.enabled', false)
+            || ! config('meli_price_manager.beauty_scheduled_prices.promotional_prices_enabled', false)) {
             Log::info('[MeliBeautyScheduledPrice] feature disabled', ['discount_id' => $this->discountId]);
 
             return;
