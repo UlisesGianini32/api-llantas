@@ -14,7 +14,8 @@ class MeliBeautyScheduledPricesCommand extends Command
         {--apply : Encolar cambios reales explícitamente}
         {--account= : ID interno de meli_accounts}
         {--discount= : ID de regla}
-        {--item= : MLM específico}';
+        {--item= : MLM específico}
+        {--all : Autorizar explícitamente el procesamiento global}';
 
     protected $description = 'Evalúa descuentos programados Beauty de Meli Price Manager';
 
@@ -30,6 +31,15 @@ class MeliBeautyScheduledPricesCommand extends Command
             $this->error('La automatización está deshabilitada por MELI_BEAUTY_SCHEDULED_PRICES_ENABLED.');
 
             return self::FAILURE;
+        }
+        if ($apply
+            && ! $this->option('all')
+            && ! $this->option('item')
+            && ! $this->option('discount')
+            && ! $this->option('account')) {
+            $this->error('--apply requiere --item, --discount, --account o la intención global explícita --all.');
+
+            return self::INVALID;
         }
 
         $rules = MeliBeautyScheduledDiscount::query()->with('meliAccount')
@@ -58,6 +68,16 @@ class MeliBeautyScheduledPricesCommand extends Command
                 $summary['apply'], $summary['no_change'], $summary['restore'], $summary['rebase'], $summary['blocked'], $summary['failed'],
             ));
             if ($this->option('verbose')) {
+                foreach ($summary['details'] as $detail) {
+                    $this->line(sprintf(
+                        '%s brand=%s base=%s discount=%s%% target=%s action=%s',
+                        $detail['meli_item_id'], $detail['brand'],
+                        $detail['base'] === null ? 'n/a' : number_format($detail['base'], 2, '.', ''),
+                        number_format($detail['discount'], 2, '.', ''),
+                        $detail['target'] === null ? 'n/a' : number_format($detail['target'], 2, '.', ''),
+                        $detail['action'],
+                    ));
+                }
                 foreach ($summary['errors'] as $error) {
                     $this->warn(($error['meli_item_id'] ?? 'item').' ERROR '.$error['message']);
                 }

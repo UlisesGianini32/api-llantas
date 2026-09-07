@@ -4,6 +4,7 @@ return [
     'stale_after_hours' => 24,
     'beauty_scheduled_prices' => [
         'enabled' => env('MELI_BEAUTY_SCHEDULED_PRICES_ENABLED', false),
+        'scheduler_enabled' => env('MELI_BEAUTY_SCHEDULED_PRICES_SCHEDULER_ENABLED', false),
         'default_timezone' => 'America/Hermosillo',
     ],
     'focused_catalog' => [

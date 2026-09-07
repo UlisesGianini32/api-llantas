@@ -1,6 +1,7 @@
 <?php
 
 use App\Services\SyscomApiService;
+use App\Support\MeliBeautyScheduledPriceSchedule;
 use App\Support\SyscomCarritoPagoHelper;
 use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Facades\Artisan;
@@ -152,9 +153,4 @@ Schedule::command('system:heartbeat')
     ->everyMinute()
     ->withoutOverlapping();
 
-if (config('meli_price_manager.beauty_scheduled_prices.enabled', false)) {
-    Schedule::command('meli:beauty-scheduled-prices --apply')
-        ->everyMinute()
-        ->withoutOverlapping()
-        ->runInBackground();
-}
+MeliBeautyScheduledPriceSchedule::register();

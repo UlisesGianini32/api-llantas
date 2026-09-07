@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Jobs\ProcessMeliBeautyScheduledPriceJob;
 use App\Models\MeliAccount;
 use App\Models\MeliBeautyScheduledDiscount;
 use App\Models\MeliBrandGroup;
@@ -15,6 +16,7 @@ use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Schema;
 use Inertia\Testing\AssertableInertia as Assert;
 use Tests\TestCase;
@@ -186,6 +188,8 @@ class MeliBeautyScheduledPriceEligibilityTest extends TestCase
             ->assertInertia(fn (Assert $page) => $page
                 ->component('MeliPriceManager/ScheduledDiscounts')
                 ->has('brandOptions', 1)
+                ->where('automationEnabled', false)
+                ->where('schedulerEnabled', false)
                 ->where('brandOptions.0.id', $this->brand->id));
 
         $operations = User::factory()->create(['role' => User::ROLE_OPERATIONS]);
@@ -262,6 +266,10 @@ class MeliBeautyScheduledPriceEligibilityTest extends TestCase
         $dryRun = $service->processRule($rule->fresh(), null, true);
         $this->assertSame(1, $dryRun['apply']);
         $this->assertSame(0, $dryRun['failed']);
+        $this->assertSame('MLM-DRY-RUN', $dryRun['details'][0]['meli_item_id']);
+        $this->assertSame(2000.0, $dryRun['details'][0]['base']);
+        $this->assertSame(1800.0, $dryRun['details'][0]['target']);
+        $this->assertSame('apply', $dryRun['details'][0]['action']);
         Http::assertNotSent(fn (Request $request): bool => $request->method() === 'PUT');
         $this->assertDatabaseCount('meli_scheduled_price_states', 0);
 
@@ -337,6 +345,100 @@ class MeliBeautyScheduledPriceEligibilityTest extends TestCase
         $this->assertSame(1, $summary['blocked']);
         $this->assertDatabaseCount('meli_scheduled_price_states', 0);
         Http::assertNotSent(fn (Request $request): bool => strtolower($request->method()) === 'put');
+    }
+
+    public function test_manual_apply_requires_explicit_scope_when_scheduler_is_disabled(): void
+    {
+        config()->set('meli_price_manager.beauty_scheduled_prices.enabled', true);
+        config()->set('meli_price_manager.beauty_scheduled_prices.scheduler_enabled', false);
+        Queue::fake();
+
+        $this->assertSame(2, Artisan::call('meli:beauty-scheduled-prices', ['--apply' => true]));
+        Queue::assertNothingPushed();
+    }
+
+    public function test_manual_item_apply_is_allowed_when_scheduler_is_disabled(): void
+    {
+        config()->set('meli_price_manager.beauty_scheduled_prices.enabled', true);
+        config()->set('meli_price_manager.beauty_scheduled_prices.scheduler_enabled', false);
+        Queue::fake();
+        $rule = MeliBeautyScheduledDiscount::query()->create($this->rule()->getAttributes());
+
+        $this->assertSame(0, Artisan::call('meli:beauty-scheduled-prices', [
+            '--apply' => true,
+            '--item' => 'MLM-CONTROLLED',
+            '--discount' => $rule->id,
+        ]));
+        Queue::assertPushed(ProcessMeliBeautyScheduledPriceJob::class, fn ($job): bool => $job->discountId === $rule->id && $job->meliItemId === 'MLM-CONTROLLED');
+    }
+
+    public function test_dry_run_works_while_both_flags_are_disabled(): void
+    {
+        config()->set('meli_price_manager.beauty_scheduled_prices.enabled', false);
+        config()->set('meli_price_manager.beauty_scheduled_prices.scheduler_enabled', false);
+        MeliBeautyScheduledDiscount::query()->create($this->rule()->getAttributes());
+        Queue::fake();
+        Http::fake();
+
+        $this->assertSame(0, Artisan::call('meli:beauty-scheduled-prices', ['--dry-run' => true]));
+        Queue::assertNothingPushed();
+        Http::assertNothingSent();
+    }
+
+    public function test_global_apply_always_requires_explicit_all_even_when_scheduler_is_enabled(): void
+    {
+        config()->set('meli_price_manager.beauty_scheduled_prices.enabled', true);
+        config()->set('meli_price_manager.beauty_scheduled_prices.scheduler_enabled', true);
+        Queue::fake();
+
+        $this->assertSame(2, Artisan::call('meli:beauty-scheduled-prices', ['--apply' => true]));
+        Queue::assertNothingPushed();
+    }
+
+    public function test_explicit_all_queues_global_apply(): void
+    {
+        config()->set('meli_price_manager.beauty_scheduled_prices.enabled', true);
+        config()->set('meli_price_manager.beauty_scheduled_prices.scheduler_enabled', false);
+        Queue::fake();
+        $rule = MeliBeautyScheduledDiscount::query()->create($this->rule()->getAttributes());
+
+        $this->assertSame(0, Artisan::call('meli:beauty-scheduled-prices', ['--apply' => true, '--all' => true]));
+        Queue::assertPushed(ProcessMeliBeautyScheduledPriceJob::class, fn ($job): bool => $job->discountId === $rule->id && $job->meliItemId === null);
+    }
+
+    public function test_job_never_processes_when_engine_is_disabled(): void
+    {
+        config()->set('meli_price_manager.beauty_scheduled_prices.enabled', false);
+        config()->set('meli_price_manager.beauty_scheduled_prices.scheduler_enabled', true);
+        $service = $this->mock(MeliBeautyScheduledPriceService::class);
+        $service->shouldNotReceive('processRule');
+
+        (new ProcessMeliBeautyScheduledPriceJob(999))->handle($service);
+        $this->addToAssertionCount(1);
+    }
+
+    public function test_job_processes_with_engine_enabled_and_scheduler_disabled(): void
+    {
+        config()->set('meli_price_manager.beauty_scheduled_prices.enabled', true);
+        config()->set('meli_price_manager.beauty_scheduled_prices.scheduler_enabled', false);
+        $rule = MeliBeautyScheduledDiscount::query()->create($this->rule()->getAttributes());
+        $service = $this->mock(MeliBeautyScheduledPriceService::class);
+        $service->shouldReceive('processRule')->once()->withArgs(fn ($actualRule, $item): bool => $actualRule->is($rule) && $item === 'MLM-JOB')->andReturn(['processed' => 0]);
+
+        (new ProcessMeliBeautyScheduledPriceJob($rule->id, 'MLM-JOB'))->handle($service);
+    }
+
+    public function test_ui_exposes_effective_engine_and_scheduler_states(): void
+    {
+        config()->set('meli_price_manager.beauty_scheduled_prices.enabled', true);
+        config()->set('meli_price_manager.beauty_scheduled_prices.scheduler_enabled', false);
+        $this->actingAs($this->user)->get(route('meli-price-manager.scheduled-discounts.index'))
+            ->assertInertia(fn (Assert $page) => $page->where('automationEnabled', true)->where('schedulerEnabled', false));
+
+        config()->set('meli_price_manager.beauty_scheduled_prices.enabled', false);
+        config()->set('meli_price_manager.beauty_scheduled_prices.scheduler_enabled', true);
+        $this->actingAs($this->user)->get(route('meli-price-manager.scheduled-discounts.index'))
+            ->assertInertia(fn (Assert $page) => $page->where('automationEnabled', false)->where('schedulerEnabled', false));
     }
 
     public function test_manual_price_change_is_rebased_on_next_cycle_and_restored_to_2300(): void

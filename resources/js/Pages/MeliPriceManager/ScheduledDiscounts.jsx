@@ -77,6 +77,7 @@ export default function ScheduledDiscounts({
     brandOptions = [],
     defaultTimezone = 'America/Hermosillo',
     automationEnabled = false,
+    schedulerEnabled = false,
 }) {
     const [editor, setEditor] = useState(null)
     const [examplePrice, setExamplePrice] = useState('2000')
@@ -173,8 +174,18 @@ export default function ScheduledDiscounts({
                 </header>
 
                 <section className={`rounded-2xl border p-4 ${automationEnabled ? 'border-emerald-200 bg-emerald-50 dark:border-emerald-500/20 dark:bg-emerald-500/5' : 'border-sky-200 bg-sky-50 dark:border-sky-500/20 dark:bg-sky-500/5'}`}>
-                    <p className="text-sm font-semibold text-sky-900 dark:text-sky-100">
-                        {automationEnabled ? 'La automatización está habilitada. Los cambios reales se procesan mediante la cola segura de Mercado Libre.' : 'Automatización deshabilitada globalmente. Las reglas pueden configurarse, pero no se modificarán precios automáticamente.'}
+                    <div className="flex flex-wrap items-center gap-2 text-sm font-semibold text-slate-900 dark:text-white">
+                        <span>Motor de precios:</span>
+                        <Badge tone={automationEnabled ? 'green' : 'slate'}>{automationEnabled ? 'Activo' : 'Desactivado'}</Badge>
+                        <span className="ml-2">Scheduler automático:</span>
+                        <Badge tone={schedulerEnabled && automationEnabled ? 'green' : 'slate'}>{schedulerEnabled && automationEnabled ? 'Activo' : 'Desactivado'}</Badge>
+                    </div>
+                    <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">
+                        {!automationEnabled
+                            ? 'La automatización está completamente deshabilitada. Las reglas pueden configurarse y simularse, pero no se modificarán precios.'
+                            : schedulerEnabled
+                                ? 'La automatización periódica está activa y procesa reglas cada minuto mediante la cola segura de Mercado Libre.'
+                                : 'Se permiten pruebas manuales controladas, pero el scheduler no está ejecutando reglas automáticamente.'}
                     </p>
                 </section>
 

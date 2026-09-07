@@ -134,10 +134,10 @@ class MeliBeautyScheduledPriceService
         return $this->transition('rebase', MeliScheduledPriceState::STATUS_ACTIVE, $basePrice, $promotionalPrice, $promotionalPrice);
     }
 
-    /** @return array{processed: int, apply: int, restore: int, rebase: int, no_change: int, success: int, blocked: int, failed: int, errors: list<array<string, mixed>>} */
+    /** @return array{processed: int, apply: int, restore: int, rebase: int, no_change: int, success: int, blocked: int, failed: int, errors: list<array<string, mixed>>, details: list<array<string, mixed>>} */
     public function processRule(MeliBeautyScheduledDiscount $rule, ?string $meliItemId = null, bool $dryRun = false): array
     {
-        $summary = ['processed' => 0, 'apply' => 0, 'restore' => 0, 'rebase' => 0, 'no_change' => 0, 'success' => 0, 'blocked' => 0, 'failed' => 0, 'errors' => []];
+        $summary = ['processed' => 0, 'apply' => 0, 'restore' => 0, 'rebase' => 0, 'no_change' => 0, 'success' => 0, 'blocked' => 0, 'failed' => 0, 'errors' => [], 'details' => []];
         $handledRelatedIds = [];
         $items = $this->eligibleItemsQuery($rule)
             ->with('scheduledPriceState')
@@ -164,6 +164,7 @@ class MeliBeautyScheduledPriceService
             $summary['processed']++;
             if (in_array((string) $item->meli_item_id, $handledRelatedIds, true)) {
                 $summary['no_change']++;
+                $summary['details'][] = $this->detail($rule, $item, null, 'no_change', null);
 
                 continue;
             }
@@ -172,6 +173,7 @@ class MeliBeautyScheduledPriceService
                 $inWindow = $this->isRuleActiveAt($rule);
                 if ((! $rule->active || ! $inWindow) && ($state === null || $state->status === MeliScheduledPriceState::STATUS_RESTORED)) {
                     $summary['no_change']++;
+                    $summary['details'][] = $this->detail($rule, $item, null, 'no_change', null);
 
                     continue;
                 }
@@ -179,6 +181,7 @@ class MeliBeautyScheduledPriceService
                 $remotePrice = $this->priceUpdates->scheduledRemoteStandardPrice($rule->meliAccount, $item);
                 $transition = $this->determineTransition($rule, $state, $rule->active && $inWindow, $remotePrice);
                 $summary[$transition['action']]++;
+                $summary['details'][] = $this->detail($rule, $item, $remotePrice, $transition['action'], $transition['target_price']);
                 if ($transition['action'] === 'no_change') {
                     if (! $dryRun && $state !== null) {
                         $state->forceFill(['last_observed_remote_price' => $remotePrice])->save();
@@ -284,5 +287,18 @@ class MeliBeautyScheduledPriceService
     private function samePrice(float $first, float $second): bool
     {
         return (int) round($first * 100) === (int) round($second * 100);
+    }
+
+    /** @return array{meli_item_id:string,brand:string,base:float|null,discount:float,target:float|null,action:string} */
+    private function detail(MeliBeautyScheduledDiscount $rule, MeliPriceManagerItem $item, ?float $base, string $action, ?float $target): array
+    {
+        return [
+            'meli_item_id' => (string) $item->meli_item_id,
+            'brand' => (string) ($rule->brandGroup?->name ?? 'Marca'),
+            'base' => $base,
+            'discount' => (float) $rule->discount_percentage,
+            'target' => $target,
+            'action' => $action,
+        ];
     }
 }
