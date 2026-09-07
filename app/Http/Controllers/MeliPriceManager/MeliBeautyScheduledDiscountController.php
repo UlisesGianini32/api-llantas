@@ -5,23 +5,75 @@ namespace App\Http\Controllers\MeliPriceManager;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\MeliPriceManager\StoreMeliBeautyScheduledDiscountRequest;
 use App\Http\Requests\MeliPriceManager\UpdateMeliBeautyScheduledDiscountRequest;
+use App\Models\MeliAccount;
 use App\Models\MeliBeautyScheduledDiscount;
-use Illuminate\Http\JsonResponse;
+use App\Models\MeliBrandGroup;
+use App\Services\MercadoLibre\PriceManager\MeliBeautyScheduledPriceService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Inertia\Inertia;
+use Inertia\Response;
 
 class MeliBeautyScheduledDiscountController extends Controller
 {
-    public function index(Request $request): JsonResponse
+    public function index(Request $request, MeliBeautyScheduledPriceService $service): Response
     {
-        $rules = MeliBeautyScheduledDiscount::query()
-            ->whereIn('meli_account_id', $request->user()->meliAccounts()->select('id'))
-            ->with(['brandGroup:id,name,slug', 'meliAccount:id,nickname'])
-            ->orderBy('meli_account_id')
-            ->orderBy('brand_group_id')
-            ->get();
+        $accounts = $request->user()->meliAccounts()
+            ->orderByDesc('is_default')
+            ->orderBy('id')
+            ->get(['id', 'meli_user_id', 'nickname', 'is_default']);
+        $selectedAccount = $this->selectedAccount($request, $accounts);
+        $accountId = $selectedAccount?->id;
 
-        return response()->json(['data' => $rules]);
+        $rules = $accountId === null
+            ? collect()
+            : MeliBeautyScheduledDiscount::query()
+                ->where('meli_account_id', $accountId)
+                ->with(['brandGroup:id,name,slug', 'meliAccount:id,nickname'])
+                ->orderBy('brand_group_id')
+                ->get()
+                ->map(function (MeliBeautyScheduledDiscount $rule) use ($service): array {
+                    $rule->setAttribute('eligible_items_count', $service->eligibleItemsQuery($rule)->count());
+                    $rule->setAttribute('window_active', $service->isRuleActiveAt($rule));
+
+                    return $rule->toArray();
+                });
+
+        $brandOptions = $accountId === null
+            ? collect()
+            : MeliBrandGroup::query()
+                ->where('active', true)
+                ->orderByRaw('LOWER(name)')
+                ->orderBy('name')
+                ->orderBy('id')
+                ->get(['id', 'name', 'slug'])
+                ->map(function (MeliBrandGroup $brand) use ($accountId, $service): ?array {
+                    $candidate = new MeliBeautyScheduledDiscount([
+                        'meli_account_id' => $accountId,
+                        'brand_group_id' => $brand->id,
+                    ]);
+                    $count = $service->eligibleItemsQuery($candidate)->count();
+                    if ($count === 0) {
+                        return null;
+                    }
+
+                    return [
+                        'id' => (int) $brand->id,
+                        'name' => (string) $brand->name,
+                        'slug' => (string) $brand->slug,
+                        'eligible_items_count' => $count,
+                    ];
+                })
+                ->filter()
+                ->values();
+
+        return Inertia::render('MeliPriceManager/ScheduledDiscounts', [
+            'accounts' => $accounts,
+            'selectedAccountId' => $accountId,
+            'rules' => $rules,
+            'brandOptions' => $brandOptions,
+            'defaultTimezone' => config('meli_price_manager.beauty.default_timezone'),
+        ]);
     }
 
     public function store(StoreMeliBeautyScheduledDiscountRequest $request): RedirectResponse
@@ -60,5 +112,17 @@ class MeliBeautyScheduledDiscountController extends Controller
             404,
             'La cuenta no pertenece al usuario autenticado.',
         );
+    }
+
+    private function selectedAccount(Request $request, $accounts): ?MeliAccount
+    {
+        if ($request->filled('account')) {
+            $account = $accounts->firstWhere('id', $request->integer('account'));
+            abort_if($account === null, 404, 'La cuenta de Mercado Libre no pertenece al usuario autenticado.');
+
+            return $account;
+        }
+
+        return $accounts->firstWhere('is_default', true) ?? $accounts->first();
     }
 }

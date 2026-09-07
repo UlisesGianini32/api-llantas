@@ -12,6 +12,7 @@ use Illuminate\Database\QueryException;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
+use Inertia\Testing\AssertableInertia as Assert;
 use Tests\TestCase;
 
 class MeliBeautyScheduledPriceEligibilityTest extends TestCase
@@ -148,7 +149,42 @@ class MeliBeautyScheduledPriceEligibilityTest extends TestCase
 
         $this->post(route('meli-price-manager.scheduled-discounts.store'), $payload)
             ->assertSessionHasErrors('brand_group_id');
-        $this->get(route('meli-price-manager.scheduled-discounts.index'))->assertOk()->assertJsonCount(1, 'data');
+        $this->get(route('meli-price-manager.scheduled-discounts.index'))
+            ->assertInertia(fn (Assert $page) => $page
+                ->component('MeliPriceManager/ScheduledDiscounts')
+                ->has('rules', 1)
+                ->has('brandOptions', 1)
+                ->where('rules.0.eligible_items_count', 1));
+    }
+
+    public function test_scheduled_discount_page_is_admin_only_and_exposes_only_eligible_beauty_brands(): void
+    {
+        $this->beautyItem('MLM-PAGE-BEAUTY');
+        $supplementBrand = MeliBrandGroup::factory()->create(['active' => true]);
+        $supplement = MeliPriceManagerItem::factory()
+            ->for($this->account, 'meliAccount')
+            ->for($supplementBrand, 'brandGroup')
+            ->create([
+                'meli_item_id' => 'MLM-PAGE-SUPPLEMENT',
+                'category_id' => 'MLM-SUPPLEMENT-CATEGORY',
+                'classification_status' => 'categorized',
+            ]);
+        DB::table('meli_categories')->insert([
+            'category_id' => $supplement->category_id,
+            'root_category_id' => 'MLM-SUPPLEMENTS',
+        ]);
+
+        $this->actingAs($this->user)
+            ->get(route('meli-price-manager.scheduled-discounts.index'))
+            ->assertInertia(fn (Assert $page) => $page
+                ->component('MeliPriceManager/ScheduledDiscounts')
+                ->has('brandOptions', 1)
+                ->where('brandOptions.0.id', $this->brand->id));
+
+        $operations = User::factory()->create(['role' => User::ROLE_OPERATIONS]);
+        $this->actingAs($operations)
+            ->get(route('meli-price-manager.scheduled-discounts.index'))
+            ->assertForbidden();
     }
 
     public function test_non_beauty_catalogs_and_uncategorized_or_unassigned_items_are_excluded(): void

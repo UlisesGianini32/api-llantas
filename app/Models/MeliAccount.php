@@ -62,7 +62,6 @@ class MeliAccount extends Model
         return $this->hasMany(MeliClaim::class);
     }
 
-
     public function priceManagerItems(): HasMany
     {
         return $this->hasMany(MeliPriceManagerItem::class);
