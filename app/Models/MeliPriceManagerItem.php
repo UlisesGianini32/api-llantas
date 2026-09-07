@@ -7,6 +7,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 
@@ -225,5 +226,10 @@ class MeliPriceManagerItem extends Model
     public function priceChanges(): HasMany
     {
         return $this->hasMany(MeliPriceChange::class, 'price_manager_item_id');
+    }
+
+    public function scheduledPriceState(): HasOne
+    {
+        return $this->hasOne(MeliScheduledPriceState::class, 'price_manager_item_id');
     }
 }

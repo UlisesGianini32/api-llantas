@@ -14,4 +14,11 @@ return [
         ],
         'category_cache_ttl_days' => 30,
     ],
+    'beauty' => [
+        'allowed_root_category_ids' => [
+            'MLM1246', // Belleza y Cuidado Personal
+        ],
+        'allowed_category_ids' => [],
+        'default_timezone' => 'America/Hermosillo',
+    ],
 ];

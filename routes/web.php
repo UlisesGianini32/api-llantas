@@ -23,6 +23,7 @@ use App\Http\Controllers\MeliPriceManager\MeliBrandReclassificationController;
 use App\Http\Controllers\MeliPriceManager\MeliBulkCategorizedItemBrandController;
 use App\Http\Controllers\MeliPriceManager\MeliItemClassificationActionController;
 use App\Http\Controllers\MeliPriceManager\MeliPriceManagerDashboardController;
+use App\Http\Controllers\MeliPriceManager\MeliBeautyScheduledDiscountController;
 use App\Http\Controllers\MeliPriceManager\MeliPriceSimulationController;
 use App\Http\Controllers\MeliPriceManager\MeliPriceUpdateController;
 use App\Http\Controllers\MeliPriceManager\MeliUncategorizedItemController;
@@ -250,6 +251,10 @@ Route::get(
     // MERCADO LIBRE
     Route::prefix('/meli-price-manager')->name('meli-price-manager.')->group(function () {
         Route::get('/', [MeliPriceManagerDashboardController::class, 'index'])->name('index');
+        Route::get('/scheduled-discounts', [MeliBeautyScheduledDiscountController::class, 'index'])->name('scheduled-discounts.index');
+        Route::post('/scheduled-discounts', [MeliBeautyScheduledDiscountController::class, 'store'])->name('scheduled-discounts.store');
+        Route::put('/scheduled-discounts/{discount}', [MeliBeautyScheduledDiscountController::class, 'update'])->name('scheduled-discounts.update');
+        Route::patch('/scheduled-discounts/{discount}/status', [MeliBeautyScheduledDiscountController::class, 'status'])->name('scheduled-discounts.status');
         Route::post('/sync', [MeliPriceManagerDashboardController::class, 'sync'])->name('sync');
         Route::put('/tax-profile', [MeliAccountTaxProfileController::class, 'update'])->name('tax-profile.update');
         Route::post('/items/{item}/simulate-price', MeliPriceSimulationController::class)

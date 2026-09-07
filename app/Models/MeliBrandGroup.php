@@ -36,4 +36,9 @@ class MeliBrandGroup extends Model
     {
         return $this->hasMany(MeliPriceChangeBatch::class, 'brand_group_id');
     }
+
+    public function scheduledDiscounts(): HasMany
+    {
+        return $this->hasMany(MeliBeautyScheduledDiscount::class, 'brand_group_id');
+    }
 }

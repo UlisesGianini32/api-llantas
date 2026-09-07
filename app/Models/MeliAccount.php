@@ -77,4 +77,9 @@ class MeliAccount extends Model
     {
         return $this->hasOne(MeliAccountTaxProfile::class);
     }
+
+    public function scheduledDiscounts(): HasMany
+    {
+        return $this->hasMany(MeliBeautyScheduledDiscount::class);
+    }
 }
