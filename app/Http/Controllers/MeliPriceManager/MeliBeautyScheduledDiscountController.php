@@ -76,7 +76,7 @@ class MeliBeautyScheduledDiscountController extends Controller
                         'meli_account_id' => $accountId,
                         'brand_group_id' => $brand->id,
                     ]);
-                    $count = $service->eligibleItemsQuery($candidate)->count();
+                    $count = $service->selectableItemsQuery($candidate)->count();
                     if ($count === 0) {
                         return null;
                     }
@@ -124,7 +124,7 @@ class MeliBeautyScheduledDiscountController extends Controller
             'meli_account_id' => $data['meli_account_id'],
             'brand_group_id' => $data['brand_group_id'],
         ]);
-        $query = $service->eligibleItemsQuery($candidate);
+        $query = $service->selectableItemsQuery($candidate);
         if (($search = trim((string) ($data['search'] ?? ''))) !== '') {
             $query->where(function ($query) use ($search): void {
                 $query->where('title', 'like', "%{$search}%")

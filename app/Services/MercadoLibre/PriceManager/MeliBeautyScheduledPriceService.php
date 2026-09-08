@@ -13,6 +13,8 @@ use Throwable;
 
 class MeliBeautyScheduledPriceService
 {
+    private const SELECTABLE_ITEM_STATUSES = ['active', 'paused'];
+
     public function __construct(
         private readonly MeliPriceUpdateService $priceUpdates,
         private readonly MeliBeautyPromotionWindow $window,
@@ -67,6 +69,13 @@ class MeliBeautyScheduledPriceService
                 });
             });
         });
+    }
+
+    /** @return Builder<MeliPriceManagerItem> */
+    public function selectableItemsQuery(MeliBeautyScheduledDiscount $rule): Builder
+    {
+        return $this->eligibleItemsQuery($rule)
+            ->whereIn('meli_price_manager_items.status', self::SELECTABLE_ITEM_STATUSES);
     }
 
     public function ruleHasEligibleItems(MeliBeautyScheduledDiscount $rule): bool

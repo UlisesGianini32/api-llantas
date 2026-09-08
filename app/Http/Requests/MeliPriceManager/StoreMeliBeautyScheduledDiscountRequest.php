@@ -21,7 +21,7 @@ class StoreMeliBeautyScheduledDiscountRequest extends FormRequest
             'starts_on' => $this->normalizeDate($this->input('starts_on')),
             'ends_on' => $this->normalizeDate($this->input('ends_on')),
             'timezone' => MeliBeautyPromotionWindow::TIMEZONE,
-            'active' => $this->has('active') ? $this->boolean('active') : true,
+            'active' => $this->has('active') ? $this->boolean('active') : $this->defaultActive(),
         ]);
     }
 
@@ -91,6 +91,11 @@ class StoreMeliBeautyScheduledDiscountRequest extends FormRequest
     protected function ignoredPromotionId(): ?int
     {
         return null;
+    }
+
+    protected function defaultActive(): bool
+    {
+        return false;
     }
 
     private function normalizeDate(mixed $value): mixed

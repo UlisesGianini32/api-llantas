@@ -29,6 +29,11 @@ class UpdateMeliBeautyScheduledDiscountRequest extends StoreMeliBeautyScheduledD
         return (int) $this->route('discount')?->getKey();
     }
 
+    protected function defaultActive(): bool
+    {
+        return (bool) $this->route('discount')?->active;
+    }
+
     private function changesExecutionDefinition(MeliBeautyScheduledDiscount $current): bool
     {
         $incomingItems = collect($this->input('items', []))

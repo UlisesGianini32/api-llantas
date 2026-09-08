@@ -57,10 +57,16 @@ function target(price, percentage) {
     return base > 0 && discount > 0 && discount < 100 ? Math.round(base * (1 - discount / 100) * 100) / 100 : null
 }
 
+function timezoneLabel(timezone) {
+    return timezone === 'America/Mexico_City'
+        ? 'Ciudad de México (America/Mexico_City)'
+        : timezone
+}
+
 function emptyForm(defaultTimezone) {
     return {
         meli_account_id: '', brand_group_id: '', starts_on: '', ends_on: '', starts_at: '20:00', ends_at: '06:00',
-        timezone: defaultTimezone, active: true, discount_percentage: '10', items: [],
+        timezone: defaultTimezone, active: false, discount_percentage: '10', items: [],
     }
 }
 
@@ -207,7 +213,7 @@ export default function ScheduledDiscounts({
                 </section>
 
                 {editor && <section className="rounded-2xl border border-indigo-200 bg-indigo-50/50 p-5 dark:border-indigo-500/20 dark:bg-indigo-500/5">
-                    <div className="mb-5 flex justify-between gap-3"><div><h2 className="text-lg font-bold">{editor.mode === 'edit' ? 'Editar promoción' : 'Nueva promoción'}</h2><p className="text-sm text-slate-500">Zona fija: {defaultTimezone}. Fechas DD/MM/AAAA y horas HH:mm (24 h).</p></div><button type="button" onClick={() => setEditor(null)} className={secondaryButton}>Cancelar</button></div>
+                    <div className="mb-5 flex justify-between gap-3"><div><h2 className="text-lg font-bold">{editor.mode === 'edit' ? 'Editar promoción' : 'Nueva promoción'}</h2><p className="text-sm text-slate-500">Zona fija: {timezoneLabel(defaultTimezone)}. Fechas DD/MM/AAAA y horas HH:mm (24 h).</p></div><button type="button" onClick={() => setEditor(null)} className={secondaryButton}>Cancelar</button></div>
                     <form onSubmit={submit} className="space-y-5">
                         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
                             <label><span className="mb-1 block text-sm font-semibold">Cuenta</span><select value={form.data.meli_account_id} onChange={(e) => { form.setData('meli_account_id', e.target.value); setSelected({}); setPage(1) }} className={fieldClass} disabled={editor.mode === 'edit'}>{accounts.map((account) => <option key={account.id} value={account.id}>{account.nickname || `Cuenta #${account.id}`}</option>)}</select><ErrorText message={form.errors.meli_account_id} /></label>
@@ -216,7 +222,7 @@ export default function ScheduledDiscounts({
                             <label><span className="mb-1 block text-sm font-semibold">Fecha final</span><input value={form.data.ends_on} onChange={(e) => form.setData('ends_on', e.target.value)} placeholder="12/09/2028" inputMode="numeric" className={fieldClass} /><ErrorText message={form.errors.ends_on} /></label>
                             <label><span className="mb-1 block text-sm font-semibold">Hora inicial</span><input value={form.data.starts_at} onChange={(e) => form.setData('starts_at', normalizeClock(e.target.value))} placeholder="20:00" inputMode="numeric" maxLength={5} className={fieldClass} /><ErrorText message={form.errors.starts_at} /></label>
                             <label><span className="mb-1 block text-sm font-semibold">Hora final</span><input value={form.data.ends_at} onChange={(e) => form.setData('ends_at', normalizeClock(e.target.value))} placeholder="06:00" inputMode="numeric" maxLength={5} className={fieldClass} /><ErrorText message={form.errors.ends_at} /></label>
-                            <div><span className="mb-1 block text-sm font-semibold">Zona horaria</span><div className={`${fieldClass} bg-slate-50 dark:bg-neutral-900`}>{defaultTimezone}</div></div>
+                            <div><span className="mb-1 block text-sm font-semibold">Zona horaria</span><div className={`${fieldClass} bg-slate-50 dark:bg-neutral-900`}>{timezoneLabel(defaultTimezone)}</div></div>
                             <label className="flex items-center gap-2 self-end rounded-xl border border-slate-200 px-3 py-2 dark:border-neutral-700"><input type="checkbox" checked={Boolean(form.data.active)} onChange={(e) => form.setData('active', e.target.checked)} /><span className="text-sm font-semibold">Promoción habilitada</span></label>
                         </div>
 
@@ -242,7 +248,7 @@ export default function ScheduledDiscounts({
                 <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white dark:border-neutral-800 dark:bg-neutral-900">
                     <div className="border-b border-slate-200 p-4 dark:border-neutral-800"><h2 className="font-bold">Promociones configuradas</h2></div>
                     {!rules.length && <div className="p-10 text-center text-sm text-slate-500">No hay promociones programadas para esta cuenta.</div>}
-                    {!!rules.length && <div className="overflow-x-auto"><table className="min-w-[980px] w-full text-left text-sm"><thead className="bg-slate-50 text-xs uppercase text-slate-500 dark:bg-neutral-950"><tr><th className="px-4 py-3">Marca</th><th className="px-4 py-3">Periodo</th><th className="px-4 py-3">Horario</th><th className="px-4 py-3">Publicaciones</th><th className="px-4 py-3">Estado</th><th className="px-4 py-3">Precios</th><th className="px-4 py-3">Acciones</th></tr></thead><tbody className="divide-y divide-slate-100 dark:divide-neutral-800">{rules.map((promotion) => { const status = statusLabels[promotion.schedule_status] ?? statusLabels.requires_configuration; return <tr key={promotion.id}><td className="px-4 py-4"><b>{promotion.brand_group?.name || 'Marca no disponible'}</b><small className="block text-slate-500">{selectedAccount?.nickname}</small></td><td className="px-4 py-4">{promotion.starts_on ? `${dateForUi(promotion.starts_on)} – ${dateForUi(promotion.ends_on)}` : 'Sin fechas (legado)'}</td><td className="px-4 py-4">{timePart(promotion.starts_at)} – {timePart(promotion.ends_at)}<small className="block text-slate-500">{promotion.timezone}</small></td><td className="px-4 py-4 font-bold">{promotion.selected_items_count ?? 0}</td><td className="px-4 py-4"><Badge tone={status[1]}>{status[0]}</Badge></td><td className="px-4 py-4"><span>{promotion.state_summary?.active || 0} activas</span><small className="block text-slate-500">{promotion.state_summary?.restore_pending || 0} por restaurar · {promotion.state_summary?.failed || 0} fallidas</small></td><td className="px-4 py-4"><div className="flex gap-2"><button type="button" onClick={() => openEdit(promotion)} className={secondaryButton}>Editar</button><button type="button" onClick={() => togglePromotion(promotion)} className={secondaryButton}>{promotion.active ? 'Deshabilitar' : 'Habilitar'}</button></div></td></tr> })}</tbody></table></div>}
+                    {!!rules.length && <div className="overflow-x-auto"><table className="min-w-[980px] w-full text-left text-sm"><thead className="bg-slate-50 text-xs uppercase text-slate-500 dark:bg-neutral-950"><tr><th className="px-4 py-3">Marca</th><th className="px-4 py-3">Periodo</th><th className="px-4 py-3">Horario</th><th className="px-4 py-3">Publicaciones</th><th className="px-4 py-3">Estado</th><th className="px-4 py-3">Precios</th><th className="px-4 py-3">Acciones</th></tr></thead><tbody className="divide-y divide-slate-100 dark:divide-neutral-800">{rules.map((promotion) => { const status = statusLabels[promotion.schedule_status] ?? statusLabels.requires_configuration; return <tr key={promotion.id}><td className="px-4 py-4"><b>{promotion.brand_group?.name || 'Marca no disponible'}</b><small className="block text-slate-500">{selectedAccount?.nickname}</small></td><td className="px-4 py-4">{promotion.starts_on ? `${dateForUi(promotion.starts_on)} – ${dateForUi(promotion.ends_on)}` : 'Sin fechas (legado)'}</td><td className="px-4 py-4">{timePart(promotion.starts_at)} – {timePart(promotion.ends_at)}<small className="block text-slate-500">{timezoneLabel(promotion.timezone)}</small></td><td className="px-4 py-4 font-bold">{promotion.selected_items_count ?? 0}</td><td className="px-4 py-4"><Badge tone={status[1]}>{status[0]}</Badge></td><td className="px-4 py-4"><span>{promotion.state_summary?.active || 0} activas</span><small className="block text-slate-500">{promotion.state_summary?.restore_pending || 0} por restaurar · {promotion.state_summary?.failed || 0} fallidas</small></td><td className="px-4 py-4"><div className="flex gap-2"><button type="button" onClick={() => openEdit(promotion)} className={secondaryButton}>Editar</button><button type="button" onClick={() => togglePromotion(promotion)} className={secondaryButton}>{promotion.active ? 'Deshabilitar' : 'Habilitar'}</button></div></td></tr> })}</tbody></table></div>}
                 </section>
             </div>
         </AppShell>
