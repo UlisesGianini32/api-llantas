@@ -52,18 +52,41 @@ return new class extends Migration
 
     public function down(): void
     {
+        $hasDuplicateAccountBrands = DB::table('meli_beauty_scheduled_discounts')
+            ->select(['meli_account_id', 'brand_group_id'])
+            ->groupBy('meli_account_id', 'brand_group_id')
+            ->havingRaw('COUNT(*) > 1')
+            ->exists();
+
+        if ($hasDuplicateAccountBrands) {
+            throw new RuntimeException(
+                'No se puede revertir la migración de promociones Beauty: existen varias promociones para la misma cuenta y marca.'
+            );
+        }
+
+        // Recreate the unique index before any destructive operation. Besides
+        // failing safely, this closes the window for a concurrent duplicate.
+        if (DB::connection()->getDriverName() === 'sqlite') {
+            DB::statement('CREATE UNIQUE INDEX meli_beauty_discounts_account_brand_uq ON meli_beauty_scheduled_discounts (meli_account_id, brand_group_id)');
+        } else {
+            Schema::table('meli_beauty_scheduled_discounts', function (Blueprint $table): void {
+                $table->unique(['meli_account_id', 'brand_group_id'], 'meli_beauty_discounts_account_brand_uq');
+            });
+        }
+
         Schema::dropIfExists('meli_beauty_scheduled_discount_items');
 
         if (DB::connection()->getDriverName() === 'sqlite') {
             DB::statement('DROP INDEX mbsd_account_brand_idx');
-            DB::statement('CREATE UNIQUE INDEX meli_beauty_discounts_account_brand_uq ON meli_beauty_scheduled_discounts (meli_account_id, brand_group_id)');
             Schema::table('meli_beauty_scheduled_discounts', fn (Blueprint $table) => $table->dropColumn(['starts_on', 'ends_on']));
         } else {
             Schema::table('meli_beauty_scheduled_discounts', function (Blueprint $table): void {
                 $table->dropIndex('mbsd_account_brand_idx');
-                $table->unique(['meli_account_id', 'brand_group_id'], 'meli_beauty_discounts_account_brand_uq');
                 $table->dropColumn(['starts_on', 'ends_on']);
             });
         }
+
+        // The previous active value of legacy rows was intentionally discarded
+        // by up() and cannot be inferred safely during rollback.
     }
 };
