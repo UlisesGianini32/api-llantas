@@ -90,7 +90,8 @@ class MeliBeautyScheduledPricesCommand extends Command
                     ));
                 }
                 foreach ($summary['errors'] as $error) {
-                    $this->warn(($error['meli_item_id'] ?? 'item').' ERROR '.$error['message']);
+                    $label = ($error['status'] ?? 'failed') === 'blocked' ? 'BLOCKED' : 'ERROR';
+                    $this->warn(($error['meli_item_id'] ?? 'item').' '.$label.' '.$error['message']);
                 }
             }
         }

@@ -87,6 +87,50 @@ class MeliPriceDiscountAdoptionTest extends TestCase
         parent::tearDown();
     }
 
+    #[DataProvider('verboseExceptionReports')]
+    public function test_verbose_command_labels_exceptions_consistently_with_summary(
+        string $itemStatus,
+        string $label,
+        string $message,
+        int $blocked,
+        int $failed,
+    ): void {
+        $this->item->forceFill([
+            'status' => $itemStatus,
+            'raw_item' => ['sub_status' => $itemStatus === 'under_review' ? ['forbidden'] : []],
+        ])->save();
+        $this->fakeRemotePrices(['standard' => null]);
+
+        CarbonImmutable::withTestNow(CarbonImmutable::parse('2026-09-07 17:15', 'America/Hermosillo'), function () use ($label, $message, $blocked, $failed): void {
+            $this->artisan('meli:beauty-scheduled-prices', [
+                '--dry-run' => true, '--verbose' => true, '--discount' => $this->rule->id,
+            ])
+                ->expectsOutput("Cuenta {$this->account->id} · Beauty · APPLY:0 NO_CHANGE:0 RESTORE:0 REBASE:0 BLOCKED:{$blocked} ERROR:{$failed}")
+                ->expectsOutput("{$this->item->meli_item_id} {$label} {$message}")
+                ->doesntExpectOutputToContain($this->item->meli_item_id.($label === 'BLOCKED' ? ' ERROR ' : ' BLOCKED '))
+                ->assertSuccessful();
+        });
+
+        $this->assertDatabaseCount('meli_scheduled_price_states', 0);
+        $this->assertDatabaseCount('meli_price_changes', 0);
+        $this->assertNoRemoteWrites();
+        if ($itemStatus === 'under_review') {
+            Http::assertNothingSent();
+        }
+    }
+
+    public static function verboseExceptionReports(): array
+    {
+        return [
+            'under review is blocked' => [
+                'under_review', 'BLOCKED', 'El estado actual de la publicación no permite modificarla.', 1, 0,
+            ],
+            'unavailable standard is an error' => [
+                'active', 'ERROR', 'No fue posible determinar de forma inequívoca el precio standard de marketplace.', 0, 1,
+            ],
+        ];
+    }
+
     #[DataProvider('matchingStatuses')]
     public function test_beauty_dry_run_allows_adoption_and_apply_persists_confirmed_state_without_post(string $status): void
     {

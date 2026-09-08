@@ -252,7 +252,11 @@ class MeliBeautyScheduledPriceService
                         'concurrent_standard_price_change',
                     ], true);
                 $summary[$blocked ? 'blocked' : 'failed']++;
-                $summary['errors'][] = ['meli_item_id' => (string) $item->meli_item_id, 'message' => $exception->getMessage()];
+                $summary['errors'][] = [
+                    'meli_item_id' => (string) $item->meli_item_id,
+                    'message' => $exception->getMessage(),
+                    'status' => $blocked ? 'blocked' : 'failed',
+                ];
                 if (! $dryRun && ! $blocked) {
                     $state = $item->scheduledPriceState;
                     if ($state !== null) {
