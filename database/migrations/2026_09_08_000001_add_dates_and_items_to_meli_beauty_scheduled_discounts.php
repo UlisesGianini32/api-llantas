@@ -22,12 +22,15 @@ return new class extends Migration
             ->update(['active' => false]);
 
         if (DB::connection()->getDriverName() === 'sqlite') {
-            DB::statement('DROP INDEX meli_beauty_discounts_account_brand_uq');
             DB::statement('CREATE INDEX mbsd_account_brand_idx ON meli_beauty_scheduled_discounts (meli_account_id, brand_group_id)');
+            DB::statement('DROP INDEX meli_beauty_discounts_account_brand_uq');
         } else {
             Schema::table('meli_beauty_scheduled_discounts', function (Blueprint $table): void {
-                $table->dropUnique('meli_beauty_discounts_account_brand_uq');
                 $table->index(['meli_account_id', 'brand_group_id'], 'mbsd_account_brand_idx');
+            });
+
+            Schema::table('meli_beauty_scheduled_discounts', function (Blueprint $table): void {
+                $table->dropUnique('meli_beauty_discounts_account_brand_uq');
             });
         }
 
@@ -74,17 +77,16 @@ return new class extends Migration
             });
         }
 
-        Schema::dropIfExists('meli_beauty_scheduled_discount_items');
-
         if (DB::connection()->getDriverName() === 'sqlite') {
             DB::statement('DROP INDEX mbsd_account_brand_idx');
-            Schema::table('meli_beauty_scheduled_discounts', fn (Blueprint $table) => $table->dropColumn(['starts_on', 'ends_on']));
         } else {
             Schema::table('meli_beauty_scheduled_discounts', function (Blueprint $table): void {
                 $table->dropIndex('mbsd_account_brand_idx');
-                $table->dropColumn(['starts_on', 'ends_on']);
             });
         }
+
+        Schema::dropIfExists('meli_beauty_scheduled_discount_items');
+        Schema::table('meli_beauty_scheduled_discounts', fn (Blueprint $table) => $table->dropColumn(['starts_on', 'ends_on']));
 
         // The previous active value of legacy rows was intentionally discarded
         // by up() and cannot be inferred safely during rollback.

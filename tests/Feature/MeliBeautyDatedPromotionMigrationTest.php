@@ -74,6 +74,31 @@ class MeliBeautyDatedPromotionMigrationTest extends TestCase
         $this->assertShortConstraintNames();
     }
 
+    public function test_mysql_up_creates_replacement_index_in_a_separate_statement_before_dropping_unique(): void
+    {
+        // SQLite cannot reproduce MySQL error 1553, so this regression verifies
+        // the two explicit Schema statements and their source order.
+        $source = file_get_contents(database_path('migrations/2026_09_08_000001_add_dates_and_items_to_meli_beauty_scheduled_discounts.php'));
+        $upStart = strpos($source, 'public function up(): void');
+        $downStart = strpos($source, 'public function down(): void');
+        $this->assertNotFalse($upStart);
+        $this->assertNotFalse($downStart);
+        $upSource = substr($source, $upStart, $downStart - $upStart);
+
+        $mysqlBranchStart = strpos($upSource, '} else {');
+        $mysqlBranchEnd = strpos($upSource, "\n        }\n\n        Schema::create", $mysqlBranchStart);
+        $this->assertNotFalse($mysqlBranchStart);
+        $this->assertNotFalse($mysqlBranchEnd);
+        $mysqlBranch = substr($upSource, $mysqlBranchStart, $mysqlBranchEnd - $mysqlBranchStart);
+
+        $createIndex = strpos($mysqlBranch, "\$table->index(['meli_account_id', 'brand_group_id'], 'mbsd_account_brand_idx');");
+        $dropUnique = strpos($mysqlBranch, "\$table->dropUnique('meli_beauty_discounts_account_brand_uq');");
+        $this->assertNotFalse($createIndex);
+        $this->assertNotFalse($dropUnique);
+        $this->assertLessThan($dropUnique, $createIndex);
+        $this->assertSame(2, substr_count($mysqlBranch, "Schema::table('meli_beauty_scheduled_discounts'"));
+    }
+
     public function test_down_without_duplicates_restores_original_schema(): void
     {
         $promotionId = $this->insertLegacyPromotion();
