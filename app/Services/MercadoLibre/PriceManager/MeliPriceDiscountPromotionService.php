@@ -119,7 +119,7 @@ class MeliPriceDiscountPromotionService
         float $targetPrice,
     ): array {
         $current = $this->snapshot($account, $item);
-        if ($this->isPromotionConfirmed($current, $basePrice, $targetPrice)) {
+        if ($this->isConfirmedPromotion($current, $basePrice, $targetPrice)) {
             return $current;
         }
 
@@ -140,7 +140,7 @@ class MeliPriceDiscountPromotionService
         );
 
         $confirmed = $this->snapshot($account, $item);
-        if (! $this->isPromotionConfirmed($confirmed, $basePrice, $targetPrice)) {
+        if (! $this->isConfirmedPromotion($confirmed, $basePrice, $targetPrice)) {
             throw new MeliPriceUpdateException(
                 'Mercado Libre recibió PRICE_DISCOUNT, pero no confirmó el precio promocional y su precio tachado.',
                 'promotion_not_confirmed',
@@ -186,7 +186,7 @@ class MeliPriceDiscountPromotionService
     }
 
     /** @param array<string, mixed> $snapshot */
-    private function isPromotionConfirmed(array $snapshot, float $basePrice, float $targetPrice): bool
+    public function isConfirmedPromotion(array $snapshot, float $basePrice, float $targetPrice): bool
     {
         return in_array($snapshot['promotion_status'], ['candidate', 'started', 'active'], true)
             && $this->sameNullablePrice($snapshot['standard_base'], $basePrice)

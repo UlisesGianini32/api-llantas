@@ -182,9 +182,10 @@ class MeliBeautyScheduledPriceService
                     : $basePrice;
 
                 if ($shouldBeActive) {
+                    $existingPromotionMatches = $this->priceUpdates->isConfirmedPromotion($snapshot, $basePrice, $targetPrice);
                     if ($state !== null
                         && $state->status === MeliScheduledPriceState::STATUS_ACTIVE
-                        && $this->isConfirmedActivePromotion($snapshot, $basePrice, $targetPrice)) {
+                        && $existingPromotionMatches) {
                         $summary['no_change']++;
                         $summary['details'][] = $this->detail($rule, $item, $snapshot, 'no_change', $targetPrice, []);
                         if (! $dryRun) {
@@ -194,8 +195,10 @@ class MeliBeautyScheduledPriceService
                         continue;
                     }
 
-                    $reasons = $this->priceUpdates->promotionEligibilityReasons($snapshot, $basePrice, $targetPrice);
-                    if (in_array($snapshot['promotion_status'], ['started', 'active'], true)) {
+                    $reasons = $existingPromotionMatches
+                        ? []
+                        : $this->priceUpdates->promotionEligibilityReasons($snapshot, $basePrice, $targetPrice);
+                    if (! $existingPromotionMatches && in_array($snapshot['promotion_status'], ['started', 'active'], true)) {
                         $reasons[] = 'price_discount_already_active';
                     }
                     $reasons = array_values(array_unique($reasons));
@@ -316,8 +319,8 @@ class MeliBeautyScheduledPriceService
     }
 
     /** @param array<string, mixed>|null $snapshot
-     *  @param list<string> $reasons
-     *  @return array<string, mixed>
+     * @param  list<string>  $reasons
+     * @return array<string, mixed>
      */
     private function detail(
         MeliBeautyScheduledDiscount $rule,
@@ -326,8 +329,7 @@ class MeliBeautyScheduledPriceService
         string $action,
         ?float $target,
         array $reasons,
-    ): array
-    {
+    ): array {
         return [
             'meli_item_id' => (string) $item->meli_item_id,
             'brand' => (string) ($rule->brandGroup?->name ?? 'Marca'),
@@ -347,19 +349,5 @@ class MeliBeautyScheduledPriceService
             'target' => $target,
             'action' => $action,
         ];
-    }
-
-    /** @param array<string, mixed> $snapshot */
-    private function isConfirmedActivePromotion(array $snapshot, float $basePrice, float $targetPrice): bool
-    {
-        return in_array($snapshot['promotion_status'], ['started', 'active'], true)
-            && is_numeric($snapshot['promotion_original'])
-            && is_numeric($snapshot['promotion_price'])
-            && is_numeric($snapshot['sale_amount'])
-            && is_numeric($snapshot['sale_regular_amount'])
-            && $this->samePrice((float) $snapshot['promotion_original'], $basePrice)
-            && $this->samePrice((float) $snapshot['promotion_price'], $targetPrice)
-            && $this->samePrice((float) $snapshot['sale_amount'], $targetPrice)
-            && $this->samePrice((float) $snapshot['sale_regular_amount'], $basePrice);
     }
 }

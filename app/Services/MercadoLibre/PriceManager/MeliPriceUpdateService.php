@@ -207,11 +207,17 @@ class MeliPriceUpdateService
     }
 
     /** @param array<string, mixed> $snapshot
-     *  @return list<string>
+     * @return list<string>
      */
     public function promotionEligibilityReasons(array $snapshot, float $basePrice, float $targetPrice): array
     {
         return $this->priceDiscountPromotions->eligibilityReasons($snapshot, $basePrice, $targetPrice);
+    }
+
+    /** @param array<string, mixed> $snapshot */
+    public function isConfirmedPromotion(array $snapshot, float $basePrice, float $targetPrice): bool
+    {
+        return $this->priceDiscountPromotions->isConfirmedPromotion($snapshot, $basePrice, $targetPrice);
     }
 
     /**
@@ -270,19 +276,19 @@ class MeliPriceUpdateService
                 return ['result' => 'success', 'old_price' => (float) $before['sale_amount'], 'new_price' => $basePrice, 'change_id' => null, 'batch_id' => null, 'related_items' => []];
             }
 
-            if (! $forRestore) {
+            if (! $forRestore && ! $this->isConfirmedPromotion($before, $basePrice, $targetPrice)) {
+                if (in_array($before['promotion_status'], ['started', 'active'], true)) {
+                    throw new MeliPriceUpdateException(
+                        'Ya existe un PRICE_DISCOUNT activo que no coincide con el estado confirmado local.',
+                        'price_discount_already_active',
+                        409,
+                    );
+                }
                 $reasons = $this->priceDiscountPromotions->eligibilityReasons($before, $basePrice, $targetPrice);
                 if ($reasons !== []) {
                     throw new MeliPriceUpdateException(
                         'La promoción dejó de ser elegible: '.implode(',', $reasons),
                         $reasons[0],
-                        409,
-                    );
-                }
-                if (in_array($before['promotion_status'], ['started', 'active'], true)) {
-                    throw new MeliPriceUpdateException(
-                        'Ya existe un PRICE_DISCOUNT activo que no coincide con el estado confirmado local.',
-                        'price_discount_already_active',
                         409,
                     );
                 }
