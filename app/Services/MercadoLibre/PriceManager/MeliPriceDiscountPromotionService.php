@@ -198,11 +198,9 @@ class MeliPriceDiscountPromotionService
             }
         }
 
-        $effectiveStart = $now->greaterThan($start) ? $now : $start;
-
         return [
-            $effectiveStart->utc()->format('Y-m-d\TH:i:s.v\Z'),
-            $finish->utc()->format('Y-m-d\TH:i:s.v\Z'),
+            $start->startOfDay()->format('Y-m-d\TH:i:s'),
+            $finish->startOfDay()->format('Y-m-d\TH:i:s'),
         ];
     }
 
