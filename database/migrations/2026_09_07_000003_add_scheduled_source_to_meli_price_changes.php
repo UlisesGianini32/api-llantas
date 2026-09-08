@@ -12,8 +12,14 @@ return new class extends Migration
             $table->string('source', 32)->default('manual')->after('type')->index();
             $table->foreignId('meli_beauty_scheduled_discount_id')
                 ->nullable()
-                ->after('brand_group_id')
-                ->constrained('meli_beauty_scheduled_discounts')
+                ->after('brand_group_id');
+
+            $table->foreign(
+                'meli_beauty_scheduled_discount_id',
+                'meli_price_batch_discount_fk'
+            )
+                ->references('id')
+                ->on('meli_beauty_scheduled_discounts')
                 ->nullOnDelete();
         });
 
@@ -30,7 +36,7 @@ return new class extends Migration
             $table->dropColumn(['source', 'scheduled_action']);
         });
         Schema::table('meli_price_change_batches', function (Blueprint $table): void {
-            $table->dropForeign(['meli_beauty_scheduled_discount_id']);
+            $table->dropForeign('meli_price_batch_discount_fk');
             $table->dropIndex('meli_price_change_batches_source_index');
             $table->dropColumn(['source', 'meli_beauty_scheduled_discount_id']);
         });

@@ -154,3 +154,9 @@ Schedule::command('system:heartbeat')
     ->withoutOverlapping();
 
 MeliBeautyScheduledPriceSchedule::register();
+
+// Meli-Price-Manager
+Schedule::command('meli-price-manager:sync-categories')
+    ->dailyAt('03:10')
+    ->withoutOverlapping()
+    ->appendOutputTo(storage_path('logs/meli-price-manager-categories.log'));

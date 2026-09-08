@@ -11,8 +11,13 @@ return new class extends Migration
         Schema::create('meli_scheduled_price_states', function (Blueprint $table): void {
             $table->id();
             $table->foreignId('price_manager_item_id')->constrained('meli_price_manager_items')->restrictOnDelete();
-            $table->foreignId('meli_beauty_scheduled_discount_id')
-                ->constrained('meli_beauty_scheduled_discounts')
+            $table->foreignId('meli_beauty_scheduled_discount_id');
+            $table->foreign(
+                'meli_beauty_scheduled_discount_id',
+                'meli_sched_price_discount_fk'
+            )
+                ->references('id')
+                ->on('meli_beauty_scheduled_discounts')
                 ->restrictOnDelete();
             $table->decimal('base_price', 15, 2);
             $table->decimal('promotional_price', 15, 2);
