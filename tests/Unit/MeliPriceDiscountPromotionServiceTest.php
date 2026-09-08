@@ -41,9 +41,11 @@ class MeliPriceDiscountPromotionServiceTest extends TestCase
         $this->fakeRemotePrices($this->restoredPrices(), ['status' => 'started']);
 
         $rule = new MeliBeautyScheduledDiscount([
+            'starts_on' => '2026-09-01',
+            'ends_on' => '2026-09-30',
             'starts_at' => $startsAt,
             'ends_at' => $endsAt,
-            'timezone' => 'America/Hermosillo',
+            'timezone' => 'America/Mexico_City',
         ]);
 
         CarbonImmutable::withTestNow(CarbonImmutable::parse($now, $rule->timezone), function () use ($rule): void {
@@ -300,14 +302,18 @@ class MeliPriceDiscountPromotionServiceTest extends TestCase
 
     private function createPromotion(): array
     {
-        return app(MeliPriceDiscountPromotionService::class)->create(
-            new MeliAccount(['access_token' => 'test-token']),
-            new MeliPriceManagerItem(['meli_item_id' => 'MLM4733828880']),
-            new MeliBeautyScheduledDiscount([
-                'starts_at' => '17:00', 'ends_at' => '17:30', 'timezone' => 'America/Hermosillo',
-            ]),
-            299.00,
-            269.10,
+        return CarbonImmutable::withTestNow(
+            CarbonImmutable::parse('2026-09-07 17:15', 'America/Mexico_City'),
+            fn (): array => app(MeliPriceDiscountPromotionService::class)->create(
+                new MeliAccount(['access_token' => 'test-token']),
+                new MeliPriceManagerItem(['meli_item_id' => 'MLM4733828880']),
+                new MeliBeautyScheduledDiscount([
+                    'starts_on' => '2026-09-01', 'ends_on' => '2026-09-30',
+                    'starts_at' => '17:00', 'ends_at' => '17:30', 'timezone' => 'America/Mexico_City',
+                ]),
+                299.00,
+                269.10,
+            ),
         );
     }
 

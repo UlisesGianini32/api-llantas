@@ -58,6 +58,7 @@ class MeliPriceDiscountAdoptionTest extends TestCase
             '2026_09_07_000001_create_meli_beauty_scheduled_discounts_table.php',
             '2026_09_07_000002_create_meli_scheduled_price_states_table.php',
             '2026_09_07_000003_add_scheduled_source_to_meli_price_changes.php',
+            '2026_09_08_000001_add_dates_and_items_to_meli_beauty_scheduled_discounts.php',
         ] as $migration) {
             (require database_path('migrations/'.$migration))->up();
         }
@@ -75,8 +76,13 @@ class MeliPriceDiscountAdoptionTest extends TestCase
         ]);
         $this->rule = MeliBeautyScheduledDiscount::query()->create([
             'meli_account_id' => $this->account->id, 'brand_group_id' => $brand->id,
-            'discount_percentage' => 10, 'starts_at' => '17:00', 'ends_at' => '17:30',
-            'timezone' => 'America/Hermosillo', 'active' => true,
+            'discount_percentage' => 10, 'starts_on' => '2026-09-01', 'ends_on' => '2026-09-30',
+            'starts_at' => '17:00', 'ends_at' => '17:30',
+            'timezone' => 'America/Mexico_City', 'active' => true,
+        ]);
+        $this->rule->scheduledItems()->create([
+            'price_manager_item_id' => $this->item->id,
+            'discount_percentage' => 10,
         ]);
     }
 
@@ -101,7 +107,7 @@ class MeliPriceDiscountAdoptionTest extends TestCase
         ])->save();
         $this->fakeRemotePrices(['standard' => null]);
 
-        CarbonImmutable::withTestNow(CarbonImmutable::parse('2026-09-07 17:15', 'America/Hermosillo'), function () use ($label, $message, $blocked, $failed): void {
+        CarbonImmutable::withTestNow(CarbonImmutable::parse('2026-09-07 17:15', 'America/Mexico_City'), function () use ($label, $message, $blocked, $failed): void {
             $this->artisan('meli:beauty-scheduled-prices', [
                 '--dry-run' => true, '--verbose' => true, '--discount' => $this->rule->id,
             ])
@@ -403,7 +409,7 @@ class MeliPriceDiscountAdoptionTest extends TestCase
 
     private function processBeauty(bool $dryRun = false): array
     {
-        return CarbonImmutable::withTestNow(CarbonImmutable::parse('2026-09-07 17:15', 'America/Hermosillo'),
+        return CarbonImmutable::withTestNow(CarbonImmutable::parse('2026-09-07 17:15', 'America/Mexico_City'),
             fn (): array => app(MeliBeautyScheduledPriceService::class)->processRule($this->rule, $this->item->meli_item_id, $dryRun));
     }
 

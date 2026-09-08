@@ -6,7 +6,7 @@ return [
         'enabled' => env('MELI_BEAUTY_SCHEDULED_PRICES_ENABLED', false),
         'promotional_prices_enabled' => env('MELI_BEAUTY_PROMOTIONAL_PRICES_ENABLED', false),
         'scheduler_enabled' => env('MELI_BEAUTY_SCHEDULED_PRICES_SCHEDULER_ENABLED', false),
-        'default_timezone' => 'America/Hermosillo',
+        'default_timezone' => 'America/Mexico_City',
     ],
     'focused_catalog' => [
         // Populate only with root category IDs verified from real Mercado Libre category paths.
@@ -25,6 +25,6 @@ return [
             'MLM1246', // Belleza y Cuidado Personal
         ],
         'allowed_category_ids' => [],
-        'default_timezone' => 'America/Hermosillo',
+        'default_timezone' => 'America/Mexico_City',
     ],
 ];

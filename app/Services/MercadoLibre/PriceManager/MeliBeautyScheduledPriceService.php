@@ -5,7 +5,6 @@ namespace App\Services\MercadoLibre\PriceManager;
 use App\Models\MeliBeautyScheduledDiscount;
 use App\Models\MeliPriceManagerItem;
 use App\Models\MeliScheduledPriceState;
-use Carbon\CarbonImmutable;
 use Carbon\CarbonInterface;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\Schema;
@@ -14,26 +13,14 @@ use Throwable;
 
 class MeliBeautyScheduledPriceService
 {
-    public function __construct(private readonly MeliPriceUpdateService $priceUpdates) {}
+    public function __construct(
+        private readonly MeliPriceUpdateService $priceUpdates,
+        private readonly MeliBeautyPromotionWindow $window,
+    ) {}
 
     public function isRuleActiveAt(MeliBeautyScheduledDiscount $rule, ?CarbonInterface $at = null): bool
     {
-        if (! $rule->active) {
-            return false;
-        }
-
-        $timezone = $rule->timezone ?: (string) config('meli_price_manager.beauty.default_timezone');
-        $localTime = CarbonImmutable::instance($at ?? now())->setTimezone($timezone)->format('H:i:s');
-        $start = $this->timePart($rule->starts_at);
-        $end = $this->timePart($rule->ends_at);
-
-        if ($start === $end) {
-            return false;
-        }
-
-        return $start < $end
-            ? $localTime >= $start && $localTime < $end
-            : $localTime >= $start || $localTime < $end;
+        return $this->window->shouldApply($rule, $at);
     }
 
     public function calculatePromotionalPrice(float $basePrice, float $discountPercentage): float
@@ -138,13 +125,30 @@ class MeliBeautyScheduledPriceService
     public function processRule(MeliBeautyScheduledDiscount $rule, ?string $meliItemId = null, bool $dryRun = false): array
     {
         $summary = ['processed' => 0, 'apply' => 0, 'restore' => 0, 'rebase' => 0, 'no_change' => 0, 'success' => 0, 'blocked' => 0, 'failed' => 0, 'errors' => [], 'details' => []];
-        $items = $this->eligibleItemsQuery($rule)
-            ->with('scheduledPriceState')
-            ->orderBy('id')
+        $selections = $rule->scheduledItems()
+            ->with('item.scheduledPriceState')
+            ->orderBy('price_manager_item_id')
             ->get();
+        $selectedIds = $selections->pluck('price_manager_item_id')->map(static fn ($id): int => (int) $id)->all();
+        $eligibleIds = $selectedIds === []
+            ? []
+            : $this->eligibleItemsQuery($rule)->whereKey($selectedIds)->pluck('id')->map(static fn ($id): int => (int) $id)->all();
+        $conflictingItemIds = $this->runtimeConflictingItemIds($rule, $selectedIds);
+        $entries = $selections->map(function ($selection) use ($eligibleIds): ?array {
+            if ($selection->item === null) {
+                return null;
+            }
+
+            return [
+                'item' => $selection->item,
+                'discount_percentage' => (float) $selection->discount_percentage,
+                'selected' => true,
+                'eligible' => in_array((int) $selection->item->id, $eligibleIds, true),
+            ];
+        })->filter()->values();
 
         if ($meliItemId !== null) {
-            $items = $items->where('meli_item_id', $meliItemId)->values();
+            $entries = $entries->filter(fn (array $entry): bool => (string) $entry['item']->meli_item_id === $meliItemId)->values();
         }
 
         $stateItems = MeliScheduledPriceState::query()
@@ -153,21 +157,50 @@ class MeliBeautyScheduledPriceService
             ->with('item.scheduledPriceState')
             ->get()
             ->pluck('item')
-            ->filter();
+            ->filter()
+            ->reject(fn (MeliPriceManagerItem $item): bool => in_array((int) $item->id, $selectedIds, true))
+            ->map(fn (MeliPriceManagerItem $item): array => [
+                'item' => $item,
+                'discount_percentage' => (float) $rule->discount_percentage,
+                'selected' => false,
+                'eligible' => false,
+            ]);
         if ($meliItemId !== null) {
-            $stateItems = $stateItems->where('meli_item_id', $meliItemId)->values();
+            $stateItems = $stateItems->filter(fn (array $entry): bool => (string) $entry['item']->meli_item_id === $meliItemId)->values();
         }
-        $items = $items->concat($stateItems)->unique('id')->values();
+        $entries = $entries->concat($stateItems)->unique(fn (array $entry): int => (int) $entry['item']->id)->values();
 
-        foreach ($items as $item) {
+        foreach ($entries as $entry) {
+            /** @var MeliPriceManagerItem $item */
+            $item = $entry['item'];
             $summary['processed']++;
             try {
                 $state = $item->scheduledPriceState;
-                $inWindow = $this->isRuleActiveAt($rule);
-                $shouldBeActive = $rule->active && $inWindow;
+                $selected = (bool) $entry['selected'];
+                $eligible = (bool) $entry['eligible'];
+                $discountPercentage = (float) $entry['discount_percentage'];
+                $shouldBeActive = $selected && $eligible && $this->window->shouldApply($rule);
+
+                $stateBelongsToAnotherPromotion = $state !== null
+                    && (int) $state->meli_beauty_scheduled_discount_id !== (int) $rule->id
+                    && in_array($state->status, [MeliScheduledPriceState::STATUS_ACTIVE, MeliScheduledPriceState::STATUS_RESTORE_PENDING], true);
+                if ($shouldBeActive && ($stateBelongsToAnotherPromotion || in_array((int) $item->id, $conflictingItemIds, true))) {
+                    $summary['blocked']++;
+                    $summary['details'][] = $this->detail($rule, $item, null, 'blocked', null, ['scheduled_promotion_conflict'], $discountPercentage);
+
+                    continue;
+                }
+
+                if ($selected && ! $eligible && $this->window->shouldApply($rule)
+                    && ($state === null || $state->status === MeliScheduledPriceState::STATUS_RESTORED)) {
+                    $summary['blocked']++;
+                    $summary['details'][] = $this->detail($rule, $item, null, 'blocked', null, ['item_no_longer_eligible'], $discountPercentage);
+
+                    continue;
+                }
                 if (! $shouldBeActive && ($state === null || $state->status === MeliScheduledPriceState::STATUS_RESTORED)) {
                     $summary['no_change']++;
-                    $summary['details'][] = $this->detail($rule, $item, null, 'no_change', null, []);
+                    $summary['details'][] = $this->detail($rule, $item, null, 'no_change', null, [], $discountPercentage);
 
                     continue;
                 }
@@ -178,7 +211,7 @@ class MeliBeautyScheduledPriceService
                     $basePrice = (float) $state->base_price;
                 }
                 $targetPrice = $shouldBeActive
-                    ? $this->calculatePromotionalPrice($basePrice, (float) $rule->discount_percentage)
+                    ? $this->calculatePromotionalPrice($basePrice, $discountPercentage)
                     : $basePrice;
 
                 if ($shouldBeActive) {
@@ -187,7 +220,7 @@ class MeliBeautyScheduledPriceService
                         && $state->status === MeliScheduledPriceState::STATUS_ACTIVE
                         && $existingPromotionMatches) {
                         $summary['no_change']++;
-                        $summary['details'][] = $this->detail($rule, $item, $snapshot, 'no_change', $targetPrice, []);
+                        $summary['details'][] = $this->detail($rule, $item, $snapshot, 'no_change', $targetPrice, [], $discountPercentage);
                         if (! $dryRun) {
                             $state->forceFill(['last_observed_remote_price' => $snapshot['sale_amount']])->save();
                         }
@@ -204,7 +237,7 @@ class MeliBeautyScheduledPriceService
                     $reasons = array_values(array_unique($reasons));
                     if ($reasons !== []) {
                         $summary['blocked']++;
-                        $summary['details'][] = $this->detail($rule, $item, $snapshot, 'blocked', $targetPrice, $reasons);
+                        $summary['details'][] = $this->detail($rule, $item, $snapshot, 'blocked', $targetPrice, $reasons, $discountPercentage);
 
                         continue;
                     }
@@ -215,7 +248,7 @@ class MeliBeautyScheduledPriceService
                 }
 
                 $summary[$action]++;
-                $summary['details'][] = $this->detail($rule, $item, $snapshot, $action, $targetPrice, []);
+                $summary['details'][] = $this->detail($rule, $item, $snapshot, $action, $targetPrice, [], $discountPercentage);
                 if ($dryRun) {
                     continue;
                 }
@@ -250,6 +283,8 @@ class MeliBeautyScheduledPriceService
                         'price_discount_not_candidate', 'promotion_base_unavailable',
                         'promotion_range_unavailable', 'price_discount_already_active',
                         'concurrent_standard_price_change',
+                        'scheduled_promotion_conflict', 'item_no_longer_eligible',
+                        'scheduled_window_inactive',
                     ], true);
                 $summary[$blocked ? 'blocked' : 'failed']++;
                 $summary['errors'][] = [
@@ -278,6 +313,8 @@ class MeliBeautyScheduledPriceService
     private function persistConfirmedState(MeliPriceManagerItem $item, MeliBeautyScheduledDiscount $rule, array $transition, float $confirmedPrice): void
     {
         $state = $item->scheduledPriceState()->firstOrNew([]);
+        $samePromotion = $state->exists
+            && (int) $state->meli_beauty_scheduled_discount_id === (int) $rule->id;
         $state->fill([
             'price_manager_item_id' => $item->id,
             'meli_beauty_scheduled_discount_id' => $rule->id,
@@ -286,15 +323,12 @@ class MeliBeautyScheduledPriceService
             'last_confirmed_remote_price' => $confirmedPrice,
             'last_observed_remote_price' => $confirmedPrice,
             'status' => $transition['action'] === 'restore' ? MeliScheduledPriceState::STATUS_RESTORED : MeliScheduledPriceState::STATUS_ACTIVE,
-            'applied_at' => $transition['action'] === 'restore' ? $state->applied_at : ($state->applied_at ?? now()),
+            'applied_at' => $transition['action'] === 'restore'
+                ? $state->applied_at
+                : ($samePromotion ? ($state->applied_at ?? now()) : now()),
             'restored_at' => $transition['action'] === 'restore' ? now() : null,
             'failure_message' => null,
         ])->save();
-    }
-
-    private function timePart(mixed $value): string
-    {
-        return substr(trim((string) $value), 0, 8);
     }
 
     /** @return list<string> */
@@ -334,13 +368,16 @@ class MeliBeautyScheduledPriceService
         string $action,
         ?float $target,
         array $reasons,
+        ?float $discountPercentage = null,
     ): array {
+        $discountPercentage ??= (float) $rule->discount_percentage;
+
         return [
             'meli_item_id' => (string) $item->meli_item_id,
             'brand' => (string) ($rule->brandGroup?->name ?? 'Marca'),
             'standard_base' => $snapshot['standard_base'] ?? null,
             'promotion_original' => $snapshot['promotion_original'] ?? null,
-            'configured_discount' => (float) $rule->discount_percentage,
+            'configured_discount' => $discountPercentage,
             'desired_target' => $target,
             'allowed_min' => $snapshot['allowed_min'] ?? null,
             'allowed_max' => $snapshot['allowed_max'] ?? null,
@@ -350,9 +387,32 @@ class MeliBeautyScheduledPriceService
             'reasons' => $reasons,
             // Backwards-compatible aliases for existing console consumers.
             'base' => $snapshot['standard_base'] ?? null,
-            'discount' => (float) $rule->discount_percentage,
+            'discount' => $discountPercentage,
             'target' => $target,
             'action' => $action,
         ];
+    }
+
+    /** @param list<int> $selectedIds
+     * @return list<int>
+     */
+    private function runtimeConflictingItemIds(MeliBeautyScheduledDiscount $rule, array $selectedIds): array
+    {
+        if ($selectedIds === [] || ! $rule->active) {
+            return [];
+        }
+
+        return MeliBeautyScheduledDiscount::query()
+            ->where('active', true)
+            ->whereKeyNot($rule->id)
+            ->whereHas('scheduledItems', fn (Builder $query) => $query->whereIn('price_manager_item_id', $selectedIds))
+            ->with(['scheduledItems' => fn ($query) => $query->whereIn('price_manager_item_id', $selectedIds)])
+            ->get()
+            ->filter(fn (MeliBeautyScheduledDiscount $other): bool => $this->window->overlaps($rule, $other))
+            ->flatMap(fn (MeliBeautyScheduledDiscount $other) => $other->scheduledItems->pluck('price_manager_item_id'))
+            ->map(static fn ($id): int => (int) $id)
+            ->unique()
+            ->values()
+            ->all();
     }
 }

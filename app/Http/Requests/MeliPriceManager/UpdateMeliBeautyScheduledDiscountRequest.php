@@ -3,69 +3,59 @@
 namespace App\Http\Requests\MeliPriceManager;
 
 use App\Models\MeliBeautyScheduledDiscount;
-use App\Services\MercadoLibre\PriceManager\MeliBeautyScheduledPriceService;
-use Illuminate\Foundation\Http\FormRequest;
-use Illuminate\Validation\Rule;
+use App\Services\MercadoLibre\PriceManager\MeliBeautyScheduledPromotionGuard;
 
-class UpdateMeliBeautyScheduledDiscountRequest extends FormRequest
+class UpdateMeliBeautyScheduledDiscountRequest extends StoreMeliBeautyScheduledDiscountRequest
 {
-    public function authorize(): bool
-    {
-        return true;
-    }
-
-    protected function prepareForValidation(): void
-    {
-        $this->merge([
-            'timezone' => $this->input('timezone') ?: config('meli_price_manager.beauty.default_timezone'),
-            'active' => $this->has('active') ? $this->boolean('active') : true,
-        ]);
-    }
-
-    /** @return array<string, mixed> */
-    public function rules(): array
-    {
-        /** @var MeliBeautyScheduledDiscount|null $rule */
-        $rule = $this->route('discount');
-
-        return [
-            'meli_account_id' => ['required', 'integer', 'exists:meli_accounts,id'],
-            'brand_group_id' => [
-                'required', 'integer', 'exists:meli_brand_groups,id',
-                Rule::unique('meli_beauty_scheduled_discounts', 'brand_group_id')
-                    ->where(fn ($query) => $query->where('meli_account_id', $this->integer('meli_account_id')))
-                    ->ignore($rule?->getKey()),
-            ],
-            'discount_percentage' => ['required', 'numeric', 'gt:0', 'lt:100'],
-            'starts_at' => ['required', 'date_format:H:i'],
-            'ends_at' => ['required', 'date_format:H:i', 'different:starts_at'],
-            'timezone' => ['required', 'timezone'],
-            'active' => ['required', 'boolean'],
-        ];
-    }
-
     public function withValidator($validator): void
     {
+        parent::withValidator($validator);
         $validator->after(function ($validator): void {
             if ($validator->errors()->isNotEmpty()) {
                 return;
             }
 
-            if (! $this->user()?->meliAccounts()->whereKey($this->integer('meli_account_id'))->exists()) {
-                $validator->errors()->add('meli_account_id', 'La cuenta no pertenece al usuario autenticado.');
-
-                return;
-            }
-
-            if (! $this->boolean('active')) {
-                return;
-            }
-
-            $rule = $this->route('discount');
-            $rule->fill($this->validated());
-            if (! app(MeliBeautyScheduledPriceService::class)->ruleHasEligibleItems($rule)) {
-                $validator->errors()->add('brand_group_id', 'La marca no tiene publicaciones Beauty categorizadas y válidas en esta cuenta.');
+            /** @var MeliBeautyScheduledDiscount $current */
+            $current = $this->route('discount');
+            if (app(MeliBeautyScheduledPromotionGuard::class)->hasPendingRemoteState($current)
+                && $this->changesExecutionDefinition($current)) {
+                $validator->errors()->add('items', 'Restaura primero los precios activos antes de cambiar la programación o sus publicaciones.');
             }
         });
+    }
+
+    protected function ignoredPromotionId(): ?int
+    {
+        return (int) $this->route('discount')?->getKey();
+    }
+
+    private function changesExecutionDefinition(MeliBeautyScheduledDiscount $current): bool
+    {
+        $incomingItems = collect($this->input('items', []))
+            ->mapWithKeys(static fn (array $item): array => [(int) $item['price_manager_item_id'] => number_format((float) $item['discount_percentage'], 2, '.', '')])
+            ->sortKeys()
+            ->all();
+        $storedItems = $current->scheduledItems()
+            ->pluck('discount_percentage', 'price_manager_item_id')
+            ->map(static fn (mixed $value): string => number_format((float) $value, 2, '.', ''))
+            ->sortKeys()
+            ->all();
+
+        $stored = [
+            'meli_account_id' => (string) $current->meli_account_id,
+            'brand_group_id' => (string) $current->brand_group_id,
+            'starts_on' => optional($current->starts_on)->format('Y-m-d'),
+            'ends_on' => optional($current->ends_on)->format('Y-m-d'),
+            'starts_at' => substr((string) $current->starts_at, 0, 5),
+            'ends_at' => substr((string) $current->ends_at, 0, 5),
+        ];
+
+        foreach ($stored as $field => $value) {
+            if ((string) $value !== (string) $this->input($field)) {
+                return true;
+            }
+        }
+
+        return $incomingItems !== $storedItems;
     }
 }

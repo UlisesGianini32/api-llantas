@@ -22,31 +22,38 @@ class MeliBeautyScheduledPriceServiceTest extends TestCase
     {
         $rule = new MeliBeautyScheduledDiscount([
             'active' => true,
+            'starts_on' => '2026-09-08',
+            'ends_on' => '2026-09-12',
             'starts_at' => '20:00',
             'ends_at' => '06:00',
-            'timezone' => 'America/Hermosillo',
+            'timezone' => 'America/Mexico_City',
         ]);
 
-        $this->assertFalse($this->service->isRuleActiveAt($rule, CarbonImmutable::parse('2026-09-08 19:59:00', 'America/Hermosillo')));
-        $this->assertTrue($this->service->isRuleActiveAt($rule, CarbonImmutable::parse('2026-09-08 20:00:00', 'America/Hermosillo')));
-        $this->assertTrue($this->service->isRuleActiveAt($rule, CarbonImmutable::parse('2026-09-09 00:30:00', 'America/Hermosillo')));
-        $this->assertTrue($this->service->isRuleActiveAt($rule, CarbonImmutable::parse('2026-09-09 05:59:00', 'America/Hermosillo')));
-        $this->assertFalse($this->service->isRuleActiveAt($rule, CarbonImmutable::parse('2026-09-09 06:00:00', 'America/Hermosillo')));
+        $this->assertFalse($this->service->isRuleActiveAt($rule, CarbonImmutable::parse('2026-09-08 19:59:00', 'America/Mexico_City')));
+        $this->assertTrue($this->service->isRuleActiveAt($rule, CarbonImmutable::parse('2026-09-08 20:00:00', 'America/Mexico_City')));
+        $this->assertTrue($this->service->isRuleActiveAt($rule, CarbonImmutable::parse('2026-09-09 00:30:00', 'America/Mexico_City')));
+        $this->assertTrue($this->service->isRuleActiveAt($rule, CarbonImmutable::parse('2026-09-09 05:59:00', 'America/Mexico_City')));
+        $this->assertFalse($this->service->isRuleActiveAt($rule, CarbonImmutable::parse('2026-09-09 06:00:00', 'America/Mexico_City')));
+        $this->assertFalse($this->service->isRuleActiveAt($rule, CarbonImmutable::parse('2026-09-12 20:00:00', 'America/Mexico_City')));
     }
 
     public function test_non_cross_midnight_schedule_uses_start_inclusive_end_exclusive(): void
     {
         $rule = new MeliBeautyScheduledDiscount([
             'active' => true,
+            'starts_on' => '2026-09-08',
+            'ends_on' => '2026-09-12',
             'starts_at' => '08:00',
             'ends_at' => '18:00',
-            'timezone' => 'America/Hermosillo',
+            'timezone' => 'America/Mexico_City',
         ]);
 
-        $this->assertFalse($this->service->isRuleActiveAt($rule, CarbonImmutable::parse('2026-09-08 07:59:00', 'America/Hermosillo')));
-        $this->assertTrue($this->service->isRuleActiveAt($rule, CarbonImmutable::parse('2026-09-08 08:00:00', 'America/Hermosillo')));
-        $this->assertTrue($this->service->isRuleActiveAt($rule, CarbonImmutable::parse('2026-09-08 17:59:00', 'America/Hermosillo')));
-        $this->assertFalse($this->service->isRuleActiveAt($rule, CarbonImmutable::parse('2026-09-08 18:00:00', 'America/Hermosillo')));
+        $this->assertFalse($this->service->isRuleActiveAt($rule, CarbonImmutable::parse('2026-09-08 07:59:00', 'America/Mexico_City')));
+        $this->assertTrue($this->service->isRuleActiveAt($rule, CarbonImmutable::parse('2026-09-08 08:00:00', 'America/Mexico_City')));
+        $this->assertTrue($this->service->isRuleActiveAt($rule, CarbonImmutable::parse('2026-09-08 17:59:00', 'America/Mexico_City')));
+        $this->assertFalse($this->service->isRuleActiveAt($rule, CarbonImmutable::parse('2026-09-08 18:00:00', 'America/Mexico_City')));
+        $this->assertTrue($this->service->isRuleActiveAt($rule, CarbonImmutable::parse('2026-09-12 17:59:00', 'America/Mexico_City')));
+        $this->assertFalse($this->service->isRuleActiveAt($rule, CarbonImmutable::parse('2026-09-12 18:00:00', 'America/Mexico_City')));
     }
 
     public function test_calculation_is_rounded_and_never_uses_promotional_price_as_base(): void

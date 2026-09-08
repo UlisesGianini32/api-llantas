@@ -1,13 +1,10 @@
 import AppShell from '@/Components/layout/AppShell'
 import { Head, router, useForm } from '@inertiajs/react'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 
-const fieldClass =
-    'w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 dark:border-neutral-700 dark:bg-neutral-950 dark:text-white dark:focus:ring-indigo-500/20'
-const secondaryButton =
-    'rounded-xl border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:opacity-50 dark:border-neutral-700 dark:text-slate-200 dark:hover:bg-neutral-800'
-const primaryButton =
-    'rounded-xl bg-indigo-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-indigo-700 disabled:opacity-50'
+const fieldClass = 'w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 dark:border-neutral-700 dark:bg-neutral-950 dark:text-white'
+const secondaryButton = 'rounded-xl border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:opacity-50 dark:border-neutral-700 dark:text-slate-200 dark:hover:bg-neutral-800'
+const primaryButton = 'rounded-xl bg-indigo-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-indigo-700 disabled:opacity-50'
 
 function ErrorText({ message }) {
     return message ? <p className="mt-1 text-xs font-medium text-rose-600 dark:text-rose-300">{message}</p> : null
@@ -17,273 +14,235 @@ function Badge({ children, tone = 'slate' }) {
     const tones = {
         green: 'bg-emerald-100 text-emerald-800 dark:bg-emerald-500/15 dark:text-emerald-200',
         amber: 'bg-amber-100 text-amber-800 dark:bg-amber-500/15 dark:text-amber-200',
+        rose: 'bg-rose-100 text-rose-800 dark:bg-rose-500/15 dark:text-rose-200',
         slate: 'bg-slate-100 text-slate-700 dark:bg-neutral-800 dark:text-slate-300',
         indigo: 'bg-indigo-100 text-indigo-800 dark:bg-indigo-500/15 dark:text-indigo-200',
     }
-
     return <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-bold ${tones[tone]}`}>{children}</span>
+}
+
+const statusLabels = {
+    scheduled: ['Programada', 'indigo'],
+    in_window: ['En ventana', 'green'],
+    outside_hours: ['Fuera de horario', 'amber'],
+    finished: ['Finalizada', 'slate'],
+    disabled: ['Deshabilitada', 'slate'],
+    requires_configuration: ['Requiere configuración', 'rose'],
 }
 
 function timePart(value) {
     return String(value ?? '').slice(0, 5)
 }
 
-function formatTime(value) {
-    const [hours, minutes] = timePart(value).split(':').map(Number)
-    if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return value || '—'
-
-    return new Intl.DateTimeFormat('es-MX', {
-        hour: 'numeric',
-        minute: '2-digit',
-        hour12: true,
-    }).format(new Date(2026, 0, 1, hours, minutes))
+function dateForUi(value) {
+    const part = String(value ?? '').slice(0, 10)
+    const match = part.match(/^(\d{4})-(\d{2})-(\d{2})$/)
+    return match ? `${match[3]}/${match[2]}/${match[1]}` : part
 }
 
-function scheduleDescription(startsAt, endsAt) {
-    const start = timePart(startsAt)
-    const end = timePart(endsAt)
-    if (!start || !end || start === end) return 'Indica dos horas diferentes.'
-
-    const crossesMidnight = start > end
-    return crossesMidnight
-        ? `Desde las ${formatTime(start)} hasta las ${formatTime(end)} del día siguiente.`
-        : `Desde las ${formatTime(start)} hasta las ${formatTime(end)}.`
+function normalizeClock(value) {
+    const digits = value.replace(/\D/g, '').slice(0, 4)
+    return digits.length > 2 ? `${digits.slice(0, 2)}:${digits.slice(2)}` : digits
 }
 
-function percentagePreview(price, percentage) {
-    const numericPrice = Number(price)
-    const numericPercentage = Number(percentage)
-    if (!Number.isFinite(numericPrice) || numericPrice <= 0 || !Number.isFinite(numericPercentage)) return null
+function money(value) {
+    return Number.isFinite(Number(value))
+        ? Number(value).toLocaleString('es-MX', { style: 'currency', currency: 'MXN' })
+        : 'Sin precio'
+}
 
-    return Math.round(numericPrice * (1 - numericPercentage / 100) * 100) / 100
+function target(price, percentage) {
+    const base = Number(price)
+    const discount = Number(percentage)
+    return base > 0 && discount > 0 && discount < 100 ? Math.round(base * (1 - discount / 100) * 100) / 100 : null
 }
 
 function emptyForm(defaultTimezone) {
     return {
-        meli_account_id: '',
-        brand_group_id: '',
-        discount_percentage: '10',
-        starts_at: '20:00',
-        ends_at: '06:00',
-        timezone: defaultTimezone,
-        active: true,
+        meli_account_id: '', brand_group_id: '', starts_on: '', ends_on: '', starts_at: '20:00', ends_at: '06:00',
+        timezone: defaultTimezone, active: true, discount_percentage: '10', items: [],
     }
 }
 
 export default function ScheduledDiscounts({
-    accounts = [],
-    selectedAccountId = null,
-    rules = [],
-    brandOptions = [],
-    defaultTimezone = 'America/Hermosillo',
-    automationEnabled = false,
-    schedulerEnabled = false,
+    accounts = [], selectedAccountId = null, rules = [], brandOptions = [],
+    defaultTimezone = 'America/Mexico_City', automationEnabled = false, schedulerEnabled = false,
 }) {
     const [editor, setEditor] = useState(null)
-    const [examplePrice, setExamplePrice] = useState('2000')
+    const [rows, setRows] = useState([])
+    const [meta, setMeta] = useState({ current_page: 1, last_page: 1, total: 0, all_ids: [] })
+    const [loading, setLoading] = useState(false)
+    const [search, setSearch] = useState('')
+    const [sort, setSort] = useState('title')
+    const [page, setPage] = useState(1)
+    const [selected, setSelected] = useState({})
+    const [bulkPercentage, setBulkPercentage] = useState('10')
     const form = useForm(emptyForm(defaultTimezone))
-
     const selectedAccount = accounts.find((account) => Number(account.id) === Number(selectedAccountId))
-    const preview = useMemo(
-        () => percentagePreview(examplePrice, form.data.discount_percentage),
-        [examplePrice, form.data.discount_percentage],
-    )
+    const selectedCount = Object.keys(selected).length
 
-    const changeAccount = (accountId) => {
-        router.get('/meli-price-manager/scheduled-discounts', { account: accountId }, { preserveState: true, preserveScroll: true })
-    }
+    useEffect(() => {
+        if (!editor || !form.data.meli_account_id || !form.data.brand_group_id) {
+            setRows([])
+            return undefined
+        }
+        const controller = new AbortController()
+        const timer = window.setTimeout(async () => {
+            setLoading(true)
+            const params = new URLSearchParams({
+                catalog: '1',
+                meli_account_id: form.data.meli_account_id,
+                brand_group_id: form.data.brand_group_id,
+                search,
+                sort,
+                page: String(page),
+            })
+            try {
+                const response = await fetch(`/meli-price-manager/scheduled-discounts?${params}`, {
+                    signal: controller.signal,
+                    headers: { Accept: 'application/json' },
+                })
+                if (response.ok) {
+                    const payload = await response.json()
+                    setRows(payload.data)
+                    setMeta(payload.meta)
+                }
+            } finally {
+                if (!controller.signal.aborted) setLoading(false)
+            }
+        }, 250)
+        return () => {
+            window.clearTimeout(timer)
+            controller.abort()
+        }
+    }, [editor, form.data.meli_account_id, form.data.brand_group_id, search, sort, page])
+
+    const selectedItems = useMemo(() => Object.entries(selected).map(([id, percentage]) => ({
+        price_manager_item_id: Number(id), discount_percentage: percentage,
+    })), [selected])
 
     const openCreate = () => {
         form.clearErrors()
         form.setData({ ...emptyForm(defaultTimezone), meli_account_id: String(selectedAccountId ?? '') })
+        setSelected({})
+        setSearch('')
+        setSort('title')
+        setPage(1)
         setEditor({ mode: 'create' })
     }
 
-    const openEdit = (rule) => {
+    const openEdit = (promotion) => {
         form.clearErrors()
+        const selections = Object.fromEntries((promotion.scheduled_items ?? []).map((item) => [
+            item.price_manager_item_id, String(item.discount_percentage),
+        ]))
         form.setData({
-            meli_account_id: String(rule.meli_account_id),
-            brand_group_id: String(rule.brand_group_id),
-            discount_percentage: String(rule.discount_percentage),
-            starts_at: timePart(rule.starts_at),
-            ends_at: timePart(rule.ends_at),
-            timezone: rule.timezone,
-            active: Boolean(rule.active),
+            meli_account_id: String(promotion.meli_account_id),
+            brand_group_id: String(promotion.brand_group_id),
+            starts_on: dateForUi(promotion.starts_on),
+            ends_on: dateForUi(promotion.ends_on),
+            starts_at: timePart(promotion.starts_at),
+            ends_at: timePart(promotion.ends_at),
+            timezone: defaultTimezone,
+            active: Boolean(promotion.active),
+            discount_percentage: String(promotion.discount_percentage ?? '10'),
+            items: [],
         })
-        setEditor({ mode: 'edit', id: rule.id, brandName: rule.brand_group?.name })
-    }
-
-    const closeEditor = () => {
-        if (form.processing) return
-        setEditor(null)
-        form.clearErrors()
+        setSelected(selections)
+        setBulkPercentage(String(promotion.discount_percentage ?? '10'))
+        setSearch('')
+        setSort('title')
+        setPage(1)
+        setEditor({ mode: 'edit', id: promotion.id, brandName: promotion.brand_group?.name })
     }
 
     const submit = (event) => {
         event.preventDefault()
-        const options = {
-            preserveScroll: true,
-            onSuccess: () => {
-                setEditor(null)
-                form.reset()
-            },
-        }
-
-        if (editor?.mode === 'edit') {
-            form.put(`/meli-price-manager/scheduled-discounts/${editor.id}`, options)
-        } else {
-            form.post('/meli-price-manager/scheduled-discounts', options)
-        }
+        form.transform((data) => ({ ...data, items: selectedItems }))
+        const options = { preserveScroll: true, onSuccess: () => setEditor(null) }
+        editor?.mode === 'edit'
+            ? form.put(`/meli-price-manager/scheduled-discounts/${editor.id}`, options)
+            : form.post('/meli-price-manager/scheduled-discounts', options)
     }
 
-    const toggleRule = (rule) => {
-        const nextActive = !rule.active
-        const message = nextActive
-            ? '¿Habilitar esta regla? La configuración quedará lista, pero todavía no se modificarán precios en Mercado Libre.'
-            : '¿Deshabilitar esta regla? No se restaurará ningún precio desde esta pantalla.'
-        if (!window.confirm(message)) return
+    const toggleSelection = (row) => setSelected((current) => {
+        const next = { ...current }
+        if (next[row.id] !== undefined) delete next[row.id]
+        else next[row.id] = bulkPercentage
+        return next
+    })
 
-        router.patch(
-            `/meli-price-manager/scheduled-discounts/${rule.id}/status`,
-            { active: nextActive },
-            { preserveScroll: true },
-        )
+    const applyBulk = () => setSelected((current) => Object.fromEntries(Object.keys(current).map((id) => [id, bulkPercentage])))
+    const selectAll = () => setSelected((current) => ({
+        ...current,
+        ...Object.fromEntries((meta.all_ids ?? []).map((id) => [id, current[id] ?? bulkPercentage])),
+    }))
+
+    const togglePromotion = (promotion) => {
+        const active = !promotion.active
+        if (!window.confirm(active ? '¿Habilitar esta promoción?' : '¿Deshabilitarla? El scheduler restaurará los precios confirmados.')) return
+        router.patch(`/meli-price-manager/scheduled-discounts/${promotion.id}/status`, { active }, { preserveScroll: true })
     }
 
-    const activeBrands = editor?.mode === 'edit' && editor.brandName
-        ? brandOptions.some((brand) => Number(brand.id) === Number(form.data.brand_group_id))
-            ? brandOptions
-            : [...brandOptions, { id: form.data.brand_group_id, name: editor.brandName, eligible_items_count: null }]
+    const activeBrands = editor?.mode === 'edit' && editor.brandName && !brandOptions.some((brand) => Number(brand.id) === Number(form.data.brand_group_id))
+        ? [...brandOptions, { id: form.data.brand_group_id, name: editor.brandName }]
         : brandOptions
 
     return (
         <AppShell title="Meli Price Manager">
-            <Head title="Descuentos programados · Meli Price Manager" />
+            <Head title="Promociones programadas · Meli Price Manager" />
             <div className="space-y-6">
                 <header className="flex flex-col justify-between gap-4 xl:flex-row xl:items-end">
-                    <div>
-                        <p className="text-xs font-bold uppercase tracking-[0.2em] text-indigo-600 dark:text-indigo-300">Meli Price Manager</p>
-                        <h1 className="mt-1 text-3xl font-bold text-slate-950 dark:text-white">Descuentos programados</h1>
-                        <p className="mt-2 max-w-3xl text-sm text-slate-500 dark:text-slate-400">
-                            Configura ventanas de descuento por marca para publicaciones Beauty elegibles.
-                        </p>
-                    </div>
-                    <button type="button" onClick={openCreate} disabled={!selectedAccountId || brandOptions.length === 0} className={primaryButton}>
-                        Nueva regla
-                    </button>
+                    <div><p className="text-xs font-bold uppercase tracking-[0.2em] text-indigo-600">Meli Price Manager</p><h1 className="mt-1 text-3xl font-bold">Promociones programadas</h1><p className="mt-2 text-sm text-slate-500">PRICE_DISCOUNT de Beauty por periodo, horario y publicación.</p></div>
+                    <button type="button" onClick={openCreate} disabled={!selectedAccountId || !brandOptions.length} className={primaryButton}>Nueva promoción</button>
                 </header>
 
-                <section className={`rounded-2xl border p-4 ${automationEnabled ? 'border-emerald-200 bg-emerald-50 dark:border-emerald-500/20 dark:bg-emerald-500/5' : 'border-sky-200 bg-sky-50 dark:border-sky-500/20 dark:bg-sky-500/5'}`}>
-                    <div className="flex flex-wrap items-center gap-2 text-sm font-semibold text-slate-900 dark:text-white">
-                        <span>Motor de precios:</span>
-                        <Badge tone={automationEnabled ? 'green' : 'slate'}>{automationEnabled ? 'Activo' : 'Desactivado'}</Badge>
-                        <span className="ml-2">Scheduler automático:</span>
-                        <Badge tone={schedulerEnabled && automationEnabled ? 'green' : 'slate'}>{schedulerEnabled && automationEnabled ? 'Activo' : 'Desactivado'}</Badge>
-                    </div>
-                    <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">
-                        {!automationEnabled
-                            ? 'La automatización está completamente deshabilitada. Las reglas pueden configurarse y simularse, pero no se modificarán precios.'
-                            : schedulerEnabled
-                                ? 'La automatización periódica está activa y procesa reglas cada minuto mediante la cola segura de Mercado Libre.'
-                                : 'Se permiten pruebas manuales controladas, pero el scheduler no está ejecutando reglas automáticamente.'}
-                    </p>
+                <section className="rounded-2xl border border-slate-200 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-900">
+                    <div className="flex flex-wrap items-center gap-3 text-sm"><b>Automatización</b><Badge tone={automationEnabled ? 'green' : 'slate'}>{automationEnabled ? 'Activa' : 'Desactivada'}</Badge><b>Scheduler</b><Badge tone={schedulerEnabled ? 'green' : 'slate'}>{schedulerEnabled ? 'Cada minuto' : 'Desactivado'}</Badge></div>
+                    {!automationEnabled && <p className="mt-2 text-sm text-slate-500">Puedes configurar y validar promociones, pero no se escribirán precios en Mercado Libre.</p>}
                 </section>
 
-                <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm dark:border-neutral-800 dark:bg-neutral-900">
-                    <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(18rem,24rem)] lg:items-end">
-                        <div>
-                            <h2 className="font-semibold text-slate-900 dark:text-white">Cuenta de Mercado Libre</h2>
-                            <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-                                Las marcas y reglas corresponden únicamente a la cuenta seleccionada.
-                            </p>
-                        </div>
-                        <select value={selectedAccountId ?? ''} onChange={(event) => changeAccount(event.target.value)} disabled={!accounts.length} className={fieldClass}>
-                            {!accounts.length && <option value="">Sin cuentas vinculadas</option>}
-                            {accounts.map((account) => (
-                                <option key={account.id} value={account.id}>
-                                    {account.nickname || `Cuenta #${account.id}`} · {account.meli_user_id}{account.is_default ? ' · predeterminada' : ''}
-                                </option>
-                            ))}
-                        </select>
-                    </div>
+                <section className="rounded-2xl border border-slate-200 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-900">
+                    <label className="grid gap-2 md:grid-cols-[1fr_24rem] md:items-center"><span><b>Cuenta de Mercado Libre</b><small className="block text-slate-500">Las marcas y publicaciones se aíslan por cuenta.</small></span><select value={selectedAccountId ?? ''} onChange={(event) => router.get('/meli-price-manager/scheduled-discounts', { account: event.target.value }, { preserveState: false })} className={fieldClass}>{accounts.map((account) => <option key={account.id} value={account.id}>{account.nickname || `Cuenta #${account.id}`}</option>)}</select></label>
                 </section>
 
-                {editor && (
-                    <section className="rounded-2xl border border-indigo-200 bg-indigo-50/60 p-5 dark:border-indigo-500/20 dark:bg-indigo-500/5">
-                        <div className="mb-4 flex items-start justify-between gap-3">
-                            <div>
-                                <h2 className="text-lg font-bold text-slate-950 dark:text-white">{editor.mode === 'edit' ? 'Editar regla' : 'Nueva regla'}</h2>
-                                <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-                                    {editor.mode === 'edit' ? 'La cuenta y la marca identifican la regla y no se cambian durante la edición.' : 'Solo aparecen marcas Beauty con publicaciones elegibles en esta cuenta.'}
-                                </p>
-                            </div>
-                            <button type="button" onClick={closeEditor} className={secondaryButton}>Cancelar</button>
+                {editor && <section className="rounded-2xl border border-indigo-200 bg-indigo-50/50 p-5 dark:border-indigo-500/20 dark:bg-indigo-500/5">
+                    <div className="mb-5 flex justify-between gap-3"><div><h2 className="text-lg font-bold">{editor.mode === 'edit' ? 'Editar promoción' : 'Nueva promoción'}</h2><p className="text-sm text-slate-500">Zona fija: {defaultTimezone}. Fechas DD/MM/AAAA y horas HH:mm (24 h).</p></div><button type="button" onClick={() => setEditor(null)} className={secondaryButton}>Cancelar</button></div>
+                    <form onSubmit={submit} className="space-y-5">
+                        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                            <label><span className="mb-1 block text-sm font-semibold">Cuenta</span><select value={form.data.meli_account_id} onChange={(e) => { form.setData('meli_account_id', e.target.value); setSelected({}); setPage(1) }} className={fieldClass} disabled={editor.mode === 'edit'}>{accounts.map((account) => <option key={account.id} value={account.id}>{account.nickname || `Cuenta #${account.id}`}</option>)}</select><ErrorText message={form.errors.meli_account_id} /></label>
+                            <label><span className="mb-1 block text-sm font-semibold">Marca Beauty</span><select value={form.data.brand_group_id} onChange={(e) => { form.setData('brand_group_id', e.target.value); setSelected({}); setPage(1) }} className={fieldClass} disabled={editor.mode === 'edit'}><option value="">Selecciona</option>{activeBrands.map((brand) => <option key={brand.id} value={brand.id}>{brand.name}</option>)}</select><ErrorText message={form.errors.brand_group_id} /></label>
+                            <label><span className="mb-1 block text-sm font-semibold">Fecha inicial</span><input value={form.data.starts_on} onChange={(e) => form.setData('starts_on', e.target.value)} placeholder="08/09/2028" inputMode="numeric" className={fieldClass} /><ErrorText message={form.errors.starts_on} /></label>
+                            <label><span className="mb-1 block text-sm font-semibold">Fecha final</span><input value={form.data.ends_on} onChange={(e) => form.setData('ends_on', e.target.value)} placeholder="12/09/2028" inputMode="numeric" className={fieldClass} /><ErrorText message={form.errors.ends_on} /></label>
+                            <label><span className="mb-1 block text-sm font-semibold">Hora inicial</span><input value={form.data.starts_at} onChange={(e) => form.setData('starts_at', normalizeClock(e.target.value))} placeholder="20:00" inputMode="numeric" maxLength={5} className={fieldClass} /><ErrorText message={form.errors.starts_at} /></label>
+                            <label><span className="mb-1 block text-sm font-semibold">Hora final</span><input value={form.data.ends_at} onChange={(e) => form.setData('ends_at', normalizeClock(e.target.value))} placeholder="06:00" inputMode="numeric" maxLength={5} className={fieldClass} /><ErrorText message={form.errors.ends_at} /></label>
+                            <div><span className="mb-1 block text-sm font-semibold">Zona horaria</span><div className={`${fieldClass} bg-slate-50 dark:bg-neutral-900`}>{defaultTimezone}</div></div>
+                            <label className="flex items-center gap-2 self-end rounded-xl border border-slate-200 px-3 py-2 dark:border-neutral-700"><input type="checkbox" checked={Boolean(form.data.active)} onChange={(e) => form.setData('active', e.target.checked)} /><span className="text-sm font-semibold">Promoción habilitada</span></label>
                         </div>
-                        <form onSubmit={submit} className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-                            <label>
-                                <span className="mb-1 block text-sm font-semibold">Cuenta</span>
-                                <select value={form.data.meli_account_id} onChange={(event) => form.setData('meli_account_id', event.target.value)} disabled={editor.mode === 'edit'} className={fieldClass}>
-                                    {accounts.map((account) => <option key={account.id} value={account.id}>{account.nickname || `Cuenta #${account.id}`}</option>)}
-                                </select>
-                                <ErrorText message={form.errors.meli_account_id} />
-                            </label>
-                            <label>
-                                <span className="mb-1 block text-sm font-semibold">Marca Beauty</span>
-                                <select value={form.data.brand_group_id} onChange={(event) => form.setData('brand_group_id', event.target.value)} disabled={editor.mode === 'edit'} className={fieldClass}>
-                                    <option value="">Selecciona una marca</option>
-                                    {activeBrands.map((brand) => <option key={brand.id} value={brand.id}>{brand.name}{brand.eligible_items_count !== null ? ` · ${brand.eligible_items_count} publicaciones` : ''}</option>)}
-                                </select>
-                                <ErrorText message={form.errors.brand_group_id} />
-                            </label>
-                            <label>
-                                <span className="mb-1 block text-sm font-semibold">Descuento (%)</span>
-                                <div className="relative"><input type="number" min="0.01" max="99.99" step="0.01" value={form.data.discount_percentage} onChange={(event) => form.setData('discount_percentage', event.target.value)} className={`${fieldClass} pr-9`} required /><span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-sm font-bold text-slate-400">%</span></div>
-                                <ErrorText message={form.errors.discount_percentage} />
-                            </label>
-                            <label className="flex items-center gap-2 self-end rounded-xl border border-slate-200 px-3 py-2 dark:border-neutral-700">
-                                <input type="checkbox" checked={Boolean(form.data.active)} onChange={(event) => form.setData('active', event.target.checked)} />
-                                <span className="text-sm font-semibold">Regla habilitada</span>
-                            </label>
-                            <label>
-                                <span className="mb-1 block text-sm font-semibold">Hora de inicio</span>
-                                <input type="time" value={form.data.starts_at} onChange={(event) => form.setData('starts_at', event.target.value)} className={fieldClass} required />
-                                <ErrorText message={form.errors.starts_at} />
-                            </label>
-                            <label>
-                                <span className="mb-1 block text-sm font-semibold">Hora de finalización</span>
-                                <input type="time" value={form.data.ends_at} onChange={(event) => form.setData('ends_at', event.target.value)} className={fieldClass} required />
-                                <ErrorText message={form.errors.ends_at} />
-                            </label>
-                            <label>
-                                <span className="mb-1 block text-sm font-semibold">Zona horaria</span>
-                                <input value={form.data.timezone} onChange={(event) => form.setData('timezone', event.target.value)} className={fieldClass} required />
-                                <ErrorText message={form.errors.timezone} />
-                            </label>
-                            <div className="rounded-xl border border-indigo-200 bg-white/70 p-3 text-sm dark:border-indigo-500/20 dark:bg-neutral-950/50">
-                                <p className="font-semibold text-indigo-900 dark:text-indigo-200">Ventana horaria</p>
-                                <p className="mt-1 text-slate-600 dark:text-slate-300">{scheduleDescription(form.data.starts_at, form.data.ends_at)}</p>
+
+                        <div className="rounded-2xl border border-slate-200 bg-white dark:border-neutral-700 dark:bg-neutral-900">
+                            <div className="grid gap-3 border-b border-slate-200 p-4 md:grid-cols-[1fr_13rem_12rem] dark:border-neutral-700">
+                                <input value={search} onChange={(e) => { setSearch(e.target.value); setPage(1) }} placeholder="Buscar título, MLM o SKU" className={fieldClass} />
+                                <select value={sort} onChange={(e) => { setSort(e.target.value); setPage(1) }} className={fieldClass}><option value="title">Título</option><option value="price_asc">Precio ascendente</option><option value="price_desc">Precio descendente</option><option value="kits_first">Kits primero</option><option value="kits_last">Kits al final</option></select>
+                                <div className="flex gap-2"><button type="button" onClick={selectAll} className={secondaryButton}>Seleccionar todo</button><button type="button" onClick={() => setSelected({})} className={secondaryButton}>Deseleccionar todo</button></div>
                             </div>
-                            <div className="md:col-span-2 xl:col-span-4 rounded-xl border border-slate-200 bg-white/70 p-4 dark:border-neutral-700 dark:bg-neutral-950/50">
-                                <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
-                                    <div><p className="font-semibold">Previsualización ilustrativa</p><p className="mt-1 text-xs text-slate-500">No representa el precio real de una publicación y no se guarda.</p></div>
-                                    <label className="w-full md:w-56"><span className="mb-1 block text-xs font-semibold">Ejemplo de precio</span><input type="number" min="0.01" step="0.01" value={examplePrice} onChange={(event) => setExamplePrice(event.target.value)} className={fieldClass} /></label>
-                                </div>
-                                {preview !== null && <div className="mt-3 flex flex-wrap items-center gap-3 text-sm"><span>Precio ejemplo: <b>${Number(examplePrice).toLocaleString('es-MX', { minimumFractionDigits: 2 })}</b></span><span className="text-indigo-500">−</span><Badge tone="amber">{form.data.discount_percentage || 0}% de descuento</Badge><span className="text-indigo-500">→</span><span>Precio promocional ilustrativo: <b className="text-emerald-700 dark:text-emerald-300">${preview.toLocaleString('es-MX', { minimumFractionDigits: 2 })}</b></span></div>}
-                            </div>
-                            <div className="md:col-span-2 xl:col-span-4 flex justify-end"><button disabled={form.processing || !form.data.brand_group_id} className={primaryButton}>{form.processing ? 'Guardando...' : 'Guardar regla'}</button></div>
-                        </form>
-                    </section>
-                )}
+                            <div className="flex flex-wrap items-end gap-3 border-b border-slate-200 p-4 dark:border-neutral-700"><label><span className="mb-1 block text-xs font-semibold">Descuento masivo (%)</span><input type="number" min="0.01" max="99.99" step="0.01" value={bulkPercentage} onChange={(e) => setBulkPercentage(e.target.value)} className={`${fieldClass} w-40`} /></label><button type="button" onClick={applyBulk} disabled={!selectedCount} className={secondaryButton}>Aplicar a seleccionadas</button><Badge tone="indigo">{selectedCount} seleccionadas</Badge></div>
+                            <ErrorText message={form.errors.items} />
+                            <div className="overflow-x-auto"><table className="min-w-[920px] w-full text-left text-sm"><thead className="bg-slate-50 text-xs uppercase text-slate-500 dark:bg-neutral-950"><tr><th className="px-3 py-2">Sel.</th><th className="px-3 py-2">Kit</th><th className="px-3 py-2">Publicación</th><th className="px-3 py-2">SKU/modelo</th><th className="px-3 py-2">Standard actual</th><th className="px-3 py-2">Descuento</th><th className="px-3 py-2">Vista previa</th><th className="px-3 py-2">Estado</th></tr></thead><tbody className="divide-y divide-slate-100 dark:divide-neutral-800">
+                                {loading && <tr><td colSpan="8" className="p-8 text-center text-slate-500">Cargando publicaciones…</td></tr>}
+                                {!loading && rows.map((row) => { const percentage = selected[row.id]; const preview = target(row.current_price, percentage); return <tr key={row.id}><td className="px-3 py-3"><input type="checkbox" checked={percentage !== undefined} onChange={() => toggleSelection(row)} /></td><td className="px-3 py-3">{row.is_kit ? <Badge tone="amber">Kit</Badge> : '—'}</td><td className="px-3 py-3"><b>{row.title}</b><small className="block text-slate-500">{row.meli_item_id}</small></td><td className="px-3 py-3">{row.sku || '—'}</td><td className="px-3 py-3 font-semibold">{money(row.current_price)}</td><td className="px-3 py-3"><input type="number" min="0.01" max="99.99" step="0.01" disabled={percentage === undefined} value={percentage ?? ''} onChange={(e) => setSelected((current) => ({ ...current, [row.id]: e.target.value }))} className={`${fieldClass} w-24`} />{form.errors[`items.${selectedItems.findIndex((item) => item.price_manager_item_id === row.id)}.discount_percentage`] && <ErrorText message="Porcentaje inválido" />}</td><td className="px-3 py-3 font-semibold text-emerald-700">{preview === null ? '—' : money(preview)}</td><td className="px-3 py-3">{row.state ? <Badge tone={row.state === 'active' ? 'green' : 'slate'}>{row.state}</Badge> : 'Sin estado'}</td></tr> })}
+                                {!loading && !rows.length && <tr><td colSpan="8" className="p-8 text-center text-slate-500">No hay publicaciones Beauty elegibles.</td></tr>}
+                            </tbody></table></div>
+                            <div className="flex items-center justify-between border-t border-slate-200 p-3 text-sm dark:border-neutral-700"><span>{meta.total} publicaciones · página {meta.current_page} de {meta.last_page}</span><div className="flex gap-2"><button type="button" onClick={() => setPage((value) => Math.max(1, value - 1))} disabled={page <= 1} className={secondaryButton}>Anterior</button><button type="button" onClick={() => setPage((value) => Math.min(meta.last_page, value + 1))} disabled={page >= meta.last_page} className={secondaryButton}>Siguiente</button></div></div>
+                        </div>
+                        <div className="flex justify-end"><button disabled={form.processing || !selectedCount} className={primaryButton}>{form.processing ? 'Guardando…' : 'Guardar promoción'}</button></div>
+                    </form>
+                </section>}
 
                 <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white dark:border-neutral-800 dark:bg-neutral-900">
-                    <div className="border-b border-slate-200 px-4 py-4 dark:border-neutral-800">
-                        <h2 className="font-bold text-slate-950 dark:text-white">Reglas configuradas</h2>
-                        <p className="mt-1 text-sm text-slate-500">Los conteos usan la elegibilidad Beauty del backend. No indican precios aplicados.</p>
-                    </div>
-                    {!accounts.length && <div className="p-10 text-center text-sm text-slate-500">No hay cuentas de Mercado Libre vinculadas.</div>}
-                    {accounts.length > 0 && !brandOptions.length && <div className="p-10 text-center"><h3 className="font-bold">No hay marcas Beauty elegibles para esta cuenta.</h3><p className="mt-1 text-sm text-slate-500">La marca debe estar activa y tener publicaciones Beauty categorizadas.</p></div>}
-                    {accounts.length > 0 && brandOptions.length > 0 && !rules.length && <div className="p-10 text-center"><h3 className="font-bold">No hay descuentos programados.</h3><p className="mt-1 text-sm text-slate-500">Configura una marca Beauty para crear la primera regla.</p><button type="button" onClick={openCreate} className={`${primaryButton} mt-4`}>Crear primera regla</button></div>}
-                    {rules.length > 0 && <div className="overflow-x-auto"><table className="min-w-[1040px] w-full text-left text-sm"><thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500 dark:bg-neutral-950"><tr><th className="px-4 py-3">Marca</th><th className="px-4 py-3">Descuento</th><th className="px-4 py-3">Horario</th><th className="px-4 py-3">Estado de regla</th><th className="px-4 py-3">Ventana horaria</th><th className="px-4 py-3">Productos Beauty</th><th className="px-4 py-3">Estado de precio</th><th className="px-4 py-3">Acciones</th></tr></thead><tbody className="divide-y divide-slate-100 dark:divide-neutral-800">{rules.map((rule) => <tr key={rule.id}><td className="px-4 py-4"><p className="font-bold">{rule.brand_group?.name || 'Marca no disponible'}</p><p className="mt-1 text-xs text-slate-500">{selectedAccount?.nickname || `Cuenta #${rule.meli_account_id}`}</p></td><td className="px-4 py-4 font-bold text-indigo-700 dark:text-indigo-300">{Number(rule.discount_percentage).toLocaleString('es-MX')}%</td><td className="px-4 py-4"><p className="font-semibold">{timePart(rule.starts_at)} - {timePart(rule.ends_at)}</p><p className="mt-1 text-xs text-slate-500">{rule.timezone}</p></td><td className="px-4 py-4"><Badge tone={rule.active ? 'green' : 'slate'}>{rule.active ? 'Habilitada' : 'Deshabilitada'}</Badge></td><td className="px-4 py-4"><Badge tone={rule.active && rule.window_active ? 'amber' : 'slate'}>{rule.active && rule.window_active ? 'En horario' : 'Fuera de horario'}</Badge></td><td className="px-4 py-4"><p className="font-bold">{rule.eligible_items_count}</p><p className="text-xs text-slate-500">publicaciones elegibles</p></td><td className="px-4 py-4"><div className="space-y-1">{rule.state_summary?.active > 0 && <Badge tone="green">{rule.state_summary.active} activas</Badge>}{rule.state_summary?.restore_pending > 0 && <Badge tone="amber">{rule.state_summary.restore_pending} por restaurar</Badge>}{rule.state_summary?.failed > 0 && <Badge tone="slate">{rule.state_summary.failed} con fallo</Badge>}{!rule.state_summary?.active && !rule.state_summary?.restore_pending && !rule.state_summary?.failed && <span className="text-xs text-slate-500">Sin precio programado confirmado</span>}</div></td><td className="px-4 py-4"><div className="flex flex-wrap gap-2"><button type="button" onClick={() => openEdit(rule)} className={secondaryButton}>Editar</button><button type="button" onClick={() => toggleRule(rule)} className={secondaryButton}>{rule.active ? 'Deshabilitar' : 'Habilitar'}</button></div></td></tr>)}</tbody></table></div>}
+                    <div className="border-b border-slate-200 p-4 dark:border-neutral-800"><h2 className="font-bold">Promociones configuradas</h2></div>
+                    {!rules.length && <div className="p-10 text-center text-sm text-slate-500">No hay promociones programadas para esta cuenta.</div>}
+                    {!!rules.length && <div className="overflow-x-auto"><table className="min-w-[980px] w-full text-left text-sm"><thead className="bg-slate-50 text-xs uppercase text-slate-500 dark:bg-neutral-950"><tr><th className="px-4 py-3">Marca</th><th className="px-4 py-3">Periodo</th><th className="px-4 py-3">Horario</th><th className="px-4 py-3">Publicaciones</th><th className="px-4 py-3">Estado</th><th className="px-4 py-3">Precios</th><th className="px-4 py-3">Acciones</th></tr></thead><tbody className="divide-y divide-slate-100 dark:divide-neutral-800">{rules.map((promotion) => { const status = statusLabels[promotion.schedule_status] ?? statusLabels.requires_configuration; return <tr key={promotion.id}><td className="px-4 py-4"><b>{promotion.brand_group?.name || 'Marca no disponible'}</b><small className="block text-slate-500">{selectedAccount?.nickname}</small></td><td className="px-4 py-4">{promotion.starts_on ? `${dateForUi(promotion.starts_on)} – ${dateForUi(promotion.ends_on)}` : 'Sin fechas (legado)'}</td><td className="px-4 py-4">{timePart(promotion.starts_at)} – {timePart(promotion.ends_at)}<small className="block text-slate-500">{promotion.timezone}</small></td><td className="px-4 py-4 font-bold">{promotion.selected_items_count ?? 0}</td><td className="px-4 py-4"><Badge tone={status[1]}>{status[0]}</Badge></td><td className="px-4 py-4"><span>{promotion.state_summary?.active || 0} activas</span><small className="block text-slate-500">{promotion.state_summary?.restore_pending || 0} por restaurar · {promotion.state_summary?.failed || 0} fallidas</small></td><td className="px-4 py-4"><div className="flex gap-2"><button type="button" onClick={() => openEdit(promotion)} className={secondaryButton}>Editar</button><button type="button" onClick={() => togglePromotion(promotion)} className={secondaryButton}>{promotion.active ? 'Deshabilitar' : 'Habilitar'}</button></div></td></tr> })}</tbody></table></div>}
                 </section>
             </div>
         </AppShell>

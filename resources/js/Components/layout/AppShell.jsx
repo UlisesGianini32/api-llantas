@@ -270,7 +270,7 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                         active={currentPath.startsWith('/meli-price-manager/scheduled-discounts')}
                         onNavigate={onNavigate}
                     >
-                        Descuentos programados
+                        Promociones programadas
                     </NavItem>
 
                     <NavItem

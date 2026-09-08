@@ -20,7 +20,7 @@ const sections = [
         { key: 'publications', label: 'Publicaciones Mercado Libre', href: '/meli/publicaciones' },
         { key: 'price_manager', label: 'Meli Price Manager', href: '/meli-price-manager', exact: true, adminOnly: true },
         { key: 'brands', label: 'Marcas y alias', href: '/meli-price-manager/brands', adminOnly: true },
-        { key: 'scheduled_discounts', label: 'Descuentos programados', href: '/meli-price-manager/scheduled-discounts', adminOnly: true },
+        { key: 'scheduled_discounts', label: 'Promociones programadas', href: '/meli-price-manager/scheduled-discounts', adminOnly: true },
         { key: 'uncategorized', label: 'Pendientes de clasificación', href: '/meli-price-manager/uncategorized', adminOnly: true },
         { key: 'full_inventory', label: 'Inventario FULL', href: '/meli/full' },
     ] },

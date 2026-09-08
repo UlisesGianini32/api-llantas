@@ -12,7 +12,7 @@ class MeliBeautyScheduledDiscount extends Model
     use HasFactory;
 
     protected $fillable = [
-        'meli_account_id', 'brand_group_id', 'discount_percentage', 'starts_at', 'ends_at',
+        'meli_account_id', 'brand_group_id', 'discount_percentage', 'starts_on', 'ends_on', 'starts_at', 'ends_at',
         'timezone', 'active', 'created_by',
     ];
 
@@ -20,6 +20,8 @@ class MeliBeautyScheduledDiscount extends Model
     {
         return [
             'discount_percentage' => 'decimal:2',
+            'starts_on' => 'date:Y-m-d',
+            'ends_on' => 'date:Y-m-d',
             'active' => 'boolean',
         ];
     }
@@ -42,5 +44,10 @@ class MeliBeautyScheduledDiscount extends Model
     public function priceStates(): HasMany
     {
         return $this->hasMany(MeliScheduledPriceState::class, 'meli_beauty_scheduled_discount_id');
+    }
+
+    public function scheduledItems(): HasMany
+    {
+        return $this->hasMany(MeliBeautyScheduledDiscountItem::class, 'meli_beauty_scheduled_discount_id');
     }
 }

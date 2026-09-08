@@ -9,7 +9,7 @@ use App\Models\MeliBrandGroup;
 use App\Models\MeliPriceManagerItem;
 use App\Models\User;
 use App\Services\MercadoLibre\PriceManager\MeliBeautyScheduledPriceService;
-use Illuminate\Database\QueryException;
+use Carbon\CarbonImmutable;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Artisan;
@@ -38,6 +38,7 @@ class MeliBeautyScheduledPriceEligibilityTest extends TestCase
         config()->set('database.connections.sqlite.database', ':memory:');
         config()->set('database.connections.sqlite.foreign_key_constraints', true);
         config()->set('meli_price_manager.beauty_scheduled_prices.promotional_prices_enabled', true);
+        CarbonImmutable::setTestNow(CarbonImmutable::parse('2026-09-08 12:00', 'America/Mexico_City'));
         DB::purge('sqlite');
 
         Schema::create('users', function (Blueprint $table): void {
@@ -101,7 +102,7 @@ class MeliBeautyScheduledPriceEligibilityTest extends TestCase
 
     protected function tearDown(): void
     {
-        (require database_path('migrations/2026_09_07_000003_add_scheduled_source_to_meli_price_changes.php'))->down();
+        Schema::dropIfExists('meli_beauty_scheduled_discount_items');
         (require database_path('migrations/2026_08_29_000001_add_linked_publication_fields_to_meli_price_manager_items.php'))->down();
         require database_path('migrations/2026_09_07_000002_create_meli_scheduled_price_states_table.php');
         Schema::dropIfExists('meli_scheduled_price_states');
@@ -111,36 +112,40 @@ class MeliBeautyScheduledPriceEligibilityTest extends TestCase
             Schema::dropIfExists($table);
         }
         DB::purge('sqlite');
+        CarbonImmutable::setTestNow();
         parent::tearDown();
     }
 
-    public function test_valid_beauty_rule_is_created_and_duplicate_account_brand_is_rejected(): void
+    public function test_multiple_promotions_for_the_same_account_and_brand_are_allowed(): void
     {
         $item = $this->beautyItem('MLM-BEAUTY-VALID');
         $rule = new MeliBeautyScheduledDiscount([
             'meli_account_id' => $this->account->id, 'brand_group_id' => $this->brand->id,
-            'discount_percentage' => 10, 'starts_at' => '20:00', 'ends_at' => '06:00',
-            'timezone' => 'America/Hermosillo', 'active' => true,
+            'discount_percentage' => 10, 'starts_on' => '2026-09-08', 'ends_on' => '2026-09-12',
+            'starts_at' => '20:00', 'ends_at' => '06:00',
+            'timezone' => 'America/Mexico_City', 'active' => true,
         ]);
         $this->assertTrue(app(MeliBeautyScheduledPriceService::class)->ruleHasEligibleItems($rule));
         MeliBeautyScheduledDiscount::query()->create($rule->getAttributes());
-
-        $this->expectException(QueryException::class);
         MeliBeautyScheduledDiscount::query()->create($rule->getAttributes());
+        $this->assertDatabaseCount('meli_beauty_scheduled_discounts', 2);
     }
 
     public function test_admin_endpoints_validate_percentage_hours_and_create_only_a_beauty_rule(): void
     {
-        $this->beautyItem('MLM-ENDPOINT-BEAUTY');
+        $item = $this->beautyItem('MLM-ENDPOINT-BEAUTY');
         $this->actingAs($this->user);
         $payload = [
             'meli_account_id' => $this->account->id,
             'brand_group_id' => $this->brand->id,
             'discount_percentage' => 10,
+            'starts_on' => '08/09/2026',
+            'ends_on' => '12/09/2026',
             'starts_at' => '20:00',
             'ends_at' => '06:00',
             'timezone' => 'America/Hermosillo',
             'active' => true,
+            'items' => [['price_manager_item_id' => $item->id, 'discount_percentage' => 10]],
         ];
 
         $this->post(route('meli-price-manager.scheduled-discounts.store'), [...$payload, 'discount_percentage' => 0])
@@ -156,15 +161,19 @@ class MeliBeautyScheduledPriceEligibilityTest extends TestCase
             'brand_group_id' => $this->brand->id,
             'discount_percentage' => '10.00',
         ]);
+        $this->assertDatabaseHas('meli_beauty_scheduled_discount_items', [
+            'price_manager_item_id' => $item->id,
+            'discount_percentage' => '10.00',
+        ]);
 
         $this->post(route('meli-price-manager.scheduled-discounts.store'), $payload)
-            ->assertSessionHasErrors('brand_group_id');
+            ->assertSessionHasErrors('items');
         $this->get(route('meli-price-manager.scheduled-discounts.index'))
             ->assertInertia(fn (Assert $page) => $page
                 ->component('MeliPriceManager/ScheduledDiscounts')
                 ->has('rules', 1)
                 ->has('brandOptions', 1)
-                ->where('rules.0.eligible_items_count', 1));
+                ->where('rules.0.selected_items_count', 1));
     }
 
     public function test_scheduled_discount_page_is_admin_only_and_exposes_only_eligible_beauty_brands(): void
@@ -197,6 +206,90 @@ class MeliBeautyScheduledPriceEligibilityTest extends TestCase
         $this->actingAs($operations)
             ->get(route('meli-price-manager.scheduled-discounts.index'))
             ->assertForbidden();
+    }
+
+    public function test_publication_endpoint_filters_searches_sorts_kits_and_keeps_accounts_isolated(): void
+    {
+        $single = $this->beautyItem('MLM-SINGLE');
+        $single->forceFill(['title' => 'Aceite individual', 'sku' => 'SINGLE-1', 'current_price' => 100])->save();
+        $kit = $this->beautyItem('MLM-KIT');
+        $kit->forceFill([
+            'title' => 'Tratamiento profesional',
+            'sku' => 'PACK-3',
+            'current_price' => 300,
+            'raw_attributes' => [['id' => 'UNITS_PER_PACK', 'value_name' => '3']],
+        ])->save();
+
+        $this->actingAs($this->user)
+            ->getJson(route('meli-price-manager.scheduled-discounts.index', [
+                'catalog' => 1,
+                'meli_account_id' => $this->account->id,
+                'brand_group_id' => $this->brand->id,
+                'sort' => 'kits_first',
+            ]))
+            ->assertOk()
+            ->assertJsonPath('meta.total', 2)
+            ->assertJsonPath('data.0.meli_item_id', 'MLM-KIT')
+            ->assertJsonPath('data.0.is_kit', true)
+            ->assertJsonPath('data.1.meli_item_id', 'MLM-SINGLE');
+
+        $this->getJson(route('meli-price-manager.scheduled-discounts.index', [
+            'catalog' => 1,
+            'meli_account_id' => $this->account->id,
+            'brand_group_id' => $this->brand->id,
+            'search' => 'SINGLE-1',
+        ]))->assertOk()->assertJsonPath('meta.total', 1)->assertJsonPath('data.0.id', $single->id);
+
+        foreach ([['price_asc', 'MLM-SINGLE'], ['price_desc', 'MLM-KIT']] as [$sort, $expected]) {
+            $this->getJson(route('meli-price-manager.scheduled-discounts.index', [
+                'catalog' => 1,
+                'meli_account_id' => $this->account->id,
+                'brand_group_id' => $this->brand->id,
+                'sort' => $sort,
+            ]))->assertOk()->assertJsonPath('data.0.meli_item_id', $expected);
+        }
+    }
+
+    public function test_dates_item_percentages_and_overlapping_item_windows_are_validated(): void
+    {
+        $item = $this->beautyItem('MLM-CONFLICT');
+        $this->actingAs($this->user);
+        $payload = [
+            'meli_account_id' => $this->account->id,
+            'brand_group_id' => $this->brand->id,
+            'discount_percentage' => 10,
+            'starts_on' => '08/09/2028',
+            'ends_on' => '12/09/2028',
+            'starts_at' => '20:00',
+            'ends_at' => '06:00',
+            'timezone' => 'UTC',
+            'active' => true,
+            'items' => [['price_manager_item_id' => $item->id, 'discount_percentage' => 10]],
+        ];
+
+        $this->post(route('meli-price-manager.scheduled-discounts.store'), [
+            ...$payload, 'ends_on' => '08/09/2028',
+        ])->assertSessionHasErrors('ends_on');
+        $this->post(route('meli-price-manager.scheduled-discounts.store'), [
+            ...$payload,
+            'items' => [['price_manager_item_id' => $item->id, 'discount_percentage' => 10.123]],
+        ])->assertSessionHasErrors('items.0.discount_percentage');
+
+        $this->post(route('meli-price-manager.scheduled-discounts.store'), $payload)->assertRedirect();
+        $this->assertDatabaseHas('meli_beauty_scheduled_discounts', [
+            'timezone' => 'America/Mexico_City',
+            'starts_on' => '2028-09-08',
+            'ends_on' => '2028-09-12',
+        ]);
+        $this->post(route('meli-price-manager.scheduled-discounts.store'), $payload)
+            ->assertSessionHasErrors('items');
+
+        $this->post(route('meli-price-manager.scheduled-discounts.store'), [
+            ...$payload,
+            'starts_on' => '13/09/2028',
+            'ends_on' => '14/09/2028',
+        ])->assertRedirect()->assertSessionHasNoErrors();
+        $this->assertDatabaseCount('meli_beauty_scheduled_discounts', 2);
     }
 
     public function test_non_beauty_catalogs_and_uncategorized_or_unassigned_items_are_excluded(): void
@@ -237,6 +330,7 @@ class MeliBeautyScheduledPriceEligibilityTest extends TestCase
             'starts_at' => '00:00',
             'ends_at' => '23:59',
         ]);
+        $this->selectItem($rule, $item);
 
         $promotionStarted = false;
         Http::fake(function (Request $request) use (&$promotionStarted): mixed {
@@ -281,7 +375,7 @@ class MeliBeautyScheduledPriceEligibilityTest extends TestCase
         $this->assertDatabaseCount('meli_scheduled_price_states', 0);
 
         $apply = $service->processRule($rule->fresh(), $item->meli_item_id, false);
-        $this->assertSame(1, $apply['success']);
+        $this->assertSame(1, $apply['success'], json_encode($apply, JSON_PRETTY_PRINT));
         $this->assertSame('active', $item->fresh()->scheduledPriceState?->status);
         $this->assertSame('2000.00', $item->fresh()->current_price);
         $this->assertDatabaseHas('meli_price_changes', ['source' => 'scheduled_beauty', 'scheduled_action' => 'apply']);
@@ -353,6 +447,7 @@ class MeliBeautyScheduledPriceEligibilityTest extends TestCase
             'starts_at' => '00:00',
             'ends_at' => '23:59',
         ]);
+        $this->selectItem($rule, $item);
         Http::fake(function (Request $request): mixed {
             if (str_contains($request->url(), '/pricing-automation/')) {
                 return Http::response(['status' => 'active']);
@@ -368,6 +463,66 @@ class MeliBeautyScheduledPriceEligibilityTest extends TestCase
         $this->assertSame(1, $summary['blocked']);
         $this->assertDatabaseCount('meli_scheduled_price_states', 0);
         Http::assertNotSent(fn (Request $request): bool => strtolower($request->method()) === 'put');
+    }
+
+    public function test_runtime_blocks_overlapping_promotions_for_the_same_selected_item_without_remote_calls(): void
+    {
+        $item = $this->beautyItem('MLM-RUNTIME-CONFLICT');
+        $attributes = [
+            ...$this->rule()->getAttributes(),
+            'starts_at' => '00:00',
+            'ends_at' => '23:59',
+        ];
+        $first = MeliBeautyScheduledDiscount::query()->create($attributes);
+        $second = MeliBeautyScheduledDiscount::query()->create($attributes);
+        $this->selectItem($first, $item);
+        $this->selectItem($second, $item);
+        Http::fake();
+
+        $summary = app(MeliBeautyScheduledPriceService::class)->processRule($first, $item->meli_item_id, true);
+
+        $this->assertSame(1, $summary['blocked']);
+        $this->assertSame(['scheduled_promotion_conflict'], $summary['details'][0]['reasons']);
+        Http::assertNothingSent();
+    }
+
+    public function test_removing_a_selected_item_restores_its_confirmed_active_state(): void
+    {
+        $this->account->forceFill(['access_token' => 'token'])->save();
+        $item = $this->beautyItem('MLM-REMOVED-SELECTION');
+        $rule = MeliBeautyScheduledDiscount::query()->create([
+            ...$this->rule()->getAttributes(),
+            'starts_at' => '00:00',
+            'ends_at' => '23:59',
+        ]);
+        $this->selectItem($rule, $item);
+        $item->scheduledPriceState()->create([
+            'meli_beauty_scheduled_discount_id' => $rule->id,
+            'base_price' => 2000,
+            'promotional_price' => 1800,
+            'last_confirmed_remote_price' => 1800,
+            'status' => 'active',
+        ]);
+        $rule->scheduledItems()->delete();
+        Http::fake(function (Request $request): mixed {
+            if (str_contains($request->url(), '/seller-promotions/items/')) {
+                return Http::response([$this->priceDiscount('candidate', 2000, 360, 1800, 1700)]);
+            }
+            if (str_contains($request->url(), '/prices')) {
+                return Http::response(['prices' => [$this->standardPrice(2000)]]);
+            }
+            if (str_contains($request->url(), '/sale_price')) {
+                return Http::response(['amount' => 2000, 'regular_amount' => null, 'metadata' => []]);
+            }
+
+            return Http::response([], 500);
+        });
+
+        $summary = app(MeliBeautyScheduledPriceService::class)->processRule($rule, $item->meli_item_id);
+
+        $this->assertSame(1, $summary['success']);
+        $this->assertSame('restored', $item->fresh()->scheduledPriceState?->status);
+        Http::assertNotSent(fn (Request $request): bool => in_array(strtolower($request->method()), ['post', 'put', 'delete'], true));
     }
 
     public function test_manual_apply_requires_explicit_scope_when_scheduler_is_disabled(): void
@@ -497,6 +652,7 @@ class MeliBeautyScheduledPriceEligibilityTest extends TestCase
             'starts_at' => '00:00',
             'ends_at' => '23:59',
         ]);
+        $this->selectItem($rule, $item);
         $item->scheduledPriceState()->create([
             'meli_beauty_scheduled_discount_id' => $rule->id,
             'base_price' => 2000,
@@ -540,6 +696,7 @@ class MeliBeautyScheduledPriceEligibilityTest extends TestCase
             'starts_at' => '00:00',
             'ends_at' => '23:59',
         ]);
+        $this->selectItem($rule, $item);
         $lock = Cache::lock('meli-price-manager:price-update:'.$this->account->id.':'.$item->id, 60);
         $this->assertTrue($lock->get());
         Http::fake(function (Request $request): mixed {
@@ -571,6 +728,7 @@ class MeliBeautyScheduledPriceEligibilityTest extends TestCase
         $this->account->forceFill(['access_token' => 'token'])->save();
         $first = $this->beautyItem('MLM-LINKED-A');
         $second = $this->beautyItem('MLM-LINKED-B');
+        $this->beautyItem('MLM-NOT-SELECTED');
         $first->forceFill([
             'raw_item' => ['item_relations' => [['id' => $second->meli_item_id]]],
             'price_sync_status' => 'SYNC',
@@ -586,6 +744,8 @@ class MeliBeautyScheduledPriceEligibilityTest extends TestCase
             'starts_at' => '00:00',
             'ends_at' => '23:59',
         ]);
+        $this->selectItem($rule, $first);
+        $this->selectItem($rule, $second, 20);
         $started = [];
         Http::fake(function (Request $request) use (&$started): mixed {
             if (str_contains($request->url(), '/pricing-automation/')) {
@@ -593,6 +753,7 @@ class MeliBeautyScheduledPriceEligibilityTest extends TestCase
             }
             preg_match('/items\/([^\/?]+)/', $request->url(), $matches);
             $itemId = $matches[1] ?? 'unknown';
+            $target = $itemId === 'MLM-LINKED-B' ? 1600 : 1800;
             if (str_contains($request->url(), '/seller-promotions/items/')) {
                 if (strtolower($request->method()) === 'post') {
                     $started[$itemId] = true;
@@ -600,17 +761,17 @@ class MeliBeautyScheduledPriceEligibilityTest extends TestCase
                     return Http::response(['status' => 'started'], 201);
                 }
 
-                return Http::response([$this->priceDiscount(($started[$itemId] ?? false) ? 'started' : 'candidate', 2000, 360, 1800, 1700)]);
+                return Http::response([$this->priceDiscount(($started[$itemId] ?? false) ? 'started' : 'candidate', 2000, 360, 1800, $target)]);
             }
             if (str_contains($request->url(), '/prices')) {
                 return Http::response(['prices' => array_values(array_filter([
                     $this->standardPrice(2000),
-                    ($started[$itemId] ?? false) ? $this->promotionPrice(1800, 2000) : null,
+                    ($started[$itemId] ?? false) ? $this->promotionPrice($target, 2000) : null,
                 ]))]);
             }
             if (str_contains($request->url(), '/sale_price')) {
                 return Http::response(($started[$itemId] ?? false)
-                    ? ['amount' => 1800, 'regular_amount' => 2000, 'metadata' => ['promotion_id' => 'PRICE-DISCOUNT']]
+                    ? ['amount' => $target, 'regular_amount' => 2000, 'metadata' => ['promotion_id' => 'PRICE-DISCOUNT']]
                     : ['amount' => 2000, 'regular_amount' => null, 'metadata' => []]);
             }
 
@@ -619,8 +780,14 @@ class MeliBeautyScheduledPriceEligibilityTest extends TestCase
 
         $summary = app(MeliBeautyScheduledPriceService::class)->processRule($rule);
 
+        $this->assertSame(2, $summary['processed']);
         $this->assertSame(2, $summary['success']);
         $this->assertSame(2, collect(Http::recorded())->filter(fn (array $pair): bool => strtolower($pair[0]->method()) === 'post')->count());
+        $postedTargets = collect(Http::recorded())
+            ->filter(fn (array $pair): bool => strtolower($pair[0]->method()) === 'post')
+            ->map(fn (array $pair): float => (float) $pair[0]['deal_price'])
+            ->sort()->values()->all();
+        $this->assertSame([1600.0, 1800.0], $postedTargets);
         $this->assertSame(2, $rule->fresh()->priceStates()->count());
         Http::assertNotSent(fn (Request $request): bool => strtolower($request->method()) === 'put');
     }
@@ -635,6 +802,7 @@ class MeliBeautyScheduledPriceEligibilityTest extends TestCase
             'starts_at' => '00:00',
             'ends_at' => '23:59',
         ]);
+        $this->selectItem($rule, $item);
         Http::fake(function (Request $request): mixed {
             if (str_contains($request->url(), '/pricing-automation/')) {
                 return Http::response([], 404);
@@ -679,6 +847,7 @@ class MeliBeautyScheduledPriceEligibilityTest extends TestCase
             'starts_at' => '00:00',
             'ends_at' => '23:59',
         ]);
+        $this->selectItem($rule, $item);
         $promotionStarted = false;
         Http::fake(function (Request $request) use (&$promotionStarted): mixed {
             if (str_contains($request->url(), '/pricing-automation/')) {
@@ -779,14 +948,24 @@ class MeliBeautyScheduledPriceEligibilityTest extends TestCase
         (require database_path('migrations/2026_09_07_000001_create_meli_beauty_scheduled_discounts_table.php'))->up();
         (require database_path('migrations/2026_09_07_000002_create_meli_scheduled_price_states_table.php'))->up();
         (require database_path('migrations/2026_09_07_000003_add_scheduled_source_to_meli_price_changes.php'))->up();
+        (require database_path('migrations/2026_09_08_000001_add_dates_and_items_to_meli_beauty_scheduled_discounts.php'))->up();
     }
 
     private function rule(): MeliBeautyScheduledDiscount
     {
         return new MeliBeautyScheduledDiscount([
             'meli_account_id' => $this->account->id, 'brand_group_id' => $this->brand->id,
-            'discount_percentage' => 10, 'starts_at' => '20:00', 'ends_at' => '06:00',
-            'timezone' => 'America/Hermosillo', 'active' => true,
+            'discount_percentage' => 10, 'starts_on' => '2026-09-01', 'ends_on' => '2026-09-30',
+            'starts_at' => '20:00', 'ends_at' => '06:00',
+            'timezone' => 'America/Mexico_City', 'active' => true,
+        ]);
+    }
+
+    private function selectItem(MeliBeautyScheduledDiscount $rule, MeliPriceManagerItem $item, float $percentage = 10): void
+    {
+        $rule->scheduledItems()->create([
+            'price_manager_item_id' => $item->id,
+            'discount_percentage' => $percentage,
         ]);
     }
 

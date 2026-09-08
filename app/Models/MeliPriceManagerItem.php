@@ -232,4 +232,9 @@ class MeliPriceManagerItem extends Model
     {
         return $this->hasOne(MeliScheduledPriceState::class, 'price_manager_item_id');
     }
+
+    public function scheduledDiscountSelections(): HasMany
+    {
+        return $this->hasMany(MeliBeautyScheduledDiscountItem::class, 'price_manager_item_id');
+    }
 }

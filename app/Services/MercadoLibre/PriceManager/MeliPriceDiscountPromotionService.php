@@ -6,7 +6,6 @@ use App\Models\MeliAccount;
 use App\Models\MeliBeautyScheduledDiscount;
 use App\Models\MeliPriceManagerItem;
 use App\Services\MercadoLibre\MeliAccountApiClient;
-use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Sleep;
 
@@ -18,7 +17,10 @@ class MeliPriceDiscountPromotionService
 
     private const RESTORE_CONFIRMATION_DELAY_MS = 500;
 
-    public function __construct(private readonly MeliAccountApiClient $api) {}
+    public function __construct(
+        private readonly MeliAccountApiClient $api,
+        private readonly MeliBeautyPromotionWindow $window,
+    ) {}
 
     /**
      * @return array{
@@ -229,22 +231,18 @@ class MeliPriceDiscountPromotionService
     /** @return array{0: string, 1: string} */
     private function promotionWindow(MeliBeautyScheduledDiscount $rule): array
     {
-        $timezone = $rule->timezone ?: (string) config('meli_price_manager.beauty.default_timezone');
-        $now = CarbonImmutable::now($timezone);
-        $start = $now->setTimeFromTimeString(substr((string) $rule->starts_at, 0, 8));
-        $finish = $now->setTimeFromTimeString(substr((string) $rule->ends_at, 0, 8));
-
-        if ($start->greaterThanOrEqualTo($finish)) {
-            if ($now->lessThan($finish)) {
-                $start = $start->subDay();
-            } else {
-                $finish = $finish->addDay();
-            }
+        $occurrence = $this->window->currentOccurrence($rule);
+        if ($occurrence === null) {
+            throw new MeliPriceUpdateException(
+                'La promoción no se encuentra dentro de una ventana programada válida.',
+                'scheduled_window_inactive',
+                409,
+            );
         }
 
         return [
-            $start->startOfDay()->format('Y-m-d\TH:i:s'),
-            $finish->startOfDay()->format('Y-m-d\TH:i:s'),
+            $occurrence['start']->startOfDay()->format('Y-m-d\TH:i:s'),
+            $occurrence['end']->startOfDay()->format('Y-m-d\TH:i:s'),
         ];
     }
 
