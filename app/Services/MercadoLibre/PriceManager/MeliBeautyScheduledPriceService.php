@@ -258,6 +258,7 @@ class MeliBeautyScheduledPriceService
                     if ($state !== null) {
                         $state->forceFill([
                             'status' => $state->status === MeliScheduledPriceState::STATUS_ACTIVE
+                                || (! $shouldBeActive && $state->status === MeliScheduledPriceState::STATUS_RESTORE_PENDING)
                                 ? MeliScheduledPriceState::STATUS_RESTORE_PENDING
                                 : MeliScheduledPriceState::STATUS_FAILED,
                             'failure_message' => $exception->getMessage(),

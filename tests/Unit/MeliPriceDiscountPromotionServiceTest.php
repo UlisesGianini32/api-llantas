@@ -10,6 +10,8 @@ use App\Services\MercadoLibre\PriceManager\MeliPriceUpdateException;
 use Carbon\CarbonImmutable;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Sleep;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
@@ -19,6 +21,13 @@ class MeliPriceDiscountPromotionServiceTest extends TestCase
     {
         parent::setUp();
         Http::preventStrayRequests();
+        Sleep::fake();
+    }
+
+    protected function tearDown(): void
+    {
+        Sleep::fake(false);
+        parent::tearDown();
     }
 
     #[DataProvider('localPromotionWindows')]
@@ -122,22 +131,87 @@ class MeliPriceDiscountPromotionServiceTest extends TestCase
         Http::assertSentCount(7);
     }
 
-    public function test_restore_accepts_candidate_without_winning_promotion_or_strikethrough(): void
+    #[DataProvider('confirmedStatuses')]
+    public function test_remove_skips_delete_when_winning_prices_are_already_restored(string $status): void
     {
-        $this->fakeRemotePrices($this->restoredPrices());
+        $this->fakeRemotePrices([...$this->restoredPrices(), 'status' => $status]);
 
         $confirmed = app(MeliPriceDiscountPromotionService::class)->remove(
             new MeliAccount(['access_token' => 'test-token']),
             new MeliPriceManagerItem(['meli_item_id' => 'MLM4733828880']),
         );
 
-        $this->assertSame('candidate', $confirmed['promotion_status']);
+        $this->assertSame($status, $confirmed['promotion_status']);
         $this->assertNull($confirmed['promotion_price']);
         $this->assertSame($confirmed['standard_base'], $confirmed['sale_amount']);
         $this->assertNull($confirmed['sale_regular_amount']);
-        Http::assertSent(fn (Request $request): bool => $request->method() === 'DELETE'
-            && $request->url() === 'https://api.mercadolibre.com/seller-promotions/items/MLM4733828880?promotion_type=PRICE_DISCOUNT&app_version=v2');
-        Http::assertSentCount(4);
+        Http::assertNotSent(fn (Request $request): bool => $request->method() === 'DELETE');
+        Http::assertSentCount(3);
+        Sleep::assertNeverSlept();
+    }
+
+    #[DataProvider('restorePropagation')]
+    public function test_remove_deletes_once_and_confirms_after_bounded_propagation(string $status, int $staleReads): void
+    {
+        $this->fakeRemotePrices([], afterDelete: [
+            ...array_fill(0, $staleReads, []),
+            [...$this->restoredPrices(), 'status' => $status],
+        ]);
+
+        $confirmed = $this->removePromotion();
+
+        $this->assertSame($status, $confirmed['promotion_status']);
+        $this->assertSame(299.0, $confirmed['sale_amount']);
+        $this->assertNull($confirmed['sale_regular_amount']);
+        $this->assertNull($confirmed['promotion_price']);
+        $deletes = Http::recorded(fn (Request $request): bool => $request->method() === 'DELETE');
+        $this->assertCount(1, $deletes);
+        $this->assertSame('https://api.mercadolibre.com/seller-promotions/items/MLM4733828880?promotion_type=PRICE_DISCOUNT&app_version=v2', $deletes->first()[0]->url());
+        Http::assertSentCount(7 + 3 * $staleReads);
+        if ($staleReads === 0) {
+            Sleep::assertNeverSlept();
+        } else {
+            Sleep::assertSequence(array_fill(0, $staleReads, Sleep::for(500)->milliseconds()));
+        }
+    }
+
+    public function test_remove_reports_final_prices_after_exhausting_reads_without_repeating_delete(): void
+    {
+        Log::spy();
+        $this->fakeRemotePrices([]);
+
+        try {
+            $this->removePromotion();
+            $this->fail('A winning promotion must not be marked restored.');
+        } catch (MeliPriceUpdateException $exception) {
+            $this->assertSame('promotion_restore_not_confirmed', $exception->errorCode());
+        }
+
+        $this->assertCount(1, Http::recorded(fn (Request $request): bool => $request->method() === 'DELETE'));
+        Http::assertSentCount(19);
+        Sleep::assertSequence(array_fill(0, 4, Sleep::for(500)->milliseconds()));
+        Log::shouldHaveReceived('warning')->once()->with('PRICE_DISCOUNT restore not confirmed.', [
+            'meli_item_id' => 'MLM4733828880',
+            'standard_base' => 299.0,
+            'sale_amount' => 269.1,
+            'sale_regular_amount' => 299.0,
+            'promotion_status' => 'candidate',
+            'promotion_price' => 269.1,
+        ]);
+    }
+
+    public function test_remove_cannot_confirm_without_a_numeric_standard_base(): void
+    {
+        $this->fakeRemotePrices([...$this->restoredPrices(), 'standard' => null]);
+
+        try {
+            $this->removePromotion();
+            $this->fail('An unavailable standard base must not confirm restore.');
+        } catch (MeliPriceUpdateException $exception) {
+            $this->assertSame('ambiguous_standard_price', $exception->errorCode());
+        }
+        Http::assertNotSent(fn (Request $request): bool => $request->method() === 'DELETE');
+        Sleep::assertNeverSlept();
     }
 
     #[DataProvider('unrestoredPrices')]
@@ -156,7 +230,21 @@ class MeliPriceDiscountPromotionServiceTest extends TestCase
             $this->assertSame(502, $exception->httpStatus());
         }
 
-        Http::assertSentCount(3);
+        Http::assertSentCount(15);
+        Http::assertNotSent(fn (Request $request): bool => $request->method() === 'DELETE');
+        Sleep::assertSleptTimes(4);
+    }
+
+    public static function restorePropagation(): array
+    {
+        $cases = [];
+        foreach (['candidate', 'started', 'active'] as $status) {
+            foreach ([0, 1, 4] as $staleReads) {
+                $cases[$status.' after '.$staleReads.' stale reads'] = [$status, $staleReads];
+            }
+        }
+
+        return $cases;
     }
 
     public static function confirmedStatuses(): array
@@ -188,8 +276,7 @@ class MeliPriceDiscountPromotionServiceTest extends TestCase
             'winning promotion remains' => [[]],
             'strikethrough remains without promotion' => [['promotion' => null, 'sale' => 299.0]],
             'sale differs from standard' => [['promotion' => null, 'regular' => null]],
-            'started still reported' => [['promotion' => null, 'sale' => 299.0, 'regular' => null, 'status' => 'started']],
-            'active still reported' => [['promotion' => null, 'sale' => 299.0, 'regular' => null, 'status' => 'active']],
+            'sale unavailable' => [['promotion' => null, 'sale' => null, 'regular' => null]],
         ];
     }
 
@@ -229,10 +316,20 @@ class MeliPriceDiscountPromotionServiceTest extends TestCase
         return ['promotion' => null, 'sale' => 299.0, 'regular' => null];
     }
 
-    private function fakeRemotePrices(array $before, ?array $afterPost = null): void
+    private function removePromotion(): array
+    {
+        return app(MeliPriceDiscountPromotionService::class)->remove(
+            new MeliAccount(['access_token' => 'test-token']),
+            new MeliPriceManagerItem(['meli_item_id' => 'MLM4733828880']),
+        );
+    }
+
+    private function fakeRemotePrices(array $before, ?array $afterPost = null, array $afterDelete = []): void
     {
         $posted = false;
-        Http::fake(function (Request $request) use ($before, $afterPost, &$posted): mixed {
+        $deleted = false;
+        $confirmationIndex = 0;
+        Http::fake(function (Request $request) use ($before, $afterPost, $afterDelete, &$posted, &$deleted, &$confirmationIndex): mixed {
             $path = parse_url($request->url(), PHP_URL_PATH);
             if ($path === '/seller-promotions/items/MLM4733828880' && $request->method() === 'POST') {
                 $posted = true;
@@ -240,14 +337,23 @@ class MeliPriceDiscountPromotionServiceTest extends TestCase
                 return Http::response([], 201);
             }
             if ($path === '/seller-promotions/items/MLM4733828880' && $request->method() === 'DELETE') {
+                $deleted = true;
+
                 return Http::response([], 200);
             }
 
             $this->assertSame('GET', $request->method());
+            $overrides = $posted ? ($afterPost ?? $before) : $before;
+            if ($deleted && $afterDelete !== []) {
+                $overrides = $afterDelete[min($confirmationIndex, count($afterDelete) - 1)];
+                if ($path === '/seller-promotions/items/MLM4733828880') {
+                    $confirmationIndex++;
+                }
+            }
             $prices = array_replace([
                 'standard' => 299.0, 'promotion' => 269.1, 'sale' => 269.1,
                 'regular' => 299.0, 'status' => 'candidate',
-            ], $posted ? ($afterPost ?? $before) : $before);
+            ], $overrides);
 
             return match ($path) {
                 '/items/MLM4733828880/prices' => Http::response(['prices' => array_values(array_filter([

@@ -268,14 +268,6 @@ class MeliPriceUpdateService
                 );
             }
 
-            if ($forRestore
-                && ! in_array($before['promotion_status'], ['started', 'active'], true)
-                && $before['promotion_price'] === null
-                && is_numeric($before['sale_amount'])
-                && $this->samePrice((float) $before['sale_amount'], $basePrice)) {
-                return ['result' => 'success', 'old_price' => (float) $before['sale_amount'], 'new_price' => $basePrice, 'change_id' => null, 'batch_id' => null, 'related_items' => []];
-            }
-
             if (! $forRestore && ! $this->isConfirmedPromotion($before, $basePrice, $targetPrice)) {
                 if (in_array($before['promotion_status'], ['started', 'active'], true)) {
                     throw new MeliPriceUpdateException(

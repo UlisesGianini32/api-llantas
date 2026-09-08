@@ -7,10 +7,16 @@ use App\Models\MeliBeautyScheduledDiscount;
 use App\Models\MeliPriceManagerItem;
 use App\Services\MercadoLibre\MeliAccountApiClient;
 use Carbon\CarbonImmutable;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Sleep;
 
 class MeliPriceDiscountPromotionService
 {
     private const PROMOTION_TYPE = 'PRICE_DISCOUNT';
+
+    private const RESTORE_CONFIRMATION_ATTEMPTS = 5;
+
+    private const RESTORE_CONFIRMATION_DELAY_MS = 500;
 
     public function __construct(private readonly MeliAccountApiClient $api) {}
 
@@ -154,6 +160,11 @@ class MeliPriceDiscountPromotionService
     /** @return array<string, mixed> */
     public function remove(MeliAccount $account, MeliPriceManagerItem $item): array
     {
+        $current = $this->snapshot($account, $item);
+        if ($this->isRestoredSnapshot($current)) {
+            return $current;
+        }
+
         $itemId = rawurlencode((string) $item->meli_item_id);
         $this->api->request(
             $account,
@@ -169,20 +180,40 @@ class MeliPriceDiscountPromotionService
     /** @return array<string, mixed> */
     public function confirmRestored(MeliAccount $account, MeliPriceManagerItem $item): array
     {
-        $confirmed = $this->snapshot($account, $item);
-        $promotionStillActive = in_array($confirmed['promotion_status'], ['started', 'active'], true);
-        if ($promotionStillActive
-            || $confirmed['promotion_price'] !== null
-            || $confirmed['sale_regular_amount'] !== null
-            || ! $this->sameNullablePrice($confirmed['sale_amount'], $confirmed['standard_base'])) {
-            throw new MeliPriceUpdateException(
-                'Mercado Libre no confirmó la eliminación del precio promocional ganador.',
-                'promotion_restore_not_confirmed',
-                502,
-            );
+        for ($attempt = 1; $attempt <= self::RESTORE_CONFIRMATION_ATTEMPTS; $attempt++) {
+            if ($attempt > 1) {
+                Sleep::for(self::RESTORE_CONFIRMATION_DELAY_MS)->milliseconds();
+            }
+
+            $confirmed = $this->snapshot($account, $item);
+            if ($this->isRestoredSnapshot($confirmed)) {
+                return $confirmed;
+            }
         }
 
-        return $confirmed;
+        Log::warning('PRICE_DISCOUNT restore not confirmed.', [
+            'meli_item_id' => (string) $item->meli_item_id,
+            'standard_base' => $confirmed['standard_base'],
+            'sale_amount' => $confirmed['sale_amount'],
+            'sale_regular_amount' => $confirmed['sale_regular_amount'],
+            'promotion_status' => $confirmed['promotion_status'],
+            'promotion_price' => $confirmed['promotion_price'],
+        ]);
+
+        throw new MeliPriceUpdateException(
+            'Mercado Libre no confirmó la eliminación del precio promocional ganador.',
+            'promotion_restore_not_confirmed',
+            502,
+        );
+    }
+
+    /** @param array<string, mixed> $snapshot */
+    private function isRestoredSnapshot(array $snapshot): bool
+    {
+        return is_numeric($snapshot['standard_base'])
+            && $this->sameNullablePrice($snapshot['sale_amount'], $snapshot['standard_base'])
+            && $snapshot['sale_regular_amount'] === null
+            && $snapshot['promotion_price'] === null;
     }
 
     /** @param array<string, mixed> $snapshot */
