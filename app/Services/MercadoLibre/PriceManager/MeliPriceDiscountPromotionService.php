@@ -118,6 +118,11 @@ class MeliPriceDiscountPromotionService
         float $basePrice,
         float $targetPrice,
     ): array {
+        $current = $this->snapshot($account, $item);
+        if ($this->isPromotionConfirmed($current, $basePrice, $targetPrice)) {
+            return $current;
+        }
+
         [$start, $finish] = $this->promotionWindow($rule);
         $itemId = rawurlencode((string) $item->meli_item_id);
         $this->api->request(
@@ -135,10 +140,7 @@ class MeliPriceDiscountPromotionService
         );
 
         $confirmed = $this->snapshot($account, $item);
-        if (! in_array($confirmed['promotion_status'], ['started', 'active'], true)
-            || ! $this->sameNullablePrice($confirmed['promotion_price'], $targetPrice)
-            || ! $this->sameNullablePrice($confirmed['sale_amount'], $targetPrice)
-            || ! $this->sameNullablePrice($confirmed['sale_regular_amount'], $basePrice)) {
+        if (! $this->isPromotionConfirmed($confirmed, $basePrice, $targetPrice)) {
             throw new MeliPriceUpdateException(
                 'Mercado Libre recibió PRICE_DISCOUNT, pero no confirmó el precio promocional y su precio tachado.',
                 'promotion_not_confirmed',
@@ -171,6 +173,7 @@ class MeliPriceDiscountPromotionService
         $promotionStillActive = in_array($confirmed['promotion_status'], ['started', 'active'], true);
         if ($promotionStillActive
             || $confirmed['promotion_price'] !== null
+            || $confirmed['sale_regular_amount'] !== null
             || ! $this->sameNullablePrice($confirmed['sale_amount'], $confirmed['standard_base'])) {
             throw new MeliPriceUpdateException(
                 'Mercado Libre no confirmó la eliminación del precio promocional ganador.',
@@ -180,6 +183,16 @@ class MeliPriceDiscountPromotionService
         }
 
         return $confirmed;
+    }
+
+    /** @param array<string, mixed> $snapshot */
+    private function isPromotionConfirmed(array $snapshot, float $basePrice, float $targetPrice): bool
+    {
+        return in_array($snapshot['promotion_status'], ['candidate', 'started', 'active'], true)
+            && $this->sameNullablePrice($snapshot['standard_base'], $basePrice)
+            && $this->sameNullablePrice($snapshot['promotion_price'], $targetPrice)
+            && $this->sameNullablePrice($snapshot['sale_amount'], $targetPrice)
+            && $this->sameNullablePrice($snapshot['sale_regular_amount'], $basePrice);
     }
 
     /** @return array{0: string, 1: string} */
