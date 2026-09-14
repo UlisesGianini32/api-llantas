@@ -210,6 +210,14 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                 </p>
                 <div className="space-y-1">
                     <NavItem
+                        href="/mercado-libre/etiquetas"
+                        active={currentPath.startsWith('/mercado-libre/etiquetas')}
+                        onNavigate={onNavigate}
+                    >
+                        Etiquetas Mercado Libre
+                    </NavItem>
+
+                    <NavItem
                         href="/meli/preguntas"
                         active={currentPath.startsWith('/meli/preguntas')}
                         onNavigate={onNavigate}
