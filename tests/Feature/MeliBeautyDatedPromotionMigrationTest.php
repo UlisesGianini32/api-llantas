@@ -99,6 +99,24 @@ class MeliBeautyDatedPromotionMigrationTest extends TestCase
         $this->assertSame(2, substr_count($mysqlBranch, "Schema::table('meli_beauty_scheduled_discounts'"));
     }
 
+    public function test_all_day_migration_defaults_existing_and_new_promotions_to_false_and_rolls_back_column(): void
+    {
+        $legacyId = $this->insertLegacyPromotion();
+        $this->datedMigration()->up();
+        $migration = require database_path('migrations/2026_09_14_000001_add_all_day_to_meli_beauty_scheduled_discounts.php');
+
+        $migration->up();
+
+        $this->assertTrue(Schema::hasColumn('meli_beauty_scheduled_discounts', 'all_day'));
+        $this->assertSame(0, (int) DB::table('meli_beauty_scheduled_discounts')->whereKey($legacyId)->value('all_day'));
+        $newId = $this->insertDatedPromotion(15);
+        $this->assertSame(0, (int) DB::table('meli_beauty_scheduled_discounts')->whereKey($newId)->value('all_day'));
+
+        $migration->down();
+
+        $this->assertFalse(Schema::hasColumn('meli_beauty_scheduled_discounts', 'all_day'));
+    }
+
     public function test_down_without_duplicates_restores_original_schema(): void
     {
         $promotionId = $this->insertLegacyPromotion();

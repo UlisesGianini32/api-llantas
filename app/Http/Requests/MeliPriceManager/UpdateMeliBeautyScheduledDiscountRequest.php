@@ -34,6 +34,11 @@ class UpdateMeliBeautyScheduledDiscountRequest extends StoreMeliBeautyScheduledD
         return (bool) $this->route('discount')?->active;
     }
 
+    protected function defaultAllDay(): bool
+    {
+        return (bool) $this->route('discount')?->all_day;
+    }
+
     private function changesExecutionDefinition(MeliBeautyScheduledDiscount $current): bool
     {
         $incomingItems = collect($this->input('items', []))
@@ -46,14 +51,21 @@ class UpdateMeliBeautyScheduledDiscountRequest extends StoreMeliBeautyScheduledD
             ->sortKeys()
             ->all();
 
+        if ((bool) $current->all_day !== $this->boolean('all_day')) {
+            return true;
+        }
+
         $stored = [
             'meli_account_id' => (string) $current->meli_account_id,
             'brand_group_id' => (string) $current->brand_group_id,
             'starts_on' => optional($current->starts_on)->format('Y-m-d'),
             'ends_on' => optional($current->ends_on)->format('Y-m-d'),
-            'starts_at' => substr((string) $current->starts_at, 0, 5),
-            'ends_at' => substr((string) $current->ends_at, 0, 5),
         ];
+
+        if (! $current->all_day && ! $this->boolean('all_day')) {
+            $stored['starts_at'] = substr((string) $current->starts_at, 0, 5);
+            $stored['ends_at'] = substr((string) $current->ends_at, 0, 5);
+        }
 
         foreach ($stored as $field => $value) {
             if ((string) $value !== (string) $this->input($field)) {

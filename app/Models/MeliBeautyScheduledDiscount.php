@@ -13,7 +13,7 @@ class MeliBeautyScheduledDiscount extends Model
 
     protected $fillable = [
         'meli_account_id', 'brand_group_id', 'discount_percentage', 'starts_on', 'ends_on', 'starts_at', 'ends_at',
-        'timezone', 'active', 'created_by',
+        'all_day', 'timezone', 'active', 'created_by',
     ];
 
     protected function casts(): array
@@ -22,6 +22,7 @@ class MeliBeautyScheduledDiscount extends Model
             'discount_percentage' => 'decimal:2',
             'starts_on' => 'date:Y-m-d',
             'ends_on' => 'date:Y-m-d',
+            'all_day' => 'boolean',
             'active' => 'boolean',
         ];
     }

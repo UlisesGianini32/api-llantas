@@ -41,6 +41,31 @@ class MeliBeautyPromotionWindowTest extends TestCase
         $this->assertTrue($window->overlaps($first, $overlapping));
     }
 
+    public function test_all_day_period_ignores_hours_and_includes_every_instant_of_the_final_date(): void
+    {
+        $promotion = $this->promotion('2028-09-08', '2028-09-12', '20:00', '06:00');
+        $promotion->all_day = true;
+        $window = app(MeliBeautyPromotionWindow::class);
+
+        $this->assertFalse($window->contains($promotion, $this->at('2028-09-07 23:59:59')));
+        $this->assertTrue($window->contains($promotion, $this->at('2028-09-08 00:00:00')));
+        $this->assertTrue($window->contains($promotion, $this->at('2028-09-12 23:59:59')));
+        $this->assertFalse($window->contains($promotion, $this->at('2028-09-13 00:00:00')));
+        $this->assertSame('in_window', $window->status($promotion, $this->at('2028-09-10 12:00:00')));
+    }
+
+    public function test_all_day_period_overlaps_any_timed_occurrence_inside_its_dates(): void
+    {
+        $window = app(MeliBeautyPromotionWindow::class);
+        $allDay = $this->promotion('2028-09-08', '2028-09-08', '00:00', '00:00');
+        $allDay->all_day = true;
+        $timed = $this->promotion('2028-09-08', '2028-09-08', '09:00', '12:00');
+        $nextDay = $this->promotion('2028-09-09', '2028-09-09', '09:00', '12:00');
+
+        $this->assertTrue($window->overlaps($allDay, $timed));
+        $this->assertFalse($window->overlaps($allDay, $nextDay));
+    }
+
     public function test_legacy_and_invalid_same_date_overnight_periods_are_not_executable(): void
     {
         $window = app(MeliBeautyPromotionWindow::class);

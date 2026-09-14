@@ -7,6 +7,7 @@ use App\Services\MercadoLibre\PriceManager\MeliBeautyPromotionWindow;
 use App\Services\MercadoLibre\PriceManager\MeliBeautyScheduledPromotionGuard;
 use Carbon\CarbonImmutable;
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Rule;
 
 class StoreMeliBeautyScheduledDiscountRequest extends FormRequest
 {
@@ -17,9 +18,14 @@ class StoreMeliBeautyScheduledDiscountRequest extends FormRequest
 
     protected function prepareForValidation(): void
     {
+        $allDay = $this->has('all_day') ? $this->boolean('all_day') : $this->defaultAllDay();
+
         $this->merge([
             'starts_on' => $this->normalizeDate($this->input('starts_on')),
             'ends_on' => $this->normalizeDate($this->input('ends_on')),
+            'starts_at' => $allDay ? $this->clockOrDefault($this->input('starts_at'), '00:00') : $this->input('starts_at'),
+            'ends_at' => $allDay ? $this->clockOrDefault($this->input('ends_at'), '00:00') : $this->input('ends_at'),
+            'all_day' => $allDay,
             'timezone' => MeliBeautyPromotionWindow::TIMEZONE,
             'active' => $this->has('active') ? $this->boolean('active') : $this->defaultActive(),
         ]);
@@ -35,7 +41,8 @@ class StoreMeliBeautyScheduledDiscountRequest extends FormRequest
             'starts_on' => ['required', 'date_format:Y-m-d'],
             'ends_on' => ['required', 'date_format:Y-m-d', 'after_or_equal:starts_on'],
             'starts_at' => ['required', 'date_format:H:i'],
-            'ends_at' => ['required', 'date_format:H:i', 'different:starts_at'],
+            'ends_at' => ['required', 'date_format:H:i', Rule::when(! $this->boolean('all_day'), ['different:starts_at'])],
+            'all_day' => ['required', 'boolean'],
             'timezone' => ['required', 'in:'.MeliBeautyPromotionWindow::TIMEZONE],
             'active' => ['required', 'boolean'],
             'items' => ['required', 'array', 'min:1'],
@@ -60,7 +67,12 @@ class StoreMeliBeautyScheduledDiscountRequest extends FormRequest
             $promotion = new MeliBeautyScheduledDiscount($validator->validated());
             $window = app(MeliBeautyPromotionWindow::class);
             if ($window->bounds($promotion) === null) {
-                $validator->errors()->add('ends_on', 'La fecha y hora finales deben ser posteriores al inicio; una ventana nocturna no puede comenzar y terminar la misma fecha.');
+                $validator->errors()->add(
+                    'ends_on',
+                    $this->boolean('all_day')
+                        ? 'La fecha final debe ser igual o posterior a la fecha inicial.'
+                        : 'La fecha y hora finales deben ser posteriores al inicio; una ventana nocturna no puede comenzar y terminar la misma fecha.',
+                );
 
                 return;
             }
@@ -98,6 +110,11 @@ class StoreMeliBeautyScheduledDiscountRequest extends FormRequest
         return false;
     }
 
+    protected function defaultAllDay(): bool
+    {
+        return false;
+    }
+
     private function normalizeDate(mixed $value): mixed
     {
         if (! is_string($value) || trim($value) === '') {
@@ -116,5 +133,12 @@ class StoreMeliBeautyScheduledDiscountRequest extends FormRequest
         }
 
         return $value;
+    }
+
+    private function clockOrDefault(mixed $value, string $default): string
+    {
+        $clock = substr(trim((string) $value), 0, 5);
+
+        return preg_match('/^(?:[01]\d|2[0-3]):[0-5]\d$/', $clock) === 1 ? $clock : $default;
     }
 }

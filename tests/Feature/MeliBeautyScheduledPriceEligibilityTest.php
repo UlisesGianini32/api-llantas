@@ -161,6 +161,7 @@ class MeliBeautyScheduledPriceEligibilityTest extends TestCase
             'brand_group_id' => $this->brand->id,
             'discount_percentage' => '10.00',
             'active' => true,
+            'all_day' => false,
         ]);
         $this->assertDatabaseHas('meli_beauty_scheduled_discount_items', [
             'price_manager_item_id' => $item->id,
@@ -199,9 +200,54 @@ class MeliBeautyScheduledPriceEligibilityTest extends TestCase
 
         $source = file_get_contents(resource_path('js/Pages/MeliPriceManager/ScheduledDiscounts.jsx'));
         $this->assertIsString($source);
-        $this->assertStringContainsString('timezone: defaultTimezone, active: false', $source);
+        $this->assertStringContainsString('timezone: defaultTimezone, active: false, all_day: false', $source);
         $this->assertStringContainsString('active: Boolean(promotion.active)', $source);
+        $this->assertStringContainsString('all_day: Boolean(promotion.all_day)', $source);
         $this->assertStringContainsString('Ciudad de México (America/Mexico_City)', $source);
+    }
+
+    public function test_all_day_promotion_ignores_missing_hours_and_the_ui_places_save_at_the_top(): void
+    {
+        $item = $this->beautyItem('MLM-ALL-DAY');
+        $this->actingAs($this->user)->post(route('meli-price-manager.scheduled-discounts.store'), [
+            'meli_account_id' => $this->account->id,
+            'brand_group_id' => $this->brand->id,
+            'discount_percentage' => 10,
+            'starts_on' => '08/09/2028',
+            'ends_on' => '08/09/2028',
+            'all_day' => true,
+            'timezone' => 'UTC',
+            'active' => true,
+            'items' => [['price_manager_item_id' => $item->id, 'discount_percentage' => 10]],
+        ])->assertRedirect()->assertSessionHasNoErrors();
+
+        $this->assertDatabaseHas('meli_beauty_scheduled_discounts', [
+            'starts_on' => '2028-09-08',
+            'ends_on' => '2028-09-08',
+            'starts_at' => '00:00',
+            'ends_at' => '00:00',
+            'all_day' => true,
+            'timezone' => 'America/Mexico_City',
+        ]);
+
+        $promotion = MeliBeautyScheduledDiscount::query()->sole();
+        $window = app(\App\Services\MercadoLibre\PriceManager\MeliBeautyPromotionWindow::class);
+        $this->assertTrue($window->contains($promotion, CarbonImmutable::parse('2028-09-08 23:59:59', 'America/Mexico_City')));
+        $this->get(route('meli-price-manager.scheduled-discounts.index'))
+            ->assertInertia(fn (Assert $page) => $page
+                ->where('rules.0.all_day', true));
+
+        $source = file_get_contents(resource_path('js/Pages/MeliPriceManager/ScheduledDiscounts.jsx'));
+        $this->assertIsString($source);
+        $this->assertSame(1, substr_count($source, 'Guardar promoción'));
+        $savePosition = strpos($source, 'Guardar promoción');
+        $formPosition = strpos($source, '<form id="scheduled-discount-form"');
+        $this->assertNotFalse($savePosition);
+        $this->assertNotFalse($formPosition);
+        $this->assertLessThan($formPosition, $savePosition);
+        $this->assertStringContainsString('Promoción habilitada', $source);
+        $this->assertStringContainsString('24 horas', $source);
+        $this->assertStringContainsString('!form.data.all_day', $source);
     }
 
     public function test_editing_preserves_the_saved_active_value_when_it_is_not_submitted(): void
@@ -1151,6 +1197,7 @@ class MeliBeautyScheduledPriceEligibilityTest extends TestCase
         (require database_path('migrations/2026_09_07_000002_create_meli_scheduled_price_states_table.php'))->up();
         (require database_path('migrations/2026_09_07_000003_add_scheduled_source_to_meli_price_changes.php'))->up();
         (require database_path('migrations/2026_09_08_000001_add_dates_and_items_to_meli_beauty_scheduled_discounts.php'))->up();
+        (require database_path('migrations/2026_09_14_000001_add_all_day_to_meli_beauty_scheduled_discounts.php'))->up();
     }
 
     private function rule(): MeliBeautyScheduledDiscount

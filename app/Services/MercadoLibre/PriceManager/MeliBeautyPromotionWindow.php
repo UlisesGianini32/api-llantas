@@ -35,6 +35,10 @@ class MeliBeautyPromotionWindow
             return null;
         }
 
+        if ($promotion->all_day) {
+            return $bounds;
+        }
+
         $startTime = $this->time($promotion->starts_at);
         $endTime = $this->time($promotion->ends_at);
         $overnight = $startTime > $endTime;
@@ -65,6 +69,17 @@ class MeliBeautyPromotionWindow
     {
         if (blank($promotion->starts_on) || blank($promotion->ends_on)) {
             return null;
+        }
+
+        if ($promotion->all_day) {
+            try {
+                $start = CarbonImmutable::parse($this->date($promotion->starts_on), self::TIMEZONE)->startOfDay();
+                $end = CarbonImmutable::parse($this->date($promotion->ends_on), self::TIMEZONE)->startOfDay()->addDay();
+            } catch (\Throwable) {
+                return null;
+            }
+
+            return $end->greaterThan($start) ? ['start' => $start, 'end' => $end] : null;
         }
 
         $startTime = $this->time($promotion->starts_at);
@@ -130,6 +145,10 @@ class MeliBeautyPromotionWindow
         $bounds = $this->bounds($promotion);
         if ($bounds === null) {
             return [];
+        }
+
+        if ($promotion->all_day) {
+            return [$bounds];
         }
 
         $startTime = $this->time($promotion->starts_at);

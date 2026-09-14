@@ -59,6 +59,7 @@ class MeliPriceDiscountAdoptionTest extends TestCase
             '2026_09_07_000002_create_meli_scheduled_price_states_table.php',
             '2026_09_07_000003_add_scheduled_source_to_meli_price_changes.php',
             '2026_09_08_000001_add_dates_and_items_to_meli_beauty_scheduled_discounts.php',
+            '2026_09_14_000001_add_all_day_to_meli_beauty_scheduled_discounts.php',
         ] as $migration) {
             (require database_path('migrations/'.$migration))->up();
         }

@@ -56,6 +56,23 @@ class MeliBeautyScheduledPriceServiceTest extends TestCase
         $this->assertFalse($this->service->isRuleActiveAt($rule, CarbonImmutable::parse('2026-09-12 18:00:00', 'America/Mexico_City')));
     }
 
+    public function test_all_day_schedule_is_active_for_the_complete_period_in_mexico_city(): void
+    {
+        $rule = new MeliBeautyScheduledDiscount([
+            'active' => true,
+            'all_day' => true,
+            'starts_on' => '2026-09-08',
+            'ends_on' => '2026-09-12',
+            'starts_at' => '20:00',
+            'ends_at' => '06:00',
+            'timezone' => 'America/Mexico_City',
+        ]);
+
+        $this->assertTrue($this->service->isRuleActiveAt($rule, CarbonImmutable::parse('2026-09-08 00:00:00', 'America/Mexico_City')));
+        $this->assertTrue($this->service->isRuleActiveAt($rule, CarbonImmutable::parse('2026-09-12 23:59:59', 'America/Mexico_City')));
+        $this->assertFalse($this->service->isRuleActiveAt($rule, CarbonImmutable::parse('2026-09-13 00:00:00', 'America/Mexico_City')));
+    }
+
     public function test_calculation_is_rounded_and_never_uses_promotional_price_as_base(): void
     {
         $rule = new MeliBeautyScheduledDiscount(['discount_percentage' => 10]);
