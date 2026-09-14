@@ -14,6 +14,7 @@ const sections = [
         { key: 'stale_tires', label: 'Llantas no actualizadas', href: '/llantas/no-actualizadas' },
     ] },
     { key: 'mercado_libre', label: 'Mercado Libre', items: [
+        { key: 'meli_labels', label: 'Etiquetas Mercado Libre', href: '/mercado-libre/etiquetas' },
         { key: 'questions', label: 'Preguntas de productos', href: '/meli/preguntas', pendingQuestions: true },
         { key: 'messaging', label: 'Mensajería posventa', href: '/meli/mensajeria' },
         { key: 'claims', label: 'Reclamos', href: '/meli-claims' },

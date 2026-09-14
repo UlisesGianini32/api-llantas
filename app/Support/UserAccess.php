@@ -17,6 +17,7 @@ final class UserAccess
         'meli.claims.*',
         'meli.publications.*',
         'meli.full.*',
+        'meli.labels.*',
         'ams.*',
         'qz.*',
         'settings.index',

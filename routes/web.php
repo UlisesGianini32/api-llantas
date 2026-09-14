@@ -44,6 +44,7 @@ use App\Http\Controllers\SystemLogController;
 use App\Http\Controllers\SystemQueueController;
 use App\Http\Controllers\SystemServerController;
 use App\Http\Controllers\QzTrayController;
+use App\Http\Controllers\MeliLabelController;
 use Illuminate\Support\Facades\Route;
 use Laravel\Fortify\Features;
 
@@ -249,6 +250,12 @@ Route::get(
     ->name('qz.sign');
 
     // MERCADO LIBRE
+    Route::get('/mercado-libre/etiquetas', [MeliLabelController::class, 'index'])->name('meli.labels.index');
+    Route::post('/mercado-libre/etiquetas/procesar', [MeliLabelController::class, 'process'])->name('meli.labels.process');
+    Route::post('/mercado-libre/etiquetas/registrar-impresion/{labelPrint}', [MeliLabelController::class, 'record'])
+        ->whereNumber('labelPrint')
+        ->name('meli.labels.printed');
+
     Route::prefix('/meli-price-manager')->name('meli-price-manager.')->group(function () {
         Route::get('/', [MeliPriceManagerDashboardController::class, 'index'])->name('index');
         Route::get('/scheduled-discounts', [MeliBeautyScheduledDiscountController::class, 'index'])->name('scheduled-discounts.index');

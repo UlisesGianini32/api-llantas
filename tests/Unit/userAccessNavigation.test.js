@@ -9,6 +9,7 @@ test('operations sees exactly the allowed sidebar modules without empty admin se
     assert.deepEqual(sections.map((section) => section.label), ['General', 'Mercado Libre', 'Operaciones'])
     assert.deepEqual(sections.flatMap((section) => section.items.map((item) => item.label)), [
         'Dashboard',
+        'Etiquetas Mercado Libre',
         'Preguntas de productos',
         'Mensajería posventa',
         'Reclamos',
