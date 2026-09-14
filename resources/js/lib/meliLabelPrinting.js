@@ -20,8 +20,21 @@ export function labelTypePresentation(type, count = 0) {
     return { icon: '🏷️', name: 'Etiquetas de productos', noun: count === 1 ? 'etiqueta' : 'etiquetas' }
 }
 
-export function labelPrintProgress(results, total) {
-    const sent = results.filter((status) => status === 'sent').length
+export function labelPrintButtonText(type, physicalCount) {
+    return `IMPRIMIR ${physicalCount} ${labelTypePresentation(type, physicalCount).noun.toUpperCase()}`
+}
+
+export function labelPrintProgress(results, quantitiesOrTotal) {
+    const quantities = Array.isArray(quantitiesOrTotal)
+        ? quantitiesOrTotal
+        : results.map(() => 1)
+    const total = Array.isArray(quantitiesOrTotal)
+        ? quantities.reduce((sum, quantity) => sum + quantity, 0)
+        : quantitiesOrTotal
+    const sent = results.reduce(
+        (sum, status, index) => sum + (status === 'sent' ? (quantities[index] || 0) : 0),
+        0
+    )
 
     return {
         sent,
@@ -65,7 +78,7 @@ export async function sendLabelBatch(qz, printer, labels, indices, onResult) {
         } catch (error) {
             onResult(index, 'uncertain')
             // A rejected promise can happen after the spooler accepted the job.
-            throw new Error(`Falló la etiqueta ${index + 1} de ${labels.length}. Revisa la impresora antes de reintentar. ${error?.message || String(error)}`)
+            throw new Error(`Falló el bloque ${index + 1} de ${labels.length}. El estado de este bloque es incierto: QZ puede haber entregado el trabajo al spooler antes del error. Verifica físicamente antes de reintentar. ${error?.message || String(error)}`)
         }
     }
 }

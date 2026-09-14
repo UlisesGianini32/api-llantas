@@ -23,6 +23,8 @@ class MeliLabelPrint extends Model
     {
         return [
             'labels_count' => 'integer',
+            'zpl_blocks_count' => 'integer',
+            'physical_labels_count' => 'integer',
             'created_by' => 'integer',
             'printed_at' => 'datetime',
         ];

@@ -15,6 +15,8 @@ class MeliLabelsTest extends TestCase
 {
     private object $labelPrintsMigration;
 
+    private object $explicitCountsMigration;
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -34,10 +36,13 @@ class MeliLabelsTest extends TestCase
 
         $this->labelPrintsMigration = require database_path('migrations/2026_09_14_000002_create_meli_label_prints_table.php');
         $this->labelPrintsMigration->up();
+        $this->explicitCountsMigration = require database_path('migrations/2026_09_14_000003_add_explicit_counts_to_meli_label_prints_table.php');
+        $this->explicitCountsMigration->up();
     }
 
     protected function tearDown(): void
     {
+        $this->explicitCountsMigration->down();
         $this->labelPrintsMigration->down();
         Schema::dropIfExists('users');
         parent::tearDown();
@@ -98,7 +103,7 @@ class MeliLabelsTest extends TestCase
                 ->where('history.0.type', 'package'));
     }
 
-    public function test_product_upload_uses_original_hash_and_normalizes_every_label_to_one_copy(): void
+    public function test_product_upload_preserves_quantities_and_returns_physical_and_block_counts(): void
     {
         $this->actingAs($this->operator());
         $input = str_repeat("^XA\n^FDPRODUCTO PRUEBA^FS\n^PQ10,0,1,Y\n^XZ\n", 6);
@@ -106,17 +111,49 @@ class MeliLabelsTest extends TestCase
             ->assertOk()
             ->assertJsonPath('shipment_id', '76771745')
             ->assertJsonPath('type', 'product')
-            ->assertJsonPath('count', 6)
+            ->assertJsonPath('block_count', 6)
+            ->assertJsonPath('count', 60)
+            ->assertJsonPath('physical_label_count', 60)
+            ->assertJsonCount(6, 'quantities')
+            ->assertJsonPath('quantities.0', 10)
             ->assertJsonPath('file_hash', hash('sha256', $input))
             ->assertJsonPath('fingerprint', hash('sha256', $input))
             ->assertJsonPath('previous_print', null)
             ->assertJsonPath('encoding', 'base64');
 
-        $this->assertSame("^XA\n^FDPRODUCTO PRUEBA^FS\n^PQ1,0,1,Y\n^XZ", base64_decode($response->json('labels.0')));
+        $this->assertSame("^XA^PW406^LL203\n^FDPRODUCTO PRUEBA^FS\n^PQ10,0,1,Y\n^XZ", base64_decode($response->json('labels.0')));
         $this->assertDatabaseHas('meli_label_prints', [
             'id' => $response->json('print_id'),
             'status' => 'analyzed',
             'file_hash' => hash('sha256', $input),
+            'labels_count' => 6,
+            'zpl_blocks_count' => 6,
+            'physical_labels_count' => 60,
+        ]);
+    }
+
+    public function test_real_fifteen_block_product_batch_reports_and_persists_one_hundred_sixty_four_labels(): void
+    {
+        $this->actingAs($this->operator());
+        $quantities = [4, 12, 12, 6, 6, 12, 6, 20, 20, 12, 12, 12, 12, 12, 6];
+        $content = implode("\n", array_map(
+            fn (int $quantity, int $index): string => "^XA^FDSKU-{$index}^FS^PQ{$quantity},0,1,Y^XZ",
+            $quantities,
+            array_keys($quantities),
+        ));
+
+        $response = $this->analyze('Envio-76771745-Etiquetas-de-productos (1).txt', $content)
+            ->assertOk()
+            ->assertJsonPath('block_count', 15)
+            ->assertJsonPath('count', 164)
+            ->assertJsonPath('physical_label_count', 164)
+            ->assertJsonPath('quantities', $quantities);
+
+        $this->assertDatabaseHas('meli_label_prints', [
+            'id' => $response->json('print_id'),
+            'labels_count' => 15,
+            'zpl_blocks_count' => 15,
+            'physical_labels_count' => 164,
         ]);
     }
 
@@ -124,7 +161,12 @@ class MeliLabelsTest extends TestCase
     {
         $this->actingAs($this->operator());
         $product = $this->analyze('Envio-76771745-Etiquetas-de-productos.txt', '^XA^FDSKU 123^FS^XZ')->assertOk();
-        $package = $this->analyze('Envio-76771745-Etiquetas-de-bultos.txt', '^XA^FDBULTO 1^FS^XZ')->assertOk();
+        $package = $this->analyze('Envio-76771745-Etiquetas-de-bultos.txt', '^XA^FDBULTO 1^FS^PQ12,0,1,Y^XZ')
+            ->assertOk()
+            ->assertJsonPath('block_count', 1)
+            ->assertJsonPath('physical_label_count', 1)
+            ->assertJsonPath('quantities.0', 1);
+        $this->assertSame('^XA^FDBULTO 1^FS^PQ1,0,1,Y^XZ', base64_decode($package->json('labels.0')));
 
         $this->postJson('/mercado-libre/etiquetas/registrar-impresion/'.$product->json('print_id'), [
             'printer_name' => 'Zebra productos', 'status' => 'printed',
@@ -136,6 +178,29 @@ class MeliLabelsTest extends TestCase
         $this->assertDatabaseHas('meli_label_prints', ['shipment_id' => '76771745', 'type' => 'product', 'status' => 'printed']);
         $this->assertDatabaseHas('meli_label_prints', ['shipment_id' => '76771745', 'type' => 'package', 'status' => 'printed']);
         $this->assertSame(2, MeliLabelPrint::query()->where('shipment_id', '76771745')->where('status', 'printed')->count());
+    }
+
+    public function test_additive_migration_backfills_legacy_count_into_both_explicit_columns(): void
+    {
+        $this->explicitCountsMigration->down();
+        $id = MeliLabelPrint::query()->insertGetId([
+            'type' => 'package',
+            'original_filename' => 'legacy.txt',
+            'file_hash' => str_repeat('c', 64),
+            'labels_count' => 7,
+            'status' => 'printed',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $this->explicitCountsMigration->up();
+
+        $this->assertDatabaseHas('meli_label_prints', [
+            'id' => $id,
+            'labels_count' => 7,
+            'zpl_blocks_count' => 7,
+            'physical_labels_count' => 7,
+        ]);
     }
 
     public function test_previously_printed_hash_requires_explicit_reprint_confirmation(): void

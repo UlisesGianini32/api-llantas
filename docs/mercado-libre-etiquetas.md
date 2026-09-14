@@ -13,13 +13,25 @@ El tipo se detecta primero por el nombre, sin distinguir mayúsculas. Si el nomb
 
 ## Flujo TXT/ZPL
 
-1. El servidor valida extensión `.txt`, MIME de texto/binario, máximo 5 MB y máximo 500 etiquetas.
+1. El servidor valida extensión `.txt`, MIME de texto/binario, máximo 5 MB, máximo 500 bloques ZPL y máximo 10,000 etiquetas físicas.
 2. `MeliLabelParser` separa únicamente bloques completos `^XA...^XZ`. Rechaza texto/comandos fuera de ellos, bloques anidados o truncados.
-3. Cada `^PQ` compatible se reemplaza por `^PQ1,0,1,Y`. Si falta `^PQ`, se agrega inmediatamente antes de `^XZ`; los datos y gráficos restantes no se modifican.
-4. Se calcula SHA-256 sobre los bytes del archivo original. El TXT y el ZPL no se guardan permanentemente.
-5. El navegador recibe cada bloque normalizado en Base64 y lo envía, sólo después de pulsar **Imprimir**, como comando RAW mediante QZ Tray.
+3. En archivos de productos, el primer parámetro de `^PQ` es la cantidad física solicitada por Mercado Libre. Se valida y se conserva sin convertirlo a una copia. Si falta, la cantidad es uno.
+4. Cada producto se normaliza a formato horizontal 2 × 1 para 203 dpi mediante `^PW406` y `^LL203`. Los comandos existentes se reemplazan una sola vez; no se agrega `^POR` ni se alteran `^LH`, `^FO`, `^FT`, `^FB`, `^FD`, `^FH`, SKU, códigos o gráficos.
+5. En archivos de bultos, cada bloque sigue representando una guía: cualquier `^PQ` compatible se reemplaza por `^PQ1,0,1,Y` y, si falta, se agrega antes de `^XZ`. No se aplican las dimensiones 2 × 1.
+6. Se calcula SHA-256 sobre los bytes del archivo original. El TXT y el ZPL no se guardan permanentemente.
+7. El navegador recibe cada bloque normalizado en Base64 y lo envía, sólo después de pulsar **Imprimir**, como comando RAW mediante QZ Tray.
 
-No existe conversión a PDF, PNG, imagen o HTML. QZ envía una etiqueta por llamada, en secuencia y con `copies: 1`.
+No existe conversión a PDF, PNG, imagen o HTML. QZ envía cada bloque una sola vez, en secuencia y con `copies: 1`. En productos, sólo el `^PQ` incluido en el ZPL gobierna las copias físicas; nunca se multiplica mediante la configuración QZ.
+
+## Bloques ZPL y etiquetas físicas
+
+Los conteos tienen significados distintos:
+
+- `zpl_blocks_count`: productos/diseños o guías diferentes enviados a QZ.
+- `physical_labels_count`: suma de los `^PQ` de productos; en bultos coincide con los bloques.
+- `labels_count`: columna histórica conservada como número de bloques para compatibilidad.
+
+Por ejemplo, el lote real con 15 bloques y cantidades `4, 12, 12, 6, 6, 12, 6, 20, 20, 12, 12, 12, 12, 12, 6` contiene 164 etiquetas físicas. La UI muestra ambos valores y el progreso avanza 4/164, 16/164, etc., cuando QZ acepta cada bloque.
 
 ## QZ Tray e impresoras
 
@@ -32,11 +44,11 @@ storage/app/private/qz/private-key.pem
 
 No deben regenerarse ni moverse. La pantalla muestra si QZ está conectado, detecta todas las impresoras instaladas y permite elegir cualquiera. Prefiere `4BARCODE 4B-2054A` cuando existe y recuerda la elección en `localStorage`; no hay una impresora global obligatoria.
 
-QZ confirma que el trabajo llegó a la cola de impresión, no que salió físicamente. Si una llamada falla, el lote se detiene, muestra la etiqueta exacta y la marca como no confirmada. Antes de reintentar se debe revisar la impresora, porque el spooler pudo aceptar el trabajo antes de la desconexión.
+QZ confirma que el trabajo llegó a la cola de impresión, no que salió físicamente. Si una llamada falla, el lote se detiene, identifica el bloque y lo marca como incierto. Antes de reintentar se debe revisar la impresora, porque el spooler pudo aceptar todas las copias indicadas por ese `^PQ` antes de la desconexión. El retry excluye los bloques ya confirmados.
 
 ## Historial y reimpresión
 
-La tabla `meli_label_prints` guarda sólo metadatos: envío, tipo, nombre original, hash, cantidad, impresora, estado, usuario y fechas. No guarda ZPL.
+La tabla `meli_label_prints` guarda sólo metadatos: envío, tipo, nombre original, hash, bloques ZPL, etiquetas físicas, impresora, estado, usuario y fechas. No guarda ZPL. Una migración aditiva conserva `labels_count` y hace backfill de registros anteriores hacia los dos conteos explícitos; como el flujo anterior forzaba una copia por bloque, ambos valores históricos son iguales y correctos.
 
 - Al analizar se crea un registro `analyzed`; esto no significa que se haya impreso.
 - Sólo después de que todas las promesas de impresión QZ terminan se registra `printed` y `printed_at`.
@@ -56,10 +68,10 @@ Productos y bultos pueden coexistir bajo el mismo número de envío. El historia
 
 ## Despliegue y pruebas
 
-Esta versión requiere crear el historial:
+Esta versión requiere agregar y completar los conteos explícitos del historial:
 
 ```bash
-php artisan migrate
+php artisan migrate --force
 ```
 
 Pruebas relevantes:
@@ -70,4 +82,4 @@ node --test tests/Unit/meliLabelPrinting.test.js
 npm run build
 ```
 
-La prueba física recomendada comienza con un TXT que contenga una sola etiqueta y continúa con un lote pequeño de productos y otro de bultos. Confirmar cantidad, una sola copia, códigos legibles, progreso e historial antes de procesar lotes reales grandes. También conviene verificar AMS principal/secundaria, KAMO, Zebra, 4BARCODE y RawBT después del despliegue; comparten la configuración QZ pero conservan sus handlers y formatos.
+La prueba física recomendada comienza con un solo bloque de producto. En una copia temporal del TXT, usar `^PQ1,0,1,Y` exclusivamente para validar `^PW406`, `^LL203`, orientación horizontal, dimensiones, códigos, nombre y SKU. No usar el lote de 164 para esta comprobación inicial. Después se restaura el `^PQ` real y se valida el lote completo observando 15 productos/diseños, 164 etiquetas y progreso acumulado. También conviene verificar un lote pequeño de bultos y los flujos AMS principal/secundaria, KAMO, Zebra, 4BARCODE y RawBT; su configuración QZ, handlers y formatos no cambian.

@@ -6,6 +6,7 @@ import {
     exclusiveLabelPrint,
     isQzConnected,
     LABEL_PRINTER_STORAGE_KEY,
+    labelPrintButtonText,
     labelPrintProgress,
     labelTypePresentation,
     preferredLabelPrinter,
@@ -26,6 +27,15 @@ function formatDate(value) {
 
 function historyStatus(status) {
     return { analyzed: 'Analizado', printed: 'Impreso', failed: 'Fallido' }[status] || status
+}
+
+function historyQuantity(item) {
+    const blocks = item.zpl_blocks_count ?? item.labels_count
+    const physical = item.physical_labels_count ?? item.labels_count
+
+    return item.type === 'product'
+        ? `${blocks} productos / ${physical} etiquetas`
+        : `${physical} ${physical === 1 ? 'guía' : 'guías'}`
 }
 
 export default function Etiquetas() {
@@ -166,7 +176,7 @@ export default function Etiquetas() {
             setError('Debes confirmar la reimpresión antes de enviar el archivo a QZ Tray.')
             return
         }
-        if (retry && !window.confirm('Se reintentará lo no confirmado, incluida la etiqueta que falló. Puede haber salido físicamente. Revisa la impresora para evitar duplicados. ¿Continuar?')) return
+        if (retry && !window.confirm('Se reintentará cada bloque no confirmado. El bloque incierto puede haber generado una o varias etiquetas antes del error. Revisa físicamente la impresora para evitar duplicados. ¿Continuar?')) return
 
         locked.current = true
         setBusy('printing')
@@ -183,14 +193,15 @@ export default function Etiquetas() {
                 const state = retry ? [...results] : batch.labels.map(() => 'pending')
                 const indices = state.flatMap((status, index) => status === 'sent' ? [] : [index])
                 setResults([...state])
-                setMessage(`Enviando ${indices.length} ${labelTypePresentation(batch.type, indices.length).noun} a ${printer}...`)
+                setMessage(`Enviando ${indices.length} bloques ZPL (${batch.count} ${labelTypePresentation(batch.type, batch.count).noun}) a ${printer}...`)
                 qzAttemptStarted = true
 
                 try {
                     await sendLabelBatch(qz, printer, batch.labels, indices, (index, status) => {
                         state[index] = status
                         setResults([...state])
-                        setMessage(`${labelTypePresentation(batch.type, 1).noun} ${index + 1} de ${batch.count}: ${status === 'sent' ? 'enviada correctamente' : 'envío no confirmado'}.`)
+                        const currentProgress = labelPrintProgress(state, batch.quantities)
+                        setMessage(`Bloque ${index + 1} de ${batch.block_count}: ${currentProgress.sent} / ${batch.count} ${labelTypePresentation(batch.type, batch.count).noun} ${status === 'sent' ? 'enviadas a la cola' : 'con envío incierto'}.`)
                     })
                 } catch (exception) {
                     try { await persistResult('failed', exception.message) } catch (historyError) { console.error('No se pudo registrar el fallo de impresión.', historyError) }
@@ -227,8 +238,9 @@ export default function Etiquetas() {
     }
 
     const presentation = batch ? labelTypePresentation(batch.type, batch.count) : null
-    const progress = labelPrintProgress(results, batch?.count || 0)
+    const progress = labelPrintProgress(results, batch?.quantities || [])
     const retryAvailable = results.includes('uncertain')
+    const unconfirmedBlocks = results.filter((status) => status !== 'sent').length
     const canPrint = canStartLabelPrint({ batch, printer, qzConnected, busy, reprintConfirmed, completed })
     const filteredHistory = historyFilter === 'all' ? history : history.filter((item) => item.type === historyFilter)
 
@@ -255,7 +267,7 @@ export default function Etiquetas() {
                 >
                     <span className="block text-lg font-semibold">Arrastra tu archivo TXT aquí</span>
                     <span className="mt-1 block">o haz clic para seleccionarlo</span>
-                    <span className="mt-3 block text-sm text-slate-500">Productos · Bultos · Mercado Libre · máximo 5 MB / 500 etiquetas</span>
+                    <span className="mt-3 block text-sm text-slate-500">Productos · Bultos · máximo 5 MB / 500 bloques / 10,000 etiquetas físicas</span>
                 </label>
                 {file && <p className="break-all text-sm">Seleccionado: <strong>{file.name}</strong></p>}
                 <button className={primaryButton} disabled={!!busy || !file}>{busy === 'processing' ? 'Analizando...' : 'Analizar archivo'}</button>
@@ -278,18 +290,23 @@ export default function Etiquetas() {
                 <div className="flex items-center gap-3"><span className="text-3xl" aria-hidden="true">{presentation.icon}</span><div><h2 className="text-lg font-semibold">{presentation.name}</h2><p className="text-emerald-600">Archivo válido</p></div></div>
                 <dl className="grid gap-3 sm:grid-cols-2">
                     <div><dt className="text-sm text-slate-500">Envío</dt><dd className="font-semibold">{batch.shipment_id || `Hash ${batch.file_hash.slice(0, 12)}`}</dd></div>
-                    <div><dt className="text-sm text-slate-500">Cantidad</dt><dd className="font-semibold">{batch.count} {presentation.noun}</dd></div>
+                    {batch.type === 'product' ? <>
+                        <div><dt className="text-sm text-slate-500">Productos / diseños</dt><dd className="font-semibold">{batch.block_count}</dd></div>
+                        <div><dt className="text-sm text-slate-500">Etiquetas físicas</dt><dd className="font-semibold">{batch.physical_label_count}</dd></div>
+                        <div><dt className="text-sm text-slate-500">Formato</dt><dd className="font-semibold">2 × 1 horizontal</dd></div>
+                        <div><dt className="text-sm text-slate-500">Resolución</dt><dd className="font-semibold">203 dpi · 406 × 203 dots</dd></div>
+                    </> : <div><dt className="text-sm text-slate-500">Guías</dt><dd className="font-semibold">{batch.physical_label_count}</dd></div>}
                     <div className="sm:col-span-2"><dt className="text-sm text-slate-500">Archivo</dt><dd className="break-all font-semibold">{batch.filename}</dd></div>
                 </dl>
 
                 {batch.previous_print && !reprintConfirmed && !completed && <div className="space-y-3 rounded-xl border border-amber-300 bg-amber-50 p-4 text-amber-950 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-100">
                     <p className="font-bold">Este archivo ya fue impreso anteriormente.</p>
-                    <p>Envío: {batch.previous_print.shipment_id || 'No identificado'} · Cantidad: {batch.previous_print.labels_count} · Fecha: {formatDate(batch.previous_print.printed_at)} · Impresora: {batch.previous_print.printer_name || 'No registrada'}</p>
+                    <p>Envío: {batch.previous_print.shipment_id || 'No identificado'} · {historyQuantity(batch.previous_print)} · Fecha: {formatDate(batch.previous_print.printed_at)} · Impresora: {batch.previous_print.printer_name || 'No registrada'}</p>
                     <div className="flex gap-3"><button type="button" className={secondaryButton} onClick={clearBatch}>Cancelar</button><button type="button" className={primaryButton} onClick={() => { setReprintConfirmed(true); setMessage('Reimpresión confirmada. Pulsa Imprimir para continuar.') }}>Reimprimir</button></div>
                 </div>}
 
-                {(!batch.previous_print || reprintConfirmed) && !completed && <button type="button" className={primaryButton} disabled={!canPrint} onClick={() => print()}>{busy === 'printing' ? 'Imprimiendo...' : `IMPRIMIR ${batch.count} ${presentation.noun.toUpperCase()}`}</button>}
-                {retryAvailable && !completed && <button type="button" className={secondaryButton} disabled={!!busy || !printer || !qzConnected} onClick={() => print(true)}>Reintentar {batch.count - progress.sent} no confirmadas</button>}
+                {(!batch.previous_print || reprintConfirmed) && !completed && <button type="button" className={primaryButton} disabled={!canPrint} onClick={() => print()}>{busy === 'printing' ? 'Imprimiendo...' : labelPrintButtonText(batch.type, batch.count)}</button>}
+                {retryAvailable && !completed && <button type="button" className={secondaryButton} disabled={!!busy || !printer || !qzConnected} onClick={() => print(true)}>Reintentar {unconfirmedBlocks} bloques no confirmados</button>}
                 <progress className="h-3 w-full" value={progress.sent} max={batch.count} aria-label={`${presentation.name} enviadas`} />
                 <p>{progress.sent} / {batch.count} {presentation.noun} enviadas correctamente a QZ Tray ({progress.percentage}%).</p>
                 {completed && <p className="rounded-xl bg-emerald-50 p-4 font-semibold text-emerald-800 dark:bg-emerald-950 dark:text-emerald-200">Impresión terminada. Para reimprimir, carga nuevamente el TXT y confirma la advertencia.</p>}
@@ -304,7 +321,7 @@ export default function Etiquetas() {
                 <div className="overflow-x-auto">
                     <table className="min-w-full text-left text-sm">
                         <thead><tr className="border-b dark:border-neutral-700"><th className="p-2">Fecha</th><th className="p-2">Envío</th><th className="p-2">Tipo</th><th className="p-2">Archivo</th><th className="p-2">Cantidad</th><th className="p-2">Impresora</th><th className="p-2">Estado</th><th className="p-2">Acciones</th></tr></thead>
-                        <tbody>{filteredHistory.map((item) => <tr key={item.id} className="border-b align-top dark:border-neutral-800"><td className="whitespace-nowrap p-2">{formatDate(item.printed_at || item.created_at)}</td><td className="p-2">{item.shipment_id || '—'}</td><td className="p-2">{labelTypePresentation(item.type).name.replace('Etiquetas de ', '')}</td><td className="max-w-56 break-all p-2">{item.original_filename}</td><td className="p-2">{item.labels_count}</td><td className="p-2">{item.printer_name || '—'}</td><td className="p-2">{historyStatus(item.status)}</td><td className="p-2 text-slate-500">Cargar nuevamente el TXT para reimprimir.</td></tr>)}</tbody>
+                        <tbody>{filteredHistory.map((item) => <tr key={item.id} className="border-b align-top dark:border-neutral-800"><td className="whitespace-nowrap p-2">{formatDate(item.printed_at || item.created_at)}</td><td className="p-2">{item.shipment_id || '—'}</td><td className="p-2">{labelTypePresentation(item.type).name.replace('Etiquetas de ', '')}</td><td className="max-w-56 break-all p-2">{item.original_filename}</td><td className="p-2">{historyQuantity(item)}</td><td className="p-2">{item.printer_name || '—'}</td><td className="p-2">{historyStatus(item.status)}</td><td className="p-2 text-slate-500">Cargar nuevamente el TXT para reimprimir.</td></tr>)}</tbody>
                     </table>
                     {!filteredHistory.length && <p className="p-4 text-center text-slate-500">No hay registros para este filtro.</p>}
                 </div>

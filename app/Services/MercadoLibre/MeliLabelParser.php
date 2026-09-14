@@ -8,14 +8,27 @@ final class MeliLabelParser
 {
     public const MAX_LABELS = 500;
 
+    public const MAX_PHYSICAL_LABELS = 10000;
+
     public const TYPE_PRODUCT = 'product';
 
     public const TYPE_PACKAGE = 'package';
 
     /** @return list<string> */
-    public function parse(string $content): array
+    public function parse(string $content, string $type = self::TYPE_PACKAGE): array
     {
-        return array_map($this->normalizeSingleCopy(...), $this->extractLabels($content));
+        $normalizer = match ($type) {
+            self::TYPE_PRODUCT => $this->normalizeProductLabel(...),
+            self::TYPE_PACKAGE => $this->normalizePackageLabel(...),
+            default => throw ValidationException::withMessages([
+                'file' => 'El tipo de etiquetas no es compatible.',
+            ]),
+        };
+
+        $labels = array_map($normalizer, $this->extractLabels($content));
+        $this->printQuantities($labels);
+
+        return $labels;
     }
 
     /** @return list<string> */
@@ -35,7 +48,7 @@ final class MeliLabelParser
             $labels[] = substr($content, $start, $end + 3 - $start);
             if (count($labels) > self::MAX_LABELS) {
                 throw ValidationException::withMessages([
-                    'file' => 'El archivo supera el máximo permitido de 500 etiquetas.',
+                    'file' => 'El archivo supera el máximo permitido de 500 bloques ZPL.',
                 ]);
             }
             $offset = $end + 3;
@@ -80,6 +93,11 @@ final class MeliLabelParser
 
     public function normalizeSingleCopy(string $label): string
     {
+        return $this->normalizePackageLabel($label);
+    }
+
+    public function normalizePackageLabel(string $label): string
+    {
         $replacements = 0;
         $normalized = preg_replace_callback('/\^PQ([^\^~\r\n]*)/', function (array $match): string {
             if (! preg_match('/^\d*(?:,\d*)?(?:,\d*)?(?:,[YN]?)?(?:,[YN]?)?[ \t]*$/D', $match[1])) {
@@ -102,6 +120,60 @@ final class MeliLabelParser
         return $normalized;
     }
 
+    public function normalizeProductLabel(string $label): string
+    {
+        $this->extractPrintQuantity($label);
+
+        $normalized = preg_replace('/\^(?:PW|LL)[^\^~\r\n]*/', '', $label);
+        if ($normalized === null || ! str_starts_with($normalized, '^XA')) {
+            $this->invalidContent();
+        }
+
+        return '^XA^PW406^LL203'.substr($normalized, 3);
+    }
+
+    public function extractPrintQuantity(string $label): int
+    {
+        preg_match_all('/\^PQ([^\^~\r\n]*)/', $label, $matches);
+
+        if ($matches[1] === []) {
+            return 1;
+        }
+
+        if (count($matches[1]) !== 1 || ! preg_match('/^([1-9]\d*)(?:,\d*)?(?:,\d*)?(?:,[YN]?)?(?:,[YN]?)?[ \t]*$/D', $matches[1][0], $quantityMatch)) {
+            $this->invalidQuantity();
+        }
+
+        $digits = ltrim($quantityMatch[1], '0');
+        $digits = $digits === '' ? '0' : $digits;
+        if (strlen($digits) > strlen((string) self::MAX_PHYSICAL_LABELS)) {
+            $this->invalidQuantity();
+        }
+
+        $quantity = (int) $digits;
+        if ($quantity < 1 || $quantity > self::MAX_PHYSICAL_LABELS) {
+            $this->invalidQuantity();
+        }
+
+        return $quantity;
+    }
+
+    /**
+     * @param  list<string>  $labels
+     * @return list<int>
+     */
+    public function printQuantities(array $labels): array
+    {
+        $quantities = array_map($this->extractPrintQuantity(...), $labels);
+        if (array_sum($quantities) > self::MAX_PHYSICAL_LABELS) {
+            throw ValidationException::withMessages([
+                'file' => 'El archivo supera el máximo permitido de '.self::MAX_PHYSICAL_LABELS.' etiquetas físicas.',
+            ]);
+        }
+
+        return $quantities;
+    }
+
     public function calculateHash(string $content): string
     {
         return hash('sha256', $content);
@@ -111,6 +183,13 @@ final class MeliLabelParser
     {
         throw ValidationException::withMessages([
             'file' => 'El archivo no contiene etiquetas ZPL válidas o incluye bloques incompletos/comandos fuera de las etiquetas.',
+        ]);
+    }
+
+    private function invalidQuantity(): never
+    {
+        throw ValidationException::withMessages([
+            'file' => 'Una etiqueta contiene un comando ^PQ inválido o una cantidad física fuera del límite permitido.',
         ]);
     }
 }

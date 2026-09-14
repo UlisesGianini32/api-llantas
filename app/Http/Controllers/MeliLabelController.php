@@ -56,7 +56,10 @@ class MeliLabelController extends Controller
             ]);
         }
 
-        $labels = $parser->parse($content);
+        $labels = $parser->parse($content, $type);
+        $quantities = $parser->printQuantities($labels);
+        $blockCount = count($labels);
+        $physicalLabelCount = array_sum($quantities);
         $fileHash = $parser->calculateHash($content);
         $shipmentId = $parser->extractShipmentId($filename);
         $previousPrint = MeliLabelPrint::query()
@@ -71,7 +74,10 @@ class MeliLabelController extends Controller
             'type' => $type,
             'original_filename' => $filename,
             'file_hash' => $fileHash,
-            'labels_count' => count($labels),
+            // Keep the legacy column as block count; explicit columns remove ambiguity.
+            'labels_count' => $blockCount,
+            'zpl_blocks_count' => $blockCount,
+            'physical_labels_count' => $physicalLabelCount,
             'status' => MeliLabelPrint::STATUS_ANALYZED,
             'created_by' => $request->user()->getKey(),
         ]);
@@ -82,7 +88,10 @@ class MeliLabelController extends Controller
             'filename' => $filename,
             'shipment_id' => $shipmentId,
             'type' => $type,
-            'count' => count($labels),
+            'block_count' => $blockCount,
+            'count' => $physicalLabelCount,
+            'physical_label_count' => $physicalLabelCount,
+            'quantities' => $quantities,
             'file_hash' => $fileHash,
             'fingerprint' => $fileHash,
             'previous_print' => $previousPrint ? $this->serializePrint($previousPrint) : null,
@@ -153,6 +162,8 @@ class MeliLabelController extends Controller
             'type' => $print->type,
             'original_filename' => $print->original_filename,
             'labels_count' => $print->labels_count,
+            'zpl_blocks_count' => $print->zpl_blocks_count ?? $print->labels_count,
+            'physical_labels_count' => $print->physical_labels_count ?? $print->labels_count,
             'printer_name' => $print->printer_name,
             'status' => $print->status,
             'printed_at' => $print->printed_at?->toIso8601String(),
