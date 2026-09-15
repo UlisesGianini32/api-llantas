@@ -6,6 +6,7 @@ use App\Models\MeliAccount;
 use App\Models\MeliClaim;
 use App\Models\MeliClaimReason;
 use App\Models\MeliOrder;
+use App\Services\TelegramAlertService;
 use App\Services\MercadoLibre\MeliAccountApiClient;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Log;
@@ -224,7 +225,16 @@ class MeliClaimsService
         }
         $record->forceFill([...$updates, 'last_synced_at' => now(), 'sync_error' => null])->save();
 
-        return $record->fresh(['reason', 'order.items', 'meliAccount']);
+        $fresh = $record->fresh(['reason', 'order.items', 'meliAccount']);
+        if ($record->wasRecentlyCreated && in_array($fresh->status, ['opened', 'open'], true)) {
+            try {
+                app(TelegramAlertService::class)->notifyMeliNewClaim($fresh);
+            } catch (Throwable $e) {
+                Log::warning('MELI CLAIMS: alerta Telegram fallida', ['claim_id' => $claimId, 'exception' => $e::class]);
+            }
+        }
+
+        return $fresh;
     }
 
     private function persist(MeliAccount $account, string $claimId, array $raw): MeliClaim
