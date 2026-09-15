@@ -85,7 +85,10 @@ class MeliClaimController extends Controller
     public function sync(Request $request, MeliClaimsService $service): RedirectResponse
     {
         $account = $request->user()->meliAccounts()->findOrFail($request->integer('account_id'));
-        try { $result = $service->syncAccount($account, null, 30, true); return back()->with('ok', "Reclamos actualizados: {$result['saved']}."); }
+        try {
+            $result = $service->syncAccount($account, 'opened', 0, false);
+            return back()->with('ok', "Reclamos revisados: {$result['received']}. Actualizados/nuevos: {$result['saved']}. Sin cambios: {$result['skipped']}. Reconciliados: {$result['reconciled']}. Fallidos: {$result['failed']}.");
+        }
         catch (\Throwable $e) { report($e); return back()->with('err', 'No fue posible sincronizar reclamos: '.$e->getMessage()); }
     }
 

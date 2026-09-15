@@ -6,6 +6,7 @@ use App\Models\MeliAccount;
 use App\Models\MeliClaim;
 use App\Models\MeliClaimReason;
 use App\Models\MeliOrder;
+use App\Services\TelegramAlertService;
 use App\Services\MercadoLibre\MeliAccountApiClient;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Log;
@@ -74,16 +75,17 @@ class MeliClaimsService
         return $this->api->getReadOnly($account, self::BASE.'/'.rawurlencode($claim->claim_id).'/attachments/'.rawurlencode($attachment).'/download', [], 1);
     }
 
-    /** @return array{received:int,saved:int,failed:int} */
-    public function syncAccount(MeliAccount $account, ?string $status = null, int $days = 30, bool $force = false): array
+    /** @return array{received:int,saved:int,skipped:int,reconciled:int,failed:int} */
+    public function syncAccount(MeliAccount $account, ?string $status = null, int $days = 0, bool $force = false): array
     {
         $this->api->ensureFreshAccessToken($account);
         $limit = 50;
-        $result = ['received' => 0, 'saved' => 0, 'failed' => 0];
+        $result = ['received' => 0, 'saved' => 0, 'skipped' => 0, 'reconciled' => 0, 'failed' => 0];
+        $seen = [];
 
         $statuses = filled($status)
             ? [(string) $status]
-            : ['opened', 'closed'];
+            : ['opened'];
 
         foreach ($statuses as $currentStatus) {
             $offset = 0;
@@ -106,21 +108,37 @@ class MeliClaimsService
                     ->getReadOnly($account, self::BASE.'/search', $query)
                     ->json();
 
-                $claims = array_values(array_filter(
-                    (array) ($payload['data'] ?? $payload['claims'] ?? $payload['results'] ?? []),
-                    'is_array'
-                ));
+                $claims = $payload['data'] ?? $payload['claims'] ?? $payload['results'] ?? null;
+                if (! is_array($claims)) {
+                    throw new \RuntimeException('Búsqueda de reclamos inválida; no se reconciliaron cierres.');
+                }
+                $total = filter_var(data_get($payload, 'paging.total'), FILTER_VALIDATE_INT, ['options' => ['min_range' => 0]]);
+                if ($total === false) {
+                    throw new \RuntimeException('Búsqueda sin total válido; no se reconciliaron cierres.');
+                }
 
                 $result['received'] += count($claims);
 
                 foreach ($claims as $raw) {
-                    $claimId = trim((string) ($raw['id'] ?? $raw['claim_id'] ?? ''));
+                    $claimId = is_array($raw) ? trim((string) ($raw['id'] ?? $raw['claim_id'] ?? '')) : '';
 
                     if ($claimId === '') {
-                        continue;
+                        throw new \RuntimeException('Búsqueda con reclamo sin ID; no se reconciliaron cierres.');
                     }
 
+                    $seen[$claimId] = true;
+
                     try {
+                        $local = MeliClaim::query()->where('meli_account_id', $account->id)->where('claim_id', $claimId)->first();
+                        $remoteUpdated = $this->date($raw['last_updated'] ?? null);
+                        // Preserve remote precision/time zone when the SQL timestamp loses fractions.
+                        $localUpdated = $local ? ($this->date(data_get($local->raw_claim, 'last_updated')) ?? $local->last_updated) : null;
+                        if (! $force && $local && $local->sync_error === null && $remoteUpdated && $localUpdated && $remoteUpdated->equalTo($localUpdated)) {
+                            $local->forceFill(['last_synced_at' => now()])->save();
+                            $this->notifyPendingClaim($local);
+                            $result['skipped']++;
+                            continue;
+                        }
                         $this->syncClaim($account, $claimId, $force, $raw);
                         $result['saved']++;
                     } catch (Throwable $e) {
@@ -130,8 +148,29 @@ class MeliClaimsService
                 }
 
                 $offset += count($claims);
-                $total = (int) data_get($payload, 'paging.total', $offset);
+                if ($claims === [] && $offset < $total) {
+                    throw new \RuntimeException('Búsqueda de reclamos incompleta; no se reconciliaron cierres.');
+                }
             } while ($claims !== [] && $offset < $total);
+        }
+
+        // Only an unbounded, successfully completed opened search can establish absence.
+        if ($statuses === ['opened'] && $days <= 0) {
+            MeliClaim::query()->where('meli_account_id', $account->id)
+                ->where(fn ($query) => $query->whereNull('status')->orWhereNotIn('status', ['closed', 'resolved']))
+                ->whereNotIn('claim_id', array_keys($seen))
+                ->chunkById(100, function ($claims) use ($account, $force, &$result): void {
+                    foreach ($claims as $local) {
+                        try {
+                            $this->syncClaim($account, $local->claim_id, $force);
+                            $result['saved']++;
+                            $result['reconciled']++;
+                        } catch (Throwable $e) {
+                            $result['failed']++;
+                            $this->recordError($account, $local->claim_id, $e);
+                        }
+                    }
+                });
         }
 
         return $result;
@@ -190,7 +229,24 @@ class MeliClaimsService
         }
         $record->forceFill([...$updates, 'last_synced_at' => now(), 'sync_error' => null])->save();
 
-        return $record->fresh(['reason', 'order.items', 'meliAccount']);
+        $fresh = $record->fresh(['reason', 'order.items', 'meliAccount']);
+        $this->notifyPendingClaim($fresh);
+
+        return $fresh;
+    }
+
+    private function notifyPendingClaim(MeliClaim $claim): void
+    {
+        if ($claim->telegram_notified_at !== null || ! in_array($claim->status, ['opened', 'open'], true)) {
+            return;
+        }
+
+        try {
+            // The notifier reserves atomically; only attempts before that reservation can retry.
+            app(TelegramAlertService::class)->notifyMeliNewClaim($claim);
+        } catch (Throwable $e) {
+            Log::warning('MELI CLAIMS: alerta Telegram fallida', ['claim_id' => $claim->claim_id, 'exception' => $e::class]);
+        }
     }
 
     private function persist(MeliAccount $account, string $claimId, array $raw): MeliClaim
