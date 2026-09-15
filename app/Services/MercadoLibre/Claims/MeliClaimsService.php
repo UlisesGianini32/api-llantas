@@ -112,6 +112,10 @@ class MeliClaimsService
                 if (! is_array($claims)) {
                     throw new \RuntimeException('Búsqueda de reclamos inválida; no se reconciliaron cierres.');
                 }
+                $total = filter_var(data_get($payload, 'paging.total'), FILTER_VALIDATE_INT, ['options' => ['min_range' => 0]]);
+                if ($total === false) {
+                    throw new \RuntimeException('Búsqueda sin total válido; no se reconciliaron cierres.');
+                }
 
                 $result['received'] += count($claims);
 
@@ -143,7 +147,6 @@ class MeliClaimsService
                 }
 
                 $offset += count($claims);
-                $total = (int) data_get($payload, 'paging.total', $offset);
                 if ($claims === [] && $offset < $total) {
                     throw new \RuntimeException('Búsqueda de reclamos incompleta; no se reconciliaron cierres.');
                 }
