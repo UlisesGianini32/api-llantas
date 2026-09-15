@@ -9,12 +9,17 @@ return new class extends Migration
 {
     public function up(): void
     {
-        // Deploy with claim writers paused so the baseline has a defined boundary.
+        $baselineMaxId = DB::table('meli_claims')->max('id');
+
+        // Still pause claim writers at deployment as an additional safeguard.
         Schema::table('meli_claims', function (Blueprint $table): void {
             $table->timestamp('telegram_notified_at')->nullable()->index();
         });
 
-        DB::table('meli_claims')->whereNull('telegram_notified_at')->update(['telegram_notified_at' => now()]);
+        if ($baselineMaxId !== null) {
+            DB::table('meli_claims')->where('id', '<=', $baselineMaxId)
+                ->whereNull('telegram_notified_at')->update(['telegram_notified_at' => now()]);
+        }
     }
 
     public function down(): void

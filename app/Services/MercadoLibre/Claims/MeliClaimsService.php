@@ -135,6 +135,7 @@ class MeliClaimsService
                         $localUpdated = $local ? ($this->date(data_get($local->raw_claim, 'last_updated')) ?? $local->last_updated) : null;
                         if (! $force && $local && $local->sync_error === null && $remoteUpdated && $localUpdated && $remoteUpdated->equalTo($localUpdated)) {
                             $local->forceFill(['last_synced_at' => now()])->save();
+                            $this->notifyPendingClaim($local);
                             $result['skipped']++;
                             continue;
                         }
@@ -229,15 +230,23 @@ class MeliClaimsService
         $record->forceFill([...$updates, 'last_synced_at' => now(), 'sync_error' => null])->save();
 
         $fresh = $record->fresh(['reason', 'order.items', 'meliAccount']);
-        if ($record->wasRecentlyCreated && in_array($fresh->status, ['opened', 'open'], true)) {
-            try {
-                app(TelegramAlertService::class)->notifyMeliNewClaim($fresh);
-            } catch (Throwable $e) {
-                Log::warning('MELI CLAIMS: alerta Telegram fallida', ['claim_id' => $claimId, 'exception' => $e::class]);
-            }
-        }
+        $this->notifyPendingClaim($fresh);
 
         return $fresh;
+    }
+
+    private function notifyPendingClaim(MeliClaim $claim): void
+    {
+        if ($claim->telegram_notified_at !== null || ! in_array($claim->status, ['opened', 'open'], true)) {
+            return;
+        }
+
+        try {
+            // The notifier reserves atomically; only attempts before that reservation can retry.
+            app(TelegramAlertService::class)->notifyMeliNewClaim($claim);
+        } catch (Throwable $e) {
+            Log::warning('MELI CLAIMS: alerta Telegram fallida', ['claim_id' => $claim->claim_id, 'exception' => $e::class]);
+        }
     }
 
     private function persist(MeliAccount $account, string $claimId, array $raw): MeliClaim

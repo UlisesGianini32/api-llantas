@@ -1077,7 +1077,8 @@ class MeliClaimsTest extends TestCase
             if (str_ends_with($path, '/search')) return Http::response(['data' => [$raw], 'paging' => ['total' => 1]]);
             return Http::response(str_ends_with($path, '/123') ? $raw : []);
         });
-        $this->mock(TelegramAlertService::class)->shouldReceive('notifyMeliNewClaim')->once();
+        $this->mock(TelegramAlertService::class)->shouldReceive('notifyMeliNewClaim')->once()
+            ->andReturnUsing(fn (MeliClaim $claim) => $claim->forceFill(['telegram_notified_at' => now()])->save());
         $service = app(MeliClaimsService::class);
         $first = $service->syncAccount($account, 'opened', 0);
         $this->assertSame(1, $first['saved']);
@@ -1159,7 +1160,7 @@ class MeliClaimsTest extends TestCase
     public function test_missing_timestamp_refreshes_instead_of_skipping(): void
     {
         $account = $this->account();
-        $this->claim($account, ['status' => 'opened', 'last_updated' => now()]);
+        $this->claim($account, ['status' => 'opened', 'last_updated' => now(), 'telegram_notified_at' => now()]);
         $this->fakeClaimApi('opened');
         $this->mock(TelegramAlertService::class)->shouldNotReceive('notifyMeliNewClaim');
         $result = app(MeliClaimsService::class)->syncAccount($account);
@@ -1196,6 +1197,116 @@ class MeliClaimsTest extends TestCase
         $this->assertSame(2, $result['skipped']);
         $this->assertSame(0, $result['reconciled']);
         Http::assertSentCount(2);
+    }
+
+    public function test_unchanged_pending_claim_notifies_without_downloading_details(): void
+    {
+        $this->withClaimTelegram(function (): void {
+            $account = $this->account();
+            $version = '2026-09-15T10:00:00Z';
+            $claim = $this->claim($account, ['status' => 'opened', 'last_updated' => $version]);
+            Http::fake([
+                'api.mercadolibre.com/post-purchase/v1/claims/search*' => Http::response([
+                    'data' => [['id' => 123, 'last_updated' => $version]], 'paging' => ['total' => 1],
+                ]),
+                'api.telegram.org/*' => Http::response(['ok' => true]),
+            ]);
+
+            $service = app(MeliClaimsService::class);
+            $first = $service->syncAccount($account);
+            $second = $service->syncAccount($account);
+
+            $this->assertSame(1, $first['skipped']);
+            $this->assertSame(0, $first['saved']);
+            $this->assertSame(1, $second['skipped']);
+            $this->assertNotNull($claim->fresh()->telegram_notified_at);
+            Http::assertSentCount(3); // Two searches and one Telegram delivery, no claim resources.
+            Http::assertNotSent(fn (Request $request) => str_contains($request->url(), '/claims/123'));
+        });
+    }
+
+    public function test_notified_open_claim_never_invokes_notifier_on_skip_or_refresh(): void
+    {
+        $account = $this->account();
+        $version = '2026-09-15T10:00:00Z';
+        $this->claim($account, ['status' => 'opened', 'last_updated' => $version, 'telegram_notified_at' => now()]);
+        Http::fake(function (Request $request) use ($version) {
+            $raw = ['id' => 123, 'status' => 'opened', 'last_updated' => $version];
+            $path = parse_url($request->url(), PHP_URL_PATH);
+            if (str_ends_with($path, '/search')) return Http::response(['data' => [$raw], 'paging' => ['total' => 1]]);
+            return Http::response(str_ends_with($path, '/123') ? $raw : []);
+        });
+        $this->mock(TelegramAlertService::class)->shouldNotReceive('notifyMeliNewClaim');
+
+        $service = app(MeliClaimsService::class);
+        $this->assertSame(1, $service->syncAccount($account)['skipped']);
+        Http::assertSentCount(1);
+        $service->syncClaim($account, '123');
+    }
+
+    public function test_existing_open_claim_recovers_after_telegram_configuration_was_missing(): void
+    {
+        $this->withClaimTelegram(function (): void {
+            $account = $this->account();
+            $this->fakeClaimApi('open');
+            Http::fake(['api.telegram.org/*' => Http::response(['ok' => true])]);
+            $_ENV['TELEGRAM_BOT_TOKEN'] = $_SERVER['TELEGRAM_BOT_TOKEN'] = '';
+            putenv('TELEGRAM_BOT_TOKEN=');
+            $service = app(MeliClaimsService::class);
+            $claim = $service->syncClaim($account, '123');
+            $this->assertNull($claim->fresh()->telegram_notified_at);
+            Http::assertNotSent(fn (Request $request) => str_contains($request->url(), 'api.telegram.org'));
+
+            $_ENV['TELEGRAM_BOT_TOKEN'] = $_SERVER['TELEGRAM_BOT_TOKEN'] = 'test-bot';
+            putenv('TELEGRAM_BOT_TOKEN=test-bot');
+            $service->syncClaim($account, '123');
+            $service->syncClaim($account, '123');
+
+            $this->assertNotNull($claim->fresh()->telegram_notified_at);
+            $this->assertCount(1, collect(Http::recorded())->filter(fn ($pair) => str_contains($pair[0]->url(), 'api.telegram.org')));
+        });
+    }
+
+    public function test_notifier_failure_before_reservation_keeps_skipped_claim_retryable(): void
+    {
+        $account = $this->account();
+        $version = '2026-09-15T10:00:00Z';
+        $claim = $this->claim($account, ['status' => 'opened', 'last_updated' => $version]);
+        Http::fake(['api.mercadolibre.com/post-purchase/v1/claims/search*' => Http::response([
+            'data' => [['id' => 123, 'last_updated' => $version]], 'paging' => ['total' => 1],
+        ])]);
+        $this->mock(TelegramAlertService::class)->shouldReceive('notifyMeliNewClaim')->twice()
+            ->andThrow(new \RuntimeException('Before reservation'));
+
+        $service = app(MeliClaimsService::class);
+        foreach (range(1, 2) as $_) {
+            $result = $service->syncAccount($account);
+            $this->assertSame(1, $result['skipped']);
+            $this->assertSame(0, $result['failed']);
+        }
+        $this->assertNull($claim->fresh()->telegram_notified_at);
+        Http::assertSentCount(2);
+    }
+
+    public function test_atomic_reservation_blocks_another_notifier_while_delivery_is_in_flight(): void
+    {
+        $this->withClaimTelegram(function (): void {
+            $claim = $this->claim($this->account(), ['status' => 'opened']);
+            $stale = $claim->fresh();
+            $attempts = 0;
+            Http::fake(function () use ($stale, &$attempts) {
+                $attempts++;
+                if ($attempts === 1) app(TelegramAlertService::class)->notifyMeliNewClaim($stale);
+                return Http::response(['ok' => true]);
+            });
+
+            app(TelegramAlertService::class)->notifyMeliNewClaim($claim);
+            app(TelegramAlertService::class)->notifyMeliNewClaim($stale);
+
+            $this->assertSame(1, $attempts);
+            $this->assertNotNull($claim->fresh()->telegram_notified_at);
+            Http::assertSentCount(1);
+        });
     }
 
     public function test_telegram_is_attempted_once_even_with_stale_models_and_later_updates(): void
@@ -1304,6 +1415,50 @@ class MeliClaimsTest extends TestCase
             $this->mock(TelegramAlertService::class)->shouldNotReceive('notifyMeliNewClaim');
             app(MeliClaimsService::class)->syncClaim($account, '123');
         });
+    }
+
+    public function test_baseline_excludes_claim_inserted_after_max_id_was_captured(): void
+    {
+        $this->telegramMigration->down();
+        $account = $this->account();
+        $historical = $this->claim($account, ['status' => 'opened']);
+        $historicalClosed = $this->claim($account, ['claim_id' => '456', 'status' => 'closed']);
+        $insertedId = null;
+        DB::listen(function ($query) use ($account, &$insertedId): void {
+            if ($insertedId === null && str_contains(strtolower($query->sql), 'max(') && str_contains($query->sql, 'meli_claims')) {
+                // The SELECT result is already captured; insert before the schema change/baseline UPDATE.
+                $insertedId = DB::table('meli_claims')->insertGetId([
+                    'meli_account_id' => $account->id, 'claim_id' => '789', 'status' => 'opened',
+                ]);
+            }
+        });
+
+        $this->telegramMigration->up();
+
+        $this->assertNotNull($insertedId);
+        $this->assertGreaterThan($historicalClosed->id, $insertedId);
+        $this->assertNotNull($historical->fresh()->telegram_notified_at);
+        $this->assertNotNull($historicalClosed->fresh()->telegram_notified_at);
+        $this->assertNull(MeliClaim::query()->findOrFail($insertedId)->telegram_notified_at);
+    }
+
+    public function test_empty_baseline_does_not_mark_first_claim_inserted_during_migration(): void
+    {
+        $this->telegramMigration->down();
+        $account = $this->account();
+        $insertedId = null;
+        DB::listen(function ($query) use ($account, &$insertedId): void {
+            if ($insertedId === null && str_contains(strtolower($query->sql), 'max(') && str_contains($query->sql, 'meli_claims')) {
+                $insertedId = DB::table('meli_claims')->insertGetId([
+                    'meli_account_id' => $account->id, 'claim_id' => '123', 'status' => 'opened',
+                ]);
+            }
+        });
+
+        $this->telegramMigration->up();
+
+        $this->assertNotNull($insertedId);
+        $this->assertNull(MeliClaim::query()->findOrFail($insertedId)->telegram_notified_at);
     }
 
     public function test_new_closed_claim_does_not_notify(): void
