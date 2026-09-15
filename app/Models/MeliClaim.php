@@ -17,6 +17,7 @@ class MeliClaim extends Model
             'reputation_has_incentive' => 'boolean', 'due_date' => 'datetime',
             'reputation_due_date' => 'datetime', 'date_created' => 'datetime',
             'last_updated' => 'datetime', 'last_synced_at' => 'datetime',
+            'telegram_notified_at' => 'datetime',
             'raw_claim' => 'array', 'raw_detail' => 'array', 'status_history' => 'array',
             'actions_history' => 'array', 'expected_resolutions' => 'array', 'available_actions' => 'array',
             'messages' => 'array', 'changes' => 'array',
