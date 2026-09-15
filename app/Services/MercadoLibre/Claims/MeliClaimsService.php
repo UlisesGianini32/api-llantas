@@ -74,16 +74,17 @@ class MeliClaimsService
         return $this->api->getReadOnly($account, self::BASE.'/'.rawurlencode($claim->claim_id).'/attachments/'.rawurlencode($attachment).'/download', [], 1);
     }
 
-    /** @return array{received:int,saved:int,failed:int} */
-    public function syncAccount(MeliAccount $account, ?string $status = null, int $days = 30, bool $force = false): array
+    /** @return array{received:int,saved:int,skipped:int,reconciled:int,failed:int} */
+    public function syncAccount(MeliAccount $account, ?string $status = null, int $days = 0, bool $force = false): array
     {
         $this->api->ensureFreshAccessToken($account);
         $limit = 50;
-        $result = ['received' => 0, 'saved' => 0, 'failed' => 0];
+        $result = ['received' => 0, 'saved' => 0, 'skipped' => 0, 'reconciled' => 0, 'failed' => 0];
+        $seen = [];
 
         $statuses = filled($status)
             ? [(string) $status]
-            : ['opened', 'closed'];
+            : ['opened'];
 
         foreach ($statuses as $currentStatus) {
             $offset = 0;
@@ -106,21 +107,32 @@ class MeliClaimsService
                     ->getReadOnly($account, self::BASE.'/search', $query)
                     ->json();
 
-                $claims = array_values(array_filter(
-                    (array) ($payload['data'] ?? $payload['claims'] ?? $payload['results'] ?? []),
-                    'is_array'
-                ));
+                $claims = $payload['data'] ?? $payload['claims'] ?? $payload['results'] ?? null;
+                if (! is_array($claims)) {
+                    throw new \RuntimeException('Búsqueda de reclamos inválida; no se reconciliaron cierres.');
+                }
 
                 $result['received'] += count($claims);
 
                 foreach ($claims as $raw) {
-                    $claimId = trim((string) ($raw['id'] ?? $raw['claim_id'] ?? ''));
+                    $claimId = is_array($raw) ? trim((string) ($raw['id'] ?? $raw['claim_id'] ?? '')) : '';
 
                     if ($claimId === '') {
-                        continue;
+                        throw new \RuntimeException('Búsqueda con reclamo sin ID; no se reconciliaron cierres.');
                     }
 
+                    $seen[$claimId] = true;
+
                     try {
+                        $local = MeliClaim::query()->where('meli_account_id', $account->id)->where('claim_id', $claimId)->first();
+                        $remoteUpdated = $this->date($raw['last_updated'] ?? null);
+                        // Preserve remote precision/time zone when the SQL timestamp loses fractions.
+                        $localUpdated = $local ? ($this->date(data_get($local->raw_claim, 'last_updated')) ?? $local->last_updated) : null;
+                        if (! $force && $local && $local->sync_error === null && $remoteUpdated && $localUpdated && $remoteUpdated->equalTo($localUpdated)) {
+                            $local->forceFill(['last_synced_at' => now()])->save();
+                            $result['skipped']++;
+                            continue;
+                        }
                         $this->syncClaim($account, $claimId, $force, $raw);
                         $result['saved']++;
                     } catch (Throwable $e) {
@@ -131,7 +143,29 @@ class MeliClaimsService
 
                 $offset += count($claims);
                 $total = (int) data_get($payload, 'paging.total', $offset);
+                if ($claims === [] && $offset < $total) {
+                    throw new \RuntimeException('Búsqueda de reclamos incompleta; no se reconciliaron cierres.');
+                }
             } while ($claims !== [] && $offset < $total);
+        }
+
+        // Only an unbounded, successfully completed opened search can establish absence.
+        if ($statuses === ['opened'] && $days <= 0) {
+            MeliClaim::query()->where('meli_account_id', $account->id)
+                ->where(fn ($query) => $query->whereNull('status')->orWhereNotIn('status', ['closed', 'resolved']))
+                ->whereNotIn('claim_id', array_keys($seen))
+                ->chunkById(100, function ($claims) use ($account, $force, &$result): void {
+                    foreach ($claims as $local) {
+                        try {
+                            $this->syncClaim($account, $local->claim_id, $force);
+                            $result['saved']++;
+                            $result['reconciled']++;
+                        } catch (Throwable $e) {
+                            $result['failed']++;
+                            $this->recordError($account, $local->claim_id, $e);
+                        }
+                    }
+                });
         }
 
         return $result;
