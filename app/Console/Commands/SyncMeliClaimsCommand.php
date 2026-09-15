@@ -9,7 +9,7 @@ use Throwable;
 
 class SyncMeliClaimsCommand extends Command
 {
-    protected $signature = 'meli:sync-claims {--account=} {--status=} {--claim=} {--days=30} {--force}';
+    protected $signature = 'meli:sync-claims {--account=} {--status=opened} {--claim=} {--days=0} {--force}';
 
     protected $description = 'Sincroniza reclamos de Mercado Libre en modo de solo lectura';
 
@@ -26,12 +26,12 @@ class SyncMeliClaimsCommand extends Command
                     $this->info("Cuenta {$account->id}: reclamo sincronizado.");
                 } else {
                     $result = $service->syncAccount($account, $this->option('status'), max(0, (int) $this->option('days')), (bool) $this->option('force'));
-                    $this->info("Cuenta {$account->id}: {$result['saved']} guardados, {$result['failed']} fallidos.");
+                    $this->info("Cuenta {$account->id}: {$result['received']} recibidos, {$result['saved']} guardados, {$result['skipped']} sin cambios, {$result['reconciled']} reconciliados, {$result['failed']} fallidos.");
                     $failed += $result['failed'];
                 }
             } catch (Throwable $e) {
                 $failed++;
-                $this->error("Cuenta {$account->id}: ".$e->getMessage());
+                $this->error("Cuenta {$account->id}: ".$service->safeErrorMessage($e));
             }
         }
 

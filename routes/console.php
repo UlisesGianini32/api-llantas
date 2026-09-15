@@ -93,7 +93,7 @@ Schedule::command('meli:sync-questions --pages=4')
     ->runInBackground()
     ->appendOutputTo(storage_path('logs/meli-questions-sync.log'));
 
-Schedule::command('meli:sync-claims --days=30')
+Schedule::command('meli:sync-claims --status=opened --days=0')
     ->everyFiveMinutes()
     ->withoutOverlapping()
     ->runInBackground()
