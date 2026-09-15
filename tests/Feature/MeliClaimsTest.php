@@ -1271,13 +1271,16 @@ class MeliClaimsTest extends TestCase
         $this->withClaimTelegram(function (): void {
             $account = $this->account(['nickname' => 'Tienda']);
             $orderId = DB::table('meli_orders')->insertGetId(['meli_account_id' => $account->id, 'order_id' => 'ORDER-TG']);
-            DB::table('meli_order_items')->insert(['meli_order_id' => $orderId, 'title' => str_repeat('🚨', 5000), 'sku' => 'SKU-TG', 'quantity' => 2]);
+            for ($i = 0; $i < 10; $i++) {
+                DB::table('meli_order_items')->insert(['meli_order_id' => $orderId, 'title' => str_repeat('🚨', 5000), 'sku' => 'SKU-TG', 'quantity' => 2]);
+            }
             $claim = $this->claim($account, ['status' => 'opened', 'meli_order_id' => $orderId, 'order_id' => 'ORDER-TG']);
             Http::fake(['api.telegram.org/*' => Http::response(['ok' => true])]);
             app(TelegramAlertService::class)->notifyMeliNewClaim($claim);
             Http::assertSent(function (Request $request) use ($claim): bool {
                 $text = $request['text'];
                 return str_contains($text, 'SKU-TG') && str_contains($text, 'Cantidad: 2')
+                    && str_contains($text, 'Fecha límite:') && str_contains($text, 'Afecta reputación:')
                     && str_contains($text, 'Cuenta: Tienda') && str_contains($text, route('meli.claims.show', $claim))
                     && strlen(mb_convert_encoding($text, 'UTF-16LE', 'UTF-8')) <= 8192;
             });
