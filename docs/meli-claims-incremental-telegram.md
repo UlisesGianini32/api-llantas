@@ -15,6 +15,7 @@ El servicio sin estado explícito recorría `opened` y `closed`. El comando y sc
 - El webhook existente sigue encolando `SyncMeliClaimJob` en `meli` para actualizar un reclamo concreto.
 - El respaldo y el botón buscan exclusivamente `opened`, sin rango de fechas y sin forzar detalles. La frecuencia sigue siendo cinco minutos.
 - Se compara `last_updated` por cuenta y claim. Una fecha igual omite detalles; se conserva la precisión del timestamp remoto en `raw_claim`. Fechas ausentes/inválidas y errores previos fuerzan la lectura.
+- Los abiertos con `telegram_notified_at IS NULL` intentan su aviso pendiente tanto al sincronizar detalles como al quedar `skipped`. El camino `skipped` no descarga recursos adicionales de MeLi.
 - Tras completar todas las páginas, solamente los reclamos locales no `closed`/`resolved` ausentes del listado se consultan individualmente. No se descarga el historial de cerrados ni se borran registros.
 - Una búsqueda fallida, inválida, sin total o truncada aborta antes de reconciliar. Las búsquedas explícitas con rango histórico no reconcilian ausencias.
 - Se conservan `received`, `saved`, `failed` y se agregan `skipped`, `reconciled`. `saved` incluye las reconciliaciones exitosas; `received` cuenta resultados de búsqueda.
@@ -24,34 +25,36 @@ El servicio sin estado explícito recorría `opened` y `closed`. El comando y sc
 
 | Archivo | Cambio |
 | --- | --- |
-| `app/Services/MercadoLibre/Claims/MeliClaimsService.php` | Comparación incremental, reconciliación, contadores y evento de creación |
+| `app/Services/MercadoLibre/Claims/MeliClaimsService.php` | Comparación incremental, reconciliación, contadores y avisos pendientes |
 | `app/Services/TelegramAlertService.php` | `notifyMeliNewClaim`, reserva atómica, mensaje acotado y errores sanitizados |
 | `app/Models/MeliClaim.php` | Cast datetime de `telegram_notified_at` |
-| `database/migrations/2026_09_15_000001_add_telegram_notified_at_to_meli_claims.php` | Columna nullable indexada y baseline de todos los registros existentes |
+| `database/migrations/2026_09_15_000001_add_telegram_notified_at_to_meli_claims.php` | Columna nullable indexada y baseline limitado al máximo ID capturado antes de agregarla |
 | `app/Console/Commands/SyncMeliClaimsCommand.php` | Defaults abiertos/sin rango y salida con contadores |
 | `app/Http/Controllers/MeliClaimController.php` | Botón con `opened`, `0`, `false` y resumen |
 | `routes/console.php` | Respaldo incremental, conservando sus protecciones y log |
-| `tests/Feature/MeliClaimsTest.php` | 18 casos nuevos y actualización del caso del comportamiento anterior |
+| `tests/Feature/MeliClaimsTest.php` | 25 casos nuevos, incluyendo 7 correctivos, y actualización del caso del comportamiento anterior |
 | `docs/meli-claims-incremental-telegram.md` | Reporte y operación |
 
 ## Telegram y concurrencia
 
 Se reutilizan el bot y `TELEGRAM_BOT_TOKEN`, con `TELEGRAM_ALERT_CHAT_IDS` o su fallback `TELEGRAM_ALLOWED_CHAT_IDS`. No se agregan credenciales ni opciones de entorno. El mensaje contiene cuenta, claim, pedido, productos/SKU/cantidades locales, motivo, etapa, responsable, reputación, vencimiento y `route('meli.claims.show', $claim)`. No incorpora identificadores del comprador.
 
-La integración invoca Telegram solamente cuando Eloquent acaba de crear un reclamo abierto (`opened` o el alias local `open`). La restricción única existente `(meli_account_id, claim_id)` evita dos inserciones concurrentes; `updateOrCreate` de Laravel recupera el registro ganador. Antes de enviar, un UPDATE condicionado a `telegram_notified_at IS NULL` reserva el aviso. Dos instancias del modelo, aunque estén desactualizadas, no pueden reservar el mismo registro.
+La integración invoca Telegram para cualquier reclamo abierto (`opened` o el alias local `open`) con `telegram_notified_at IS NULL`, aunque ya exista o su fecha remota no haya cambiado. Esto recupera avisos que salieron antes de reservar, por ejemplo por configuración ausente. La restricción única existente `(meli_account_id, claim_id)` evita dos inserciones concurrentes; `updateOrCreate` de Laravel recupera el registro ganador. Antes de enviar, el UPDATE atómico existente, condicionado por ID, estado abierto y `telegram_notified_at IS NULL`, reserva el aviso. Dos instancias del modelo, aunque estén desactualizadas, no pueden reservar el mismo registro. Un registro marcado no vuelve a invocar el notifier desde la sincronización.
+
+El baseline captura `MAX(id)` antes de agregar la columna y marca únicamente `id <= baselineMaxId`. Una inserción posterior a esa captura conserva null, incluso si ocurre antes del UPDATE del baseline. Si la tabla estaba vacía, no se marca ningún registro. Los reclamos históricos marcados siguen excluidos de los avisos.
 
 **Semántica: como máximo un intento por chat.** `telegram_notified_at` representa baseline o reserva de intento, no comprobante de recepción. Se marca antes del HTTP y no se limpia ante rechazo, timeout o entrega parcial. No hay reintentos automáticos que dupliquen un envío incierto. Los errores se registran sin cuerpo de respuesta, URL del bot ni mensaje de excepción. Una falla de Telegram no revierte el claim.
 
 Limitaciones deliberadas:
 
-- Puede perderse una alerta si el proceso muere después de reservar, si Telegram falla, si faltan credenciales o si la sincronización se interrumpe tras insertar y antes del aviso. Las siguientes actualizaciones no reenvían el evento de creación.
+- Puede perderse una alerta si el proceso muere después de reservar o si Telegram falla. Las siguientes sincronizaciones no reenvían una entrega reservada, incluso si fue incierta. Si todavía no hubo reserva, el aviso permanece pendiente y puede recuperarse en una sincronización posterior mientras el reclamo siga abierto.
 - No se promete entrega exactamente una vez; Telegram y la BD no comparten una transacción.
-- El despliegue debe pausar todos los escritores de reclamos durante la migración. Así el baseline tiene un límite definido.
+- El despliegue debe pausar todos los escritores MeLi durante la migración como defensa adicional a la frontera por ID.
 - La paginación remota no es una instantánea transaccional. Una ausencia provoca una lectura individual, nunca un cierre inferido ni borrado.
 - Un recurso opcional puede seguir sin estar disponible por permisos de MeLi; se conserva el manejo existente y sus logs.
 - No se verificó entrega real a Telegram ni rendimiento contra MeLi; las pruebas no crean reclamos reales. Tampoco se ejecutaron cambios en producción.
 
-## Validaciones locales, 2026-09-15
+## Validaciones iniciales, 2026-09-15
 
 PHP 8.4.24 de Herd, Laravel instalado por el proyecto y SQLite en memoria; APIs simuladas con `Http::fake`, `Http::preventStrayRequests`, mocks y `Bus::fake`.
 
@@ -73,6 +76,16 @@ Errores preexistentes: 32 tests que ejecutan migraciones generales encuentran `p
 La suite necesitó `php -d memory_limit=512M vendor/bin/phpunit`: el límite inicial de 128 MB era insuficiente. Herd muestra además una advertencia de inicio por la extensión GMP bloqueada por Windows, también presente en la base; las pruebas de reclamos terminan correctamente.
 
 Los 18 casos nuevos cubren fechas iguales/cambiadas/ausentes (incluyendo fracciones), creación, force, reconciliación aislada por cuenta, búsqueda truncada/fallida/sin total, rango histórico, paginación, Telegram una vez con modelos desactualizados, errores HTTP/excepciones/timeout, baseline, reclamo nuevo cerrado, tamaño/productos/URL del mensaje, botón/comando, scheduler y topics/cola del webhook.
+
+## Revisión correctiva
+
+Se agregaron 7 tests para: aviso pendiente en un claim sin cambios sin descargar detalles, exclusión de marcados tanto en skip como refresh, recuperación tras configuración ausente, excepción antes de reservar que mantiene el aviso pendiente, segundo notifier durante un envío en curso, inserción posterior al máximo ID histórico e inserción con baseline inicialmente vacío. Los tests existentes siguen cubriendo timeout ambiguo sin segundo envío.
+
+- Claims y Telegram: **74 tests, 554 assertions, correctos**.
+- Suite completa: **541 tests, 4762 assertions, los mismos 36 errores preexistentes**, sin fallos de aserción. Comparación de identidades contra los resultados de la base `cf436e7`: cero diferencias.
+- `php -l`: sin errores en los tres PHP corregidos. `git diff --check`: correcto.
+- Lectura estricta UTF-8 de los 9 archivos PHP/Markdown modificados por la feature: sin mojibake real. Verificados `Búsqueda`, `configuración`, `acción`, `Sí`, `—` y `🚨` en el código PHP. No fue necesario cambiar ningún archivo por encoding.
+- Se conserva sin cambios la reserva atómica de `TelegramAlertService`; no se limpian marcas después de timeout o rechazo. Los tests usan SQLite en memoria y APIs simuladas.
 
 ## Despliegue por el operador
 
@@ -103,7 +116,7 @@ Ejecutar desde la raíz del proyecto en el servidor solamente después de revisa
    php artisan schedule:list
    ```
 
-   Confirmar que las migraciones anteriores de reclamos ya estaban aplicadas. La migración nueva asigna `now()` a todos los registros existentes; registros posteriores inician en null. No ejecutar `migrate:fresh`, `migrate:reset` ni una migración histórica modificada. No volver a correr manualmente el `up()` sobre una tabla ya migrada.
+   Confirmar que las migraciones anteriores de reclamos ya estaban aplicadas. La migración nueva captura el máximo ID antes de agregar la columna y asigna `now()` solamente hasta ese ID; los registros posteriores conservan null. Mantener pausados los escritores MeLi como defensa adicional. No ejecutar `migrate:fresh`, `migrate:reset` ni una migración histórica modificada. Esta corrección pertenece a la migración de la feature aún sin desplegar; no volver a correr manualmente el `up()` sobre una tabla ya migrada.
 
 4. Restablecer las cachés que use el procedimiento habitual, reiniciar los workers con el código nuevo y salir de mantenimiento. Si se pausó el gestor del scheduler, reanudarlo.
 
@@ -176,5 +189,6 @@ Después ejecutar el cambio de código y reinicios indicados arriba. No usar est
 - `310eb38`: botón, comando y scheduler.
 - `17cd1f2`: pruebas y validación de total remoto antes de reconciliar.
 - `8493199`: preservar los datos operativos y la URL al acotar mensajes con productos largos; 67 tests de reclamos nuevamente correctos.
+- `c0d6855`: revisión correctiva de avisos sin reserva y frontera del baseline, con 7 tests adicionales.
 
 El commit de este reporte se identifica mediante `git log --oneline rescue/production-2026-08-21..HEAD`.
