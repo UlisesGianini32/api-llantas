@@ -3,12 +3,15 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class MeliOrder extends Model
 {
     protected $table = 'meli_orders';
 
     protected $fillable = [
+        'meli_account_id',
         'order_id',
         'topic',
         'resource',
@@ -50,7 +53,12 @@ class MeliOrder extends Model
         'updated_at' => 'datetime',
     ];
 
-    public function items()
+    public function meliAccount(): BelongsTo
+    {
+        return $this->belongsTo(MeliAccount::class);
+    }
+
+    public function items(): HasMany
     {
         return $this->hasMany(MeliOrderItem::class, 'meli_order_id');
     }

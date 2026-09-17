@@ -26,3 +26,27 @@ yarn-error.log
 database/*.zip
 storage/logs/*.log
 *.log
+
+# Backups and temporary deployment files
+.env.*
+!.env.example
+*.bak
+*.bak-*
+*.bak_*
+*.backup
+*.backup-*
+*.backup_*
+*_old
+*_old.*
+*.orig
+*.rej
+*.tar.gz
+/backups/
+/storage/backups/
+/ams_etiquetas_pack_productos_v3/
+/centro_control_v2/
+/llantas_purgar_stock_cero/
+/llantas_sku_inteligente/
+/meli_republish_atributos_obligatorios_v2/
+/panel_salud_v1/
+/publicaciones_mercado_libre/

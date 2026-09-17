@@ -1,4 +1,5 @@
 import FlashToasts from '@/Components/ui/FlashToasts'
+import { sidebarSectionsForRole } from '@/lib/userAccessNavigation'
 import { Head, Link, usePage } from '@inertiajs/react'
 import { useEffect, useRef, useState } from 'react'
 
@@ -119,7 +120,9 @@ function SidebarBrand() {
     )
 }
 
-function SidebarNav({ currentPath, onNavigate }) {
+function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
+    const isAdmin = sidebarSectionsForRole(role).some((section) => section.key === 'inventory')
+
     return (
         <nav className="space-y-6">
             <div>
@@ -133,7 +136,7 @@ function SidebarNav({ currentPath, onNavigate }) {
                 </div>
             </div>
 
-            <div>
+            {isAdmin && <div>
                 <p className="mb-2 px-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">
                     Inventario
                 </p>
@@ -199,7 +202,7 @@ function SidebarNav({ currentPath, onNavigate }) {
                         Llantas no actualizadas
                     </NavItem>
                 </div>
-            </div>
+            </div>}
 
             <div>
                 <p className="mb-2 px-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">
@@ -207,11 +210,93 @@ function SidebarNav({ currentPath, onNavigate }) {
                 </p>
                 <div className="space-y-1">
                     <NavItem
+                        href="/mercado-libre/etiquetas"
+                        active={currentPath.startsWith('/mercado-libre/etiquetas')}
+                        onNavigate={onNavigate}
+                    >
+                        Etiquetas Mercado Libre
+                    </NavItem>
+
+                    <NavItem
+                        href="/meli/preguntas"
+                        active={currentPath.startsWith('/meli/preguntas')}
+                        onNavigate={onNavigate}
+                    >
+                        <span className="flex items-center justify-between gap-2">
+                            <span>Preguntas de productos</span>
+                            {pendingQuestions > 0 && (
+                                <span className="min-w-6 rounded-full bg-amber-100 px-2 py-0.5 text-center text-xs font-bold text-amber-800 dark:bg-amber-500/20 dark:text-amber-200">
+                                    {pendingQuestions > 99 ? '99+' : pendingQuestions}
+                                </span>
+                            )}
+                        </span>
+                    </NavItem>
+
+                    <NavItem
                         href="/meli/mensajeria"
                         active={currentPath.startsWith('/meli/mensajeria')}
                         onNavigate={onNavigate}
                     >
                         Mensajería posventa
+                    </NavItem>
+
+                    <NavItem
+                        href="/meli-claims"
+                        active={currentPath.startsWith('/meli-claims')}
+                        onNavigate={onNavigate}
+                    >
+                        Reclamos
+                    </NavItem>
+
+                    <NavItem
+                        href="/meli/publicaciones"
+                        active={currentPath.startsWith('/meli/publicaciones')}
+                        onNavigate={onNavigate}
+                    >
+                        Publicaciones Mercado Libre
+                    </NavItem>
+
+                    {isAdmin && <>
+                    <NavItem
+                        href="/meli-price-manager"
+                        active={currentPath === '/meli-price-manager'}
+                        onNavigate={onNavigate}
+                    >
+                        Meli Price Manager
+                    </NavItem>
+
+                    <NavItem
+                        href="/meli-price-manager/brands"
+                        active={currentPath.startsWith('/meli-price-manager/brands')}
+                        onNavigate={onNavigate}
+                    >
+                        Marcas y alias
+                    </NavItem>
+
+                    <NavItem
+                        href="/meli-price-manager/scheduled-discounts"
+                        active={currentPath.startsWith('/meli-price-manager/scheduled-discounts')}
+                        onNavigate={onNavigate}
+                    >
+                        Promociones programadas
+                    </NavItem>
+
+                    <NavItem
+                        href="/meli-price-manager/uncategorized"
+                        active={currentPath.startsWith('/meli-price-manager/uncategorized')}
+                        onNavigate={onNavigate}
+                    >
+                        Pendientes de clasificación
+                    </NavItem>
+
+                    </>}
+
+                    <NavItem
+                        href="/meli/full"
+                        active={currentPath.startsWith('/meli/full')}
+                        onNavigate={onNavigate}
+                    >
+                        Inventario FULL
                     </NavItem>
                 </div>
             </div>
@@ -225,21 +310,65 @@ function SidebarNav({ currentPath, onNavigate }) {
                         AMS Pedidos
                     </NavItem>
                     <NavItem
-                        href="/ams/pedidos-procesar"
-                        active={currentPath.startsWith('/ams/pedidos-procesar')}
-                        onNavigate={onNavigate}
-                    >
-                        AMS Procesar
-                    </NavItem>
-                    <NavItem
-                        href="/ams/pedidos-manana"
-                        active={currentPath.startsWith('/ams/pedidos-manana')}
-                        onNavigate={onNavigate}
-                    >
-                        AMS Mañana
-                    </NavItem>
+    href="/ams/pedidos-procesar"
+    active={currentPath.startsWith('/ams/pedidos-procesar')}
+    onNavigate={onNavigate}
+>
+    AMS Procesar
+</NavItem>
+
+<NavItem
+    href="/ams/pedidos-secundaria"
+    active={currentPath.startsWith('/ams/pedidos-secundaria')}
+    onNavigate={onNavigate}
+>
+    AMS Secundaria
+</NavItem>
+
+<NavItem
+    href="/ams/pedidos-manana"
+    active={currentPath.startsWith('/ams/pedidos-manana')}
+    onNavigate={onNavigate}
+>
+    AMS Mañana
+</NavItem>
                 </div>
             </div>
+
+            {isAdmin && <div>
+                <p className="mb-2 px-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">
+                    Sistema
+                </p>
+                <div className="space-y-1">
+                    <NavItem href="/sistema/estado" active={currentPath.startsWith('/sistema/estado')} onNavigate={onNavigate}>
+                        Estado del sistema
+                    </NavItem>
+
+                    <NavItem
+                        href="/sistema/colas"
+                        active={currentPath.startsWith('/sistema/colas')}
+                        onNavigate={onNavigate}
+                    >
+                        Colas
+                    </NavItem>
+                    <NavItem
+                        href="/sistema/logs"
+                        active={currentPath.startsWith('/sistema/logs')}
+                        onNavigate={onNavigate}
+                    >
+                        Logs
+                    </NavItem>
+                    <NavItem
+                        href="/sistema/acciones"
+                        active={currentPath.startsWith('/sistema/acciones')}
+                        onNavigate={onNavigate}
+                    >
+                        Acciones rápidas
+                    </NavItem>
+
+                </div>
+            </div>}
+
         </nav>
     )
 }
@@ -264,7 +393,7 @@ function SidebarFooter({ user, onNavigate }) {
 }
 
 export default function AppShell({ title = 'Dashboard', children }) {
-    const { auth } = usePage().props
+    const { auth, meli_questions_pending = 0 } = usePage().props
     const [mobileNavOpen, setMobileNavOpen] = useState(false)
     const currentPath =
         typeof window !== 'undefined' ? window.location.pathname : ''
@@ -315,7 +444,12 @@ export default function AppShell({ title = 'Dashboard', children }) {
                                 </div>
                                 <SidebarBrand />
                                 <div className="min-h-0 flex-1 overflow-y-auto">
-                                    <SidebarNav currentPath={currentPath} onNavigate={closeMobile} />
+                                    <SidebarNav
+                                        currentPath={currentPath}
+                                        role={auth?.user?.role}
+                                        onNavigate={closeMobile}
+                                        pendingQuestions={meli_questions_pending}
+                                    />
                                 </div>
                                 <SidebarFooter user={auth?.user} onNavigate={closeMobile} />
                             </div>
@@ -325,7 +459,7 @@ export default function AppShell({ title = 'Dashboard', children }) {
                     <aside className="hidden w-72 shrink-0 border-r border-slate-200 bg-white lg:block dark:border-neutral-800 dark:bg-neutral-900">
                         <div className="flex h-full flex-col p-4">
                             <SidebarBrand />
-                            <SidebarNav currentPath={currentPath} />
+                            <SidebarNav currentPath={currentPath} role={auth?.user?.role} pendingQuestions={meli_questions_pending} />
                             <SidebarFooter user={auth?.user} />
                         </div>
                     </aside>

@@ -15,7 +15,9 @@ class SyscomMeliPublishService
     public function __construct(
         private MeliPublishService $meli,
         private SyscomProductPricingService $pricing,
-        private SyscomImageNormalizerService $imageNormalizer
+        private SyscomImageNormalizerService $imageNormalizer,
+        private SyscomMeliCategoryGuardService $categoryGuard,
+        private SyscomMeliCategoryResolverService $categoryResolver
     ) {}
 
     public function makeSku(int $syscomProductoId): string
@@ -53,7 +55,7 @@ class SyscomMeliPublishService
         SyscomProduct $product,
         string $hermosilloBranchCode,
         ?string $categoryId = null,
-        string $officialStoreMode = 'tobeauty',
+        string $officialStoreMode = 'marketmax',
         string $priceScope = 'llanta',
         ?string $manualUniversalCode = null
     ): array {
@@ -74,24 +76,49 @@ class SyscomMeliPublishService
             $categoryId = trim((string) $categoryId);
         }
 
-        $categoryId = $this->applyAutoCategoryFixes($product, $categoryId);
+        // Una categoría capturada manualmente nunca debe ser reemplazada por heurísticas.
+        // Las correcciones automáticas solo se aplican cuando el panel dejó la categoría vacía.
+        //
+        // Además, una equivalencia SYSCOM -> ML aprobada tiene prioridad y
+        // tampoco debe ser modificada por heurísticas históricas.
+        $approvedProductOverride = $this->hasApprovedProductOverride(
+            $product,
+            (string) $categoryId
+        );
 
-        if ($manualCategoryInput !== null && $categoryId !== $manualCategoryInput) {
-            Log::info('SyscomMeliPublish: categoría manual reemplazada por regla automática del producto', [
-                'manual_category_id' => $manualCategoryInput,
-                'final_category_id' => $categoryId,
-                'syscom_producto_id' => $product->syscom_producto_id,
-            ]);
-            $categoryManual = false;
+        $approvedSyscomMapping = $this->hasApprovedSyscomMapping(
+            $product,
+            (string) $categoryId
+        );
+
+        if (
+            ! $categoryManual
+            && ! $approvedProductOverride
+            && ! $approvedSyscomMapping
+        ) {
+            $categoryId = $this->applyAutoCategoryFixes(
+                $product,
+                $categoryId
+            );
         }
 
         $this->assertMeliCategoryPlausibleForProduct($user, $product, $categoryId, $categoryManual);
+
+        // Segunda barrera independiente. También valida categorías capturadas manualmente
+        // y bloquea contradicciones fuertes antes de crear el item en Mercado Libre.
+        $categoryDiagnostic = $this->categoryGuard->validate(
+            $user,
+            $product,
+            (string) $categoryId,
+            $categoryManual
+        );
 
         Log::info('SyscomMeliPublish: categoría ML final para publicación', [
             'category_id' => $categoryId,
             'syscom_producto_id' => $product->syscom_producto_id,
             'titulo' => trim((string) ($product->titulo ?? '')),
             'manual' => $categoryManual,
+            'category_guard' => $categoryDiagnostic,
         ]);
 
         $stock = (int) ($product->stock_hermosillo ?? 0);
@@ -646,6 +673,20 @@ class SyscomMeliPublishService
             return null;
         }
 
+        /*
+         * GTIN/EAN/UPC nunca deben recibir un fallback textual genérico.
+         *
+         * Si SYSCOM no trae un código universal válido, dejamos el
+         * identificador vacío para que ensureProductIdentifierConditional()
+         * utilice EMPTY_GTIN_REASON / EMPTY_EAN_REASON.
+         *
+         * Enviar "No especificado" como GTIN provoca:
+         * item.attribute.product_identifier.invalid_format
+         */
+        if (in_array($id, ['GTIN', 'EAN', 'UPC'], true)) {
+            return null;
+        }
+
         $factsPack = isset($facts['by_key']) ? $facts : ['by_key' => [], 'lines' => []];
 
         if ($id === 'FIBERS_NUMBER') {
@@ -986,8 +1027,23 @@ class SyscomMeliPublishService
         $catLine = $this->flattenSyscomCategoriesLine($product);
         $tireProduct = $this->productLooksLikeTire($title, $model, $blob);
         $sensorOrAccessHints = $this->blobSuggestsSecurityOrVehicularAccess($blob);
-        $dvrProduct = $this->productLooksLikeNvrDvr($blob, $title);
-        $cameraProduct = $this->productLooksLikeSurveillanceCamera($blob, $title);
+        $dashCamProduct = $this->productLooksLikeDashCam($blob, $title);
+        $upsProduct = $this->productLooksLikeUps($blob, $title);
+
+        if ($upsProduct) {
+            $upsCategoryId = $this->configuredUpsCategoryId();
+
+            Log::info('SyscomMeliPublish: categoría ML fija por familia UPS', [
+                'category_id' => $upsCategoryId,
+                'syscom_producto_id' => $product->syscom_producto_id,
+                'titulo' => $title,
+            ]);
+
+            return $upsCategoryId;
+        }
+
+        $dvrProduct = ! $dashCamProduct && $this->productLooksLikeNvrDvr($blob, $title);
+        $cameraProduct = ! $dashCamProduct && $this->productLooksLikeSurveillanceCamera($blob, $title);
         $videoporteroProduct = $this->productLooksLikeVideoIntercom($blob, $title);
         $videoSurveillanceProduct = $dvrProduct
             || $cameraProduct
@@ -1018,10 +1074,34 @@ class SyscomMeliPublishService
             $dvrProduct,
             $isKitProduct
         );
+        // Fase 4: clasifica la familia antes de domain_discovery y busca únicamente
+        // categorías compatibles. Las categorías fijas sólo se usan cuando fueron verificadas.
+        $familyResolution = $this->categoryResolver->resolve($user, $product);
+        if (is_array($familyResolution) && trim((string) ($familyResolution['category_id'] ?? '')) !== '') {
+            Log::info('SyscomMeliPublish: categoría ML resuelta por familia', [
+                'phase' => 4,
+                'syscom_producto_id' => $product->syscom_producto_id,
+                'titulo' => $title,
+                'resolution' => $familyResolution,
+            ]);
+
+            return (string) $familyResolution['category_id'];
+        }
+
         $configuredBalunCategory = $this->configuredBalunCategoryId();
         $configuredSwitchCategory = $this->configuredSwitchCategoryId();
         $configuredOltCategory = $this->configuredOltCategoryId();
         $configuredAntennaCategory = $this->configuredAntennaCategoryId();
+
+        $configuredDashCamCategory = $this->configuredDashCamCategoryId();
+        if ($dashCamProduct && $configuredDashCamCategory !== '') {
+            Log::info('SyscomMeliPublish: categoría Dash Cam fija por SYSCOM_MELI_DASH_CAM_CATEGORY_ID', [
+                'category_id' => $configuredDashCamCategory,
+                'titulo' => $title,
+            ]);
+
+            return $configuredDashCamCategory;
+        }
 
         $configuredPoeInjectorCategory = $this->configuredPoeInjectorCategoryId();
         if ($poeInjectorProduct && $configuredPoeInjectorCategory !== '') {
@@ -1547,10 +1627,40 @@ class SyscomMeliPublishService
                 $antennaProduct
             );
             if (is_string($bestId) && $bestId !== '') {
+                $rankedIds = array_keys($scores);
+                $bestScore = (int) ($scores[$bestId] ?? PHP_INT_MIN);
+                $secondScore = PHP_INT_MIN;
+
+                foreach ($rankedIds as $candidateId) {
+                    if ((string) $candidateId === $bestId) {
+                        continue;
+                    }
+                    $secondScore = (int) ($scores[$candidateId] ?? PHP_INT_MIN);
+                    break;
+                }
+
+                $minimumScore = max(1, (int) config('syscom.meli_category_min_score', 18));
+                $minimumGap = max(0, (int) config('syscom.meli_category_min_gap', 6));
+                $gap = $secondScore === PHP_INT_MIN ? PHP_INT_MAX : $bestScore - $secondScore;
+
+                if ($bestScore < $minimumScore || $gap < $minimumGap) {
+                    $top = [];
+                    foreach (array_slice($scores, 0, 3, true) as $id => $score) {
+                        $top[] = $id.' ('.($names[$id] ?? 'Categoría ML').', puntaje '.$score.')';
+                    }
+
+                    throw new \RuntimeException(
+                        'No se publicó porque Mercado Libre devolvió categorías ambiguas o con poca confianza. '.
+                        'Captura manualmente una categoría final MLM en el campo «Categoría ML». '.
+                        'Mejores coincidencias: '.implode('; ', $top).'.'
+                    );
+                }
+
                 Log::info('SyscomMeliPublish: categoría ML por votación domain_discovery', [
                     'category_id' => $bestId,
                     'category_name' => $names[$bestId] ?? '',
-                    'score' => $scores[$bestId],
+                    'score' => $bestScore,
+                    'gap' => $gap,
                     'top' => array_slice($scores, 0, 5, true),
                 ]);
 
@@ -1559,7 +1669,8 @@ class SyscomMeliPublishService
         }
 
         $fallback = trim((string) config('syscom.meli_fallback_category_id', ''));
-        if ($fallback !== '') {
+        $allowFallback = (bool) config('syscom.meli_allow_fallback_category', false);
+        if ($allowFallback && $fallback !== '') {
             Log::info('SyscomMeliPublish: categoría por SYSCOM_MELI_FALLBACK_CATEGORY_ID', [
                 'category_id' => $fallback,
             ]);
@@ -2344,11 +2455,31 @@ class SyscomMeliPublishService
     private function applyAutoCategoryFixes(SyscomProduct $product, string $categoryId): string
     {
         [$title, $blob] = $this->productClassificationContext($product);
+
+        // Fase 3: si el producto es una Dash Cam, resolveMeliCategoryId() ya buscó
+        // y validó una categoría vehicular específica. No permitimos que las reglas
+        // heredadas de CCTV/DVR sustituyan después esa categoría por Cámaras de Seguridad.
+        $dashCamProduct = $this->productLooksLikeDashCam($blob, $title);
+        if ($dashCamProduct) {
+            Log::info('SyscomMeliPublish: se conserva categoría vehicular de Dash Cam', [
+                'phase' => 3,
+                'category_id' => $categoryId,
+                'syscom_producto_id' => $product->syscom_producto_id,
+                'titulo' => $title,
+            ]);
+
+            return $categoryId;
+        }
+
         $dvrProduct = $this->productLooksLikeNvrDvr($blob, $title);
         $isKitProduct = $this->productLooksLikeKit($blob, $title);
         $videoSurveillance = $dvrProduct || $this->productBlobSuggestsVideovigilancia($product, $blob);
         $balunProduct = $this->productLooksLikeAudioVideoBalun($blob, $title);
         $surveillanceKitProduct = $isKitProduct && $videoSurveillance && ! $balunProduct;
+
+        if ($this->productLooksLikeUps($blob, $title)) {
+            return $this->configuredUpsCategoryId();
+        }
 
         if ($this->productLooksLikeSolarEnergyMeter($blob, $title)) {
             return $this->configuredSolarMeterCategoryId();
@@ -2448,16 +2579,166 @@ class SyscomMeliPublishService
         return $categoryId;
     }
 
+    /**
+     * Indica si la categoría ML coincide exactamente con el mapping aprobado
+     * de la categoría SYSCOM primaria del producto.
+     */
+    /**
+     * Indica si la categoría ML coincide exactamente con un
+     * override aprobado para este producto específico.
+     */
+    private function hasApprovedProductOverride(
+        SyscomProduct $product,
+        string $categoryId
+    ): bool {
+        $productId = (int) ($product->id ?? 0);
+        $categoryId = strtoupper(trim($categoryId));
+
+        if (
+            $productId <= 0
+            || ! preg_match('/^MLM\d+$/', $categoryId)
+        ) {
+            return false;
+        }
+
+        return \Illuminate\Support\Facades\DB::table(
+            'syscom_meli_product_category_overrides'
+        )
+            ->where('syscom_product_id', $productId)
+            ->where('approved', true)
+            ->whereRaw(
+                'UPPER(TRIM(meli_category_id)) = ?',
+                [$categoryId]
+            )
+            ->exists();
+    }
+
+    private function hasApprovedSyscomMapping(
+        SyscomProduct $product,
+        string $categoryId
+    ): bool {
+        $primaryCategoryId = (int) (
+            $product->syscom_primary_category_id ?? 0
+        );
+
+        $categoryId = strtoupper(trim($categoryId));
+
+        if (
+            $primaryCategoryId <= 0
+            || ! preg_match('/^MLM\d+$/', $categoryId)
+        ) {
+            return false;
+        }
+
+        return \Illuminate\Support\Facades\DB::table(
+            'syscom_meli_category_maps'
+        )
+            ->where('syscom_category_id', $primaryCategoryId)
+            ->where('approved', true)
+            ->whereRaw(
+                'UPPER(TRIM(meli_category_id)) = ?',
+                [$categoryId]
+            )
+            ->exists();
+    }
+
     private function assertMeliCategoryPlausibleForProduct(
         User $user,
         SyscomProduct $product,
         string $categoryId,
         bool $categoryManual
     ): void {
+        $categoryId = strtoupper(trim($categoryId));
+        if (! preg_match('/^MLM\d+$/', $categoryId)) {
+            throw new \RuntimeException(
+                'Categoría de Mercado Libre inválida: «'.$categoryId.'». Debe ser un category_id de México con formato MLM seguido de números; no pegues el id de una publicación.'
+            );
+        }
+
+        try {
+            $categoryMeta = $this->meli->getCategory($user, $categoryId);
+        } catch (\Throwable $e) {
+            throw new \RuntimeException(
+                'No se pudo validar la categoría '.$categoryId.' con Mercado Libre. Por seguridad no se publicó. Detalle: '.$e->getMessage(),
+                0,
+                $e
+            );
+        }
+
+        $settings = is_array($categoryMeta['settings'] ?? null) ? $categoryMeta['settings'] : [];
+        if (array_key_exists('listing_allowed', $settings) && $settings['listing_allowed'] !== true) {
+            throw new \RuntimeException(
+                'La categoría '.$categoryId.' no permite crear publicaciones. Selecciona una categoría final distinta.'
+            );
+        }
+
+        $children = is_array($categoryMeta['children_categories'] ?? null)
+            ? $categoryMeta['children_categories']
+            : [];
+        if ($children !== []) {
+            throw new \RuntimeException(
+                'La categoría '.$categoryId.' todavía contiene subcategorías y no es una categoría final segura. Selecciona una categoría hija final.'
+            );
+        }
+
+        /*
+         * Si la equivalencia SYSCOM -> Mercado Libre está aprobada y coincide
+         * exactamente con esta categoría, ya no usamos regex de título o
+         * descripción para contradecirla.
+         *
+         * IMPORTANTE: antes de llegar aquí ya se validó:
+         * - formato MLM;
+         * - existencia de la categoría;
+         * - listing_allowed;
+         * - que sea una categoría final sin hijos.
+         */
+        $approvedProductOverride =
+            $this->hasApprovedProductOverride(
+                $product,
+                $categoryId
+            );
+
+        $approvedSyscomMapping =
+            $this->hasApprovedSyscomMapping(
+                $product,
+                $categoryId
+            );
+
+        if (
+            $approvedProductOverride
+            || $approvedSyscomMapping
+        ) {
+            Log::info(
+                'SyscomMeliPublish: autoridad de categoría aprobada; heurísticas omitidas',
+                [
+                    'syscom_producto_id' =>
+                        $product->syscom_producto_id,
+                    'modelo' =>
+                        $product->modelo,
+                    'category_id' =>
+                        $categoryId,
+                    'source' =>
+                        $approvedProductOverride
+                            ? 'product_category_override'
+                            : 'syscom_category_map',
+                ]
+            );
+
+            return;
+        }
+
         [$title, $blob] = $this->productClassificationContext($product);
-        $dvrProduct = $this->productLooksLikeNvrDvr($blob, $title);
-        $videoSurveillance = $dvrProduct
-            || $this->productBlobSuggestsVideovigilancia($product, $blob);
+
+        $dashCamProduct = $this->productLooksLikeDashCam($blob, $title);
+
+        $dvrProduct = ! $dashCamProduct
+            && $this->productLooksLikeNvrDvr($blob, $title);
+
+        $videoSurveillance = ! $dashCamProduct
+            && (
+                $dvrProduct
+                || $this->productBlobSuggestsVideovigilancia($product, $blob)
+            );
         $isKitProduct = $this->productLooksLikeKit($blob, $title);
         $switchProduct = $this->productLooksLikeSwitch($blob, $title);
         $oltProduct = $this->productLooksLikeOlt($blob, $title);
@@ -2489,11 +2770,7 @@ class SyscomMeliPublishService
             return;
         }
 
-        try {
-            $cat = $this->meli->getCategory($user, $categoryId);
-        } catch (\Throwable) {
-            return;
-        }
+        $cat = $categoryMeta;
 
         $path = [];
         foreach (is_array($cat['path_from_root'] ?? null) ? $cat['path_from_root'] : [] as $node) {
@@ -2503,7 +2780,7 @@ class SyscomMeliPublishService
         }
         $pathStr = mb_strtolower(implode(' ', $path).' '.(string) ($cat['name'] ?? ''));
 
-        if ($this->categoryNameLooksLikeVehicleCatalog($pathStr)) {
+        if ($this->categoryNameLooksLikeVehicleCatalog($pathStr) && ! $dashCamProduct) {
             $hint = $this->productIsStandaloneSurveillanceCamera($blob, $title, $product, $dvrProduct, $isKitProduct)
                 ? 'Cámaras de Seguridad ('.$this->configuredCameraCategoryId().', variable SYSCOM_MELI_CAMERA_CATEGORY_ID)'
                 : 'Videograbadoras/DVR (SYSCOM_MELI_DVR_CATEGORY_ID)';
@@ -2895,6 +3172,13 @@ class SyscomMeliPublishService
         return $id !== '' ? $id : 'MLM7642';
     }
 
+    private function configuredDashCamCategoryId(): string
+    {
+        // Se deja sin valor por defecto para no fijar una categoría incorrecta.
+        // Si está vacío, domain_discovery resolverá la categoría vehicular.
+        return trim((string) config('syscom.meli_dash_cam_category_id', ''));
+    }
+
     private function configuredCameraCategoryId(): string
     {
         return trim((string) config('syscom.meli_camera_category_id', 'MLM437575'));
@@ -2930,7 +3214,7 @@ class SyscomMeliPublishService
 
         if (preg_match('/\btransceptor\b/u', $hay) === 1
             && (preg_match('/\b(balun|baluns|ballun|balluns|cctv|videovigil|hikvision|hilook|turbo hd|turbohd)\b/u', $hay) === 1
-                || preg_match('/\bbl[\-\s]?\d/h/ui', $hay) === 1)) {
+                || preg_match('/\bbl[\-\s]?\d/ui', $hay) === 1)) {
             return true;
         }
 
@@ -3307,7 +3591,28 @@ class SyscomMeliPublishService
             return false;
         }
 
-        $hay = mb_strtolower($title).' '.$blobLower;
+        $titleLower = mb_strtolower($title);
+
+        /*
+         * Una cámara puede traer en su ficha técnica frases como:
+         * "fuente de alimentación: 12 VDC".
+         * Eso NO convierte al producto en una fuente de poder.
+         *
+         * Si el título identifica claramente una cámara y el propio título
+         * no dice que sea una fuente/PSU, se descarta como power supply.
+         */
+        $titleLooksLikeCamera =
+            preg_match('/\b(c[aá]mara|camera|bala\s+ip|bullet(?:\s+camera)?|domo|dome|turret|eyeball)\b/u', $titleLower) === 1
+            || preg_match('/\b\d+(?:\.\d+)?\s*(?:mp|megap[ií]xel(?:es)?)\b/u', $titleLower) === 1;
+
+        $titleExplicitlyPowerSupply =
+            preg_match('/\b(fuente|fonte|power\s+supply|psu|smps)\b/u', $titleLower) === 1;
+
+        if ($titleLooksLikeCamera && ! $titleExplicitlyPowerSupply) {
+            return false;
+        }
+
+        $hay = $titleLower.' '.$blobLower;
 
         if (preg_match('/\b(fuente|fonte)\b/u', $hay) === 1
             && preg_match('/\b(poder|alimentaci[oó]n|power supply|conmutad|switching)\b/u', $hay) === 1) {
@@ -3399,6 +3704,52 @@ class SyscomMeliPublishService
             || (str_contains($nameLower, 'fuente') && str_contains($nameLower, 'conmutad'))
             || (str_contains($nameLower, 'fuente') && str_contains($nameLower, 'aliment'))
             || str_contains($nameLower, 'componentes electr');
+    }
+
+    /**
+     * Detecta UPS / no-break con batería.
+     */
+    private function productLooksLikeUps(string $blob, string $title): bool
+    {
+        $hay = mb_strtolower($title.' '.$blob);
+
+        // Evita confundir barras PDU y fuentes de alimentación con un UPS.
+        if (preg_match(
+            '/\b(pdu|power distribution unit|unidad de distribuci[oó]n|barra de distribuci[oó]n|fuente de poder|fuente conmutada)\b/u',
+            $hay
+        ) === 1) {
+            return false;
+        }
+
+        if (preg_match(
+            '/\b(no[\-\s]?break|nobreak|ups|uninterruptible power supply|sistema de alimentaci[oó]n ininterrumpida)\b/u',
+            $hay
+        ) === 1) {
+            return true;
+        }
+
+        // Algunos productos no dicen UPS explícitamente, pero sí incluyen
+        // topología interactiva, potencia VA y respaldo de batería.
+        return preg_match(
+            '/\b(l[ií]nea interactiva|line interactive|respaldo de energ[ií]a|respaldo de bater[ií]a)\b/u',
+            $hay
+        ) === 1
+            && preg_match('/\b\d{3,5}\s*va\b/u', $hay) === 1;
+    }
+
+    /**
+     * Categoría final de Mercado Libre México para UPS / No Breaks.
+     */
+    private function configuredUpsCategoryId(): string
+    {
+        $categoryId = strtoupper(trim((string) config(
+            'syscom.meli_ups_category_id',
+            env('SYSCOM_MELI_UPS_CATEGORY_ID', 'MLM1720')
+        )));
+
+        return preg_match('/^MLM\d+$/', $categoryId) === 1
+            ? $categoryId
+            : 'MLM1720';
     }
 
     /**
@@ -3593,8 +3944,27 @@ class SyscomMeliPublishService
             || str_contains($nameLower, 'citófono');
     }
 
+    private function productLooksLikeDashCam(string $blobLower, string $title): bool
+    {
+        $hay = mb_strtolower(trim($title).' '.$blobLower);
+
+        $strong = preg_match('/\b(dash[\s-]?cam|dashcam|camara de tablero|cámara de tablero|camara vehicular|cámara vehicular|camara para vehiculo|cámara para vehículo|camara movil.*vehiculo|cámara móvil.*vehículo|mobile dvr|mdvr)\b/u', $hay) === 1;
+        if ($strong) {
+            return true;
+        }
+
+        $vehicleSignal = preg_match('/\b(vehiculo|vehículo|vehicular|automovil|automóvil|auto|carro|camion|camión|autobus|autobús|tablero|parabrisas|conductor|adas|dsm)\b/u', $hay) === 1;
+        $cameraOrRecorder = preg_match('/\b(camara|cámara|grabador|grabadora|dvr|video)\b/u', $hay) === 1;
+        $fixedCctv = preg_match('/\b(cctv|turbohd|colorvu|acusense|camara fija|cámara fija|kit de seguridad|rack|nvr de red)\b/u', $hay) === 1;
+
+        return $vehicleSignal && $cameraOrRecorder && ! $fixedCctv;
+    }
+
     private function productLooksLikeNvrDvr(string $blobLower, string $title): bool
     {
+        if ($this->productLooksLikeDashCam($blobLower, $title)) {
+            return false;
+        }
         if ($this->productHasStrongSolarMeterSignals($blobLower, $title)
             || $this->productLooksLikeSolarMount($blobLower, $title)
             || $this->productLooksLikeSurveillanceCamera($blobLower, $title)) {
@@ -3608,6 +3978,18 @@ class SyscomMeliPublishService
         }
 
         $titleLower = mb_strtolower(trim($title));
+
+        /*
+         * Un router puede mencionar NVR/DVR en descripción, aplicaciones
+         * o compatibilidades. Si el TÍTULO identifica explícitamente al
+         * producto como router/enrutador, no debe clasificarse como NVR/DVR.
+         */
+        if (preg_match('/\b(router|enrutador)\b/u', $titleLower) === 1
+            || str_contains($titleLower, 'router wifi')
+            || str_contains($titleLower, 'router wi-fi')
+            || str_contains($titleLower, 'router inal')) {
+            return false;
+        }
 
         if (preg_match('/\b(nvr|dvr)\b/u', $titleLower) === 1) {
             return true;
@@ -4473,14 +4855,42 @@ class SyscomMeliPublishService
             }
         }
 
-        $physical = $this->measureForAttributeId($id, $product);
-        if ($physical !== null) {
-            $formatted = $this->formatAttributeValueForMeli($attr, $physical);
-            if ($formatted !== null) {
-                return ['id' => $id, 'value_name' => $formatted];
-            }
+        /*
+         * Nunca resolver una medida física para un atributo booleano.
+         *
+         * Ejemplo problemático:
+         *
+         * WITH_ADJUSTABLE_HEIGHT
+         *
+         * contiene la palabra HEIGHT, pero ML espera Sí/No.
+         * measureForAttributeId() podía interpretarlo como altura física
+         * y terminar enviando valores como "7.31 cm".
+         */
+        if (
+            ($attr['value_type'] ?? '') !== 'boolean'
+            && $id !== 'BANDWIDTH'
+        ) {
+            $physical = $this->measureForAttributeId(
+                $id,
+                $product
+            );
 
-            return null;
+            if ($physical !== null) {
+                $formatted =
+                    $this->formatAttributeValueForMeli(
+                        $attr,
+                        $physical
+                    );
+
+                if ($formatted !== null) {
+                    return [
+                        'id' => $id,
+                        'value_name' => $formatted,
+                    ];
+                }
+
+                return null;
+            }
         }
 
         $fromFacts = $this->fillAttributeFromFacts($attr, $facts);
@@ -4964,7 +5374,7 @@ class SyscomMeliPublishService
 
         if (is_array($img)) {
             // Orden: primero variantes grandes (en SYSCOM `zoom` a veces apunta a miniatura).
-            foreach (['imagen_grande', 'grande', 'zoom', 'url', 'src', 'mediana', 'chica'] as $k) {
+            foreach (['imagen_grande', 'grande', 'imagen', 'zoom', 'url', 'src', 'mediana', 'chica'] as $k) {
                 $v = trim((string) ($img[$k] ?? ''));
                 if ($v !== '') {
                     return $v;
@@ -5517,6 +5927,26 @@ class SyscomMeliPublishService
         $name = trim((string) ($attr['name'] ?? ''));
         $values = is_array($attr['values'] ?? null) ? $attr['values'] : [];
 
+        /*
+         * BANDWIDTH no es una dimensión física.
+         *
+         * Solo aceptamos una frecuencia explícita obtenida
+         * de características como:
+         *
+         *   Ancho de banda 2000 MHz
+         *   Frecuencia hasta 250 MHz
+         *   Rendimiento Cat6A hasta 500 MHz
+         *   Ancho de banda 1.2 GHz
+         *
+         * Nunca valores como "20 cm".
+         */
+        if ($id === 'BANDWIDTH') {
+            return $this->fillBandwidthAttributeFromFacts(
+                $attr,
+                $facts
+            );
+        }
+
         $candidateKeys = array_filter([
             $this->normalizeKey($name),
             $this->normalizeKey(str_replace('_', ' ', $id)),
@@ -5524,15 +5954,60 @@ class SyscomMeliPublishService
         $byKey = is_array($facts['by_key'] ?? null) ? $facts['by_key'] : [];
         $lines = is_array($facts['lines'] ?? null) ? $facts['lines'] : [];
 
+        $valueType = (string) (
+            $attr['value_type']
+            ?? ''
+        );
+
+        /*
+         * Para number/number_unit/boolean no usar coincidencias
+         * parciales de nombres.
+         *
+         * Ejemplos de falsos positivos que esto evita:
+         *
+         * "Ancho" -> "Ancho de banda"
+         * "Puertos 2.5G" -> "Cantidad de puertos LAN"
+         * "Almacenamiento" -> capacidad de huellas/rostros
+         *
+         * En esos tipos solo aceptamos una clave exacta.
+         */
+        $strictFactMatch = in_array(
+            $valueType,
+            [
+                'number',
+                'number_unit',
+                'boolean',
+            ],
+            true
+        );
+
         $value = null;
+
         foreach ($candidateKeys as $ck) {
             if (isset($byKey[$ck])) {
-                $value = trim((string) $byKey[$ck]);
+                $value = trim(
+                    (string) $byKey[$ck]
+                );
+
                 break;
             }
+
+            if ($strictFactMatch) {
+                continue;
+            }
+
             foreach ($byKey as $k => $v) {
-                if ($k !== '' && (str_contains($k, $ck) || str_contains($ck, $k))) {
-                    $value = trim((string) $v);
+                if (
+                    $k !== ''
+                    && (
+                        str_contains($k, $ck)
+                        || str_contains($ck, $k)
+                    )
+                ) {
+                    $value = trim(
+                        (string) $v
+                    );
+
                     break 2;
                 }
             }
@@ -5571,17 +6046,59 @@ class SyscomMeliPublishService
         }
 
         if (($attr['value_type'] ?? '') === 'boolean') {
-            $lv = mb_strtolower($value);
-            $wantYes = preg_match('/\b(si|sí|yes|true|1)\b/u', $lv) === 1;
-            $wantNo = preg_match('/\b(no|false|0)\b/u', $lv) === 1;
-            if ($wantYes || $wantNo) {
-                $pick = $this->pickValueIdByName($values, $wantYes ? ['sí', 'si', 'yes'] : ['no', 'false']);
-                if ($pick !== null) {
-                    return ['id' => $id, 'value_id' => $pick['id'], 'value_name' => $pick['name']];
-                }
+            /*
+             * Los atributos booleanos de ML solamente aceptan
+             * señales inequívocas de Sí/No.
+             *
+             * Nunca permitir que una medida física obtenida de
+             * características SYSCOM, por ejemplo:
+             *
+             *   7.31 cm
+             *   24.21 cm
+             *   51 x 31
+             *
+             * termine enviada a un booleano como
+             * WITH_ADJUSTABLE_HEIGHT.
+             */
+            $lv = mb_strtolower(trim($value));
+            $lv = trim(
+                preg_replace('/\s+/u', ' ', $lv)
+                ?? $lv
+            );
 
-                return ['id' => $id, 'value_name' => $wantYes ? 'Sí' : 'No'];
+            $wantYes = preg_match(
+                '/^(?:si|sí|yes|true|1)$/u',
+                $lv
+            ) === 1;
+
+            $wantNo = preg_match(
+                '/^(?:no|false|0)$/u',
+                $lv
+            ) === 1;
+
+            if (! $wantYes && ! $wantNo) {
+                return null;
             }
+
+            $pick = $this->pickValueIdByName(
+                $values,
+                $wantYes
+                    ? ['sí', 'si', 'yes', 'true']
+                    : ['no', 'false']
+            );
+
+            if ($pick !== null) {
+                return [
+                    'id' => $id,
+                    'value_id' => $pick['id'],
+                    'value_name' => $pick['name'],
+                ];
+            }
+
+            return [
+                'id' => $id,
+                'value_name' => $wantYes ? 'Sí' : 'No',
+            ];
         }
 
         $pick = $this->pickValueIdByName($values, [$value]);
@@ -5590,6 +6107,260 @@ class SyscomMeliPublishService
         }
 
         return ['id' => $id, 'value_name' => Str::limit($value, 120, '')];
+    }
+
+    /**
+     * Devuelve BANDWIDTH únicamente cuando SYSCOM contiene
+     * una frecuencia inequívoca.
+     *
+     * No infiere ni convierte dimensiones físicas.
+     *
+     * @param array<string, mixed> $attr
+     * @param array<string, mixed> $facts
+     */
+    private function fillBandwidthAttributeFromFacts(
+        array $attr,
+        array $facts
+    ): ?array {
+        $id = strtoupper(
+            trim(
+                (string) (
+                    $attr['id']
+                    ?? ''
+                )
+            )
+        );
+
+        if ($id !== 'BANDWIDTH') {
+            return null;
+        }
+
+        $candidates = [];
+
+        $addCandidate = function (
+            string $text,
+            int $priority
+        ) use (&$candidates): void {
+            $text = trim(
+                preg_replace(
+                    '/\s+/u',
+                    ' ',
+                    $text
+                )
+                ?? $text
+            );
+
+            if ($text === '') {
+                return;
+            }
+
+            /*
+             * Exigir unidad real de frecuencia.
+             * No aceptar cm/mm/m/Gbps como BANDWIDTH.
+             */
+            if (
+                ! preg_match(
+                    '/(?<![\d.])'
+                    .'(\d+(?:[.,]\d+)?)'
+                    .'\s*'
+                    .'(GHz|MHz|kHz|Hz)'
+                    .'\b/iu',
+                    $text,
+                    $m
+                )
+            ) {
+                return;
+            }
+
+            $num = str_replace(
+                ',',
+                '.',
+                $m[1]
+            );
+
+            $unitLower =
+                mb_strtolower(
+                    $m[2]
+                );
+
+            $unit = match ($unitLower) {
+                'ghz' => 'GHz',
+                'mhz' => 'MHz',
+                'khz' => 'kHz',
+                'hz' => 'Hz',
+                default => null,
+            };
+
+            if ($unit === null) {
+                return;
+            }
+
+            $candidates[] = [
+                'priority' =>
+                    $priority,
+
+                'value' =>
+                    $num.' '.$unit,
+
+                'source' =>
+                    $text,
+            ];
+        };
+
+        $byKey = is_array(
+            $facts['by_key']
+            ?? null
+        )
+            ? $facts['by_key']
+            : [];
+
+        foreach ($byKey as $key => $value) {
+            $hay = mb_strtolower(
+                (string) $key
+                .' '
+                .(string) $value
+            );
+
+            $priority = 0;
+
+            if (
+                str_contains(
+                    $hay,
+                    'ancho de banda'
+                )
+                || str_contains(
+                    $hay,
+                    'bandwidth'
+                )
+            ) {
+                $priority = 100;
+            } elseif (
+                str_contains(
+                    $hay,
+                    'frecuencia'
+                )
+                || str_contains(
+                    $hay,
+                    'frequency'
+                )
+            ) {
+                $priority = 90;
+            } elseif (
+                str_contains(
+                    $hay,
+                    'rendimiento'
+                )
+                || str_contains(
+                    $hay,
+                    'certific'
+                )
+            ) {
+                $priority = 80;
+            }
+
+            if ($priority > 0) {
+                $addCandidate(
+                    (string) $value,
+                    $priority
+                );
+            }
+        }
+
+        $lines = is_array(
+            $facts['lines']
+            ?? null
+        )
+            ? $facts['lines']
+            : [];
+
+        foreach ($lines as $line) {
+            $line = (string) $line;
+
+            $hay = mb_strtolower(
+                $line
+            );
+
+            $priority = 0;
+
+            if (
+                str_contains(
+                    $hay,
+                    'ancho de banda'
+                )
+                || str_contains(
+                    $hay,
+                    'bandwidth'
+                )
+            ) {
+                $priority = 100;
+            } elseif (
+                str_contains(
+                    $hay,
+                    'frecuencia'
+                )
+                || str_contains(
+                    $hay,
+                    'frequency'
+                )
+            ) {
+                $priority = 90;
+            } elseif (
+                str_contains(
+                    $hay,
+                    'rendimiento'
+                )
+                || str_contains(
+                    $hay,
+                    'certific'
+                )
+            ) {
+                $priority = 80;
+            }
+
+            if ($priority > 0) {
+                $addCandidate(
+                    $line,
+                    $priority
+                );
+            }
+        }
+
+        if ($candidates === []) {
+            return null;
+        }
+
+        usort(
+            $candidates,
+            static fn (
+                array $a,
+                array $b
+            ): int =>
+                $b['priority']
+                <=>
+                $a['priority']
+        );
+
+        $winner =
+            $candidates[0];
+
+        Log::debug(
+            'SyscomMeliPublish: BANDWIDTH confiable',
+            [
+                'value' =>
+                    $winner['value'],
+
+                'source' =>
+                    $winner['source'],
+            ]
+        );
+
+        return [
+            'id' =>
+                'BANDWIDTH',
+
+            'value_name' =>
+                $winner['value'],
+        ];
     }
 
     private function normalizeKey(string $raw): string

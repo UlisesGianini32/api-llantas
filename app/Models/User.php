@@ -14,6 +14,12 @@ class User extends Authenticatable
 {
     use HasApiTokens, HasFactory, Notifiable, TwoFactorAuthenticatable;
 
+    public const ROLE_ADMIN = 'admin';
+
+    public const ROLE_OPERATIONS = 'operations';
+
+    public const ROLES = [self::ROLE_ADMIN, self::ROLE_OPERATIONS];
+
     protected $fillable = [
         'name',
         'email',
@@ -51,6 +57,21 @@ class User extends Authenticatable
             ->take(2)
             ->map(fn ($word) => Str::substr($word, 0, 1))
             ->implode('');
+    }
+
+    public function hasRole(string $role): bool
+    {
+        return $this->role === $role;
+    }
+
+    public function isAdmin(): bool
+    {
+        return $this->hasRole(self::ROLE_ADMIN);
+    }
+
+    public function isOperations(): bool
+    {
+        return $this->hasRole(self::ROLE_OPERATIONS);
     }
 
     /** @return HasMany<MeliAccount, User> */

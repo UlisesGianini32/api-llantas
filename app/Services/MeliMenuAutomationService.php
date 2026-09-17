@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Models\MeliAccount;
 use App\Models\MeliChatFlow;
 use App\Models\MeliPublication;
 use App\Models\User;
@@ -77,6 +78,7 @@ class MeliMenuAutomationService
     {
         return DB::transaction(function () use ($data) {
             $keys = [
+                'meli_account_id' => $data['meli_account_id'],
                 'order_id' => $data['order_id'],
                 'buyer_id' => $data['buyer_id'],
             ];
@@ -130,6 +132,7 @@ class MeliMenuAutomationService
     {
         return [
             'user_id' => $data['user_id'],
+            'meli_account_id' => $data['meli_account_id'],
             'pack_id' => $data['pack_id'],
             'conversation_id' => $data['conversation_id'],
             'message_id' => $data['message_id'],
@@ -157,6 +160,10 @@ class MeliMenuAutomationService
 
         if (!empty($data['user_id'])) {
             $updates['user_id'] = $data['user_id'];
+        }
+
+        if (!empty($data['meli_account_id'])) {
+            $updates['meli_account_id'] = $data['meli_account_id'];
         }
 
         if (!empty($data['site_id'])) {
@@ -369,7 +376,7 @@ class MeliMenuAutomationService
         $buyerName = '—';
         $lines = '—';
 
-        $user = $flow->user_id ? User::query()->find($flow->user_id) : null;
+        $user = $this->resolveApiUserForFlow($flow);
         if ($user && $orderId !== '' && ctype_digit($orderId)) {
             $order = $this->meliApi->getOrder($user, (int) $orderId);
             if ($order !== []) {
@@ -427,7 +434,7 @@ class MeliMenuAutomationService
             return $flow;
         }
 
-        $user = User::query()->find($flow->user_id);
+        $user = $this->resolveApiUserForFlow($flow);
         if (! $user || $user->access_token === null || $user->access_token === '') {
             return $flow;
         }
@@ -528,6 +535,7 @@ class MeliMenuAutomationService
     {
         return MeliChatFlow::firstOrCreate(
             [
+                'meli_account_id' => $data['meli_account_id'],
                 'order_id' => $data['order_id'] ?: 'no-order-' . ($data['conversation_id'] ?: uniqid()),
                 'buyer_id' => $data['buyer_id'] ?: 'unknown',
             ],
@@ -539,6 +547,9 @@ class MeliMenuAutomationService
     {
         return [
             'user_id' => $userId,
+            'meli_account_id' => isset($payload['meli_account_id'])
+                ? (int) $payload['meli_account_id']
+                : null,
             'event_type' => $payload['event_type'] ?? null,
             'order_id' => isset($payload['order_id']) ? (string) $payload['order_id'] : null,
             'pack_id' => isset($payload['pack_id']) ? (string) $payload['pack_id'] : null,
@@ -587,7 +598,7 @@ class MeliMenuAutomationService
             return null;
         }
 
-        $user = User::query()->find($flow->user_id);
+        $user = $this->resolveApiUserForFlow($flow);
         if (! $user || $user->access_token === null || $user->access_token === '') {
             return null;
         }
@@ -624,6 +635,64 @@ class MeliMenuAutomationService
         }
 
         return null;
+    }
+
+
+    protected function resolveApiUserForFlow(MeliChatFlow $flow): ?User
+    {
+        $owner = $flow->user_id
+            ? User::query()->find($flow->user_id)
+            : null;
+
+        if (! $owner) {
+            return null;
+        }
+
+        $account = null;
+
+        if ($flow->meli_account_id) {
+            $account = MeliAccount::query()
+                ->where('user_id', $owner->id)
+                ->whereKey($flow->meli_account_id)
+                ->first();
+        }
+
+        if (! $account) {
+            $account = $owner->meliAccounts()
+                ->where('is_default', true)
+                ->first()
+                ?? $owner->meliAccounts()->orderBy('id')->first();
+        }
+
+        if (
+            ! $account
+            || ! filled($account->meli_user_id)
+            || ! filled($account->access_token)
+        ) {
+            return null;
+        }
+
+        if (! $flow->meli_account_id) {
+            $flow->forceFill([
+                'meli_account_id' => $account->id,
+            ])->save();
+        }
+
+        /** @var User $apiUser */
+        $apiUser = clone $owner;
+
+        $apiUser->forceFill([
+            'meli_id' => $account->meli_user_id,
+            'access_token' => $account->access_token,
+            'refresh_token' => $account->refresh_token,
+            'expires_at' => $account->expires_at,
+            'official_store_id' => $account->official_store_id,
+        ]);
+
+        $apiUser->setAttribute('id', $owner->id);
+        $apiUser->setAttribute('meli_account_id', $account->id);
+
+        return $apiUser;
     }
 
     protected function resolveProductPdfUrl(MeliChatFlow $flow): ?string

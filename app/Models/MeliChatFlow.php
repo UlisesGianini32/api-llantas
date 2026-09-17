@@ -3,11 +3,13 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class MeliChatFlow extends Model
 {
     protected $fillable = [
         'user_id',
+        'meli_account_id',
         'order_id',
         'pack_id',
         'conversation_id',
@@ -36,4 +38,14 @@ class MeliChatFlow extends Model
         'requires_human_at' => 'datetime',
         'meta' => 'array',
     ];
+
+    public function user(): BelongsTo
+    {
+        return $this->belongsTo(User::class);
+    }
+
+    public function meliAccount(): BelongsTo
+    {
+        return $this->belongsTo(MeliAccount::class);
+    }
 }

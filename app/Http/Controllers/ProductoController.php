@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Jobs\ResolveShopifyCategoriesJob;
+use App\Models\MeliPublication;
 use App\Models\Product;
 use App\Support\ApplyMlProductListingFilters;
 use Illuminate\Database\Eloquent\Builder;
@@ -39,6 +40,7 @@ class ProductoController extends Controller
         $officialStoreId = (string) $request->input('official_store_id', '');
         $categories = $request->input('categories', []);
         $sort = (string) $request->input('sort', 'name');
+        $publicationAccountId = trim((string) $request->input('publication_account_id', ''));
         $dir = strtolower((string) $request->input('dir', 'asc')) === 'desc' ? 'desc' : 'asc';
 
         if (!is_array($categories)) {
@@ -87,31 +89,122 @@ class ProductoController extends Controller
 
         $this->applyProductListFilters($query, $request);
 
+        if ($publicationAccountId !== '') {
+            $selectedAccount = $request->user()
+                ->meliAccounts()
+                ->whereKey((int) $publicationAccountId)
+                ->first();
+
+            if ($selectedAccount && ! $selectedAccount->is_default) {
+                $query->whereExists(function ($subQuery) use ($request, $selectedAccount) {
+                    $subQuery->selectRaw('1')
+                        ->from('meli_publications')
+                        ->whereColumn('meli_publications.source_mlm', 'products.ml')
+                        ->where('meli_publications.user_id', $request->user()->id)
+                        ->where('meli_publications.meli_account_id', $selectedAccount->id)
+                        ->where('meli_publications.status', '!=', 'deleted');
+                });
+            }
+        }
+
         $products = $query
             ->orderBy($sortColumn, $dir)
             ->paginate($perPage)
-            ->withQueryString()
-            ->through(function (Product $product) {
-                return [
-                    'id' => $product->id,
-                    'name' => $product->name,
-                    'ml' => $product->ml,
-                    'sku' => $product->sku,
-                    'official_store_id' => $product->official_store_id,
-                    'category_name' => $product->category_name,
-                    'category_id' => $product->category_id,
-                    'shopify_category_id' => $product->shopify_category_id,
-                    'shopify_category_name' => $product->shopify_category_name,
-                    'shopify_category_source' => $product->shopify_category_source,
-                    'price' => $product->price,
-                    'stock' => $product->stock,
-                    'status_ml' => $product->status_ml,
-                    'thumbnail' => $product->thumbnail,
+            ->withQueryString();
+
+        $pageRows = collect($products->items());
+        $pageMlms = $pageRows->pluck('ml')->filter()->map(fn ($mlm) => strtoupper(trim((string) $mlm)))->values();
+        $pageSkus = $pageRows->pluck('sku')->filter()->map(fn ($sku) => trim((string) $sku))->values();
+
+        $publications = MeliPublication::query()
+            ->with('meliAccount:id,meli_user_id,nickname,is_default')
+            ->where('user_id', $request->user()->id)
+            ->where(function ($publicationQuery) use ($pageMlms, $pageSkus) {
+                if ($pageMlms->isNotEmpty()) {
+                    $publicationQuery->whereIn('source_mlm', $pageMlms)
+                        ->orWhereIn('mlm', $pageMlms);
+                }
+
+                if ($pageSkus->isNotEmpty()) {
+                    $publicationQuery->orWhereIn('sku', $pageSkus);
+                }
+            })
+            ->orderByDesc('id')
+            ->get();
+
+        $products->setCollection($pageRows->map(function (Product $product) use ($publications, $request) {
+            $productMlm = strtoupper(trim((string) $product->ml));
+            $productSku = trim((string) $product->sku);
+
+            $relatedPublications = $publications
+                ->filter(function (MeliPublication $publication) use ($productMlm, $productSku) {
+                    $sourceMlm = strtoupper(trim((string) $publication->source_mlm));
+                    $publicationMlm = strtoupper(trim((string) $publication->mlm));
+                    $publicationSku = trim((string) $publication->sku);
+
+                    return ($productMlm !== '' && ($sourceMlm === $productMlm || $publicationMlm === $productMlm))
+                        || ($productSku !== '' && $publicationSku === $productSku);
+                })
+                ->unique(fn (MeliPublication $publication) => $publication->mlm)
+                ->map(function (MeliPublication $publication) {
+                    return [
+                        'id' => $publication->id,
+                        'mlm' => $publication->mlm,
+                        'source_mlm' => $publication->source_mlm,
+                        'status' => $publication->status,
+                        'permalink' => $publication->permalink,
+                        'meli_account_id' => $publication->meli_account_id,
+                        'account' => $publication->meliAccount ? [
+                            'id' => $publication->meliAccount->id,
+                            'meli_user_id' => (string) $publication->meliAccount->meli_user_id,
+                            'nickname' => $publication->meliAccount->nickname,
+                            'is_default' => (bool) $publication->meliAccount->is_default,
+                        ] : null,
+                    ];
+                })
+                ->values();
+
+            $defaultAccount = $request->user()->meliAccounts->firstWhere('is_default', true)
+                ?: $request->user()->meliAccounts->first();
+
+            if ($productMlm !== '' && ! $relatedPublications->contains(fn ($publication) => strtoupper((string) $publication['mlm']) === $productMlm)) {
+                $relatedPublications->prepend([
+                    'id' => null,
+                    'mlm' => $product->ml,
+                    'source_mlm' => null,
+                    'status' => $product->status_ml,
                     'permalink' => $product->permalink,
-                    'brand' => $product->brand,
-                    'description' => $product->description,
-                ];
-            });
+                    'meli_account_id' => $defaultAccount?->id,
+                    'account' => $defaultAccount ? [
+                        'id' => $defaultAccount->id,
+                        'meli_user_id' => (string) $defaultAccount->meli_user_id,
+                        'nickname' => $defaultAccount->nickname,
+                        'is_default' => (bool) $defaultAccount->is_default,
+                    ] : null,
+                ]);
+            }
+
+            return [
+                'id' => $product->id,
+                'name' => $product->name,
+                'ml' => $product->ml,
+                'sku' => $product->sku,
+                'official_store_id' => $product->official_store_id,
+                'category_name' => $product->category_name,
+                'category_id' => $product->category_id,
+                'shopify_category_id' => $product->shopify_category_id,
+                'shopify_category_name' => $product->shopify_category_name,
+                'shopify_category_source' => $product->shopify_category_source,
+                'price' => $product->price,
+                'stock' => $product->stock,
+                'status_ml' => $product->status_ml,
+                'thumbnail' => $product->thumbnail,
+                'permalink' => $product->permalink,
+                'brand' => $product->brand,
+                'description' => $product->description,
+                'meli_publications' => $relatedPublications,
+            ];
+        }));
 
         $allCategories = Product::query()
             ->whereNotNull('category_name')
@@ -129,6 +222,20 @@ class ProductoController extends Controller
             ->pluck('official_store_id')
             ->values();
 
+        $meliAccounts = $request->user()
+            ->meliAccounts()
+            ->orderByDesc('is_default')
+            ->orderBy('id')
+            ->get()
+            ->map(fn ($account) => [
+                'id' => $account->id,
+                'meli_user_id' => (string) $account->meli_user_id,
+                'nickname' => $account->nickname,
+                'is_default' => (bool) $account->is_default,
+                'has_access_token' => ! empty($account->access_token),
+            ])
+            ->values();
+
         return Inertia::render('Producto/Index', [
             'products' => $products,
             'filters' => [
@@ -138,9 +245,11 @@ class ProductoController extends Controller
                 'categories' => array_values($categories),
                 'sort' => $sort,
                 'dir' => $dir,
+                'publication_account_id' => $publicationAccountId,
             ],
             'categories' => $allCategories,
             'officialStores' => $officialStores,
+            'meliAccounts' => $meliAccounts,
         ]);
     }
 

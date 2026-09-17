@@ -273,6 +273,7 @@ class ProcessMeliMessageNotification implements ShouldBeUnique, ShouldQueue
             'item_id' => $itemId,
             'sku' => $sku,
             'site_id' => $siteId,
+            'meli_account_id' => $user->getAttribute('meli_account_id'),
             'meta' => [
                 'webhook' => $this->payload,
                 'message_snapshot' => $msg,
@@ -472,14 +473,28 @@ class ProcessMeliMessageNotification implements ShouldBeUnique, ShouldQueue
                 'refresh_token' => $account->refresh_token,
                 'expires_at' => $account->expires_at,
             ]);
+            $user->setAttribute('meli_account_id', $account->id);
 
             return $user;
         }
 
-        return User::query()
+        $user = User::query()
             ->where('meli_id', $recipientMeliId)
             ->whereNotNull('access_token')
             ->first();
+
+        if ($user) {
+            $accountId = MeliAccount::query()
+                ->where('user_id', $user->id)
+                ->where('meli_user_id', $recipientMeliId)
+                ->value('id');
+
+            if ($accountId) {
+                $user->setAttribute('meli_account_id', (int) $accountId);
+            }
+        }
+
+        return $user;
     }
 
     private function actionsIndicateNewInboundMessage(array $actions): bool

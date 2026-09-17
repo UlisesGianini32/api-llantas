@@ -151,19 +151,14 @@ return [
      * todas las cuentas (devuelve `existencia.detalle: []` aunque haya stock en HMO).
      *
      * Endpoint: GET https://www.syscom.mx/api/productos/{id}/existencias
-     * Auth: cookies del navegador (sesión NextAuth + cf_clearance de Cloudflare).
+     * Auth: normalmente no hace falta (el endpoint es público). Cookies opcionales si Cloudflare
+     * bloquea el IP del servidor (cf_clearance + session desde DevTools → Network → existencias).
      *
      * Para activarlo:
-     *   1) Logueate en https://www.syscom.mx con tu cuenta.
-     *   2) Abrí DevTools → Network → click en "Disponibilidad" en cualquier producto.
-     *   3) Click derecho en la request /api/productos/{id}/existencias → Copy → Copy value
-     *      del header `Cookie:` (la línea entera).
-     *   4) Pegá esa string en .env como `SYSCOM_PORTAL_COOKIES="..."`.
-     *   5) Activá `SYSCOM_PORTAL_SCRAPE_ENABLED=true`.
-     *   6) Probá: `php artisan syscom:test-portal-scrape 193139`.
-     *
-     * Cuando las cookies vencen (especialmente cf_clearance ~horas), hay que repetir
-     * el paso 3-4. La sesión NextAuth (__Secure-authjs.session-token) suele durar 30 días.
+     *   1) `SYSCOM_PORTAL_SCRAPE_ENABLED=true`
+     *   2) Probá: `php artisan syscom:test-portal-scrape 228524 --branch=hermosillo`
+     *   3) Si falla con 403/bloqueo, copiá Cookie del cURL o Application → Cookies → syscom.mx
+     *      y pegá en `SYSCOM_PORTAL_COOKIES="..."`.
      */
     'portal_scrape_enabled' => filter_var(env('SYSCOM_PORTAL_SCRAPE_ENABLED', false), FILTER_VALIDATE_BOOL),
     'portal_base_url' => rtrim((string) env('SYSCOM_PORTAL_BASE_URL', 'https://www.syscom.mx'), '/'),

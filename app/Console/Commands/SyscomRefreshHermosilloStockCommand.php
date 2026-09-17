@@ -14,13 +14,15 @@ use Illuminate\Support\Facades\Log;
 class SyscomRefreshHermosilloStockCommand extends Command
 {
     protected $signature = 'syscom:refresh-hermosillo-for-published
-                            {--user_id= : Restringir a cola de un usuario}
+                            {--user_id= : Restringir a cola de un usuario (solo sin --all)}
                             {--id= : Refrescar SOLO ese syscom_producto_id (rapido, sin sync ML masivo)}
+                            {--all : Todos los syscom_products en BD (no solo publicados con MLM)}
                             {--limit= : Procesar como mucho N productos (para tandas, evita timeouts)}
+                            {--offset=0 : Saltar los primeros N productos (--all o --id sin MLM)}
                             {--no-sync-ml : No pausar/actualizar publicaciones en Mercado Libre}
                             {--progress : Imprimir una linea por producto procesado (cuenta y stock)}';
 
-    protected $description = 'Lee detalle SYSCOM por producto y actualiza existencia, total_existencia y stock_hermosillo en BD (publicaciones con MLM)';
+    protected $description = 'Actualiza stock_hermosillo (portal SYSCOM) y total_existencia en BD; por defecto solo publicaciones con MLM';
 
     public function handle(SyscomApiService $api, MeliSyncService $meliSync, SyscomPortalScraper $scraper): int
     {
@@ -42,6 +44,8 @@ class SyscomRefreshHermosilloStockCommand extends Command
 
         $singleId = trim((string) $this->option('id'));
         $limit = (int) $this->option('limit');
+        $offset = max(0, (int) $this->option('offset'));
+        $allCatalog = (bool) $this->option('all');
         $progress = (bool) $this->option('progress') || $singleId !== '';
 
         $scraperEnabled = $scraper->isEnabled();
@@ -49,39 +53,36 @@ class SyscomRefreshHermosilloStockCommand extends Command
             $this->line('Portal scraper: '.($scraperEnabled ? 'ACTIVO (fuente primaria)' : 'inactivo (uso buscador SYSCOM)'));
         }
 
-        $q = SyscomMeliQueue::query()->whereNotNull('mlm');
-        if ($this->option('user_id')) {
-            $q->where('user_id', (int) $this->option('user_id'));
-        }
-        if ($singleId !== '') {
-            $q->where('syscom_producto_id', (int) $singleId);
-        }
-        if ($limit > 0) {
-            $q->orderBy('id')->limit($limit);
-        }
-        $queues = $q->with('product')->get();
+        $branchCodeByProductId = SyscomMeliQueue::query()
+            ->whereNotNull('branch_code')
+            ->pluck('branch_code', 'syscom_product_id');
 
-        if ($queues->isEmpty()) {
-            $this->line($singleId !== ''
-                ? "No hay cola con MLM para syscom_producto_id={$singleId}."
-                : 'Nada en cola con MLM.');
+        $workItems = $this->resolveWorkItems($singleId, $allCatalog, $offset, $limit, $branchCodeByProductId);
+        if ($workItems === []) {
+            if ($singleId !== '') {
+                $this->line("No hay producto en BD con syscom_producto_id={$singleId}.");
+            } elseif ($allCatalog) {
+                $this->line('No hay productos en syscom_products.');
+            } else {
+                $this->line('Nada en cola con MLM. Usá --all para refrescar todo el catálogo en BD.');
+            }
 
             return self::SUCCESS;
         }
 
-        $totalQueues = $queues->count();
+        $totalQueues = count($workItems);
         $idx = 0;
         $n = 0;
         $scrapeOk = 0;
         $scrapeFail = 0;
-        foreach ($queues as $row) {
+        foreach ($workItems as $row) {
             $idx++;
-            $p = $row->product;
+            $p = $row['product'];
             if (! $p instanceof SyscomProduct) {
                 continue;
             }
 
-            $code = (string) ($row->branch_code ?: $branchCode);
+            $code = (string) ($row['branch_code'] ?: $branchCode);
 
             // 1) Fuente primaria: portal SYSCOM (www.syscom.mx). Trae el desglose REAL por
             //    sucursal (api/productos/{id}/existencias). Si está activo y devuelve datos,
@@ -183,7 +184,7 @@ class SyscomRefreshHermosilloStockCommand extends Command
             $this->line("Portal scrape: ok={$scrapeOk}  fallback={$scrapeFail}");
         }
 
-        $skipMlSync = (bool) $this->option('no-sync-ml') || $singleId !== '';
+        $skipMlSync = (bool) $this->option('no-sync-ml') || $singleId !== '' || $allCatalog;
         if ($n > 0 && ! $skipMlSync) {
             try {
                 $meliSync->syncSyscomPublicationsOnly();
@@ -197,5 +198,57 @@ class SyscomRefreshHermosilloStockCommand extends Command
         }
 
         return self::SUCCESS;
+    }
+
+    /**
+     * @param  \Illuminate\Support\Collection<int, string|null>  $branchCodeByProductId
+     * @return list<array{product: SyscomProduct, branch_code: string|null}>
+     */
+    private function resolveWorkItems(
+        string $singleId,
+        bool $allCatalog,
+        int $offset,
+        int $limit,
+        $branchCodeByProductId
+    ): array {
+        if ($allCatalog || $singleId !== '') {
+            $q = SyscomProduct::query()->orderBy('id');
+            if ($singleId !== '') {
+                $q->where('syscom_producto_id', (int) $singleId);
+            }
+            if ($offset > 0) {
+                $q->offset($offset);
+            }
+            if ($limit > 0) {
+                $q->limit($limit);
+            }
+
+            return $q->get()->map(function (SyscomProduct $p) use ($branchCodeByProductId) {
+                return [
+                    'product' => $p,
+                    'branch_code' => $branchCodeByProductId[$p->id] ?? null,
+                ];
+            })->all();
+        }
+
+        $q = SyscomMeliQueue::query()->whereNotNull('mlm');
+        if ($this->option('user_id')) {
+            $q->where('user_id', (int) $this->option('user_id'));
+        }
+        if ($limit > 0) {
+            $q->orderBy('id')->limit($limit);
+        }
+
+        $items = [];
+        foreach ($q->with('product')->get() as $row) {
+            if ($row->product instanceof SyscomProduct) {
+                $items[] = [
+                    'product' => $row->product,
+                    'branch_code' => $row->branch_code,
+                ];
+            }
+        }
+
+        return $items;
     }
 }

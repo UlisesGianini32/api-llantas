@@ -166,6 +166,21 @@ export default function Index({ llantas, filters, tabCounts }) {
         }
     }, [llantas])
 
+    const buildEditUrl = (editUrl) => {
+        const params = new URLSearchParams({
+            page: String(llantas?.current_page ?? filters.page ?? 1),
+            search: filters.search ?? '',
+            sort: filters.sort ?? 'sku',
+            dir: filters.dir ?? 'asc',
+            per_page: String(filters.per_page ?? 25),
+            ml_status: filters.ml_status ?? '',
+        })
+
+        const separator = editUrl.includes('?') ? '&' : '?'
+
+        return `${editUrl}${separator}${params.toString()}`
+    }
+
     const applyFilters = (extra = {}) => {
         router.get(
             '/llantas',
@@ -536,7 +551,7 @@ export default function Index({ llantas, filters, tabCounts }) {
                                                 <td className="px-4 py-4">
                                                     <div className="flex min-w-[130px] flex-col gap-2">
                                                         <Link
-                                                            href={row.actions.edit_url}
+                                                            href={buildEditUrl(row.actions.edit_url)}
                                                             className="inline-flex items-center justify-center rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50 dark:border-neutral-700 dark:bg-neutral-950 dark:text-slate-200 dark:hover:bg-neutral-800"
                                                         >
                                                             Editar

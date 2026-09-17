@@ -3,6 +3,8 @@
 namespace App\Http\Middleware;
 
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Inertia\Middleware;
 
 class HandleInertiaRequests extends Middleware
@@ -26,6 +28,7 @@ class HandleInertiaRequests extends Middleware
                         'id' => $user->id,
                         'name' => $user->name,
                         'email' => $user->email,
+                        'role' => $user->role,
                         'meli_id' => $user->meli_id,
                         // No mandar access_token al JS ($hidden). Bandera explícita para la UI:
                         'meli_linked' => filled($user->meli_id),
@@ -44,6 +47,12 @@ class HandleInertiaRequests extends Middleware
                 'ok' => fn () => $request->session()->get('ok'),
                 'err' => fn () => $request->session()->get('err'),
             ],
+            'meli_questions_pending' => fn () => $user && Schema::hasTable('meli_questions')
+                ? DB::table('meli_questions')
+                    ->where('user_id', $user->id)
+                    ->where('status', 'UNANSWERED')
+                    ->count()
+                : 0,
         ];
     }
 }

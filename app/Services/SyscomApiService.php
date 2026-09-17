@@ -17,178 +17,584 @@ class SyscomApiService
 
     protected string $clientSecret;
 
-    /** Token OAuth obtenido en este mismo proceso (evita repetir /oauth/token). */
+    /**
+     * Token OAuth obtenido durante el mismo proceso.
+     *
+     * Esto evita solicitar un token nuevo por cada producto.
+     */
     protected ?string $runtimeOAuthToken = null;
+
+    /**
+     * Tipo de cambio calculado durante el mismo proceso.
+     *
+     * Esto evita llamar repetidamente a /tipocambio.
+     */
+    protected ?float $runtimeTipoCambio = null;
+
+    /**
+     * Cuando SYSCOM devuelve 401, bloquea nuevos intentos OAuth
+     * durante el mismo proceso.
+     */
+    protected bool $oauthDisabled = false;
+
+    /**
+     * Motivo por el que se deshabilitó OAuth durante el proceso.
+     */
+    protected ?string $oauthDisabledReason = null;
+
+    /**
+     * Clave utilizada para compartir temporalmente el fallo OAuth
+     * entre diferentes procesos o Jobs.
+     */
+    protected string $oauthFailureCacheKey = 'syscom.oauth.temporarily_disabled';
 
     public function __construct()
     {
-        $this->baseUrl = rtrim((string) config('services.syscom.base_url', 'https://developers.syscom.mx/api/v1'), '/');
-        $this->oauthUrl = (string) config('services.syscom.oauth_url', 'https://developers.syscom.mx/oauth/token');
-        $this->clientId = (string) config('services.syscom.client_id', '');
-        $this->clientSecret = (string) config('services.syscom.client_secret', '');
+        $this->baseUrl = rtrim(
+            (string) config(
+                'services.syscom.base_url',
+                'https://developers.syscom.mx/api/v1'
+            ),
+            '/'
+        );
+
+        $this->oauthUrl = (string) config(
+            'services.syscom.oauth_url',
+            'https://developers.syscom.mx/oauth/token'
+        );
+
+        $this->clientId = trim(
+            (string) config('services.syscom.client_id', '')
+        );
+
+        $this->clientSecret = trim(
+            (string) config('services.syscom.client_secret', '')
+        );
     }
 
+    /**
+     * Obtiene el token de acceso para SYSCOM.
+     *
+     * Prioridad:
+     * 1. Token fijo configurado.
+     * 2. Token obtenido durante este proceso.
+     * 3. Token OAuth cacheado.
+     * 4. Solicitud nueva a /oauth/token.
+     */
     public function getAccessToken(): string
     {
-        $token = trim((string) config('services.syscom.access_token', ''));
-        if ($token !== '') {
-            return $token;
+        $configuredToken = trim(
+            (string) config('services.syscom.access_token', '')
+        );
+
+        if ($configuredToken !== '') {
+            return $configuredToken;
         }
 
-        if ($this->runtimeOAuthToken !== null && $this->runtimeOAuthToken !== '') {
+        if (
+            $this->runtimeOAuthToken !== null
+            && $this->runtimeOAuthToken !== ''
+        ) {
             return $this->runtimeOAuthToken;
         }
 
-        if ($this->clientId === '' || $this->clientSecret === '') {
-            throw new \RuntimeException('Faltan credenciales de SYSCOM (SYSCOM_CLIENT_ID/SYSCOM_CLIENT_SECRET).');
+        if ($this->oauthDisabled) {
+            throw new \RuntimeException(
+                $this->oauthDisabledReason
+                    ?? 'Autenticación SYSCOM deshabilitada durante este proceso.'
+            );
         }
 
-        $maxAttempts = max(1, (int) config('syscom.oauth_max_attempts', 6));
-        $lastError = '';
-        for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
-            $resp = Http::asForm()
-                ->timeout(45)
-                ->post($this->oauthUrl, [
-                    'grant_type' => 'client_credentials',
-                    'client_id' => $this->clientId,
-                    'client_secret' => $this->clientSecret,
-                ]);
+        /*
+         * Evita que diferentes workers sigan intentando autenticarse
+         * después de que alguno ya recibió un 401.
+         */
+        $cachedFailure = Cache::get(
+            $this->oauthFailureCacheKey
+        );
 
-            if ($resp->status() === 429) {
-                $wait = min(120, (int) (5 * (2 ** ($attempt - 1))));
-                Log::warning('SYSCOM oauth 429, reintento', ['attempt' => $attempt, 'wait_s' => $wait]);
-                sleep($wait);
-                $lastError = '429 too many requests (oauth)';
+        if (
+            is_string($cachedFailure)
+            && trim($cachedFailure) !== ''
+        ) {
+            $this->oauthDisabled = true;
+            $this->oauthDisabledReason = trim($cachedFailure);
+
+            throw new \RuntimeException(
+                $this->oauthDisabledReason
+            );
+        }
+
+        if (
+            $this->clientId === ''
+            || $this->clientSecret === ''
+        ) {
+            $message = 'Faltan credenciales de SYSCOM '
+                . '(SYSCOM_CLIENT_ID/SYSCOM_CLIENT_SECRET).';
+
+            $this->disableOAuthTemporarily($message);
+
+            throw new \RuntimeException($message);
+        }
+
+        /*
+         * Cacheamos el token entre procesos para no llamar a OAuth
+         * en cada ejecución.
+         */
+        $tokenCacheKey = $this->oauthTokenCacheKey();
+
+        $cachedToken = trim(
+            (string) Cache::get($tokenCacheKey, '')
+        );
+
+        if ($cachedToken !== '') {
+            $this->runtimeOAuthToken = $cachedToken;
+
+            return $cachedToken;
+        }
+
+        /*
+         * Reducimos los reintentos por defecto.
+         *
+         * Antes eran 6, lo cual podía producir esperas acumuladas
+         * de varios minutos.
+         */
+        $maxAttempts = max(
+            1,
+            min(
+                3,
+                (int) config(
+                    'syscom.oauth_max_attempts',
+                    2
+                )
+            )
+        );
+
+        $lastError = '';
+
+        for (
+            $attempt = 1;
+            $attempt <= $maxAttempts;
+            $attempt++
+        ) {
+            try {
+                $response = Http::asForm()
+                    ->acceptJson()
+                    ->connectTimeout(10)
+                    ->timeout(25)
+                    ->post(
+                        $this->oauthUrl,
+                        [
+                            'grant_type' => 'client_credentials',
+                            'client_id' => $this->clientId,
+                            'client_secret' => $this->clientSecret,
+                        ]
+                    );
+            } catch (\Throwable $exception) {
+                $lastError = $exception->getMessage();
+
+                Log::warning(
+                    'SYSCOM oauth exception',
+                    [
+                        'attempt' => $attempt,
+                        'error' => $exception->getMessage(),
+                    ]
+                );
+
+                if ($attempt >= $maxAttempts) {
+                    throw new \RuntimeException(
+                        'No se pudo conectar con OAuth de SYSCOM: '
+                        . $lastError
+                    );
+                }
+
+                sleep(min(3, $attempt));
 
                 continue;
             }
 
-            if (! $resp->successful()) {
-                $lastError = (string) $resp->status().' '.$resp->body();
-                $code = $resp->status();
-                if ($attempt < $maxAttempts && $code >= 500) {
-                    sleep(min(30, 2 * $attempt));
-                    continue;
+            $status = $response->status();
+
+            /*
+             * Un 401 significa que las credenciales no son válidas.
+             *
+             * No tiene sentido volver a intentar con los mismos datos.
+             */
+            if ($status === 401) {
+                $body = trim((string) $response->body());
+
+                $message = 'No se pudo autenticar con SYSCOM: 401';
+
+                if ($body !== '') {
+                    $message .= ' ' . mb_substr(
+                        $body,
+                        0,
+                        500
+                    );
                 }
-                throw new \RuntimeException('No se pudo autenticar con SYSCOM: '.$lastError);
+
+                $this->disableOAuthTemporarily($message);
+
+                Log::error(
+                    'SYSCOM oauth credenciales inválidas',
+                    [
+                        'status' => $status,
+                        'body' => mb_substr($body, 0, 500),
+                    ]
+                );
+
+                throw new \RuntimeException($message);
             }
 
-            $value = trim((string) ($resp->json('access_token') ?? ''));
-            if ($value === '') {
-                throw new \RuntimeException('SYSCOM no devolvio access_token en oauth/token.');
+            /*
+             * Si SYSCOM limita las solicitudes, hacemos una espera corta.
+             *
+             * Ya no esperamos 5, 10, 20, 40, 80 segundos.
+             */
+            if ($status === 429) {
+                $wait = min(
+                    10,
+                    2 * $attempt
+                );
+
+                $lastError = '429 too many requests (oauth)';
+
+                Log::warning(
+                    'SYSCOM oauth 429, reintento corto',
+                    [
+                        'attempt' => $attempt,
+                        'max_attempts' => $maxAttempts,
+                        'wait_s' => $wait,
+                    ]
+                );
+
+                if ($attempt < $maxAttempts) {
+                    sleep($wait);
+                    continue;
+                }
+
+                throw new \RuntimeException(
+                    'No se pudo autenticar con SYSCOM: '
+                    . $lastError
+                );
             }
+
+            if (! $response->successful()) {
+                $lastError = $status
+                    . ' '
+                    . mb_substr(
+                        (string) $response->body(),
+                        0,
+                        500
+                    );
+
+                /*
+                 * Solo se reintentan errores temporales 5xx.
+                 */
+                if (
+                    $status >= 500
+                    && $attempt < $maxAttempts
+                ) {
+                    sleep(min(4, 2 * $attempt));
+
+                    continue;
+                }
+
+                throw new \RuntimeException(
+                    'No se pudo autenticar con SYSCOM: '
+                    . $lastError
+                );
+            }
+
+            $value = trim(
+                (string) (
+                    $response->json('access_token')
+                    ?? ''
+                )
+            );
+
+            if ($value === '') {
+                throw new \RuntimeException(
+                    'SYSCOM no devolvió access_token en oauth/token.'
+                );
+            }
+
+            $expiresIn = (int) (
+                $response->json('expires_in')
+                ?? 3600
+            );
+
+            /*
+             * Dejamos un margen antes de la expiración real.
+             */
+            $cacheSeconds = max(
+                60,
+                $expiresIn - 120
+            );
+
             $this->runtimeOAuthToken = $value;
+
+            Cache::put(
+                $tokenCacheKey,
+                $value,
+                now()->addSeconds($cacheSeconds)
+            );
+
+            /*
+             * Si la autenticación ya funciona, eliminamos el bloqueo temporal.
+             */
+            Cache::forget(
+                $this->oauthFailureCacheKey
+            );
 
             return $value;
         }
 
-        throw new \RuntimeException('No se pudo autenticar con SYSCOM (429 o varios fallos). '.$lastError);
+        throw new \RuntimeException(
+            'No se pudo autenticar con SYSCOM: '
+            . $lastError
+        );
     }
 
     public function getBranches(string $token): array
     {
-        $response = $this->request($token, '/carrito/sucursales');
+        $response = $this->request(
+            $token,
+            '/carrito/sucursales'
+        );
 
-        return is_array($response) ? $response : [];
+        return is_array($response)
+            ? $response
+            : [];
     }
 
     /**
-     * Categorías nivel 1 (GET /categorias).
+     * Categorías nivel 1.
+     *
+     * GET /categorias
      *
      * @return array<int, array<string, mixed>>
      */
     public function getCategories(string $token): array
     {
-        $response = $this->request($token, '/categorias');
+        $response = $this->request(
+            $token,
+            '/categorias'
+        );
 
-        return is_array($response) ? $response : [];
+        return is_array($response)
+            ? $response
+            : [];
     }
 
     /**
-     * Detalle de categoría con subcategorías (GET /categorias/{id}).
+     * Detalle de categoría con subcategorías.
+     *
+     * GET /categorias/{id}
      *
      * @return array<string, mixed>
      */
-    public function getCategory(string $token, int|string $id): array
-    {
-        $response = $this->request($token, '/categorias/'.trim((string) $id));
+    public function getCategory(
+        string $token,
+        int|string $id
+    ): array {
+        $response = $this->request(
+            $token,
+            '/categorias/' . trim((string) $id)
+        );
 
-        return is_array($response) ? $response : [];
+        return is_array($response)
+            ? $response
+            : [];
     }
 
     /**
-     * Tipo de cambio SYSCOM (USD/MXN normal y especial preferencial).
-     * Endpoint: /tipocambio
+     * Tipo de cambio SYSCOM.
+     *
+     * GET /tipocambio
      *
      * @return array<string, mixed>
      */
-    public function getTipoCambio(string $token): array
-    {
-        $response = $this->request($token, '/tipocambio');
-        return is_array($response) ? $response : [];
+    public function getTipoCambio(
+        string $token
+    ): array {
+        $response = $this->request(
+            $token,
+            '/tipocambio'
+        );
+
+        return is_array($response)
+            ? $response
+            : [];
     }
 
     /**
-     * Tipo de cambio MXN/USD que aplica SYSCOM, cacheado.
+     * Tipo de cambio MXN usado por SYSCOM.
      *
-     * Lee `tc_kind` de config/syscom (preferencial, normal, un_dia, etc.).
-     * Si la API falla y no hay valor cacheado, usa `tc_fallback`.
+     * El valor se reutiliza durante todo el proceso.
+     * Si falla SYSCOM, el fallback también se conserva en memoria
+     * para evitar nuevos intentos OAuth por cada producto.
      */
     public function getTipoCambioMxn(): float
     {
-        $kind = (string) config('syscom.tc_kind', 'preferencial');
-        $minutes = max(1, (int) config('syscom.tc_cache_minutes', 60));
-        $fallback = (float) config('syscom.tc_fallback', 17.5);
+        if (
+            $this->runtimeTipoCambio !== null
+            && $this->runtimeTipoCambio > 0
+        ) {
+            return $this->runtimeTipoCambio;
+        }
+
+        $kind = trim(
+            (string) config(
+                'syscom.tc_kind',
+                'preferencial'
+            )
+        );
+
+        if ($kind === '') {
+            $kind = 'preferencial';
+        }
+
+        $minutes = max(
+            1,
+            (int) config(
+                'syscom.tc_cache_minutes',
+                60
+            )
+        );
+
+        $fallback = (float) config(
+            'syscom.tc_fallback',
+            17.5
+        );
+
+        if ($fallback <= 0) {
+            $fallback = 17.5;
+        }
 
         $cacheKey = "syscom.tc.{$kind}";
 
         $cached = Cache::get($cacheKey);
-        if (is_numeric($cached) && (float) $cached > 0) {
-            return (float) $cached;
+
+        if (
+            is_numeric($cached)
+            && (float) $cached > 0
+        ) {
+            $this->runtimeTipoCambio = (float) $cached;
+
+            return $this->runtimeTipoCambio;
+        }
+
+        /*
+         * Si ya falló OAuth durante este proceso, no intentamos otra vez.
+         */
+        if ($this->oauthDisabled) {
+            $this->runtimeTipoCambio = $fallback;
+
+            return $this->runtimeTipoCambio;
         }
 
         try {
             $token = $this->getAccessToken();
-            $tc = $this->getTipoCambio($token);
-        } catch (\Throwable $e) {
-            Log::warning('SYSCOM tipo_cambio fallo, usando fallback', [
-                'error' => $e->getMessage(),
-                'fallback' => $fallback,
-            ]);
+            $tipoCambio = $this->getTipoCambio($token);
+        } catch (\Throwable $exception) {
+            /*
+             * Solo registramos el primer fallo relevante del proceso.
+             */
+            if ($this->runtimeTipoCambio === null) {
+                Log::warning(
+                    'SYSCOM tipo_cambio falló, usando fallback',
+                    [
+                        'error' => $exception->getMessage(),
+                        'fallback' => $fallback,
+                    ]
+                );
+            }
 
-            return $fallback;
+            $this->runtimeTipoCambio = $fallback;
+
+            /*
+             * Guardamos temporalmente el fallback para que otros procesos
+             * tampoco vuelvan a consultar inmediatamente.
+             */
+            Cache::put(
+                $cacheKey,
+                $fallback,
+                now()->addMinutes(
+                    min($minutes, 10)
+                )
+            );
+
+            return $this->runtimeTipoCambio;
         }
 
-        $value = $tc[$kind] ?? null;
-        if (! is_numeric($value) || (float) $value <= 0) {
-            $value = $tc['preferencial'] ?? $tc['normal'] ?? null;
-        }
-        if (! is_numeric($value) || (float) $value <= 0) {
-            return $fallback;
+        $value = $tipoCambio[$kind]
+            ?? null;
+
+        if (
+            ! is_numeric($value)
+            || (float) $value <= 0
+        ) {
+            $value = $tipoCambio['preferencial']
+                ?? $tipoCambio['normal']
+                ?? null;
         }
 
-        $value = (float) $value;
-        Cache::put($cacheKey, $value, now()->addMinutes($minutes));
+        if (
+            ! is_numeric($value)
+            || (float) $value <= 0
+        ) {
+            $value = $fallback;
+        }
 
-        return $value;
+        $this->runtimeTipoCambio = (float) $value;
+
+        Cache::put(
+            $cacheKey,
+            $this->runtimeTipoCambio,
+            now()->addMinutes($minutes)
+        );
+
+        return $this->runtimeTipoCambio;
     }
 
-    public function resolveBranchCodeByName(string $token, string $branchName): ?string
-    {
-        $needle = mb_strtolower(trim($branchName));
+    public function resolveBranchCodeByName(
+        string $token,
+        string $branchName
+    ): ?string {
+        $needle = mb_strtolower(
+            trim($branchName)
+        );
+
         if ($needle === '') {
             return null;
         }
 
-        foreach ($this->getBranches($token) as $branch) {
+        foreach (
+            $this->getBranches($token)
+            as $branch
+        ) {
             if (! is_array($branch)) {
                 continue;
             }
 
-            $name = mb_strtolower(trim((string) ($branch['nombre_sucursal'] ?? '')));
-            $code = trim((string) ($branch['codigo'] ?? ''));
+            $name = mb_strtolower(
+                trim(
+                    (string) (
+                        $branch['nombre_sucursal']
+                        ?? ''
+                    )
+                )
+            );
 
-            if ($code === '' || $name === '') {
+            $code = trim(
+                (string) ($branch['codigo'] ?? '')
+            );
+
+            if (
+                $code === ''
+                || $name === ''
+            ) {
                 continue;
             }
 
@@ -202,9 +608,17 @@ class SyscomApiService
 
     /**
      * Búsqueda de productos en sucursal.
-     * La API exige al menos uno: busqueda, marca o categoria (422 si faltan los tres).
      *
-     * @param  array{busqueda?:string,marca?:string,categoria?:string}  $filter
+     * La API exige al menos uno:
+     * - busqueda
+     * - marca
+     * - categoria
+     *
+     * @param array{
+     *     busqueda?: string,
+     *     marca?: string,
+     *     categoria?: string
+     * } $filter
      */
     public function searchProducts(
         string $token,
@@ -224,59 +638,202 @@ class SyscomApiService
             $query['stock'] = 1;
         }
 
-        $busq = trim((string) ($filter['busqueda'] ?? ''));
-        $marca = trim((string) ($filter['marca'] ?? ''));
-        $categoria = trim((string) ($filter['categoria'] ?? ''));
+        $search = trim(
+            (string) ($filter['busqueda'] ?? '')
+        );
 
-        if ($busq === '' && $marca === '' && $categoria === '') {
-            $marca = trim((string) config('syscom.default_productos_marca', ''));
-            $categoria = trim((string) config('syscom.default_productos_categoria', ''));
-            $busq = trim((string) config('syscom.default_productos_busqueda', 'a'));
+        $brand = trim(
+            (string) ($filter['marca'] ?? '')
+        );
+
+        $category = trim(
+            (string) ($filter['categoria'] ?? '')
+        );
+
+        if (
+            $search === ''
+            && $brand === ''
+            && $category === ''
+        ) {
+            $brand = trim(
+                (string) config(
+                    'syscom.default_productos_marca',
+                    ''
+                )
+            );
+
+            $category = trim(
+                (string) config(
+                    'syscom.default_productos_categoria',
+                    ''
+                )
+            );
+
+            $search = trim(
+                (string) config(
+                    'syscom.default_productos_busqueda',
+                    'a'
+                )
+            );
         }
 
-        if ($busq === '' && $marca === '' && $categoria === '') {
-            $busq = 'a';
+        if (
+            $search === ''
+            && $brand === ''
+            && $category === ''
+        ) {
+            $search = 'a';
         }
 
-        if ($busq !== '') {
-            $query['busqueda'] = $busq;
-        } elseif ($marca !== '') {
-            $query['marca'] = $marca;
+        if ($search !== '') {
+            $query['busqueda'] = $search;
+        } elseif ($brand !== '') {
+            $query['marca'] = $brand;
         } else {
-            $query['categoria'] = $categoria;
+            $query['categoria'] = $category;
         }
 
-        $response = $this->request($token, '/productos', $query);
+        $response = $this->request(
+            $token,
+            '/productos',
+            $query
+        );
 
-        return is_array($response) ? $response : [];
+        return is_array($response)
+            ? $response
+            : [];
+    }
+
+
+    /**
+     * Consulta fichas de productos en un solo request.
+     *
+     * SYSCOM acepta hasta 300 IDs separados por coma y devuelve:
+     * - un objeto cuando se solicita un solo ID;
+     * - una lista cuando se solicitan varios.
+     *
+     * @param  array<int, int|string>  $productIds
+     * @return array<int, array<string, mixed>>
+     */
+    public function getProductsByIds(
+        string $token,
+        array $productIds,
+        bool $inventarios = true,
+        string $moneda = 'usd'
+    ): array {
+        $ids = collect($productIds)
+            ->map(static fn ($id) => (int) $id)
+            ->filter(static fn (int $id) => $id > 0)
+            ->unique()
+            ->values()
+            ->all();
+
+        if ($ids === []) {
+            return [];
+        }
+
+        if (count($ids) > 300) {
+            throw new \InvalidArgumentException(
+                'SYSCOM permite consultar como máximo 300 IDs por petición.'
+            );
+        }
+
+        $query = [
+            'inventarios' => $inventarios ? 1 : 0,
+            'moneda' => trim($moneda) !== '' ? trim($moneda) : 'usd',
+        ];
+
+        $response = $this->request(
+            $token,
+            '/productos/'.implode(',', $ids),
+            $query
+        );
+
+        if (! is_array($response) || $response === []) {
+            return [];
+        }
+
+        if (
+            isset($response['producto_id'])
+            || isset($response['id'])
+        ) {
+            return [$response];
+        }
+
+        if (isset($response['productos']) && is_array($response['productos'])) {
+            return array_values(
+                array_filter($response['productos'], 'is_array')
+            );
+        }
+
+        if (array_is_list($response)) {
+            return array_values(
+                array_filter($response, 'is_array')
+            );
+        }
+
+        $nestedItems = array_values(
+            array_filter($response, 'is_array')
+        );
+
+        return $nestedItems;
     }
 
     /**
-     * Detalle de producto. El query `sucursal` (código) alinea existencias a la misma
-     * sucursal que usás en búsqueda; la API a veces devuelve `existencia` en distinto
-     * formato que sin filtro.
+     * Detalle de producto.
+     *
+     * El query sucursal alinea las existencias con la sucursal
+     * seleccionada cuando está habilitado en configuración.
      */
-    public function getProduct(string $token, int|string $productId, ?string $sucursal = null): array
-    {
-        $sucursal = $sucursal !== null ? trim($sucursal) : '';
-        // Los códigos de sucursal de SYSCOM pueden ser slugs ("hermosillo", "culiacan"), no solo
-        // números. Si hay código y el config lo pide, filtramos el detalle por esa sucursal.
-        $useQueryFirst = (bool) config('syscom.get_product_with_sucursal_query', false) && $sucursal !== '';
+    public function getProduct(
+        string $token,
+        int|string $productId,
+        ?string $sucursal = null
+    ): array {
+        $sucursal = $sucursal !== null
+            ? trim($sucursal)
+            : '';
+
+        $useQueryFirst = (bool) config(
+            'syscom.get_product_with_sucursal_query',
+            false
+        ) && $sucursal !== '';
 
         if ($useQueryFirst) {
-            $response = $this->fetchProduct($token, $productId, $sucursal);
-            $response['__branch_scoped_existencia'] = true;
+            $response = $this->fetchProduct(
+                $token,
+                $productId,
+                $sucursal
+            );
+
+            $response[
+                '__branch_scoped_existencia'
+            ] = true;
 
             return $response;
         }
 
-        $response = $this->fetchProduct($token, $productId, null);
+        $response = $this->fetchProduct(
+            $token,
+            $productId,
+            null
+        );
+
         if ($sucursal === '') {
             return $response;
         }
 
-        $existencia = is_array($response['existencia'] ?? null) ? $response['existencia'] : [];
-        $branchName = (string) config('syscom.sucursal_nombre', 'hermosillo');
+        $existencia = is_array(
+            $response['existencia'] ?? null
+        )
+            ? $response['existencia']
+            : [];
+
+        $branchName = (string) config(
+            'syscom.sucursal_nombre',
+            'hermosillo'
+        );
+
         $stock = SyscomHermosilloStock::fromProductDetail(
             $existencia,
             $sucursal,
@@ -284,40 +841,66 @@ class SyscomApiService
             (int) ($response['total_existencia'] ?? 0)
         );
 
-        if ($stock > 0 || $existencia !== []) {
+        if (
+            $stock > 0
+            || $existencia !== []
+        ) {
             return $response;
         }
 
-        $scoped = $this->fetchProduct($token, $productId, $sucursal);
+        $scoped = $this->fetchProduct(
+            $token,
+            $productId,
+            $sucursal
+        );
+
         if (! is_array($scoped)) {
             return $response;
         }
 
-        $scopedExist = is_array($scoped['existencia'] ?? null) ? $scoped['existencia'] : [];
-        if ($scopedExist === []) {
+        $scopedExistence = is_array(
+            $scoped['existencia'] ?? null
+        )
+            ? $scoped['existencia']
+            : [];
+
+        if ($scopedExistence === []) {
             return $response;
         }
 
-        $scoped['__branch_scoped_existencia'] = true;
+        $scoped[
+            '__branch_scoped_existencia'
+        ] = true;
 
         return $scoped;
     }
 
     /**
-     * Detalle crudo del producto, opcionalmente filtrado por sucursal (para diagnóstico).
+     * Detalle crudo del producto.
      *
      * @return array<string, mixed>
      */
-    public function getProductRaw(string $token, int|string $productId, ?string $sucursal = null): array
-    {
-        return $this->fetchProduct($token, $productId, $sucursal);
+    public function getProductRaw(
+        string $token,
+        int|string $productId,
+        ?string $sucursal = null
+    ): array {
+        return $this->fetchProduct(
+            $token,
+            $productId,
+            $sucursal
+        );
     }
 
     /**
-     * Stock de un producto en una sucursal vía el buscador filtrado (sucursal=X&stock=1),
-     * que es como SYSCOM realmente separa por sucursal (el detalle solo da nacional).
+     * Busca un producto dentro de una sucursal.
      *
-     * @return array{found: bool, total_existencia: int, existencia: array<string, mixed>, item: array<string, mixed>}|null
+     * @return array{
+     *     found: bool,
+     *     total_existencia: int,
+     *     existencia: array<string, mixed>,
+     *     item: array<string, mixed>
+     * }|null
      */
     public function findProductInBranchSearch(
         string $token,
@@ -328,123 +911,447 @@ class SyscomApiService
     ): ?array {
         $busqueda = trim($busqueda);
         $branchCode = trim($branchCode);
-        if ($busqueda === '' || $branchCode === '') {
+
+        if (
+            $busqueda === ''
+            || $branchCode === ''
+        ) {
             return null;
         }
 
         $productId = (int) $productId;
-        for ($page = 1; $page <= max(1, $maxPages); $page++) {
-            $res = $this->searchProducts($token, $branchCode, $page, true, ['busqueda' => $busqueda]);
-            $items = is_array($res['productos'] ?? null) ? $res['productos'] : [];
+
+        for (
+            $page = 1;
+            $page <= max(1, $maxPages);
+            $page++
+        ) {
+            $result = $this->searchProducts(
+                $token,
+                $branchCode,
+                $page,
+                true,
+                [
+                    'busqueda' => $busqueda,
+                ]
+            );
+
+            $items = is_array(
+                $result['productos'] ?? null
+            )
+                ? $result['productos']
+                : [];
+
             if ($items === []) {
                 break;
             }
 
-            foreach ($items as $it) {
-                if (! is_array($it)) {
+            foreach ($items as $item) {
+                if (! is_array($item)) {
                     continue;
                 }
-                if ((int) ($it['producto_id'] ?? 0) === $productId) {
+
+                if (
+                    (int) (
+                        $item['producto_id']
+                        ?? 0
+                    ) === $productId
+                ) {
                     return [
                         'found' => true,
-                        'total_existencia' => max(0, (int) ($it['total_existencia'] ?? 0)),
-                        'existencia' => is_array($it['existencia'] ?? null) ? $it['existencia'] : [],
-                        'item' => $it,
+                        'total_existencia' => max(
+                            0,
+                            (int) (
+                                $item['total_existencia']
+                                ?? 0
+                            )
+                        ),
+                        'existencia' => is_array(
+                            $item['existencia'] ?? null
+                        )
+                            ? $item['existencia']
+                            : [],
+                        'item' => $item,
                     ];
                 }
             }
 
-            $pages = (int) ($res['paginas'] ?? 1);
+            $pages = (int) (
+                $result['paginas']
+                ?? 1
+            );
+
             if ($page >= $pages) {
                 break;
             }
         }
 
-        return ['found' => false, 'total_existencia' => 0, 'existencia' => [], 'item' => []];
+        return [
+            'found' => false,
+            'total_existencia' => 0,
+            'existencia' => [],
+            'item' => [],
+        ];
     }
 
     /**
-     * Stock confiable de un producto en una sucursal (vía buscador filtrado).
-     * 0 = no hay stock en esa sucursal (no aparece en sucursal=X&stock=1).
-     * El `total_existencia` que devuelve la API en el item es NACIONAL (suma de todas
-     * las sucursales). El desglose real por sucursal está en `existencia`; ahí se busca
-     * la cantidad de Hermosillo. Si la API no detalla cantidad por sucursal pero el
-     * producto sí aparece en sucursal=X&stock=1, devolvemos al menos 1.
+     * Obtiene el stock confiable de un producto en una sucursal.
      */
-    public function getBranchStock(string $token, string $branchCode, int|string $productId, string $busqueda): int
-    {
-        $hit = $this->findProductInBranchSearch($token, $branchCode, $productId, $busqueda);
-        if ($hit === null || ! $hit['found']) {
+    public function getBranchStock(
+        string $token,
+        string $branchCode,
+        int|string $productId,
+        string $busqueda
+    ): int {
+        $hit = $this->findProductInBranchSearch(
+            $token,
+            $branchCode,
+            $productId,
+            $busqueda
+        );
+
+        if (
+            $hit === null
+            || ! $hit['found']
+        ) {
             return 0;
         }
 
-        $branchName = (string) config('syscom.sucursal_nombre', 'hermosillo');
-        $existencia = is_array($hit['existencia'] ?? null) ? $hit['existencia'] : [];
+        $branchName = (string) config(
+            'syscom.sucursal_nombre',
+            'hermosillo'
+        );
 
-        $qty = SyscomHermosilloStock::forBranch($existencia, $branchCode, $branchName);
-        if ($qty > 0) {
-            return $qty;
+        $existencia = is_array(
+            $hit['existencia'] ?? null
+        )
+            ? $hit['existencia']
+            : [];
+
+        $quantity = SyscomHermosilloStock::forBranch(
+            $existencia,
+            $branchCode,
+            $branchName
+        );
+
+        if ($quantity > 0) {
+            return $quantity;
         }
 
+        /*
+         * Si aparece en la búsqueda con stock=1 pero no viene cantidad
+         * detallada, consideramos por lo menos una pieza.
+         */
         return 1;
+    }
+
+    /**
+     * Limpia los bloqueos y cachés de autenticación SYSCOM.
+     *
+     * Útil después de corregir las credenciales.
+     */
+    public function clearAuthenticationCache(): void
+    {
+        $this->runtimeOAuthToken = null;
+        $this->runtimeTipoCambio = null;
+        $this->oauthDisabled = false;
+        $this->oauthDisabledReason = null;
+
+        Cache::forget(
+            $this->oauthFailureCacheKey
+        );
+
+        Cache::forget(
+            $this->oauthTokenCacheKey()
+        );
+    }
+
+    /**
+     * Devuelve si OAuth quedó bloqueado durante este proceso.
+     */
+    public function isOAuthDisabled(): bool
+    {
+        return $this->oauthDisabled;
     }
 
     /**
      * @return array<string, mixed>
      */
-    private function fetchProduct(string $token, int|string $productId, ?string $sucursal): array
-    {
+    private function fetchProduct(
+        string $token,
+        int|string $productId,
+        ?string $sucursal
+    ): array {
         $query = [];
-        if ($sucursal !== null && trim($sucursal) !== '') {
+
+        if (
+            $sucursal !== null
+            && trim($sucursal) !== ''
+        ) {
             $query['sucursal'] = trim($sucursal);
         }
-        $response = $this->request($token, '/productos/'.trim((string) $productId), $query);
 
-        return is_array($response) ? $response : [];
+        $response = $this->request(
+            $token,
+            '/productos/' . trim((string) $productId),
+            $query
+        );
+
+        return is_array($response)
+            ? $response
+            : [];
     }
 
-    protected function request(string $token, string $path, array $query = []): mixed
-    {
-        $url = $this->baseUrl.'/'.ltrim($path, '/');
-        $max = max(1, (int) config('syscom.request_max_attempts', 5));
-        $last = '';
+    /**
+     * Ejecuta una petición GET contra SYSCOM.
+     */
+    protected function request(
+        string $token,
+        string $path,
+        array $query = []
+    ): mixed {
+        $token = trim($token);
 
-        for ($attempt = 1; $attempt <= $max; $attempt++) {
-            $resp = Http::withToken($token)
-                ->acceptJson()
-                ->timeout(45)
-                ->get($url, $query);
+        if ($token === '') {
+            throw new \RuntimeException(
+                'SYSCOM request cancelado: token vacío.'
+            );
+        }
 
-            if ($resp->status() === 429) {
-                $wait = min(90, (int) (3 * (2 ** ($attempt - 1))));
-                Log::warning('SYSCOM GET 429, esperando', [
-                    'url' => $url,
-                    'attempt' => $attempt,
-                    'wait_s' => $wait,
-                ]);
-                sleep($wait);
-                $last = (string) $resp->body();
+        if ($this->oauthDisabled) {
+            throw new \RuntimeException(
+                $this->oauthDisabledReason
+                    ?? 'Autenticación SYSCOM deshabilitada durante este proceso.'
+            );
+        }
+
+        $url = $this->baseUrl
+            . '/'
+            . ltrim($path, '/');
+
+        $maxAttempts = max(
+            1,
+            min(
+                3,
+                (int) config(
+                    'syscom.request_max_attempts',
+                    2
+                )
+            )
+        );
+
+        $lastError = '';
+
+        for (
+            $attempt = 1;
+            $attempt <= $maxAttempts;
+            $attempt++
+        ) {
+            try {
+                $response = Http::withToken($token)
+                    ->acceptJson()
+                    ->connectTimeout(10)
+                    ->timeout(30)
+                    ->get($url, $query);
+            } catch (\Throwable $exception) {
+                $lastError = $exception->getMessage();
+
+                Log::warning(
+                    'SYSCOM request exception',
+                    [
+                        'url' => $url,
+                        'attempt' => $attempt,
+                        'error' => $exception->getMessage(),
+                    ]
+                );
+
+                if ($attempt >= $maxAttempts) {
+                    throw new \RuntimeException(
+                        'SYSCOM request falló: '
+                        . $lastError
+                    );
+                }
+
+                sleep(min(3, $attempt));
 
                 continue;
             }
 
-            if (! $resp->successful()) {
-                $last = $resp->status().' '.$resp->body();
-                Log::warning('SYSCOM request failed', [
-                    'url' => $url,
-                    'query' => $query,
-                    'status' => $resp->status(),
-                ]);
-                if ($resp->status() >= 500 && $attempt < $max) {
-                    sleep(2 * $attempt);
-                    continue;
+            $status = $response->status();
+
+            /*
+             * Token inválido o expirado.
+             *
+             * Se elimina el token cacheado y no se repite la petición
+             * con el mismo token.
+             */
+            if ($status === 401) {
+                Cache::forget(
+                    $this->oauthTokenCacheKey()
+                );
+
+                $this->runtimeOAuthToken = null;
+
+                $body = trim(
+                    (string) $response->body()
+                );
+
+                $message = 'SYSCOM request falló: 401';
+
+                if ($body !== '') {
+                    $message .= ' '
+                        . mb_substr(
+                            $body,
+                            0,
+                            500
+                        );
                 }
-                throw new \RuntimeException('SYSCOM request failed: '.$last);
+
+                $this->disableOAuthTemporarily(
+                    $message
+                );
+
+                Log::error(
+                    'SYSCOM API token inválido',
+                    [
+                        'url' => $url,
+                        'query' => $query,
+                        'body' => mb_substr(
+                            $body,
+                            0,
+                            500
+                        ),
+                    ]
+                );
+
+                throw new \RuntimeException($message);
             }
 
-            return $resp->json();
+            if ($status === 429) {
+                $wait = min(
+                    8,
+                    2 * $attempt
+                );
+
+                $lastError = '429 '
+                    . mb_substr(
+                        (string) $response->body(),
+                        0,
+                        300
+                    );
+
+                Log::warning(
+                    'SYSCOM GET 429, espera corta',
+                    [
+                        'url' => $url,
+                        'attempt' => $attempt,
+                        'max_attempts' => $maxAttempts,
+                        'wait_s' => $wait,
+                    ]
+                );
+
+                if ($attempt < $maxAttempts) {
+                    sleep($wait);
+                    continue;
+                }
+
+                throw new \RuntimeException(
+                    'SYSCOM request limitado por 429: '
+                    . $lastError
+                );
+            }
+
+            if (! $response->successful()) {
+                $lastError = $status
+                    . ' '
+                    . mb_substr(
+                        (string) $response->body(),
+                        0,
+                        500
+                    );
+
+                Log::warning(
+                    'SYSCOM request failed',
+                    [
+                        'url' => $url,
+                        'query' => $query,
+                        'status' => $status,
+                    ]
+                );
+
+                if (
+                    $status >= 500
+                    && $attempt < $maxAttempts
+                ) {
+                    sleep(min(4, 2 * $attempt));
+
+                    continue;
+                }
+
+                throw new \RuntimeException(
+                    'SYSCOM request failed: '
+                    . $lastError
+                );
+            }
+
+            return $response->json();
         }
 
-        throw new \RuntimeException('SYSCOM request failed tras reintentos: '.$last);
+        throw new \RuntimeException(
+            'SYSCOM request failed tras reintentos: '
+            . $lastError
+        );
+    }
+
+    /**
+     * Deshabilita OAuth temporalmente.
+     *
+     * El bloqueo entre procesos dura pocos minutos para evitar
+     * saturar la API cuando las credenciales son inválidas.
+     */
+    protected function disableOAuthTemporarily(
+        string $reason
+    ): void {
+        $reason = trim($reason);
+
+        if ($reason === '') {
+            $reason = 'Autenticación SYSCOM deshabilitada temporalmente.';
+        }
+
+        $this->oauthDisabled = true;
+        $this->oauthDisabledReason = $reason;
+
+        $minutes = max(
+            1,
+            min(
+                30,
+                (int) config(
+                    'syscom.oauth_failure_cache_minutes',
+                    5
+                )
+            )
+        );
+
+        Cache::put(
+            $this->oauthFailureCacheKey,
+            $reason,
+            now()->addMinutes($minutes)
+        );
+    }
+
+    /**
+     * Genera una clave específica para las credenciales actuales.
+     */
+    protected function oauthTokenCacheKey(): string
+    {
+        $identity = hash(
+            'sha256',
+            $this->oauthUrl
+            . '|'
+            . $this->clientId
+        );
+
+        return 'syscom.oauth.token.'
+            . substr($identity, 0, 24);
     }
 }
