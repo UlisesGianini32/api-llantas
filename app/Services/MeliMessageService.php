@@ -99,6 +99,15 @@ class MeliMessageService
                 ->post($endpoint.'?'.$query, $payload);
 
             if ($response->successful()) {
+                $flow->forceFill([
+                    'last_message_role' => 'seller',
+                    'last_message_at' => now(),
+                    'last_message_text' => $truncated,
+                    'last_message_synced_at' => now(),
+                    'requires_human' => false,
+                    'requires_human_at' => null,
+                ])->save();
+
                 Log::info('Mensaje enviado a Mercado Libre', [
                     'flow_id' => $flow->id,
                     'order_id' => $flow->order_id,

@@ -17,8 +17,7 @@ class MeliMenuAutomationService
         protected MeliMessageService $meliMessageService,
         protected MeliApi $meliApi,
         protected TelegramAlertService $telegramAlerts,
-    ) {
-    }
+    ) {}
 
     public function handleIncomingEvent(array $payload, ?int $userId = null): void
     {
@@ -30,7 +29,7 @@ class MeliMenuAutomationService
             return;
         }
 
-        if (!$data['order_id'] && !$data['conversation_id']) {
+        if (! $data['order_id'] && ! $data['conversation_id']) {
             Log::warning('MeliMenuAutomationService: evento sin order_id ni conversation_id', [
                 'payload' => $payload,
             ]);
@@ -55,7 +54,7 @@ class MeliMenuAutomationService
         $this->syncFlowContext($flow, $data);
 
         if (($data['event_type'] ?? null) === 'buyer_message') {
-            if (!$flow->fresh()->menu_sent) {
+            if (! $flow->fresh()->menu_sent) {
                 $this->sendMenuIfNeeded($flow->fresh());
 
                 return;
@@ -86,7 +85,7 @@ class MeliMenuAutomationService
             try {
                 $flow = MeliChatFlow::firstOrCreate($keys, $this->newFlowCreateAttributes($data));
             } catch (QueryException $e) {
-                if (!$this->isUniqueConstraintViolation($e)) {
+                if (! $this->isUniqueConstraintViolation($e)) {
                     throw $e;
                 }
                 $flow = MeliChatFlow::query()->where($keys)->firstOrFail();
@@ -122,9 +121,9 @@ class MeliMenuAutomationService
     protected function isBuyerMessageWithThreadKeys(array $data): bool
     {
         return ($data['event_type'] ?? null) === 'buyer_message'
-            && !empty($data['message_id'])
-            && !empty($data['order_id'])
-            && !empty($data['buyer_id']);
+            && ! empty($data['message_id'])
+            && ! empty($data['order_id'])
+            && ! empty($data['buyer_id']);
     }
 
     /** @return array<string, mixed> */
@@ -154,19 +153,26 @@ class MeliMenuAutomationService
     {
         $updates = [];
 
-        if (!empty($data['pack_id'])) {
+        if (($data['event_type'] ?? null) === 'buyer_message') {
+            $updates['last_message_role'] = 'customer';
+            $updates['last_message_at'] = now();
+            $updates['last_message_text'] = (string) ($data['message_text'] ?? '');
+            $updates['last_message_synced_at'] = now();
+        }
+
+        if (! empty($data['pack_id'])) {
             $updates['pack_id'] = $data['pack_id'];
         }
 
-        if (!empty($data['user_id'])) {
+        if (! empty($data['user_id'])) {
             $updates['user_id'] = $data['user_id'];
         }
 
-        if (!empty($data['meli_account_id'])) {
+        if (! empty($data['meli_account_id'])) {
             $updates['meli_account_id'] = $data['meli_account_id'];
         }
 
-        if (!empty($data['site_id'])) {
+        if (! empty($data['site_id'])) {
             $updates['meta'] = array_merge($flow->meta ?? [], [
                 'site_id' => $data['site_id'],
             ]);
@@ -220,7 +226,7 @@ class MeliMenuAutomationService
 
         $option = $this->extractOption($buyerText);
 
-        if (!$option) {
+        if (! $option) {
             $this->meliMessageService->sendMessage(
                 flow: $flow,
                 text: $this->buildInvalidOptionMessage()
@@ -251,7 +257,7 @@ class MeliMenuAutomationService
         $flow = $this->ensureItemIdFromOrderIfMissing($flow);
         $detailUrl = $flow->product_pdf_url ?: $this->resolveProductDetailUrl($flow);
 
-        if (!$detailUrl) {
+        if (! $detailUrl) {
             $this->meliMessageService->sendMessage(
                 flow: $flow,
                 text: 'No tenemos un enlace de ficha listo para este producto. Un asesor te apoyara en breve.'
@@ -309,10 +315,10 @@ class MeliMenuAutomationService
         }
 
         $message = "Facturacion:\n"
-            . "Pagina para facturar: {$invoiceUrl}\n"
-            . "ID de la venta: {$orderId}\n"
-            . "Importante: tienes 9 dias a partir de tu compra para facturar.\n\n"
-            . "Si necesitas otra opcion, responde solo con un numero (1, 2, 3 o 4).";
+            ."Pagina para facturar: {$invoiceUrl}\n"
+            ."ID de la venta: {$orderId}\n"
+            ."Importante: tienes 9 dias a partir de tu compra para facturar.\n\n"
+            .'Si necesitas otra opcion, responde solo con un numero (1, 2, 3 o 4).';
         $this->meliMessageService->sendMessage(flow: $flow, text: $message);
 
         $flow->update([
@@ -515,20 +521,20 @@ class MeliMenuAutomationService
     protected function buildMainMenuMessage(): string
     {
         return "Hola, gracias por tu compra.\n"
-            . "Menu (responde solo con un numero):\n"
-            . "1 Detalle del producto\n"
-            . "2 Catalogo\n"
-            . "3 Facturacion\n"
-            . "4 Ticket / Asesor";
+            ."Menu (responde solo con un numero):\n"
+            ."1 Detalle del producto\n"
+            ."2 Catalogo\n"
+            ."3 Facturacion\n"
+            .'4 Ticket / Asesor';
     }
 
     protected function buildInvalidOptionMessage(): string
     {
         return "Opcion no reconocida. Responde solo con un numero: 1, 2, 3 o 4.\n"
-            . "1 Detalle del producto\n"
-            . "2 Catalogo\n"
-            . "3 Facturacion\n"
-            . "4 Ticket / Asesor";
+            ."1 Detalle del producto\n"
+            ."2 Catalogo\n"
+            ."3 Facturacion\n"
+            .'4 Ticket / Asesor';
     }
 
     protected function findOrCreateFlow(array $data): MeliChatFlow
@@ -536,7 +542,7 @@ class MeliMenuAutomationService
         return MeliChatFlow::firstOrCreate(
             [
                 'meli_account_id' => $data['meli_account_id'],
-                'order_id' => $data['order_id'] ?: 'no-order-' . ($data['conversation_id'] ?: uniqid()),
+                'order_id' => $data['order_id'] ?: 'no-order-'.($data['conversation_id'] ?: uniqid()),
                 'buyer_id' => $data['buyer_id'] ?: 'unknown',
             ],
             $this->newFlowCreateAttributes($data)
@@ -637,7 +643,6 @@ class MeliMenuAutomationService
         return null;
     }
 
-
     protected function resolveApiUserForFlow(MeliChatFlow $flow): ?User
     {
         $owner = $flow->user_id
@@ -698,11 +703,11 @@ class MeliMenuAutomationService
     protected function resolveProductPdfUrl(MeliChatFlow $flow): ?string
     {
         if ($flow->sku) {
-            return url('/pdfs/productos/' . $flow->sku . '.pdf');
+            return url('/pdfs/productos/'.$flow->sku.'.pdf');
         }
 
         if ($flow->item_id) {
-            return url('/pdfs/productos/' . $flow->item_id . '.pdf');
+            return url('/pdfs/productos/'.$flow->item_id.'.pdf');
         }
 
         return null;
