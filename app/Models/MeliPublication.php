@@ -11,10 +11,8 @@ class MeliPublication extends Model
 
     protected $fillable = [
         'user_id',
-        'meli_account_id',
         'sku',
         'mlm',
-        'source_mlm',
         'status',
         'sub_status',
         'permalink',
@@ -33,11 +31,6 @@ class MeliPublication extends Model
     public function user()
     {
         return $this->belongsTo(User::class);
-    }
-
-    public function meliAccount()
-    {
-        return $this->belongsTo(MeliAccount::class);
     }
 
     public function llanta()

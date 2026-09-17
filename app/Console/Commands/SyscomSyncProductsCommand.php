@@ -487,11 +487,7 @@ class SyscomSyncProductsCommand extends Command
             'existencia' => $existencia,
             'imagenes' => $imagenes,
             'descripcion' => (string) ($detail['descripcion'] ?? ''),
-            'categorias' => $detail['categorias']
-                ?? $detail['categorías']
-                ?? $item['categorias']
-                ?? $item['categorías']
-                ?? [],
+            'categorias' => $detail['categorías'] ?? $item['categorías'] ?? [],
             'raw_list' => SyscomProductPriceHydrator::mergeListPayload(
                 $item,
                 $existing?->raw_list
