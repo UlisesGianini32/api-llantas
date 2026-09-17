@@ -43,14 +43,7 @@ function formatMoney(amount, currencyId) {
     }
 }
 
-export default function Index({
-    flows = [],
-    accounts = [],
-    selectedAccountId = null,
-    selectedAccountLinked = false,
-    sellerMaxLength = 350,
-    selectedFlowId = null,
-}) {
+export default function Index({ flows = [], meliLinked = false, sellerMaxLength = 350, selectedFlowId = null }) {
     const [activeFlowId, setActiveFlowId] = useState(selectedFlowId)
     const [messages, setMessages] = useState([])
     const [loadState, setLoadState] = useState('idle')
@@ -72,7 +65,7 @@ export default function Index({
     )
 
     const loadMessages = useCallback(async () => {
-        if (!activeFlowId || !selectedAccountLinked) {
+        if (!activeFlowId || !meliLinked) {
             setMessages([])
             return
         }
@@ -99,14 +92,14 @@ export default function Index({
             setLoadError(e?.message || 'Error al cargar.')
             setLoadState('error')
         }
-    }, [activeFlowId, selectedAccountLinked])
+    }, [activeFlowId, meliLinked])
 
     useEffect(() => {
         loadMessages()
     }, [loadMessages])
 
     const loadSaleDetails = useCallback(async () => {
-        if (!activeFlowId || !selectedAccountLinked) {
+        if (!activeFlowId || !meliLinked) {
             setSaleDetails(null)
             return
         }
@@ -133,7 +126,7 @@ export default function Index({
             setSaleError(e?.message || 'Error al cargar venta.')
             setSaleLoadState('error')
         }
-    }, [activeFlowId, selectedAccountLinked])
+    }, [activeFlowId, meliLinked])
 
     useEffect(() => {
         loadSaleDetails()
@@ -149,16 +142,8 @@ export default function Index({
         setActiveFlowId(id)
         router.get(
             '/meli/mensajeria',
-            { account_id: selectedAccountId, flow: id },
+            { flow: id },
             { replace: true, preserveState: true, preserveScroll: true }
-        )
-    }
-
-    const selectAccount = (accountId) => {
-        router.get(
-            '/meli/mensajeria',
-            { account_id: accountId },
-            { replace: true, preserveState: false, preserveScroll: true }
         )
     }
 
@@ -190,39 +175,10 @@ export default function Index({
                             sistema ya registró (por ejemplo cuando el comprador escribió y entró el webhook del
                             menú automático). Los mensajes se envían con la misma API que el bot posventa.
                         </p>
-
-                        <div className="mt-4 max-w-md">
-                            <label
-                                htmlFor="meli-account"
-                                className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400"
-                            >
-                                Cuenta Mercado Libre
-                            </label>
-                            <select
-                                id="meli-account"
-                                value={selectedAccountId || ''}
-                                onChange={(e) => selectAccount(Number(e.target.value))}
-                                disabled={accounts.length === 0}
-                                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 disabled:opacity-60 dark:border-neutral-700 dark:bg-neutral-950 dark:text-white"
-                            >
-                                {accounts.length === 0 ? (
-                                    <option value="">Sin cuentas vinculadas</option>
-                                ) : (
-                                    accounts.map((account) => (
-                                        <option key={account.id} value={account.id}>
-                                            {account.nickname}
-                                            {account.is_default ? ' — Principal' : ''}
-                                            {' · '}
-                                            {account.meli_user_id}
-                                        </option>
-                                    ))
-                                )}
-                            </select>
-                        </div>
-
-                        {!selectedAccountLinked && (
+                        {!meliLinked && (
                             <p className="mt-3 text-sm font-medium text-amber-800 dark:text-amber-200">
-                                La cuenta seleccionada no tiene token disponible. Refrescá su token o volvé a vincularla.
+                                Tu cuenta no tiene Mercado Libre vinculado o falta el token. Vinculá la cuenta desde
+                                configuración o refrescá el token desde el dashboard.
                             </p>
                         )}
                     </div>
@@ -375,7 +331,7 @@ export default function Index({
                                             onChange={(e) => replyForm.setData('text', e.target.value)}
                                             rows={3}
                                             maxLength={sellerMaxLength}
-                                            disabled={!selectedAccountLinked || replyForm.processing}
+                                            disabled={!meliLinked || replyForm.processing}
                                             placeholder="Escribí tu respuesta…"
                                             className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 disabled:opacity-60 dark:border-neutral-700 dark:bg-neutral-950 dark:text-white dark:placeholder-slate-500"
                                         />
@@ -391,7 +347,7 @@ export default function Index({
                                             <button
                                                 type="submit"
                                                 disabled={
-                                                    !selectedAccountLinked ||
+                                                    !meliLinked ||
                                                     replyForm.processing ||
                                                     !replyForm.data.text.trim()
                                                 }

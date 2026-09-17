@@ -22,7 +22,7 @@ class Llanta extends Model
     ];
 
     protected $casts = [
-        'last_import_at' => 'datetime',
+        'last_import_at'  => 'datetime',
         'price_locked_at' => 'datetime',
     ];
 
@@ -31,24 +31,20 @@ class Llanta extends Model
         return $this->hasMany(ProductoCompuesto::class);
     }
 
-    public function skuAliases()
-    {
-        return $this->hasMany(LlantaSkuAlias::class);
-    }
-
-    public function skuCandidates()
-    {
-        return $this->hasMany(LlantaSkuCandidate::class);
-    }
-
     public function meliPublications()
     {
-        return $this->hasMany(MeliPublication::class, 'sku', 'sku')->orderByDesc('id');
+        return $this->hasMany(\App\Models\MeliPublication::class, 'sku', 'sku')
+            ->orderByDesc('id');
     }
 
+    /**
+     * ✅ ÚLTIMA publicación (la que manda para el estatus)
+     * IMPORTANTE: NO usar select() aquí para evitar "sku ambiguous"
+     */
     public function latestMeliPublication()
     {
-        return $this->hasOne(MeliPublication::class, 'sku', 'sku')->latestOfMany('id');
+        return $this->hasOne(\App\Models\MeliPublication::class, 'sku', 'sku')
+            ->latestOfMany('id');
     }
 
     public function getPrecioMlRealAttribute()

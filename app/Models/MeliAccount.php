@@ -2,16 +2,11 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
-use Illuminate\Database\Eloquent\Relations\HasMany;
-use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class MeliAccount extends Model
 {
-    use HasFactory;
-
     protected $fillable = [
         'user_id',
         'meli_user_id',
@@ -40,45 +35,5 @@ class MeliAccount extends Model
     public function user(): BelongsTo
     {
         return $this->belongsTo(User::class);
-    }
-
-    public function orders(): HasMany
-    {
-        return $this->hasMany(MeliOrder::class);
-    }
-
-    public function chatFlows(): HasMany
-    {
-        return $this->hasMany(MeliChatFlow::class);
-    }
-
-    public function questions(): HasMany
-    {
-        return $this->hasMany(MeliQuestion::class);
-    }
-
-    public function claims(): HasMany
-    {
-        return $this->hasMany(MeliClaim::class);
-    }
-
-    public function priceManagerItems(): HasMany
-    {
-        return $this->hasMany(MeliPriceManagerItem::class);
-    }
-
-    public function priceChangeBatches(): HasMany
-    {
-        return $this->hasMany(MeliPriceChangeBatch::class);
-    }
-
-    public function taxProfile(): HasOne
-    {
-        return $this->hasOne(MeliAccountTaxProfile::class);
-    }
-
-    public function scheduledDiscounts(): HasMany
-    {
-        return $this->hasMany(MeliBeautyScheduledDiscount::class);
     }
 }
