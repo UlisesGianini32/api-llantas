@@ -4,18 +4,21 @@ namespace App\Http\Controllers;
 
 use App\Models\MeliClaim;
 use App\Models\MeliPublication;
-use App\Services\MercadoLibre\Claims\MeliClaimsService;
 use App\Services\MercadoLibre\Claims\MeliClaimMessagePolicy;
+use App\Services\MercadoLibre\Claims\MeliClaimOperationalCriteria;
 use App\Services\MercadoLibre\Claims\MeliClaimResolutionPolicy;
-use Illuminate\Support\Collection;
+use App\Services\MercadoLibre\Claims\MeliClaimsService;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Collection;
 use Inertia\Inertia;
 use Inertia\Response;
 
 class MeliClaimController extends Controller
 {
+    public function __construct(private MeliClaimOperationalCriteria $operationalCriteria) {}
+
     public function index(Request $request): Response
     {
         $accounts = $request->user()->meliAccounts()->orderByDesc('is_default')->orderBy('id')->get(['id', 'nickname', 'meli_user_id', 'is_default']);
@@ -68,6 +71,7 @@ class MeliClaimController extends Controller
         abort_unless($request->user()->meliAccounts()->whereKey($claim->meli_account_id)->exists(), 404);
         $claim->load(['meliAccount:id,nickname,meli_user_id,is_default', 'reason:reason_id,name,detail', 'order.items']);
         $publications = $this->publicationMap(collect([$claim]));
+
         return Inertia::render('MeliClaims/Show', ['claim' => [...$this->claimData($claim, $publications),
             'raw_detail' => $claim->raw_detail, 'status_history' => $claim->status_history ?? [],
             'actions_history' => $claim->actions_history ?? [], 'expected_resolutions' => $this->withoutParticipantIds($claim->expected_resolutions ?? []),
@@ -87,9 +91,13 @@ class MeliClaimController extends Controller
         $account = $request->user()->meliAccounts()->findOrFail($request->integer('account_id'));
         try {
             $result = $service->syncAccount($account, 'opened', 0, false);
+
             return back()->with('ok', "Reclamos revisados: {$result['received']}. Actualizados/nuevos: {$result['saved']}. Sin cambios: {$result['skipped']}. Reconciliados: {$result['reconciled']}. Fallidos: {$result['failed']}.");
+        } catch (\Throwable $e) {
+            report($e);
+
+            return back()->with('err', 'No fue posible sincronizar reclamos: '.$e->getMessage());
         }
-        catch (\Throwable $e) { report($e); return back()->with('err', 'No fue posible sincronizar reclamos: '.$e->getMessage()); }
     }
 
     public function refresh(Request $request, MeliClaim $claim, MeliClaimsService $service): RedirectResponse
@@ -132,9 +140,10 @@ class MeliClaimController extends Controller
                 'variation_text' => $item->variation_text,
             ];
         })->values()->all() ?? [];
-        $sellerActs = in_array($claim->action_responsible, ['seller', 'respondent'], true);
-        $open = ! in_array($claim->status, ['closed', 'resolved'], true);
-        $critical = $open && (($sellerActs && $claim->due_date?->lte(now()->addDay())) || ($claim->affects_reputation && $claim->reputation_due_date?->lte(now()->addDay())));
+        $sellerActs = $this->operationalCriteria->needsAttention($claim);
+        $open = $this->operationalCriteria->open($claim);
+        $critical = $this->operationalCriteria->urgent($claim);
+
         return [
             'id' => $claim->id, 'claim_id' => $claim->claim_id, 'order_id' => $claim->order_id, 'pack_id' => $claim->pack_id,
             'type' => $claim->type, 'stage' => $claim->stage, 'status' => $claim->status,
@@ -216,7 +225,7 @@ class MeliClaimController extends Controller
     {
         $deadlines = collect((array) data_get($claim->raw_claim, 'players', []))
             ->filter(fn (mixed $player): bool => is_array($player))->flatMap(fn (array $player) => collect((array) ($player['available_actions'] ?? []))
-                ->filter(fn (mixed $action): bool => is_array($action))->map(fn (array $action): array => [
+            ->filter(fn (mixed $action): bool => is_array($action))->map(fn (array $action): array => [
                     'role' => $player['role'] ?? $player['type'] ?? null,
                     'action' => $action['action'] ?? $action['name'] ?? null,
                     'due_date' => $action['due_date'] ?? null,
@@ -232,7 +241,9 @@ class MeliClaimController extends Controller
 
     private function listPayload(mixed $value): array
     {
-        if (! is_array($value)) return [];
+        if (! is_array($value)) {
+            return [];
+        }
         $items = array_is_list($value) ? $value : ($value['data'] ?? $value['results'] ?? []);
 
         return array_values(array_filter((array) $items, 'is_array'));
@@ -241,7 +252,9 @@ class MeliClaimController extends Controller
     private function orderData(MeliClaim $claim): ?array
     {
         $order = $claim->order;
-        if (! $order || (int) $order->meli_account_id !== (int) $claim->meli_account_id) return null;
+        if (! $order || (int) $order->meli_account_id !== (int) $claim->meli_account_id) {
+            return null;
+        }
         $raw = (array) $order->raw;
 
         return [
@@ -258,10 +271,15 @@ class MeliClaimController extends Controller
     private function variationId($order, ?string $itemId, ?string $sku): ?string
     {
         foreach ((array) data_get($order?->raw, 'order_items', []) as $row) {
-            if (! is_array($row) || (string) data_get($row, 'item.id') !== (string) $itemId) continue;
+            if (! is_array($row) || (string) data_get($row, 'item.id') !== (string) $itemId) {
+                continue;
+            }
             $remoteSku = data_get($row, 'item.seller_sku');
-            if (filled($sku) && filled($remoteSku) && (string) $remoteSku !== (string) $sku) continue;
+            if (filled($sku) && filled($remoteSku) && (string) $remoteSku !== (string) $sku) {
+                continue;
+            }
             $id = data_get($row, 'item.variation_id');
+
             return filled($id) ? (string) $id : null;
         }
 
