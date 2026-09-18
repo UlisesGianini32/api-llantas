@@ -4,18 +4,23 @@ namespace Tests\Feature;
 
 use App\Jobs\ImportExcelFromTelegramJob;
 use App\Jobs\SyncMeliOpenClaimsForTelegramJob;
+use App\Jobs\SyncMeliPostSaleForTelegramJob;
 use App\Models\MeliAccount;
 use App\Models\MeliChatFlow;
 use App\Models\MeliClaim;
 use App\Models\TelegramConversationState;
+use App\Models\TelegramProcessedUpdate;
 use App\Models\User;
 use App\Services\MeliApi;
 use App\Services\MeliMessageService;
 use App\Services\MercadoLibre\Claims\MeliClaimMessagePolicy;
 use App\Services\MercadoLibre\Claims\MeliClaimMessageSender;
 use App\Services\MercadoLibre\Claims\MeliClaimsService;
+use App\Services\Telegram\TelegramBotClient;
 use App\Services\Telegram\TelegramClaimService;
 use App\Services\Telegram\TelegramPostSaleService;
+use App\Services\Telegram\TelegramText;
+use Illuminate\Database\QueryException;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Http\Client\Request;
 use Illuminate\Http\Client\Response;
@@ -199,6 +204,35 @@ class TelegramOperationsTest extends TestCase
         $this->assertCount(1, $this->telegramRequests('sendMessage'));
     }
 
+    public function test_processed_updates_have_cleanup_index_and_duplicate_update_is_ignored(): void
+    {
+        $indexes = collect(DB::select("PRAGMA index_list('telegram_processed_updates')"));
+        $this->assertTrue($indexes->contains(fn (object $index): bool => $index->name === 'telegram_processed_updates_processed_at_index'));
+
+        $this->sendMessage(12, '100', '/start')->assertOk();
+        $this->sendMessage(12, '100', '/start')->assertOk();
+
+        $this->assertSame(1, TelegramProcessedUpdate::query()->where('update_key', 'u:12')->count());
+        $this->assertCount(1, $this->telegramRequests('sendMessage'));
+    }
+
+    public function test_non_unique_database_error_is_not_silently_treated_as_duplicate(): void
+    {
+        DB::statement(<<<'SQL'
+            CREATE TRIGGER fail_telegram_processed_update
+            BEFORE INSERT ON telegram_processed_updates
+            WHEN NEW.update_key = 'u:13'
+            BEGIN
+                SELECT RAISE(FAIL, 'forced database failure');
+            END
+        SQL);
+
+        $this->withoutExceptionHandling();
+        $this->expectException(QueryException::class);
+
+        $this->sendMessage(13, '100', '/start');
+    }
+
     public function test_excel_button_and_direct_excel_keep_existing_job(): void
     {
         Queue::fake();
@@ -219,6 +253,18 @@ class TelegramOperationsTest extends TestCase
 
         $this->sendCallback(23, '100', 'cs')->assertOk();
         Queue::assertPushed(SyncMeliOpenClaimsForTelegramJob::class, fn (SyncMeliOpenClaimsForTelegramJob $job): bool => $job->chatId === '100');
+    }
+
+    public function test_post_sale_refresh_dispatches_background_job_and_responds_immediately(): void
+    {
+        Queue::fake();
+
+        $this->sendCallback(24, '100', 'pu')->assertOk();
+
+        Queue::assertPushed(SyncMeliPostSaleForTelegramJob::class, fn (SyncMeliPostSaleForTelegramJob $job): bool => $job->chatId === '100' && $job->afterId === 0);
+        $request = $this->telegramRequests('editMessageText')->sole();
+        $this->assertStringContainsString('quedó en cola', $request->data()['text']);
+        Http::assertNotSent(fn (Request $request): bool => str_contains($request->url(), 'api.mercadolibre.com'));
     }
 
     public function test_claim_menu_filters_pagination_detail_and_safe_conversation(): void
@@ -313,27 +359,110 @@ class TelegramOperationsTest extends TestCase
         $this->assertStringContainsString('telegram', (string) $payload);
     }
 
-    public function test_post_sale_pending_uses_actual_latest_remote_sender(): void
+    public function test_claim_closed_after_writing_reply_is_revalidated_before_confirming(): void
     {
-        $customerFlow = $this->flow('ORDER-1');
-        $sellerFlow = $this->flow('ORDER-2');
-        $apiUser = clone $this->user;
-        $apiUser->forceFill(['meli_id' => '900', 'access_token' => 'token']);
+        $claim = $this->claim(['available_actions' => [['action' => 'send_message_to_complainant']]]);
+        $claims = Mockery::mock(MeliClaimsService::class);
+        $claims->shouldNotReceive('sendMessage');
+        $this->app->instance(
+            MeliClaimMessageSender::class,
+            new MeliClaimMessageSender(app(MeliClaimMessagePolicy::class), $claims)
+        );
 
+        $this->sendCallback(45, '100', 'cr:'.$claim->id)->assertOk();
+        $this->sendMessage(46, '100', 'Respuesta pendiente')->assertOk();
+        $claim->forceFill(['status' => 'closed'])->save();
+        $this->sendCallback(47, '100', 'cok:'.$claim->id)->assertOk();
+
+        $this->assertDatabaseMissing('meli_claim_action_logs', ['meli_claim_id' => $claim->id]);
+        $this->assertDatabaseMissing('telegram_conversation_states', ['chat_id' => '100']);
+        $this->assertTrue($this->telegramRequests()->contains(
+            fn (Request $request): bool => str_contains((string) data_get($request->data(), 'text', ''), 'no permite enviar')
+        ));
+    }
+
+    public function test_post_sale_menu_listing_and_null_local_role_never_call_meli(): void
+    {
+        $nullFlow = $this->flow('ORDER-NULL');
+        $customerFlow = $this->flow('ORDER-CUSTOMER')->forceFill(['last_message_role' => 'customer']);
+        $customerFlow->save();
+        $sellerFlow = $this->flow('ORDER-SELLER')->forceFill(['last_message_role' => 'seller']);
+        $sellerFlow->save();
         $messaging = Mockery::mock(MeliMessageService::class);
-        $messaging->shouldReceive('resolveApiUser')->twice()->andReturn($apiUser);
+        $messaging->shouldNotReceive('resolveApiUser');
         $api = Mockery::mock(MeliApi::class);
-        $api->shouldReceive('getPackPostSaleMessages')->once()->with($apiUser, 'ORDER-1', 50, 0, false)->andReturn(['messages' => [
-            ['id' => '1', 'from' => ['user_id' => 'BUYER'], 'text' => '¿Dónde está?', 'message_date' => ['created' => '2026-09-17T10:00:00Z']],
-        ]]);
-        $api->shouldReceive('getPackPostSaleMessages')->once()->with($apiUser, 'ORDER-2', 50, 0, false)->andReturn(['messages' => [
-            ['id' => '2', 'from' => ['user_id' => '900'], 'text' => 'En camino', 'message_date' => ['created' => '2026-09-17T11:00:00Z']],
-        ]]);
-        $service = new TelegramPostSaleService($api, $messaging, app(\App\Services\Telegram\TelegramText::class));
+        $api->shouldNotReceive('getPackPostSaleMessages');
+        $service = new TelegramPostSaleService($api, $messaging, app(TelegramText::class));
+
         [$menu] = $service->menu();
+        [$listing] = $service->listing('p', 1);
+
         $this->assertStringContainsString('Pendientes de respuesta: 1', $menu);
+        $this->assertStringContainsString('Total: 1', $listing);
+        $this->assertFalse($service->snapshot($nullFlow->fresh())['pending']);
         $this->assertTrue($service->snapshot($customerFlow->fresh())['pending']);
         $this->assertFalse($service->snapshot($sellerFlow->fresh())['pending']);
+    }
+
+    public function test_post_sale_pending_listing_finds_old_conversation_beyond_150_rows(): void
+    {
+        $now = now();
+        $rows = [];
+        for ($i = 0; $i < 151; $i++) {
+            $order = $i === 0 ? 'ORDER-OLD-PENDING' : 'ORDER-PENDING-'.$i;
+            $rows[] = [
+                'user_id' => $this->user->id,
+                'meli_account_id' => $this->account->id,
+                'order_id' => $order,
+                'pack_id' => $order,
+                'buyer_id' => 'BUYER-'.$order,
+                'last_message_role' => 'customer',
+                'last_message_at' => $i === 0 ? $now->copy()->subYear() : $now,
+                'last_message_text' => 'Pendiente '.$i,
+                'last_message_synced_at' => $now,
+                'created_at' => $i === 0 ? $now->copy()->subYear() : $now,
+                'updated_at' => $i === 0 ? $now->copy()->subYear() : $now,
+            ];
+        }
+        MeliChatFlow::query()->insert($rows);
+        $oldId = MeliChatFlow::query()->where('order_id', 'ORDER-OLD-PENDING')->value('id');
+        $messaging = Mockery::mock(MeliMessageService::class);
+        $messaging->shouldNotReceive('resolveApiUser');
+        $api = Mockery::mock(MeliApi::class);
+        $api->shouldNotReceive('getPackPostSaleMessages');
+        $service = new TelegramPostSaleService($api, $messaging, app(TelegramText::class));
+
+        [$listing, $keyboard] = $service->listing('p', 26);
+
+        $this->assertStringContainsString('Página 26 de 26', $listing);
+        $this->assertStringContainsString('Total: 151', $listing);
+        $this->assertTrue(collect($keyboard)->flatten(1)->contains(
+            fn (array $button): bool => ($button['callback_data'] ?? null) === "pd:{$oldId}:p:26"
+        ));
+    }
+
+    public function test_post_sale_background_job_hydrates_local_message_snapshot(): void
+    {
+        $flow = $this->flow('ORDER-BACKGROUND');
+        $api = Mockery::mock(MeliApi::class);
+        $api->shouldReceive('getPackPostSaleMessages')->once()->withArgs(
+            fn ($apiUser, string $packId, int $limit, int $offset, bool $markAsRead): bool => (string) $apiUser->meli_id === '900'
+                && $packId === 'ORDER-BACKGROUND' && $limit === 50 && $offset === 0 && $markAsRead === false
+        )->andReturn(['messages' => [[
+            'id' => 'REMOTE-BACKGROUND',
+            'from' => ['user_id' => 'BUYER-ORDER-BACKGROUND'],
+            'text' => 'Respuesta pendiente',
+            'message_date' => ['created' => '2026-09-18T10:00:00Z'],
+        ]]]);
+        $service = new TelegramPostSaleService($api, app(MeliMessageService::class), app(TelegramText::class));
+
+        (new SyncMeliPostSaleForTelegramJob('100'))->handle($service, app(TelegramBotClient::class));
+
+        $flow->refresh();
+        $this->assertSame('customer', $flow->last_message_role);
+        $this->assertSame('Respuesta pendiente', $flow->last_message_text);
+        $this->assertNotNull($flow->last_message_at);
+        $this->assertNotNull($flow->last_message_synced_at);
     }
 
     public function test_successful_post_sale_send_marks_conversation_answered(): void
@@ -380,7 +509,7 @@ class TelegramOperationsTest extends TestCase
             'id' => 'REMOTE-LIST', 'from' => ['user_id' => 'BUYER'], 'text' => '<p>Necesito <strong>ayuda</strong></p>',
             'message_date' => ['created' => '2026-09-17T12:00:00Z'],
         ]]]);
-        $service = new TelegramPostSaleService($api, $messaging, app(\App\Services\Telegram\TelegramText::class));
+        $service = new TelegramPostSaleService($api, $messaging, app(TelegramText::class));
 
         [$list] = $service->listing('p', 1);
         [$detail, $buttons] = $service->detail($selected->id, 'p', 1);
