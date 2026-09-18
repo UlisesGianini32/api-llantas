@@ -8,6 +8,7 @@ use App\Jobs\SyncMeliPostSaleForTelegramJob;
 use App\Models\MeliAccount;
 use App\Models\MeliChatFlow;
 use App\Models\MeliClaim;
+use App\Models\MeliClaimActionLog;
 use App\Models\TelegramConversationState;
 use App\Models\TelegramProcessedUpdate;
 use App\Models\User;
@@ -42,7 +43,11 @@ class TelegramOperationsTest extends TestCase
 
     private object $actionsMigration;
 
+    private object $actionSourceMigration;
+
     private object $attachmentsMigration;
+
+    private object $claimTelegramMigration;
 
     private object $telegramMigration;
 
@@ -143,8 +148,12 @@ class TelegramOperationsTest extends TestCase
         $this->detailsMigration->up();
         $this->actionsMigration = require database_path('migrations/2026_09_01_000001_create_meli_claim_action_logs_table.php');
         $this->actionsMigration->up();
+        $this->actionSourceMigration = require database_path('migrations/2026_09_18_000001_add_source_to_meli_claim_action_logs_table.php');
+        $this->actionSourceMigration->up();
         $this->attachmentsMigration = require database_path('migrations/2026_09_02_000001_create_meli_claim_attachment_uploads_table.php');
         $this->attachmentsMigration->up();
+        $this->claimTelegramMigration = require database_path('migrations/2026_09_15_000001_add_telegram_notified_at_to_meli_claims.php');
+        $this->claimTelegramMigration->up();
         $this->telegramMigration = require database_path('migrations/2026_09_17_000001_create_telegram_operations_tables.php');
         $this->telegramMigration->up();
 
@@ -160,7 +169,9 @@ class TelegramOperationsTest extends TestCase
     protected function tearDown(): void
     {
         $this->telegramMigration->down();
+        $this->claimTelegramMigration->down();
         $this->attachmentsMigration->down();
+        $this->actionSourceMigration->down();
         $this->actionsMigration->down();
         $this->detailsMigration->down();
         $this->claimsMigration->down();
@@ -384,6 +395,226 @@ class TelegramOperationsTest extends TestCase
         $this->assertTrue($this->telegramRequests()->contains(
             fn (Request $request): bool => str_contains((string) data_get($request->data(), 'text', ''), 'no permite enviar')
         ));
+    }
+
+    public function test_claim_detail_and_actions_menu_show_only_real_supported_actions(): void
+    {
+        $claim = $this->claim(['available_actions' => [
+            ['action' => 'refund'],
+            ['action' => 'send_message_to_complainant'],
+            ['action' => 'unknown_remote_action'],
+        ]]);
+
+        $this->sendCallback(70, '100', "cd:{$claim->id}:o:1")->assertOk();
+        $detail = $this->telegramRequests('editMessageText')->last();
+        $this->assertTrue(collect(data_get($detail->data(), 'reply_markup.inline_keyboard'))->flatten(1)->contains(
+            fn (array $button): bool => ($button['callback_data'] ?? null) === "ca:{$claim->id}"
+        ));
+
+        $this->sendCallback(71, '100', "ca:{$claim->id}")->assertOk();
+        $menu = $this->telegramRequests('editMessageText')->last();
+        $labels = collect(data_get($menu->data(), 'reply_markup.inline_keyboard'))->flatten(1)->pluck('text');
+        $this->assertTrue($labels->contains('💰 Reembolso total'));
+        $this->assertTrue($labels->contains('💬 Responder comprador'));
+        $this->assertFalse($labels->contains(fn (string $label): bool => str_contains($label, 'Unknown')));
+
+        $this->sendCallback(72, '100', "caa:{$claim->id}:z")->assertOk();
+        Http::assertNotSent(fn (Request $request): bool => str_contains($request->url(), 'api.mercadolibre.com'));
+        $this->assertDatabaseMissing('telegram_conversation_states', ['chat_id' => '100']);
+    }
+
+    public function test_refund_and_return_require_remote_preflight_and_confirmation(): void
+    {
+        $refund = $this->claim(['claim_id' => 'TG-REFUND', 'available_actions' => [['action' => 'refund']]]);
+        $actions = ['refund'];
+        $offers = [];
+        $status = 'opened';
+        $posts = 0;
+        $this->fakeClaimActionApi('TG-REFUND', $actions, $offers, $status, $posts);
+
+        $this->sendCallback(73, '100', "caa:{$refund->id}:r")->assertOk();
+        $this->assertDatabaseHas('telegram_conversation_states', [
+            'chat_id' => '100', 'mode' => 'confirm_claim_action', 'entity_id' => $refund->id,
+        ]);
+        $this->assertSame(0, $posts);
+        $this->assertTrue($this->telegramRequests('editMessageText')->contains(
+            fn (Request $request): bool => str_contains((string) $request->data()['text'], 'REEMBOLSO TOTAL')
+        ));
+
+        $this->sendCallback(74, '100', 'cancel')->assertOk();
+        $return = $this->claim(['claim_id' => 'TG-RETURN', 'available_actions' => [['action' => 'allow_return']]]);
+        $actions = ['allow_return'];
+        $this->fakeClaimActionApi('TG-RETURN', $actions, $offers, $status, $posts);
+        $this->sendCallback(75, '100', "caa:{$return->id}:d")->assertOk();
+        $this->assertDatabaseHas('telegram_conversation_states', [
+            'chat_id' => '100', 'mode' => 'confirm_claim_action', 'entity_id' => $return->id,
+        ]);
+        $this->assertSame(0, $posts);
+        $this->assertTrue($this->telegramRequests('editMessageText')->contains(
+            fn (Request $request): bool => str_contains((string) $request->data()['text'], 'HABILITAR DEVOLUCIÓN')
+        ));
+    }
+
+    public function test_partial_refund_accepts_only_a_remote_offer_and_audits_telegram_source(): void
+    {
+        $claim = $this->claim(['claim_id' => 'TG-PARTIAL', 'available_actions' => [['action' => 'allow_partial_refund']]]);
+        $actions = ['allow_partial_refund'];
+        $offers = [['percentage' => 40, 'amount' => 259.60, 'currency_id' => 'MXN']];
+        $status = 'opened';
+        $posts = 0;
+        $clearActionsAfterPost = true;
+        $this->fakeClaimActionApi('TG-PARTIAL', $actions, $offers, $status, $posts, 201, $clearActionsAfterPost);
+
+        $this->sendCallback(76, '100', "caa:{$claim->id}:p")->assertOk();
+        $this->assertDatabaseHas('telegram_conversation_states', ['chat_id' => '100', 'mode' => 'awaiting_claim_partial_refund_amount']);
+        $this->sendMessage(77, '100', 'importe inválido')->assertOk();
+        $this->sendMessage(78, '100', '250.00')->assertOk();
+        $this->assertDatabaseHas('telegram_conversation_states', ['chat_id' => '100', 'mode' => 'awaiting_claim_partial_refund_amount']);
+        $this->sendMessage(79, '100', '259.60')->assertOk();
+        $this->assertDatabaseHas('telegram_conversation_states', ['chat_id' => '100', 'mode' => 'confirm_claim_action']);
+        $this->sendCallback(80, '100', "cac:{$claim->id}")->assertOk();
+
+        $this->assertSame(1, $posts);
+        $this->assertDatabaseHas('meli_claim_action_logs', [
+            'meli_claim_id' => $claim->id,
+            'user_id' => $this->user->id,
+            'source' => 'telegram',
+            'action' => 'partial_refund',
+            'remote_status' => 201,
+            'success' => true,
+        ]);
+        $audit = MeliClaimActionLog::query()->where('meli_claim_id', $claim->id)->sole();
+        $this->assertSame(['percentage' => 40, 'amount' => 259.6, 'currency_id' => 'MXN'], $audit->request_payload_sanitized);
+        $this->assertStringNotContainsString('meli-token', $audit->toJson());
+        $this->assertSame([], $claim->fresh()->available_actions);
+        $this->assertDatabaseMissing('telegram_conversation_states', ['chat_id' => '100']);
+    }
+
+    public function test_double_and_duplicate_confirmation_execute_one_refund(): void
+    {
+        $claim = $this->claim(['claim_id' => 'TG-ONCE', 'available_actions' => [['action' => 'refund']]]);
+        $actions = ['refund'];
+        $offers = [];
+        $status = 'opened';
+        $posts = 0;
+        $this->fakeClaimActionApi('TG-ONCE', $actions, $offers, $status, $posts);
+
+        $this->sendCallback(81, '100', "caa:{$claim->id}:r")->assertOk();
+        $this->sendCallback(82, '100', "cac:{$claim->id}")->assertOk();
+        $this->sendCallback(82, '100', "cac:{$claim->id}")->assertOk();
+        $this->sendCallback(83, '100', "cac:{$claim->id}")->assertOk();
+
+        $this->assertSame(1, $posts);
+        $this->assertSame(1, MeliClaimActionLog::query()->where('meli_claim_id', $claim->id)->count());
+    }
+
+    public function test_action_disappearing_or_claim_closing_before_confirmation_never_posts(): void
+    {
+        $claim = $this->claim(['claim_id' => 'TG-DISAPPEARS', 'available_actions' => [['action' => 'refund']]]);
+        $actions = ['refund'];
+        $offers = [];
+        $status = 'opened';
+        $posts = 0;
+        $this->fakeClaimActionApi('TG-DISAPPEARS', $actions, $offers, $status, $posts);
+        $this->sendCallback(84, '100', "caa:{$claim->id}:r")->assertOk();
+        $actions = [];
+        $this->sendCallback(85, '100', "cac:{$claim->id}")->assertOk();
+        $this->assertSame(0, $posts);
+
+        $closed = $this->claim(['claim_id' => 'TG-CLOSED', 'available_actions' => [['action' => 'allow_return']]]);
+        $actions = ['allow_return'];
+        $status = 'opened';
+        $this->fakeClaimActionApi('TG-CLOSED', $actions, $offers, $status, $posts);
+        $this->sendCallback(86, '200', "caa:{$closed->id}:d")->assertOk();
+        $status = 'closed';
+        $this->sendCallback(87, '200', "cac:{$closed->id}")->assertOk();
+        $this->assertSame(0, $posts);
+        $this->assertDatabaseMissing('meli_claim_action_logs', ['meli_claim_id' => $closed->id]);
+    }
+
+    public function test_partial_offer_is_revalidated_before_confirming(): void
+    {
+        $claim = $this->claim(['claim_id' => 'TG-OFFER-CHANGED', 'available_actions' => [['action' => 'allow_partial_refund']]]);
+        $actions = ['allow_partial_refund'];
+        $offers = [['percentage' => 40, 'amount' => 100, 'currency_id' => 'MXN']];
+        $status = 'opened';
+        $posts = 0;
+        $this->fakeClaimActionApi('TG-OFFER-CHANGED', $actions, $offers, $status, $posts);
+
+        $this->sendCallback(88, '100', "caa:{$claim->id}:p")->assertOk();
+        $this->sendMessage(89, '100', '100')->assertOk();
+        $offers = [['percentage' => 40, 'amount' => 90, 'currency_id' => 'MXN']];
+        $this->sendCallback(90, '100', "cac:{$claim->id}")->assertOk();
+
+        $this->assertSame(0, $posts);
+        $this->assertTrue($this->telegramRequests()->contains(
+            fn (Request $request): bool => str_contains((string) data_get($request->data(), 'text', ''), 'importe indicado ya no es válido')
+        ));
+    }
+
+    public function test_remote_action_error_is_controlled_and_not_retried(): void
+    {
+        $claim = $this->claim(['claim_id' => 'TG-REJECTED', 'available_actions' => [['action' => 'refund']]]);
+        $actions = ['refund'];
+        $offers = [];
+        $status = 'opened';
+        $posts = 0;
+        $this->fakeClaimActionApi('TG-REJECTED', $actions, $offers, $status, $posts, 500);
+
+        $this->sendCallback(91, '100', "caa:{$claim->id}:r")->assertOk();
+        $this->sendCallback(92, '100', "cac:{$claim->id}")->assertOk();
+
+        $this->assertSame(1, $posts);
+        $this->assertDatabaseHas('meli_claim_action_logs', [
+            'meli_claim_id' => $claim->id, 'source' => 'telegram', 'success' => false, 'remote_status' => 500,
+        ]);
+        $texts = $this->telegramRequests()->map(fn (Request $request): string => (string) data_get($request->data(), 'text', ''))->implode(' ');
+        $this->assertStringContainsString('Mercado Libre no procesó', $texts);
+        $this->assertStringNotContainsString('meli-token', $texts);
+    }
+
+    public function test_claim_actions_enforce_web_role_permissions(): void
+    {
+        $this->user->forceFill(['role' => 'disabled'])->save();
+        $claim = $this->claim(['claim_id' => 'TG-FORBIDDEN', 'available_actions' => [['action' => 'refund']]]);
+        $actions = ['refund'];
+        $offers = [];
+        $status = 'opened';
+        $posts = 0;
+        $this->fakeClaimActionApi('TG-FORBIDDEN', $actions, $offers, $status, $posts);
+
+        $this->sendCallback(93, '100', "caa:{$claim->id}:r")->assertOk();
+
+        $this->assertSame(0, $posts);
+        Http::assertNotSent(fn (Request $request): bool => str_contains($request->url(), 'api.mercadolibre.com'));
+        $this->assertDatabaseMissing('telegram_conversation_states', ['chat_id' => '100']);
+    }
+
+    public function test_action_menu_message_flows_keep_buyer_and_mediator_targets(): void
+    {
+        $claim = $this->claim(['available_actions' => [
+            ['action' => 'send_message_to_complainant'],
+            ['action' => 'send_message_to_mediator'],
+        ]]);
+        $sender = Mockery::mock(MeliClaimMessageSender::class);
+        $sender->shouldReceive('send')->once()->withArgs(
+            fn ($actor, $target, $text, $files, $source, $receiver): bool => $actor->is($this->user)
+                && $target->is($claim) && $text === 'Para comprador' && $files->isEmpty()
+                && $source === 'telegram' && $receiver === 'complainant'
+        )->andReturn(['ok' => true, 'refresh_failed' => false, 'error' => null]);
+        $sender->shouldReceive('send')->once()->withArgs(
+            fn ($actor, $target, $text, $files, $source, $receiver): bool => $actor->is($this->user)
+                && $target->is($claim) && $text === 'Para mediador' && $files->isEmpty()
+                && $source === 'telegram' && $receiver === 'mediator'
+        )->andReturn(['ok' => true, 'refresh_failed' => false, 'error' => null]);
+        $this->app->instance(MeliClaimMessageSender::class, $sender);
+
+        $this->sendCallback(94, '100', "caa:{$claim->id}:c")->assertOk();
+        $this->sendMessage(95, '100', 'Para comprador')->assertOk();
+        $this->sendCallback(96, '100', "cok:{$claim->id}")->assertOk();
+        $this->sendCallback(97, '100', "caa:{$claim->id}:m")->assertOk();
+        $this->sendMessage(98, '100', 'Para mediador')->assertOk();
+        $this->sendCallback(99, '100', "cok:{$claim->id}")->assertOk();
     }
 
     public function test_post_sale_menu_listing_and_null_local_role_never_call_meli(): void
@@ -666,11 +897,55 @@ class TelegramOperationsTest extends TestCase
         $this->assertCount(1, $this->telegramRequests('answerCallbackQuery'));
     }
 
+    private function fakeClaimActionApi(
+        string $claimId,
+        array &$actions,
+        array &$offers,
+        string &$status,
+        int &$posts,
+        int $postStatus = 201,
+        bool $clearActionsAfterPost = false,
+    ): void {
+        Http::fake(function (Request $request) use ($claimId, &$actions, &$offers, &$status, &$posts, $postStatus, $clearActionsAfterPost) {
+            if (str_contains($request->url(), 'api.telegram.org')) {
+                return Http::response(['ok' => true]);
+            }
+            $path = (string) parse_url($request->url(), PHP_URL_PATH);
+            if ($request->method() === 'POST') {
+                $posts++;
+                if ($clearActionsAfterPost && $postStatus >= 200 && $postStatus < 300) {
+                    $actions = [];
+                }
+
+                return Http::response($postStatus >= 400 ? ['message' => 'private-token-rejected'] : ['id' => 'TG-ACTION-1'], $postStatus);
+            }
+            if (str_ends_with($path, '/partial-refund/available-offers')) {
+                return Http::response(['available_offers' => $offers]);
+            }
+            if (preg_match('#/(detail|affects-reputation|status-history|actions-history|expected-resolutions|messages|changes)$#', $path)) {
+                return Http::response([]);
+            }
+
+            return Http::response([
+                'id' => $claimId,
+                'status' => $status,
+                'stage' => 'claim',
+                'last_updated' => now()->toISOString(),
+                'players' => [[
+                    'role' => 'respondent',
+                    'type' => 'seller',
+                    'available_actions' => array_map(fn (string $action): array => ['action' => $action], $actions),
+                ]],
+            ]);
+        });
+    }
+
     private function claim(array $overrides = []): MeliClaim
     {
         return MeliClaim::query()->create([
             'meli_account_id' => $this->account->id, 'claim_id' => 'CLAIM-'.fake()->unique()->numberBetween(1, 999999),
             'status' => 'opened', 'stage' => 'claim', 'date_created' => now(), 'last_updated' => now(),
+            'telegram_notified_at' => now(),
             ...$overrides,
         ]);
     }
