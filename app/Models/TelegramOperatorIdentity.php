@@ -7,7 +7,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class TelegramOperatorIdentity extends Model
 {
-    protected $fillable = ['chat_id', 'user_id', 'active'];
+    protected $fillable = ['telegram_user_id', 'user_id', 'active'];
 
     protected function casts(): array
     {

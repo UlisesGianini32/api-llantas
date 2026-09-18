@@ -167,8 +167,8 @@ class TelegramOperationsTest extends TestCase
             'user_id' => $this->user->id, 'meli_user_id' => '900', 'nickname' => 'Principal',
             'access_token' => 'meli-token', 'expires_at' => now()->addHour(), 'is_default' => true,
         ]);
-        TelegramOperatorIdentity::query()->create(['chat_id' => '100', 'user_id' => $this->user->id]);
-        TelegramOperatorIdentity::query()->create(['chat_id' => '200', 'user_id' => $this->user->id]);
+        TelegramOperatorIdentity::query()->create(['telegram_user_id' => '100', 'user_id' => $this->user->id]);
+        TelegramOperatorIdentity::query()->create(['telegram_user_id' => '200', 'user_id' => $this->user->id]);
         Http::preventStrayRequests();
         Http::fake(['api.telegram.org/*' => Http::response(['ok' => true])]);
     }
@@ -235,6 +235,45 @@ class TelegramOperationsTest extends TestCase
 
         $this->assertSame(1, TelegramProcessedUpdate::query()->where('update_key', 'u:12')->count());
         $this->assertCount(1, $this->telegramRequests('sendMessage'));
+    }
+
+    public function test_source_migration_backfills_only_historical_telegram_payloads(): void
+    {
+        $claim = $this->claim(['claim_id' => 'SOURCE-BACKFILL']);
+        $this->actionSecurityMigration->down();
+        $this->actionSourceMigration->down();
+
+        try {
+            foreach ([
+                'telegram-log' => ['source' => 'telegram', 'message' => 'Desde Telegram'],
+                'web-log' => ['source' => 'web', 'message' => 'Desde web'],
+                'legacy-log' => ['message' => 'Sin origen'],
+            ] as $hash => $payload) {
+                DB::table('meli_claim_action_logs')->insert([
+                    'meli_claim_id' => $claim->id,
+                    'meli_account_id' => $this->account->id,
+                    'user_id' => $this->user->id,
+                    'action' => 'send_message',
+                    'request_payload_sanitized' => json_encode($payload, JSON_THROW_ON_ERROR),
+                    'message_hash' => hash('sha256', $hash),
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ]);
+            }
+
+            $this->actionSourceMigration->up();
+
+            $this->assertSame('telegram', DB::table('meli_claim_action_logs')->where('message_hash', hash('sha256', 'telegram-log'))->value('source'));
+            $this->assertSame('web', DB::table('meli_claim_action_logs')->where('message_hash', hash('sha256', 'web-log'))->value('source'));
+            $this->assertSame('web', DB::table('meli_claim_action_logs')->where('message_hash', hash('sha256', 'legacy-log'))->value('source'));
+        } finally {
+            if (! Schema::hasColumn('meli_claim_action_logs', 'source')) {
+                $this->actionSourceMigration->up();
+            }
+            if (! Schema::hasTable('telegram_operator_identities')) {
+                $this->actionSecurityMigration->up();
+            }
+        }
     }
 
     public function test_non_unique_database_error_is_not_silently_treated_as_duplicate(): void
@@ -488,6 +527,7 @@ class TelegramOperationsTest extends TestCase
             'user_id' => $this->user->id,
             'source' => 'telegram',
             'telegram_chat_id' => '100',
+            'telegram_user_id' => '100',
             'action' => 'partial_refund',
             'remote_status' => 201,
             'success' => true,
@@ -595,6 +635,54 @@ class TelegramOperationsTest extends TestCase
         ));
     }
 
+    public function test_authorized_group_cannot_start_economic_action(): void
+    {
+        $claim = $this->claim(['claim_id' => 'TG-GROUP', 'available_actions' => [['action' => 'refund']]]);
+
+        $this->sendCallback(933, '100', "caa:{$claim->id}:r", '100', 'group')->assertOk();
+
+        Http::assertNotSent(fn (Request $request): bool => str_contains($request->url(), 'api.mercadolibre.com'));
+        $this->assertDatabaseMissing('telegram_conversation_states', ['chat_id' => '100']);
+    }
+
+    public function test_different_telegram_user_cannot_consume_or_confirm_financial_state(): void
+    {
+        $claim = $this->claim(['claim_id' => 'TG-OTHER-CONFIRM', 'available_actions' => [['action' => 'refund']]]);
+        $actions = ['refund'];
+        $offers = [];
+        $status = 'opened';
+        $posts = 0;
+        $this->fakeClaimActionApi('TG-OTHER-CONFIRM', $actions, $offers, $status, $posts);
+
+        $this->sendCallback(934, '100', "caa:{$claim->id}:r")->assertOk();
+        $this->sendCallback(935, '100', "cac:{$claim->id}", '200')->assertOk();
+
+        $this->assertSame(0, $posts);
+        $this->assertDatabaseHas('telegram_conversation_states', [
+            'chat_id' => '100', 'mode' => 'confirm_claim_action', 'entity_id' => $claim->id,
+        ]);
+        $this->assertDatabaseMissing('meli_claim_action_logs', ['meli_claim_id' => $claim->id]);
+    }
+
+    public function test_partial_refund_amount_from_another_telegram_user_is_rejected(): void
+    {
+        $claim = $this->claim(['claim_id' => 'TG-OTHER-AMOUNT', 'available_actions' => [['action' => 'allow_partial_refund']]]);
+        $actions = ['allow_partial_refund'];
+        $offers = [['percentage' => 40, 'amount' => 100, 'currency_id' => 'MXN']];
+        $status = 'opened';
+        $posts = 0;
+        $this->fakeClaimActionApi('TG-OTHER-AMOUNT', $actions, $offers, $status, $posts);
+
+        $this->sendCallback(936, '100', "caa:{$claim->id}:p")->assertOk();
+        $this->sendMessage(937, '100', '100', '200')->assertOk();
+
+        $this->assertSame(0, $posts);
+        $this->assertDatabaseHas('telegram_conversation_states', [
+            'chat_id' => '100', 'mode' => 'awaiting_claim_partial_refund_amount', 'entity_id' => $claim->id,
+        ]);
+        $this->assertDatabaseMissing('meli_claim_action_logs', ['meli_claim_id' => $claim->id]);
+    }
+
     public function test_mapped_operator_without_web_permission_cannot_start_economic_action(): void
     {
         $this->user->forceFill(['role' => 'disabled'])->save();
@@ -615,7 +703,7 @@ class TelegramOperationsTest extends TestCase
     public function test_mapped_operator_must_own_the_claim_account(): void
     {
         $other = User::factory()->create(['role' => 'operations']);
-        TelegramOperatorIdentity::query()->where('chat_id', '200')->update(['user_id' => $other->id]);
+        TelegramOperatorIdentity::query()->where('telegram_user_id', '200')->update(['user_id' => $other->id]);
         $claim = $this->claim(['claim_id' => 'TG-FOREIGN-ACCOUNT', 'available_actions' => [['action' => 'refund']]]);
 
         $this->sendCallback(931, '200', "caa:{$claim->id}:r")->assertOk();
@@ -1015,21 +1103,32 @@ class TelegramOperationsTest extends TestCase
             ->values()->all();
     }
 
-    private function sendMessage(int $updateId, string $chatId, string $text)
+    private function sendMessage(int $updateId, string $chatId, string $text, ?string $telegramUserId = null, string $chatType = 'private')
     {
+        $telegramUserId ??= $chatId;
+
         return $this->postJson('/api/telegram/webhook', [
             'update_id' => $updateId,
-            'message' => ['message_id' => $updateId, 'chat' => ['id' => (int) $chatId], 'text' => $text],
+            'message' => [
+                'message_id' => $updateId,
+                'from' => ['id' => (int) $telegramUserId],
+                'chat' => ['id' => (int) $chatId, 'type' => $chatType],
+                'text' => $text,
+            ],
         ], $this->headers());
     }
 
-    private function sendCallback(int $updateId, string $chatId, string $data)
+    private function sendCallback(int $updateId, string $chatId, string $data, ?string $telegramUserId = null, string $chatType = 'private')
     {
+        $telegramUserId ??= $chatId;
+
         return $this->postJson('/api/telegram/webhook', [
             'update_id' => $updateId,
             'callback_query' => [
-                'id' => 'callback-'.$updateId, 'data' => $data,
-                'message' => ['message_id' => 777, 'chat' => ['id' => (int) $chatId]],
+                'id' => 'callback-'.$updateId,
+                'from' => ['id' => (int) $telegramUserId],
+                'data' => $data,
+                'message' => ['message_id' => 777, 'chat' => ['id' => (int) $chatId, 'type' => $chatType]],
             ],
         ], $this->headers());
     }

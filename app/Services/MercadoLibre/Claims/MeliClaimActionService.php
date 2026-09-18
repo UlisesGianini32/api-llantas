@@ -8,7 +8,6 @@ use App\Models\MeliClaimActionLog;
 use App\Models\User;
 use App\Services\MercadoLibre\MeliApiRequestException;
 use App\Support\UserAccess;
-use Carbon\CarbonImmutable;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
@@ -36,7 +35,7 @@ class MeliClaimActionService
         $raw = $this->resolutions->preflight($account, $claim);
         $this->resolutions->persistPreflight($claim, $raw);
 
-        if ($interlock = $this->reconcileUncertainDelivery($claim, $raw)) {
+        if ($interlock = $this->unresolvedDeliveryInterlock($claim)) {
             return $interlock;
         }
 
@@ -58,7 +57,7 @@ class MeliClaimActionService
      * @param  array{percentage?:float|int,amount?:float|int|null,currency_id?:string|null}|null  $expectedOffer
      * @return array{ok:bool,code:string,message:string,refresh_failed:bool}
      */
-    public function execute(User $actor, MeliClaim $claim, string $action, ?float $percentage = null, string $source = 'web', ?array $expectedOffer = null, ?string $telegramChatId = null): array
+    public function execute(User $actor, MeliClaim $claim, string $action, ?float $percentage = null, string $source = 'web', ?array $expectedOffer = null, ?string $telegramChatId = null, ?string $telegramUserId = null): array
     {
         $account = $this->accountFor($actor, $claim);
         $this->assertSupported($action);
@@ -112,6 +111,7 @@ class MeliClaimActionService
                 'user_id' => $actor->id,
                 'source' => $source,
                 'telegram_chat_id' => $this->auditChatId($source, $telegramChatId),
+                'telegram_user_id' => $this->auditTelegramUserId($source, $telegramUserId),
                 'action' => $action,
                 'request_payload_sanitized' => $payload,
                 'message_hash' => $hash,
@@ -198,50 +198,18 @@ class MeliClaimActionService
     }
 
     /** @return array{ok:false,code:string,message:string,offers:array{},refresh_failed:false}|null */
-    private function reconcileUncertainDelivery(MeliClaim $claim, array $raw): ?array
+    private function unresolvedDeliveryInterlock(MeliClaim $claim): ?array
     {
+        // Remote timestamps and available actions cannot prove that an ambiguous POST was not accepted.
+        // Only an explicit administrative review may set reconciled_at and release this interlock.
         $pending = MeliClaimActionLog::query()
             ->where('meli_claim_id', $claim->id)
             ->whereNull('success')
             ->where('error_code', 'uncertain_delivery')
             ->whereNull('reconciled_at')
-            ->oldest('id')
-            ->get();
+            ->exists();
 
-        foreach ($pending as $audit) {
-            if (! in_array((string) ($raw['status'] ?? ''), ['open', 'opened'], true)) {
-                $audit->forceFill(['reconciliation_result' => 'claim_not_open'])->save();
-
-                return $this->uncertainDeliveryFailure();
-            }
-
-            if (! $this->policy->allows($raw, $audit->action)) {
-                $audit->forceFill(['reconciliation_result' => 'action_not_available'])->save();
-
-                return $this->uncertainDeliveryFailure();
-            }
-
-            try {
-                $remoteUpdatedAt = filled($raw['last_updated'] ?? null)
-                    ? CarbonImmutable::parse((string) $raw['last_updated'])
-                    : null;
-            } catch (Throwable) {
-                $remoteUpdatedAt = null;
-            }
-
-            if ($remoteUpdatedAt === null || $audit->created_at === null || ! $remoteUpdatedAt->isAfter($audit->created_at)) {
-                $audit->forceFill(['reconciliation_result' => 'snapshot_not_newer'])->save();
-
-                return $this->uncertainDeliveryFailure();
-            }
-
-            $audit->forceFill([
-                'reconciled_at' => now(),
-                'reconciliation_result' => 'action_still_available',
-            ])->save();
-        }
-
-        return null;
+        return $pending ? $this->uncertainDeliveryFailure() : null;
     }
 
     /** @return array{ok:false,code:string,message:string,offers:array{},refresh_failed:false} */
@@ -260,6 +228,15 @@ class MeliClaimActionService
         }
 
         return $chatId;
+    }
+
+    private function auditTelegramUserId(string $source, ?string $telegramUserId): ?string
+    {
+        if ($source !== 'telegram' || $telegramUserId === null || ! preg_match('/^\d{1,20}$/', $telegramUserId)) {
+            return null;
+        }
+
+        return $telegramUserId;
     }
 
     private function sameOffer(array $current, array $expected): bool

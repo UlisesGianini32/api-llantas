@@ -944,10 +944,10 @@ class MeliClaimsTest extends TestCase
         $this->assertSame(1, $posts);
         $audit = MeliClaimActionLog::query()->where('meli_claim_id', $claim->id)->sole();
         $this->assertNull($audit->reconciled_at);
-        $this->assertSame('claim_not_open', $audit->reconciliation_result);
+        $this->assertNull($audit->reconciliation_result);
     }
 
-    public function test_newer_remote_snapshot_with_same_action_safely_reconciles_uncertain_delivery(): void
+    public function test_newer_snapshot_and_same_action_stay_blocked_until_explicit_manual_reconciliation(): void
     {
         $claim = $this->claim($this->account(), ['claim_id' => 'UNCERTAIN-SAFE']);
         $lastUpdated = now()->subMinute()->toISOString();
@@ -981,11 +981,20 @@ class MeliClaimsTest extends TestCase
         $lastUpdated = now()->addSecond()->toISOString();
         $timeout = false;
 
+        $this->post(route('meli.claims.resolutions.refund', $claim), ['confirmed' => true])
+            ->assertSessionHas('err', 'Existe una resolución con resultado incierto. Requiere revisión antes de intentar otra acción económica.');
+
+        $this->assertSame(1, $posts);
+        $this->assertNull($uncertain->fresh()->reconciled_at);
+
+        $uncertain->forceFill([
+            'reconciled_at' => now(),
+            'reconciliation_result' => 'manual_confirmed_not_delivered',
+        ])->save();
         $this->post(route('meli.claims.resolutions.refund', $claim), ['confirmed' => true])->assertSessionHas('ok');
 
         $this->assertSame(2, $posts);
-        $this->assertNotNull($uncertain->fresh()->reconciled_at);
-        $this->assertSame('action_still_available', $uncertain->fresh()->reconciliation_result);
+        $this->assertSame('manual_confirmed_not_delivered', $uncertain->fresh()->reconciliation_result);
         $this->assertDatabaseCount('meli_claim_action_logs', 2);
     }
 

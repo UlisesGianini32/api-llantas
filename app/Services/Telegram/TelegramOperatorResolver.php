@@ -7,14 +7,14 @@ use App\Models\User;
 
 class TelegramOperatorResolver
 {
-    public function resolve(string $chatId): ?User
+    public function resolve(string $telegramUserId): ?User
     {
-        if (! preg_match('/^-?\d{1,20}$/', $chatId)) {
+        if (! preg_match('/^\d{1,20}$/', $telegramUserId)) {
             return null;
         }
 
         return TelegramOperatorIdentity::query()
-            ->where('chat_id', $chatId)
+            ->where('telegram_user_id', $telegramUserId)
             ->where('active', true)
             ->with('user')
             ->first()?->user;
