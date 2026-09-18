@@ -3,6 +3,7 @@
 namespace App\Services\Telegram;
 
 use App\Models\MeliClaim;
+use App\Services\MercadoLibre\Claims\MeliClaimActionCatalog;
 use App\Services\MercadoLibre\Claims\MeliClaimOperationalCriteria;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
@@ -14,6 +15,7 @@ class TelegramClaimService
     public function __construct(
         private MeliClaimOperationalCriteria $criteria,
         private TelegramText $text,
+        private MeliClaimActionCatalog $actionCatalog,
     ) {}
 
     public function menu(): array
@@ -91,12 +93,36 @@ class TelegramClaimService
         $keyboard = [
             [['text' => '💬 Conversación', 'callback_data' => "cc:{$claim->id}:0"]],
             [['text' => '✍️ Responder', 'callback_data' => "cr:{$claim->id}"]],
+            [['text' => '⚙️ Acciones', 'callback_data' => "ca:{$claim->id}"]],
             [['text' => '🌐 Abrir en sistema', 'url' => $webUrl]],
             $navigation,
             [['text' => '📋 Lista', 'callback_data' => "cl:{$filter}:{$page}"], ['text' => '🏠 Menú', 'callback_data' => 'm']],
         ];
 
         return [$body, array_values(array_filter($keyboard))];
+    }
+
+    public function actions(int $id): ?array
+    {
+        $claim = MeliClaim::query()->find($id);
+        if (! $claim) {
+            return null;
+        }
+
+        $actions = $this->actionCatalog->available($claim);
+        $keyboard = collect($actions)->map(fn (array $action): array => [[
+            'text' => $action['label'],
+            'callback_data' => "caa:{$claim->id}:{$action['callback']}",
+        ]])->all();
+        $keyboard[] = [['text' => '🔙 Volver al reclamo', 'callback_data' => "cd:{$claim->id}:o:1"]];
+        $keyboard[] = [['text' => '🏠 Menú', 'callback_data' => 'm']];
+
+        $body = "⚙️ ACCIONES DEL RECLAMO #{$claim->claim_id}\n\n";
+        $body .= $actions === []
+            ? 'No hay acciones compatibles disponibles para este reclamo.'
+            : 'Selecciona una acción habilitada actualmente por Mercado Libre.';
+
+        return [$body, $keyboard];
     }
 
     public function conversation(int $id, int $offset = 0): ?array

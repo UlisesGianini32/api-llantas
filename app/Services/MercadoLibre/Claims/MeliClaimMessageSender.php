@@ -23,11 +23,11 @@ class MeliClaimMessageSender
     ) {}
 
     /** @param Collection<int, mixed>|null $attachments */
-    public function send(User $actor, MeliClaim $claim, string $message, ?Collection $attachments = null, string $source = 'web'): array
+    public function send(User $actor, MeliClaim $claim, string $message, ?Collection $attachments = null, string $source = 'web', ?string $requestedReceiver = null): array
     {
         $claim->refresh();
         $account = $actor->meliAccounts()->findOrFail($claim->meli_account_id);
-        $receiver = $this->policy->recipient($claim);
+        $receiver = $this->policy->recipient($claim, $requestedReceiver);
         if ($receiver === null) {
             throw ValidationException::withMessages(['message' => 'Actualmente Mercado Libre no permite enviar un mensaje desde este reclamo.']);
         }
@@ -61,6 +61,7 @@ class MeliClaimMessageSender
                 'meli_claim_id' => $claim->id,
                 'meli_account_id' => $account->id,
                 'user_id' => $actor->id,
+                'source' => $source,
                 'action' => 'send_message',
                 'receiver_role' => $receiver,
                 'request_payload_sanitized' => [

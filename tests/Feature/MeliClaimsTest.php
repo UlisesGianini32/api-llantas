@@ -26,6 +26,8 @@ class MeliClaimsTest extends TestCase
     private object $migration;
     private object $detailMigration;
     private object $actionMigration;
+    private object $actionSourceMigration;
+    private object $actionSecurityMigration;
     private object $attachmentMigration;
     private object $telegramMigration;
     private User $user;
@@ -68,6 +70,10 @@ class MeliClaimsTest extends TestCase
         $this->detailMigration->up();
         $this->actionMigration = require database_path('migrations/2026_09_01_000001_create_meli_claim_action_logs_table.php');
         $this->actionMigration->up();
+        $this->actionSourceMigration = require database_path('migrations/2026_09_18_000001_add_source_to_meli_claim_action_logs_table.php');
+        $this->actionSourceMigration->up();
+        $this->actionSecurityMigration = require database_path('migrations/2026_09_18_000002_secure_telegram_claim_actions.php');
+        $this->actionSecurityMigration->up();
         $this->attachmentMigration = require database_path('migrations/2026_09_02_000001_create_meli_claim_attachment_uploads_table.php');
         $this->attachmentMigration->up();
         $this->telegramMigration = require database_path('migrations/2026_09_15_000001_add_telegram_notified_at_to_meli_claims.php');
@@ -81,6 +87,8 @@ class MeliClaimsTest extends TestCase
     {
         $this->telegramMigration->down();
         $this->attachmentMigration->down();
+        $this->actionSecurityMigration->down();
+        $this->actionSourceMigration->down();
         $this->actionMigration->down();
         $this->detailMigration->down();
         $this->migration->down();
@@ -787,7 +795,7 @@ class MeliClaimsTest extends TestCase
         $this->assertSame([], $posts->sole()->data());
         $this->assertTrue($posts->sole()->hasHeader('Authorization', 'Bearer economic-token'));
         $this->assertSame('GET', $requests->first()->method());
-        $this->assertDatabaseHas('meli_claim_action_logs', ['meli_claim_id' => $claim->id, 'action' => 'refund', 'success' => true, 'remote_status' => 201]);
+        $this->assertDatabaseHas('meli_claim_action_logs', ['meli_claim_id' => $claim->id, 'source' => 'web', 'action' => 'refund', 'success' => true, 'remote_status' => 201]);
         $this->assertStringNotContainsString('economic-token', MeliClaimActionLog::query()->latest('id')->first()->toJson());
     }
 
@@ -894,6 +902,100 @@ class MeliClaimsTest extends TestCase
             'success' => null,
             'error_code' => 'uncertain_delivery',
         ]);
+    }
+
+    public function test_uncertain_delivery_blocks_later_attempt_when_snapshot_is_stale_missing_action_or_closed(): void
+    {
+        $claim = $this->claim($this->account(), ['claim_id' => 'UNCERTAIN-BLOCK']);
+        $actions = ['refund'];
+        $status = 'opened';
+        $lastUpdated = now()->subMinute()->toISOString();
+        $posts = 0;
+        Http::fake(function (Request $request) use (&$actions, &$status, &$lastUpdated, &$posts) {
+            $path = (string) parse_url($request->url(), PHP_URL_PATH);
+            if ($request->method() === 'POST') {
+                $posts++;
+                throw new ConnectionException('timeout');
+            }
+            if (preg_match('#/(detail|affects-reputation|status-history|actions-history|expected-resolutions|messages|changes)$#', $path)) {
+                return Http::response([]);
+            }
+
+            return Http::response([
+                'id' => 'UNCERTAIN-BLOCK',
+                'status' => $status,
+                'last_updated' => $lastUpdated,
+                'players' => [['role' => 'respondent', 'available_actions' => array_map(fn (string $action): array => ['action' => $action], $actions)]],
+            ]);
+        });
+
+        $this->post(route('meli.claims.resolutions.refund', $claim), ['confirmed' => true])->assertSessionHas('err');
+        $this->travel(61)->seconds();
+        $this->post(route('meli.claims.resolutions.refund', $claim), ['confirmed' => true])
+            ->assertSessionHas('err', 'Existe una resolución con resultado incierto. Requiere revisión antes de intentar otra acción económica.');
+
+        $actions = [];
+        $lastUpdated = now()->addMinute()->toISOString();
+        $this->post(route('meli.claims.resolutions.refund', $claim), ['confirmed' => true])->assertSessionHas('err');
+        $actions = ['refund'];
+        $status = 'closed';
+        $this->post(route('meli.claims.resolutions.refund', $claim), ['confirmed' => true])->assertSessionHas('err');
+
+        $this->assertSame(1, $posts);
+        $audit = MeliClaimActionLog::query()->where('meli_claim_id', $claim->id)->sole();
+        $this->assertNull($audit->reconciled_at);
+        $this->assertNull($audit->reconciliation_result);
+    }
+
+    public function test_newer_snapshot_and_same_action_stay_blocked_until_explicit_manual_reconciliation(): void
+    {
+        $claim = $this->claim($this->account(), ['claim_id' => 'UNCERTAIN-SAFE']);
+        $lastUpdated = now()->subMinute()->toISOString();
+        $timeout = true;
+        $posts = 0;
+        Http::fake(function (Request $request) use (&$lastUpdated, &$timeout, &$posts) {
+            $path = (string) parse_url($request->url(), PHP_URL_PATH);
+            if ($request->method() === 'POST') {
+                $posts++;
+                if ($timeout) {
+                    throw new ConnectionException('timeout');
+                }
+
+                return Http::response(['id' => 'SAFE-RETRY'], 201);
+            }
+            if (preg_match('#/(detail|affects-reputation|status-history|actions-history|expected-resolutions|messages|changes)$#', $path)) {
+                return Http::response([]);
+            }
+
+            return Http::response([
+                'id' => 'UNCERTAIN-SAFE',
+                'status' => 'opened',
+                'last_updated' => $lastUpdated,
+                'players' => [['role' => 'respondent', 'available_actions' => [['action' => 'refund']]]],
+            ]);
+        });
+
+        $this->post(route('meli.claims.resolutions.refund', $claim), ['confirmed' => true])->assertSessionHas('err');
+        $uncertain = MeliClaimActionLog::query()->where('meli_claim_id', $claim->id)->sole();
+        $this->travel(61)->seconds();
+        $lastUpdated = now()->addSecond()->toISOString();
+        $timeout = false;
+
+        $this->post(route('meli.claims.resolutions.refund', $claim), ['confirmed' => true])
+            ->assertSessionHas('err', 'Existe una resolución con resultado incierto. Requiere revisión antes de intentar otra acción económica.');
+
+        $this->assertSame(1, $posts);
+        $this->assertNull($uncertain->fresh()->reconciled_at);
+
+        $uncertain->forceFill([
+            'reconciled_at' => now(),
+            'reconciliation_result' => 'manual_confirmed_not_delivered',
+        ])->save();
+        $this->post(route('meli.claims.resolutions.refund', $claim), ['confirmed' => true])->assertSessionHas('ok');
+
+        $this->assertSame(2, $posts);
+        $this->assertSame('manual_confirmed_not_delivered', $uncertain->fresh()->reconciliation_result);
+        $this->assertDatabaseCount('meli_claim_action_logs', 2);
     }
 
     public function test_partial_refund_uses_remote_offer_and_posts_only_percentage(): void
