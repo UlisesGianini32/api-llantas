@@ -8,6 +8,8 @@ use App\Models\MeliChatFlow;
 use App\Models\MeliClaim;
 use App\Models\TelegramProcessedUpdate;
 use App\Services\MeliMessageService;
+use App\Services\MercadoLibre\Claims\MeliClaimActionCatalog;
+use App\Services\MercadoLibre\Claims\MeliClaimActionService;
 use App\Services\MercadoLibre\Claims\MeliClaimMessagePolicy;
 use App\Services\MercadoLibre\Claims\MeliClaimMessageSender;
 use Illuminate\Database\UniqueConstraintViolationException;
@@ -23,6 +25,8 @@ class TelegramOperationsService
         private TelegramClaimService $claims,
         private TelegramPostSaleService $postSale,
         private TelegramPostSaleSyncCoordinator $postSaleSync,
+        private MeliClaimActionCatalog $claimActionCatalog,
+        private MeliClaimActionService $claimActions,
         private MeliClaimMessagePolicy $claimPolicy,
         private MeliClaimMessageSender $claimSender,
         private MeliMessageService $postSaleSender,
@@ -108,6 +112,8 @@ class TelegramOperationsService
         }
         if ($state->mode === 'awaiting_claim_reply') {
             $this->captureReply($chatId, 'claim', (int) $state->entity_id, $text);
+        } elseif ($state->mode === 'awaiting_claim_partial_refund_amount') {
+            $this->capturePartialRefundAmount($chatId, (int) $state->entity_id, $text);
         } elseif ($state->mode === 'awaiting_post_sale_reply') {
             $this->captureReply($chatId, 'post_sale', (int) $state->entity_id, $text);
         }
@@ -168,6 +174,10 @@ class TelegramOperationsService
             'cr' => $this->startClaimReply($chatId, $messageId, (int) ($parts[0] ?? 0)),
             'cok' => $this->confirmClaimReply($chatId, $messageId, (int) ($parts[0] ?? 0)),
             'ced' => $this->editReply($chatId, $messageId, 'claim', (int) ($parts[0] ?? 0)),
+            'ca' => $this->renderNullable($chatId, $messageId, $this->claims->actions((int) ($parts[0] ?? 0))),
+            'caa' => $this->startClaimAction($chatId, $messageId, (int) ($parts[0] ?? 0), (string) ($parts[1] ?? '')),
+            'cac' => $this->confirmClaimAction($chatId, $messageId, (int) ($parts[0] ?? 0)),
+            'cam' => $this->changePartialRefundAmount($chatId, $messageId, (int) ($parts[0] ?? 0)),
             'pl' => $this->render($chatId, $messageId, $this->postSale->listing($parts[0] ?? 'a', (int) ($parts[1] ?? 1))),
             'pd' => $this->renderNullable($chatId, $messageId, $this->postSale->detail((int) ($parts[0] ?? 0), $parts[1] ?? 'a', (int) ($parts[2] ?? 1))),
             'pc' => $this->renderNullable($chatId, $messageId, $this->postSale->conversation((int) ($parts[0] ?? 0), (int) ($parts[1] ?? 0))),
@@ -187,7 +197,8 @@ class TelegramOperationsService
             return;
         }
         $mode = $type === 'claim' ? 'confirm_claim_reply' : 'confirm_post_sale_reply';
-        $this->states->put($chatId, $mode, $type, $entityId, ['text' => $text]);
+        $currentPayload = $this->states->get($chatId)?->payload ?? [];
+        $this->states->put($chatId, $mode, $type, $entityId, [...$currentPayload, 'text' => $text]);
         $prefix = $type === 'claim' ? 'c' : 'p';
         $this->telegram->sendMessage($chatId, "¿Enviar este mensaje?\n\n“{$text}”", [
             [['text' => '✅ Enviar', 'callback_data' => "{$prefix}ok:{$entityId}"]],
@@ -195,16 +206,246 @@ class TelegramOperationsService
         ]);
     }
 
-    private function startClaimReply(string $chatId, string $messageId, int $claimId): void
+    private function startClaimAction(string $chatId, string $messageId, int $claimId, string $callback): void
+    {
+        $claim = MeliClaim::query()->with(['meliAccount.user', 'order.items'])->find($claimId);
+        $descriptor = $this->claimActionCatalog->fromCallback($callback);
+        $available = $claim ? collect($this->claimActionCatalog->available($claim))
+            ->first(fn (array $item): bool => $item['callback'] === $callback) : null;
+        $actor = $claim?->meliAccount?->user;
+        if (! $claim || ! $actor || ! $descriptor || ! $available) {
+            $this->invalid($chatId, $messageId, 'Esta acción ya no está disponible en Mercado Libre.');
+
+            return;
+        }
+        if (! $this->claimActions->canAct($actor, $claim)) {
+            $this->invalid($chatId, $messageId, 'Este operador no tiene permiso para ejecutar acciones sobre el reclamo.');
+
+            return;
+        }
+        if ($descriptor['flow'] === 'message') {
+            $this->startClaimReply($chatId, $messageId, $claimId, $descriptor['receiver_role']);
+
+            return;
+        }
+
+        try {
+            $prepared = $this->claimActions->prepare($actor, $claim, $descriptor['action']);
+        } catch (Throwable $error) {
+            report($error);
+            $this->invalid($chatId, $messageId, 'No fue posible verificar esta acción con Mercado Libre.');
+
+            return;
+        }
+        if (! $prepared['ok']) {
+            $this->invalid($chatId, $messageId, '⚠️ '.$prepared['message']);
+
+            return;
+        }
+        if ($descriptor['action'] === 'partial_refund') {
+            $offers = collect($prepared['offers'])->filter(fn (array $offer): bool => is_numeric($offer['amount'] ?? null)
+                && filled($offer['currency_id'] ?? null))->values()->all();
+            if ($offers === []) {
+                $this->invalid($chatId, $messageId, 'Mercado Libre no devolvió importes válidos para el reembolso parcial.');
+
+                return;
+            }
+            $this->states->put($chatId, 'awaiting_claim_partial_refund_amount', 'claim', $claimId, [
+                'action' => 'partial_refund',
+                'offers' => $offers,
+            ]);
+            $currencies = collect($offers)->pluck('currency_id')->unique()->implode(', ');
+            $this->telegram->editOrSend(
+                $chatId,
+                $messageId,
+                "💵 REEMBOLSO PARCIAL\n\nEscribe el importe exacto a ofrecer en {$currencies}. Usa hasta dos decimales.",
+                [[['text' => '❌ Cancelar', 'callback_data' => 'cancel']]]
+            );
+
+            return;
+        }
+
+        $this->states->put($chatId, 'confirm_claim_action', 'claim', $claimId, ['action' => $descriptor['action']]);
+        $this->renderClaimActionConfirmation($chatId, $messageId, $claim, $descriptor['action']);
+    }
+
+    private function capturePartialRefundAmount(string $chatId, int $claimId, string $text): void
+    {
+        $state = $this->states->get($chatId);
+        if (! $state || $state->mode !== 'awaiting_claim_partial_refund_amount' || (int) $state->entity_id !== $claimId) {
+            return;
+        }
+        $value = trim($text);
+        if (! preg_match('/^\d+(?:[.,]\d{1,2})?$/', $value)) {
+            $this->telegram->sendMessage($chatId, 'El importe debe ser numérico, mayor que cero y tener como máximo dos decimales.', [[['text' => '❌ Cancelar', 'callback_data' => 'cancel']]]);
+
+            return;
+        }
+        $amount = (float) str_replace(',', '.', $value);
+        if ($amount <= 0) {
+            $this->telegram->sendMessage($chatId, 'El importe debe ser mayor que cero.', [[['text' => '❌ Cancelar', 'callback_data' => 'cancel']]]);
+
+            return;
+        }
+        $matches = collect((array) data_get($state->payload, 'offers', []))
+            ->filter(fn (mixed $offer): bool => is_array($offer) && is_numeric($offer['amount'] ?? null)
+                && (int) round((float) $offer['amount'] * 100) === (int) round($amount * 100))
+            ->values();
+        if ($matches->count() !== 1) {
+            $allowed = collect((array) data_get($state->payload, 'offers', []))
+                ->filter(fn (mixed $offer): bool => is_array($offer) && is_numeric($offer['amount'] ?? null))
+                ->map(fn (array $offer): string => $this->money($offer['amount']).' '.($offer['currency_id'] ?? ''))
+                ->unique()->implode(', ');
+            $this->telegram->sendMessage($chatId, 'El importe no coincide con una oferta vigente de Mercado Libre.'.($allowed !== '' ? " Importes permitidos: {$allowed}." : ''), [[['text' => '❌ Cancelar', 'callback_data' => 'cancel']]]);
+
+            return;
+        }
+
+        $offer = $matches->first();
+        $this->states->put($chatId, 'confirm_claim_action', 'claim', $claimId, [
+            'action' => 'partial_refund',
+            'offer' => $offer,
+        ]);
+        $claim = MeliClaim::query()->with(['meliAccount.user', 'order.items'])->find($claimId);
+        if (! $claim) {
+            $this->states->clear($chatId);
+
+            return;
+        }
+        $this->renderClaimActionConfirmation($chatId, null, $claim, 'partial_refund', $offer);
+    }
+
+    private function changePartialRefundAmount(string $chatId, string $messageId, int $claimId): void
+    {
+        $state = $this->states->get($chatId);
+        $claim = MeliClaim::query()->with('meliAccount.user')->find($claimId);
+        $actor = $claim?->meliAccount?->user;
+        if (! $state || $state->mode !== 'confirm_claim_action' || (int) $state->entity_id !== $claimId
+            || data_get($state->payload, 'action') !== 'partial_refund' || ! $claim || ! $actor) {
+            $this->invalid($chatId, $messageId, 'La confirmación expiró.');
+
+            return;
+        }
+        try {
+            $prepared = $this->claimActions->prepare($actor, $claim, 'partial_refund');
+        } catch (Throwable $error) {
+            report($error);
+            $this->invalid($chatId, $messageId, 'No fue posible actualizar las ofertas de Mercado Libre.');
+
+            return;
+        }
+        if (! $prepared['ok']) {
+            $this->invalid($chatId, $messageId, '⚠️ '.$prepared['message']);
+
+            return;
+        }
+        $this->states->put($chatId, 'awaiting_claim_partial_refund_amount', 'claim', $claimId, [
+            'action' => 'partial_refund', 'offers' => $prepared['offers'],
+        ]);
+        $this->telegram->editOrSend($chatId, $messageId, 'Escribe el nuevo importe exacto del reembolso parcial.', [[['text' => '❌ Cancelar', 'callback_data' => 'cancel']]]);
+    }
+
+    private function confirmClaimAction(string $chatId, string $messageId, int $claimId): void
+    {
+        $payload = $this->states->claimConfirmation($chatId, 'confirm_claim_action', $claimId);
+        if (! $payload) {
+            $this->invalid($chatId, $messageId, 'Esta confirmación ya fue procesada o expiró.');
+
+            return;
+        }
+        $claim = MeliClaim::query()->with('meliAccount.user')->find($claimId);
+        $actor = $claim?->meliAccount?->user;
+        if (! $claim || ! $actor || ! $this->claimActions->canAct($actor, $claim)) {
+            $this->states->clear($chatId);
+            $this->invalid($chatId, $messageId, 'El operador no tiene permiso para ejecutar esta acción.');
+
+            return;
+        }
+        $action = (string) ($payload['action'] ?? '');
+        $offer = is_array($payload['offer'] ?? null) ? $payload['offer'] : null;
+        try {
+            $result = $this->claimActions->execute(
+                $actor,
+                $claim,
+                $action,
+                $offer !== null ? (float) ($offer['percentage'] ?? 0) : null,
+                'telegram',
+                $offer,
+            );
+        } catch (ValidationException $error) {
+            $result = ['ok' => false, 'message' => collect($error->errors())->flatten()->first() ?: 'La acción ya no es válida.'];
+        } catch (Throwable $error) {
+            report($error);
+            $result = ['ok' => false, 'message' => 'No fue posible completar la acción con Mercado Libre.'];
+        }
+        $this->states->clear($chatId);
+        if (! $result['ok']) {
+            $this->invalid($chatId, $messageId, '⚠️ '.$result['message']);
+
+            return;
+        }
+
+        $text = $result['refresh_failed']
+            ? '✅ La acción fue aceptada, pero no fue posible actualizar el reclamo. Actualízalo manualmente.'
+            : '✅ Acción realizada correctamente.';
+        $this->telegram->editOrSend($chatId, $messageId, $text, [
+            [['text' => '🚨 Ver reclamo', 'callback_data' => "cd:{$claimId}:o:1"]],
+            [['text' => '⚙️ Acciones disponibles', 'callback_data' => "ca:{$claimId}"]],
+            [['text' => '🏠 Menú', 'callback_data' => 'm']],
+        ]);
+    }
+
+    private function renderClaimActionConfirmation(string $chatId, ?string $messageId, MeliClaim $claim, string $action, ?array $offer = null): void
+    {
+        $claim->loadMissing('order.items');
+        $title = match ($action) {
+            'refund' => '💰 REEMBOLSO TOTAL',
+            'allow_return' => '📦 HABILITAR DEVOLUCIÓN',
+            default => '💵 REEMBOLSO PARCIAL',
+        };
+        $warning = match ($action) {
+            'refund' => 'Esta acción puede devolver el dinero al comprador.',
+            'allow_return' => '¿Permitir que el comprador realice la devolución?',
+            default => 'Esta oferta puede devolver parte del importe al comprador.',
+        };
+        $item = $claim->order?->items?->first();
+        $body = "{$title}\n\nReclamo: #{$claim->claim_id}\nPedido: ".($claim->order_id ?: '—')
+            ."\nProducto: ".($item?->title ?: '—');
+        $orderTotal = data_get($claim->order?->raw, 'total_amount');
+        $orderCurrency = data_get($claim->order?->raw, 'currency_id');
+        if ($action === 'refund' && is_numeric($orderTotal) && filled($orderCurrency)) {
+            $body .= "\nImporte del pedido: ".$this->money($orderTotal).' '.$orderCurrency;
+        }
+        if ($offer !== null) {
+            $body .= "\nReembolso parcial: ".$this->money($offer['amount'] ?? 0).' '.($offer['currency_id'] ?? '')
+                ."\nPorcentaje: ".($offer['percentage'] ?? '—').'%';
+        }
+        $body .= "\n\n{$warning}\n\n¿Confirmar la acción?";
+        $keyboard = [[['text' => '✅ Confirmar', 'callback_data' => "cac:{$claim->id}"]]];
+        if ($action === 'partial_refund') {
+            $keyboard[] = [['text' => '✏️ Cambiar importe', 'callback_data' => "cam:{$claim->id}"]];
+        }
+        $keyboard[] = [['text' => '❌ Cancelar', 'callback_data' => 'cancel']];
+        $this->telegram->editOrSend($chatId, $messageId, $body, $keyboard);
+    }
+
+    private function money(mixed $amount): string
+    {
+        return number_format((float) $amount, 2, '.', ',');
+    }
+
+    private function startClaimReply(string $chatId, string $messageId, int $claimId, ?string $receiverRole = null): void
     {
         $claim = MeliClaim::query()->find($claimId);
-        if (! $claim || $this->claimPolicy->recipient($claim) === null) {
+        $receiver = $claim ? $this->claimPolicy->recipient($claim, $receiverRole) : null;
+        if (! $claim || $receiver === null) {
             $this->invalid($chatId, $messageId, 'El reclamo ya no admite respuestas.');
 
             return;
         }
-        $this->states->put($chatId, 'awaiting_claim_reply', 'claim', $claimId);
-        $this->telegram->editOrSend($chatId, $messageId, "✍️ Escribe tu respuesta para el reclamo #{$claim->claim_id}.", [[['text' => '❌ Cancelar', 'callback_data' => 'cancel']]]);
+        $this->states->put($chatId, 'awaiting_claim_reply', 'claim', $claimId, ['receiver_role' => $receiver]);
+        $recipient = $receiver === 'mediator' ? 'el mediador' : 'el comprador';
+        $this->telegram->editOrSend($chatId, $messageId, "✍️ Escribe tu respuesta para {$recipient} en el reclamo #{$claim->claim_id}.", [[['text' => '❌ Cancelar', 'callback_data' => 'cancel']]]);
     }
 
     private function startPostSaleReply(string $chatId, string $messageId, int $flowId): void
@@ -228,7 +469,9 @@ class TelegramOperationsService
             return;
         }
         $mode = $type === 'claim' ? 'awaiting_claim_reply' : 'awaiting_post_sale_reply';
-        $this->states->put($chatId, $mode, $type, $entityId);
+        $payload = $state->payload ?? [];
+        unset($payload['text']);
+        $this->states->put($chatId, $mode, $type, $entityId, $payload);
         $this->telegram->editOrSend($chatId, $messageId, '✏️ Escribe el mensaje corregido.', [[['text' => '❌ Cancelar', 'callback_data' => 'cancel']]]);
     }
 
@@ -249,7 +492,10 @@ class TelegramOperationsService
             return;
         }
         try {
-            $result = $this->claimSender->send($actor, $claim, (string) ($payload['text'] ?? ''), collect(), 'telegram');
+            $receiver = filled($payload['receiver_role'] ?? null) ? (string) $payload['receiver_role'] : null;
+            $result = $receiver === null
+                ? $this->claimSender->send($actor, $claim, (string) ($payload['text'] ?? ''), collect(), 'telegram')
+                : $this->claimSender->send($actor, $claim, (string) ($payload['text'] ?? ''), collect(), 'telegram', $receiver);
         } catch (ValidationException $error) {
             $result = ['ok' => false, 'error' => collect($error->errors())->flatten()->first() ?: 'El reclamo ya no admite respuestas.'];
         }
