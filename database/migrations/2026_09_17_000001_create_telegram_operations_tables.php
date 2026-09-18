@@ -29,7 +29,7 @@ return new class extends Migration
         Schema::create('telegram_processed_updates', function (Blueprint $table): void {
             $table->id();
             $table->string('update_key', 160)->unique();
-            $table->timestamp('processed_at');
+            $table->timestamp('processed_at')->index();
             $table->timestamps();
         });
     }

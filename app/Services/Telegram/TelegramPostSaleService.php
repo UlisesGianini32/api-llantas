@@ -5,6 +5,9 @@ namespace App\Services\Telegram;
 use App\Models\MeliChatFlow;
 use App\Services\MeliApi;
 use App\Services\MeliMessageService;
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Collection;
+use Illuminate\Support\Facades\Log;
 use Throwable;
 
 class TelegramPostSaleService
@@ -17,10 +20,9 @@ class TelegramPostSaleService
         private TelegramText $text,
     ) {}
 
-    public function menu(bool $refresh = false): array
+    public function menu(): array
     {
-        $snapshots = $this->snapshots($refresh);
-        $pending = $snapshots->where('pending', true)->count();
+        $pending = $this->pendingQuery()->count();
 
         return [
             "💬 MENSAJERÍA POSVENTA\n\nPendientes de respuesta: {$pending}",
@@ -35,17 +37,20 @@ class TelegramPostSaleService
 
     public function listing(string $filter, int $page): array
     {
-        $snapshots = $this->snapshots();
-        if ($filter === 'p') {
-            $snapshots = $snapshots->where('pending', true)->values();
-        }
-        $lastPage = max(1, (int) ceil($snapshots->count() / self::PAGE_SIZE));
+        $filter = $filter === 'p' ? 'p' : 'a';
+        $query = $filter === 'p' ? $this->pendingQuery() : $this->baseQuery();
+        $total = (clone $query)->count();
+        $lastPage = max(1, (int) ceil($total / self::PAGE_SIZE));
         $page = max(1, min($page, $lastPage));
-        $keyboard = $snapshots->slice(($page - 1) * self::PAGE_SIZE, self::PAGE_SIZE)
-            ->map(fn (array $snapshot): array => [[
-                'text' => ($snapshot['pending'] ? '🔴 ' : '').'Pedido '.$snapshot['flow']->order_id,
-                'callback_data' => "pd:{$snapshot['flow']->id}:{$filter}:{$page}",
-            ]])->values()->all();
+        $flows = $query->with('meliAccount')
+            ->orderByDesc('updated_at')
+            ->orderByDesc('id')
+            ->forPage($page, self::PAGE_SIZE)
+            ->get();
+        $keyboard = $flows->map(fn (MeliChatFlow $flow): array => [[
+            'text' => ($this->isPending($flow) ? '🔴 ' : '').'Pedido '.$flow->order_id,
+            'callback_data' => "pd:{$flow->id}:{$filter}:{$page}",
+        ]])->values()->all();
         $navigation = [];
         if ($page > 1) {
             $navigation[] = ['text' => '⬅️', 'callback_data' => "pl:{$filter}:".($page - 1)];
@@ -57,7 +62,7 @@ class TelegramPostSaleService
         $keyboard[] = $navigation;
         $keyboard[] = [['text' => '💬 Posventa', 'callback_data' => 'p'], ['text' => '🏠 Menú', 'callback_data' => 'm']];
 
-        return ['💬 '.($filter === 'p' ? 'Pendientes' : 'Conversaciones activas')."\nPágina {$page} de {$lastPage}\nTotal: {$snapshots->count()}", $keyboard];
+        return ['💬 '.($filter === 'p' ? 'Pendientes' : 'Conversaciones activas')."\nPágina {$page} de {$lastPage}\nTotal: {$total}", $keyboard];
     }
 
     public function detail(int $id, string $filter = 'a', int $page = 1): ?array
@@ -66,7 +71,9 @@ class TelegramPostSaleService
         if (! $flow) {
             return null;
         }
-        $snapshot = $this->snapshot($flow, true);
+        $this->syncFlow($flow);
+        $flow->refresh()->load('meliAccount');
+        $snapshot = $this->snapshot($flow);
         $account = trim((string) $flow->meliAccount?->nickname) ?: 'Cuenta '.$flow->meliAccount?->meli_user_id;
         $product = $flow->sku ? 'SKU '.$flow->sku : ($flow->item_id ?: '—');
         $last = $snapshot['last'];
@@ -93,7 +100,7 @@ class TelegramPostSaleService
         if (! $flow) {
             return null;
         }
-        $history = $this->history($flow);
+        $history = $this->syncFlow($flow) ?? [];
         $offset = max(0, $offset);
         $chunk = collect($history)->reverse()->slice($offset, 5)->reverse()->values();
         $parts = $chunk->map(fn (array $message): string => ($message['role'] === 'seller' ? 'Vendedor' : 'Comprador')
@@ -111,13 +118,10 @@ class TelegramPostSaleService
         return [$body, $keyboard];
     }
 
-    public function snapshot(MeliChatFlow $flow, bool $refresh = false): array
+    public function snapshot(MeliChatFlow $flow): array
     {
         $last = null;
-        if ($refresh || $flow->last_message_role === null) {
-            $last = collect($this->history($flow))->last();
-            $flow->refresh();
-        } elseif ($flow->last_message_text !== null || $flow->last_message_at !== null) {
+        if ($flow->last_message_text !== null || $flow->last_message_at !== null || $flow->last_message_role !== null) {
             $last = [
                 'role' => $flow->last_message_role,
                 'text' => $flow->last_message_text ?? '',
@@ -128,54 +132,38 @@ class TelegramPostSaleService
         return [
             'flow' => $flow,
             'last' => $last,
-            'pending' => (bool) $flow->requires_human || ($flow->last_message_role ?? ($last['role'] ?? null)) === 'customer',
+            'pending' => $this->isPending($flow),
         ];
     }
 
-    private function snapshots(bool $refresh = false)
+    /** @return Collection<int, MeliChatFlow> */
+    public function syncableFlowsAfter(int $afterId, int $limit): Collection
     {
-        return MeliChatFlow::query()->with('meliAccount')
-            ->whereHas('meliAccount', fn ($query) => $query->whereNotNull('access_token'))
-            ->whereNotNull('order_id')->where('order_id', '!=', '')
-            ->where('order_id', 'not like', 'no-order-%')
-            ->orderByDesc('updated_at')->limit(150)->get()
-            ->map(fn (MeliChatFlow $flow): array => $this->snapshot($flow, $refresh));
+        return $this->baseQuery()
+            ->where('id', '>', $afterId)
+            ->orderBy('id')
+            ->limit(max(1, $limit))
+            ->get();
     }
 
-    private function detailNavigation(MeliChatFlow $flow, string $filter, int $page): array
-    {
-        $query = MeliChatFlow::query()
-            ->whereHas('meliAccount', fn ($query) => $query->whereNotNull('access_token'))
-            ->whereNotNull('order_id')->where('order_id', '!=', '')
-            ->where('order_id', 'not like', 'no-order-%');
-        if ($filter === 'p') {
-            $query->where(fn ($query) => $query->where('requires_human', true)->orWhere('last_message_role', 'customer'));
-        }
-        $ids = $query->orderByDesc('updated_at')->limit(150)->pluck('id')->values();
-        $position = $ids->search($flow->id);
-        $navigation = [];
-        if ($position !== false && $position > 0) {
-            $navigation[] = ['text' => '⬅️ Anterior', 'callback_data' => 'pd:'.$ids[$position - 1].":{$filter}:{$page}"];
-        }
-        if ($position !== false && $position < $ids->count() - 1) {
-            $navigation[] = ['text' => 'Siguiente ➡️', 'callback_data' => 'pd:'.$ids[$position + 1].":{$filter}:{$page}"];
-        }
-
-        return $navigation;
-    }
-
-    private function history(MeliChatFlow $flow): array
+    /** @return array<int, array<string, string|null>>|null */
+    public function syncFlow(MeliChatFlow $flow): ?array
     {
         $apiUser = $this->messages->resolveApiUser($flow);
         $packId = $flow->pack_id ?: $flow->order_id;
         if (! $apiUser || ! $packId) {
-            return [];
+            return null;
         }
 
         try {
             $raw = $this->api->getPackPostSaleMessages($apiUser, (string) $packId, 50, 0, false);
-        } catch (Throwable) {
-            return [];
+        } catch (Throwable $error) {
+            Log::warning('Telegram posventa: no se pudo sincronizar una conversación', [
+                'flow_id' => $flow->id,
+                'error_type' => $error::class,
+            ]);
+
+            return null;
         }
 
         $sellerId = (string) $apiUser->meli_id;
@@ -199,15 +187,68 @@ class TelegramPostSaleService
         }
         usort($history, fn (array $a, array $b): int => strcmp($a['sort'], $b['sort']));
         $last = collect($history)->last();
+        $values = ['last_message_synced_at' => now()];
         if ($last) {
-            $flow->forceFill([
+            $values += [
                 'last_message_role' => $last['role'],
                 'last_message_at' => $last['sort'] !== '' ? $last['sort'] : null,
                 'last_message_text' => $last['text'],
-                'last_message_synced_at' => now(),
-            ])->save();
+            ];
+            if ($last['role'] === 'seller') {
+                $values['requires_human'] = false;
+                $values['requires_human_at'] = null;
+            }
         }
+        $flow->forceFill($values)->save();
 
         return $history;
+    }
+
+    private function detailNavigation(MeliChatFlow $flow, string $filter, int $page): array
+    {
+        $filter = $filter === 'p' ? 'p' : 'a';
+        $query = $filter === 'p' ? $this->pendingQuery() : $this->baseQuery();
+        $newer = (clone $query)->where(function (Builder $query) use ($flow): void {
+            $query->where('updated_at', '>', $flow->updated_at)
+                ->orWhere(function (Builder $query) use ($flow): void {
+                    $query->where('updated_at', $flow->updated_at)->where('id', '>', $flow->id);
+                });
+        })->orderBy('updated_at')->orderBy('id')->first();
+        $older = (clone $query)->where(function (Builder $query) use ($flow): void {
+            $query->where('updated_at', '<', $flow->updated_at)
+                ->orWhere(function (Builder $query) use ($flow): void {
+                    $query->where('updated_at', $flow->updated_at)->where('id', '<', $flow->id);
+                });
+        })->orderByDesc('updated_at')->orderByDesc('id')->first();
+        $navigation = [];
+        if ($newer) {
+            $navigation[] = ['text' => '⬅️ Anterior', 'callback_data' => "pd:{$newer->id}:{$filter}:{$page}"];
+        }
+        if ($older) {
+            $navigation[] = ['text' => 'Siguiente ➡️', 'callback_data' => "pd:{$older->id}:{$filter}:{$page}"];
+        }
+
+        return $navigation;
+    }
+
+    private function baseQuery(): Builder
+    {
+        return MeliChatFlow::query()
+            ->whereHas('meliAccount', fn (Builder $query) => $query->whereNotNull('access_token'))
+            ->whereNotNull('order_id')
+            ->where('order_id', '!=', '')
+            ->where('order_id', 'not like', 'no-order-%');
+    }
+
+    private function pendingQuery(): Builder
+    {
+        return $this->baseQuery()->where(function (Builder $query): void {
+            $query->where('requires_human', true)->orWhere('last_message_role', 'customer');
+        });
+    }
+
+    private function isPending(MeliChatFlow $flow): bool
+    {
+        return (bool) $flow->requires_human || $flow->last_message_role === 'customer';
     }
 }

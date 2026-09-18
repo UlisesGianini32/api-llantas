@@ -4,13 +4,14 @@ namespace App\Services\Telegram;
 
 use App\Jobs\ImportExcelFromTelegramJob;
 use App\Jobs\SyncMeliOpenClaimsForTelegramJob;
+use App\Jobs\SyncMeliPostSaleForTelegramJob;
 use App\Models\MeliChatFlow;
 use App\Models\MeliClaim;
 use App\Models\TelegramProcessedUpdate;
 use App\Services\MeliMessageService;
 use App\Services\MercadoLibre\Claims\MeliClaimMessagePolicy;
 use App\Services\MercadoLibre\Claims\MeliClaimMessageSender;
-use Illuminate\Database\QueryException;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
 use Throwable;
@@ -137,7 +138,8 @@ class TelegramOperationsService
             return;
         }
         if ($data === 'pu') {
-            $this->render($chatId, $messageId, $this->postSale->menu(true));
+            SyncMeliPostSaleForTelegramJob::dispatch($chatId);
+            $this->telegram->editOrSend($chatId, $messageId, '🔄 La sincronización de mensajería posventa quedó en cola.', [[['text' => '💬 Posventa', 'callback_data' => 'p']], ...$this->homeKeyboard()]);
 
             return;
         }
@@ -336,12 +338,11 @@ class TelegramOperationsService
             }
 
             return true;
-        } catch (QueryException) {
+        } catch (UniqueConstraintViolationException) {
             return false;
         } catch (Throwable $error) {
             report($error);
-
-            return false;
+            throw $error;
         }
     }
 }
