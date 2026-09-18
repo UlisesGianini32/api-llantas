@@ -8,6 +8,7 @@ use App\Models\MeliClaimActionLog;
 use App\Models\User;
 use App\Services\MercadoLibre\MeliApiRequestException;
 use App\Support\UserAccess;
+use Carbon\CarbonImmutable;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
@@ -35,6 +36,10 @@ class MeliClaimActionService
         $raw = $this->resolutions->preflight($account, $claim);
         $this->resolutions->persistPreflight($claim, $raw);
 
+        if ($interlock = $this->reconcileUncertainDelivery($claim, $raw)) {
+            return $interlock;
+        }
+
         if (! in_array((string) ($raw['status'] ?? ''), ['open', 'opened'], true)) {
             return $this->failure('closed', 'El reclamo cambió de estado y ya no admite esta acción.');
         }
@@ -53,7 +58,7 @@ class MeliClaimActionService
      * @param  array{percentage?:float|int,amount?:float|int|null,currency_id?:string|null}|null  $expectedOffer
      * @return array{ok:bool,code:string,message:string,refresh_failed:bool}
      */
-    public function execute(User $actor, MeliClaim $claim, string $action, ?float $percentage = null, string $source = 'web', ?array $expectedOffer = null): array
+    public function execute(User $actor, MeliClaim $claim, string $action, ?float $percentage = null, string $source = 'web', ?array $expectedOffer = null, ?string $telegramChatId = null): array
     {
         $account = $this->accountFor($actor, $claim);
         $this->assertSupported($action);
@@ -106,6 +111,7 @@ class MeliClaimActionService
                 'meli_account_id' => $account->id,
                 'user_id' => $actor->id,
                 'source' => $source,
+                'telegram_chat_id' => $this->auditChatId($source, $telegramChatId),
                 'action' => $action,
                 'request_payload_sanitized' => $payload,
                 'message_hash' => $hash,
@@ -189,6 +195,71 @@ class MeliClaimActionService
             || MeliClaimActionLog::query()->where('meli_claim_id', $claim->id)
                 ->where('user_id', $userId)->where('action', $action)->where('message_hash', $hash)
                 ->where('created_at', '>=', now()->subSeconds(self::COOLDOWN_SECONDS))->exists();
+    }
+
+    /** @return array{ok:false,code:string,message:string,offers:array{},refresh_failed:false}|null */
+    private function reconcileUncertainDelivery(MeliClaim $claim, array $raw): ?array
+    {
+        $pending = MeliClaimActionLog::query()
+            ->where('meli_claim_id', $claim->id)
+            ->whereNull('success')
+            ->where('error_code', 'uncertain_delivery')
+            ->whereNull('reconciled_at')
+            ->oldest('id')
+            ->get();
+
+        foreach ($pending as $audit) {
+            if (! in_array((string) ($raw['status'] ?? ''), ['open', 'opened'], true)) {
+                $audit->forceFill(['reconciliation_result' => 'claim_not_open'])->save();
+
+                return $this->uncertainDeliveryFailure();
+            }
+
+            if (! $this->policy->allows($raw, $audit->action)) {
+                $audit->forceFill(['reconciliation_result' => 'action_not_available'])->save();
+
+                return $this->uncertainDeliveryFailure();
+            }
+
+            try {
+                $remoteUpdatedAt = filled($raw['last_updated'] ?? null)
+                    ? CarbonImmutable::parse((string) $raw['last_updated'])
+                    : null;
+            } catch (Throwable) {
+                $remoteUpdatedAt = null;
+            }
+
+            if ($remoteUpdatedAt === null || $audit->created_at === null || ! $remoteUpdatedAt->isAfter($audit->created_at)) {
+                $audit->forceFill(['reconciliation_result' => 'snapshot_not_newer'])->save();
+
+                return $this->uncertainDeliveryFailure();
+            }
+
+            $audit->forceFill([
+                'reconciled_at' => now(),
+                'reconciliation_result' => 'action_still_available',
+            ])->save();
+        }
+
+        return null;
+    }
+
+    /** @return array{ok:false,code:string,message:string,offers:array{},refresh_failed:false} */
+    private function uncertainDeliveryFailure(): array
+    {
+        return $this->failure(
+            'uncertain_delivery_pending_review',
+            'Existe una resolución con resultado incierto. Requiere revisión antes de intentar otra acción económica.'
+        );
+    }
+
+    private function auditChatId(string $source, ?string $chatId): ?string
+    {
+        if ($source !== 'telegram' || $chatId === null || ! preg_match('/^-?\d{1,20}$/', $chatId)) {
+            return null;
+        }
+
+        return $chatId;
     }
 
     private function sameOffer(array $current, array $expected): bool

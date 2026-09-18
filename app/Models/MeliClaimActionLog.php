@@ -13,6 +13,7 @@ class MeliClaimActionLog extends Model
         return [
             'request_payload_sanitized' => 'array',
             'success' => 'boolean',
+            'reconciled_at' => 'datetime',
         ];
     }
 }

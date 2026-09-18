@@ -25,6 +25,7 @@ class TelegramOperationsService
         private TelegramClaimService $claims,
         private TelegramPostSaleService $postSale,
         private TelegramPostSaleSyncCoordinator $postSaleSync,
+        private TelegramOperatorResolver $telegramOperators,
         private MeliClaimActionCatalog $claimActionCatalog,
         private MeliClaimActionService $claimActions,
         private MeliClaimMessagePolicy $claimPolicy,
@@ -212,19 +213,21 @@ class TelegramOperationsService
         $descriptor = $this->claimActionCatalog->fromCallback($callback);
         $available = $claim ? collect($this->claimActionCatalog->available($claim))
             ->first(fn (array $item): bool => $item['callback'] === $callback) : null;
-        $actor = $claim?->meliAccount?->user;
-        if (! $claim || ! $actor || ! $descriptor || ! $available) {
+        $accountOwner = $claim?->meliAccount?->user;
+        if (! $claim || ! $accountOwner || ! $descriptor || ! $available) {
             $this->invalid($chatId, $messageId, 'Esta acción ya no está disponible en Mercado Libre.');
-
-            return;
-        }
-        if (! $this->claimActions->canAct($actor, $claim)) {
-            $this->invalid($chatId, $messageId, 'Este operador no tiene permiso para ejecutar acciones sobre el reclamo.');
 
             return;
         }
         if ($descriptor['flow'] === 'message') {
             $this->startClaimReply($chatId, $messageId, $claimId, $descriptor['receiver_role']);
+
+            return;
+        }
+
+        $actor = $this->telegramOperators->resolve($chatId);
+        if (! $actor || ! $this->claimActions->canAct($actor, $claim)) {
+            $this->invalid($chatId, $messageId, 'Este operador de Telegram no está vinculado o no tiene permiso para ejecutar acciones económicas sobre el reclamo.');
 
             return;
         }
@@ -253,6 +256,7 @@ class TelegramOperationsService
             $this->states->put($chatId, 'awaiting_claim_partial_refund_amount', 'claim', $claimId, [
                 'action' => 'partial_refund',
                 'offers' => $offers,
+                'operator_user_id' => $actor->id,
             ]);
             $currencies = collect($offers)->pluck('currency_id')->unique()->implode(', ');
             $this->telegram->editOrSend(
@@ -265,7 +269,10 @@ class TelegramOperationsService
             return;
         }
 
-        $this->states->put($chatId, 'confirm_claim_action', 'claim', $claimId, ['action' => $descriptor['action']]);
+        $this->states->put($chatId, 'confirm_claim_action', 'claim', $claimId, [
+            'action' => $descriptor['action'],
+            'operator_user_id' => $actor->id,
+        ]);
         $this->renderClaimActionConfirmation($chatId, $messageId, $claim, $descriptor['action']);
     }
 
@@ -305,6 +312,7 @@ class TelegramOperationsService
         $this->states->put($chatId, 'confirm_claim_action', 'claim', $claimId, [
             'action' => 'partial_refund',
             'offer' => $offer,
+            'operator_user_id' => data_get($state->payload, 'operator_user_id'),
         ]);
         $claim = MeliClaim::query()->with(['meliAccount.user', 'order.items'])->find($claimId);
         if (! $claim) {
@@ -319,9 +327,11 @@ class TelegramOperationsService
     {
         $state = $this->states->get($chatId);
         $claim = MeliClaim::query()->with('meliAccount.user')->find($claimId);
-        $actor = $claim?->meliAccount?->user;
+        $actor = $this->telegramOperators->resolve($chatId);
         if (! $state || $state->mode !== 'confirm_claim_action' || (int) $state->entity_id !== $claimId
-            || data_get($state->payload, 'action') !== 'partial_refund' || ! $claim || ! $actor) {
+            || data_get($state->payload, 'action') !== 'partial_refund' || ! $claim || ! $actor
+            || (int) data_get($state->payload, 'operator_user_id') !== $actor->id
+            || ! $this->claimActions->canAct($actor, $claim)) {
             $this->invalid($chatId, $messageId, 'La confirmación expiró.');
 
             return;
@@ -340,7 +350,9 @@ class TelegramOperationsService
             return;
         }
         $this->states->put($chatId, 'awaiting_claim_partial_refund_amount', 'claim', $claimId, [
-            'action' => 'partial_refund', 'offers' => $prepared['offers'],
+            'action' => 'partial_refund',
+            'offers' => $prepared['offers'],
+            'operator_user_id' => $actor->id,
         ]);
         $this->telegram->editOrSend($chatId, $messageId, 'Escribe el nuevo importe exacto del reembolso parcial.', [[['text' => '❌ Cancelar', 'callback_data' => 'cancel']]]);
     }
@@ -354,8 +366,9 @@ class TelegramOperationsService
             return;
         }
         $claim = MeliClaim::query()->with('meliAccount.user')->find($claimId);
-        $actor = $claim?->meliAccount?->user;
-        if (! $claim || ! $actor || ! $this->claimActions->canAct($actor, $claim)) {
+        $actor = $this->telegramOperators->resolve($chatId);
+        if (! $claim || ! $actor || (int) ($payload['operator_user_id'] ?? 0) !== $actor->id
+            || ! $this->claimActions->canAct($actor, $claim)) {
             $this->states->clear($chatId);
             $this->invalid($chatId, $messageId, 'El operador no tiene permiso para ejecutar esta acción.');
 
@@ -371,6 +384,7 @@ class TelegramOperationsService
                 $offer !== null ? (float) ($offer['percentage'] ?? 0) : null,
                 'telegram',
                 $offer,
+                $chatId,
             );
         } catch (ValidationException $error) {
             $result = ['ok' => false, 'message' => collect($error->errors())->flatten()->first() ?: 'La acción ya no es válida.'];
@@ -444,7 +458,11 @@ class TelegramOperationsService
             return;
         }
         $this->states->put($chatId, 'awaiting_claim_reply', 'claim', $claimId, ['receiver_role' => $receiver]);
-        $recipient = $receiver === 'mediator' ? 'el mediador' : 'el comprador';
+        $recipient = match ($receiver) {
+            'mediator' => 'el mediador',
+            'respondent' => 'el vendedor',
+            default => 'el comprador',
+        };
         $this->telegram->editOrSend($chatId, $messageId, "✍️ Escribe tu respuesta para {$recipient} en el reclamo #{$claim->claim_id}.", [[['text' => '❌ Cancelar', 'callback_data' => 'cancel']]]);
     }
 

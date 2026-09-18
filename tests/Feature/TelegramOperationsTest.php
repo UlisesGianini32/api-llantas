@@ -10,6 +10,7 @@ use App\Models\MeliChatFlow;
 use App\Models\MeliClaim;
 use App\Models\MeliClaimActionLog;
 use App\Models\TelegramConversationState;
+use App\Models\TelegramOperatorIdentity;
 use App\Models\TelegramProcessedUpdate;
 use App\Models\User;
 use App\Services\MeliApi;
@@ -45,6 +46,8 @@ class TelegramOperationsTest extends TestCase
 
     private object $actionSourceMigration;
 
+    private object $actionSecurityMigration;
+
     private object $attachmentsMigration;
 
     private object $claimTelegramMigration;
@@ -65,7 +68,7 @@ class TelegramOperationsTest extends TestCase
         DB::purge('sqlite');
         $this->setEnv('TELEGRAM_WEBHOOK_SECRET', 'webhook-secret');
         $this->setEnv('TELEGRAM_BOT_TOKEN', 'bot-token');
-        $this->setEnv('TELEGRAM_ALLOWED_CHAT_IDS', '100,200');
+        $this->setEnv('TELEGRAM_ALLOWED_CHAT_IDS', '100,200,300');
 
         Schema::create('users', function (Blueprint $table): void {
             $table->id();
@@ -150,6 +153,8 @@ class TelegramOperationsTest extends TestCase
         $this->actionsMigration->up();
         $this->actionSourceMigration = require database_path('migrations/2026_09_18_000001_add_source_to_meli_claim_action_logs_table.php');
         $this->actionSourceMigration->up();
+        $this->actionSecurityMigration = require database_path('migrations/2026_09_18_000002_secure_telegram_claim_actions.php');
+        $this->actionSecurityMigration->up();
         $this->attachmentsMigration = require database_path('migrations/2026_09_02_000001_create_meli_claim_attachment_uploads_table.php');
         $this->attachmentsMigration->up();
         $this->claimTelegramMigration = require database_path('migrations/2026_09_15_000001_add_telegram_notified_at_to_meli_claims.php');
@@ -162,6 +167,8 @@ class TelegramOperationsTest extends TestCase
             'user_id' => $this->user->id, 'meli_user_id' => '900', 'nickname' => 'Principal',
             'access_token' => 'meli-token', 'expires_at' => now()->addHour(), 'is_default' => true,
         ]);
+        TelegramOperatorIdentity::query()->create(['chat_id' => '100', 'user_id' => $this->user->id]);
+        TelegramOperatorIdentity::query()->create(['chat_id' => '200', 'user_id' => $this->user->id]);
         Http::preventStrayRequests();
         Http::fake(['api.telegram.org/*' => Http::response(['ok' => true])]);
     }
@@ -171,6 +178,7 @@ class TelegramOperationsTest extends TestCase
         $this->telegramMigration->down();
         $this->claimTelegramMigration->down();
         $this->attachmentsMigration->down();
+        $this->actionSecurityMigration->down();
         $this->actionSourceMigration->down();
         $this->actionsMigration->down();
         $this->detailsMigration->down();
@@ -479,6 +487,7 @@ class TelegramOperationsTest extends TestCase
             'meli_claim_id' => $claim->id,
             'user_id' => $this->user->id,
             'source' => 'telegram',
+            'telegram_chat_id' => '100',
             'action' => 'partial_refund',
             'remote_status' => 201,
             'success' => true,
@@ -573,7 +582,20 @@ class TelegramOperationsTest extends TestCase
         $this->assertStringNotContainsString('meli-token', $texts);
     }
 
-    public function test_claim_actions_enforce_web_role_permissions(): void
+    public function test_unmapped_allowed_chat_cannot_start_economic_action(): void
+    {
+        $claim = $this->claim(['claim_id' => 'TG-UNMAPPED', 'available_actions' => [['action' => 'refund']]]);
+
+        $this->sendCallback(930, '300', "caa:{$claim->id}:r")->assertOk();
+
+        Http::assertNotSent(fn (Request $request): bool => str_contains($request->url(), 'api.mercadolibre.com'));
+        $this->assertDatabaseMissing('telegram_conversation_states', ['chat_id' => '300']);
+        $this->assertTrue($this->telegramRequests()->contains(
+            fn (Request $request): bool => str_contains((string) data_get($request->data(), 'text', ''), 'no está vinculado')
+        ));
+    }
+
+    public function test_mapped_operator_without_web_permission_cannot_start_economic_action(): void
     {
         $this->user->forceFill(['role' => 'disabled'])->save();
         $claim = $this->claim(['claim_id' => 'TG-FORBIDDEN', 'available_actions' => [['action' => 'refund']]]);
@@ -588,6 +610,32 @@ class TelegramOperationsTest extends TestCase
         $this->assertSame(0, $posts);
         Http::assertNotSent(fn (Request $request): bool => str_contains($request->url(), 'api.mercadolibre.com'));
         $this->assertDatabaseMissing('telegram_conversation_states', ['chat_id' => '100']);
+    }
+
+    public function test_mapped_operator_must_own_the_claim_account(): void
+    {
+        $other = User::factory()->create(['role' => 'operations']);
+        TelegramOperatorIdentity::query()->where('chat_id', '200')->update(['user_id' => $other->id]);
+        $claim = $this->claim(['claim_id' => 'TG-FOREIGN-ACCOUNT', 'available_actions' => [['action' => 'refund']]]);
+
+        $this->sendCallback(931, '200', "caa:{$claim->id}:r")->assertOk();
+
+        Http::assertNotSent(fn (Request $request): bool => str_contains($request->url(), 'api.mercadolibre.com'));
+        $this->assertDatabaseMissing('telegram_conversation_states', ['chat_id' => '200']);
+    }
+
+    public function test_respondent_reply_is_labeled_as_the_seller_for_an_unmapped_read_only_chat(): void
+    {
+        $claim = $this->claim(['available_actions' => [['action' => 'send_message_to_respondent']]]);
+
+        $this->sendCallback(932, '300', "caa:{$claim->id}:v")->assertOk();
+
+        $request = $this->telegramRequests('editMessageText')->last();
+        $this->assertStringContainsString('para el vendedor', (string) $request->data()['text']);
+        $this->assertStringNotContainsString('para el comprador', (string) $request->data()['text']);
+        $this->assertDatabaseHas('telegram_conversation_states', [
+            'chat_id' => '300', 'mode' => 'awaiting_claim_reply', 'entity_id' => $claim->id,
+        ]);
     }
 
     public function test_action_menu_message_flows_keep_buyer_and_mediator_targets(): void
