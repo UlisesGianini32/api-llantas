@@ -6,6 +6,7 @@ use App\Jobs\ImportExcelFromTelegramJob;
 use App\Jobs\SyncMeliOpenClaimsForTelegramJob;
 use App\Jobs\SyncMeliPostSaleForTelegramJob;
 use App\Models\MeliAccount;
+use App\Models\MeliAccountUserAccess;
 use App\Models\MeliChatFlow;
 use App\Models\MeliClaim;
 use App\Models\MeliClaimActionLog;
@@ -47,6 +48,8 @@ class TelegramOperationsTest extends TestCase
     private object $actionSourceMigration;
 
     private object $actionSecurityMigration;
+
+    private object $accountAccessMigration;
 
     private object $attachmentsMigration;
 
@@ -155,6 +158,8 @@ class TelegramOperationsTest extends TestCase
         $this->actionSourceMigration->up();
         $this->actionSecurityMigration = require database_path('migrations/2026_09_18_000002_secure_telegram_claim_actions.php');
         $this->actionSecurityMigration->up();
+        $this->accountAccessMigration = require database_path('migrations/2026_09_18_000003_create_meli_account_user_accesses_table.php');
+        $this->accountAccessMigration->up();
         $this->attachmentsMigration = require database_path('migrations/2026_09_02_000001_create_meli_claim_attachment_uploads_table.php');
         $this->attachmentsMigration->up();
         $this->claimTelegramMigration = require database_path('migrations/2026_09_15_000001_add_telegram_notified_at_to_meli_claims.php');
@@ -178,6 +183,7 @@ class TelegramOperationsTest extends TestCase
         $this->telegramMigration->down();
         $this->claimTelegramMigration->down();
         $this->attachmentsMigration->down();
+        $this->accountAccessMigration->down();
         $this->actionSecurityMigration->down();
         $this->actionSourceMigration->down();
         $this->actionsMigration->down();
@@ -700,13 +706,66 @@ class TelegramOperationsTest extends TestCase
         $this->assertDatabaseMissing('telegram_conversation_states', ['chat_id' => '100']);
     }
 
-    public function test_mapped_operator_must_own_the_claim_account(): void
+    public function test_delegated_operator_can_confirm_execute_and_is_audited_as_actor(): void
     {
-        $other = User::factory()->create(['role' => 'operations']);
-        TelegramOperatorIdentity::query()->where('telegram_user_id', '200')->update(['user_id' => $other->id]);
-        $claim = $this->claim(['claim_id' => 'TG-FOREIGN-ACCOUNT', 'available_actions' => [['action' => 'refund']]]);
+        $operator = User::factory()->create(['role' => 'operations']);
+        TelegramOperatorIdentity::query()->where('telegram_user_id', '200')->update(['user_id' => $operator->id]);
+        MeliAccountUserAccess::query()->create([
+            'meli_account_id' => $this->account->id,
+            'user_id' => $operator->id,
+            'can_claim_actions' => true,
+            'active' => true,
+        ]);
+        $claim = $this->claim(['claim_id' => 'TG-DELEGATED', 'available_actions' => [['action' => 'refund']]]);
+        $actions = ['refund'];
+        $offers = [];
+        $status = 'opened';
+        $posts = 0;
+        $this->fakeClaimActionApi('TG-DELEGATED', $actions, $offers, $status, $posts);
 
         $this->sendCallback(931, '200', "caa:{$claim->id}:r")->assertOk();
+        $this->assertDatabaseHas('telegram_conversation_states', [
+            'chat_id' => '200',
+            'mode' => 'confirm_claim_action',
+            'entity_id' => $claim->id,
+        ]);
+        $this->sendCallback(932, '200', "cac:{$claim->id}")->assertOk();
+
+        $this->assertSame(1, $posts);
+        $this->assertSame($this->user->id, $this->account->fresh()->user_id);
+        $this->assertDatabaseHas('meli_claim_action_logs', [
+            'meli_claim_id' => $claim->id,
+            'meli_account_id' => $this->account->id,
+            'user_id' => $operator->id,
+            'source' => 'telegram',
+            'telegram_chat_id' => '200',
+            'telegram_user_id' => '200',
+            'success' => true,
+        ]);
+    }
+
+    public function test_delegated_operator_cannot_use_access_for_another_account(): void
+    {
+        $operator = User::factory()->create(['role' => 'operations']);
+        TelegramOperatorIdentity::query()->where('telegram_user_id', '200')->update(['user_id' => $operator->id]);
+        MeliAccountUserAccess::query()->create([
+            'meli_account_id' => $this->account->id,
+            'user_id' => $operator->id,
+            'can_claim_actions' => true,
+            'active' => true,
+        ]);
+        $otherAccount = MeliAccount::factory()->create([
+            'user_id' => $this->user->id,
+            'access_token' => 'other-token',
+            'expires_at' => now()->addHour(),
+        ]);
+        $claim = $this->claim([
+            'meli_account_id' => $otherAccount->id,
+            'claim_id' => 'TG-FOREIGN-ACCOUNT',
+            'available_actions' => [['action' => 'refund']],
+        ]);
+
+        $this->sendCallback(933, '200', "caa:{$claim->id}:r")->assertOk();
 
         Http::assertNotSent(fn (Request $request): bool => str_contains($request->url(), 'api.mercadolibre.com'));
         $this->assertDatabaseMissing('telegram_conversation_states', ['chat_id' => '200']);

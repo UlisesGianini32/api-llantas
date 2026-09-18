@@ -3,6 +3,7 @@
 namespace App\Services\MercadoLibre\Claims;
 
 use App\Models\MeliAccount;
+use App\Models\MeliAccountUserAccess;
 use App\Models\MeliClaim;
 use App\Models\MeliClaimActionLog;
 use App\Models\User;
@@ -170,7 +171,20 @@ class MeliClaimActionService
     public function canAct(User $actor, MeliClaim $claim): bool
     {
         return UserAccess::canAccessRoute($actor, 'meli.claims.resolutions.refund')
-            && $actor->meliAccounts()->whereKey($claim->meli_account_id)->exists();
+            && $this->hasAccountAccess($actor, $claim->meli_account_id);
+    }
+
+    public function hasAccountAccess(User $actor, MeliAccount|int $account): bool
+    {
+        $accountId = $account instanceof MeliAccount ? $account->getKey() : $account;
+
+        return $actor->meliAccounts()->whereKey($accountId)->exists()
+            || MeliAccountUserAccess::query()
+                ->where('meli_account_id', $accountId)
+                ->where('user_id', $actor->getKey())
+                ->where('active', true)
+                ->where('can_claim_actions', true)
+                ->exists();
     }
 
     private function accountFor(User $actor, MeliClaim $claim): MeliAccount
@@ -179,7 +193,7 @@ class MeliClaimActionService
             throw new AuthorizationException('El operador no tiene permiso para resolver este reclamo.');
         }
 
-        return $actor->meliAccounts()->findOrFail($claim->meli_account_id);
+        return MeliAccount::query()->findOrFail($claim->meli_account_id);
     }
 
     private function assertSupported(string $action): void
