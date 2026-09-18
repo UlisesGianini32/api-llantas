@@ -4,14 +4,15 @@ namespace App\Jobs;
 
 use App\Services\Telegram\TelegramBotClient;
 use App\Services\Telegram\TelegramPostSaleService;
+use App\Services\Telegram\TelegramPostSaleSyncCoordinator;
 use Illuminate\Bus\Queueable;
-use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Throwable;
 
-class SyncMeliPostSaleForTelegramJob implements ShouldBeUnique, ShouldQueue
+class SyncMeliPostSaleForTelegramJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
@@ -23,22 +24,22 @@ class SyncMeliPostSaleForTelegramJob implements ShouldBeUnique, ShouldQueue
 
     public int $timeout = 180;
 
-    public int $uniqueFor = 600;
-
     public function __construct(
         public string $chatId,
         public int $afterId = 0,
         public int $synced = 0,
         public int $failed = 0,
+        public string $lockOwner = '',
     ) {}
 
-    public function uniqueId(): string
-    {
-        return 'telegram-post-sale-sync:'.$this->afterId;
-    }
-
-    public function handle(TelegramPostSaleService $postSale, TelegramBotClient $telegram): void
-    {
+    public function handle(
+        TelegramPostSaleService $postSale,
+        TelegramBotClient $telegram,
+        TelegramPostSaleSyncCoordinator $coordinator,
+    ): void {
+        if ($this->lockOwner === '' || ! $coordinator->owns($this->lockOwner)) {
+            return;
+        }
         $flows = $postSale->syncableFlowsAfter($this->afterId, self::CHUNK_SIZE);
         $synced = $this->synced;
         $failed = $this->failed;
@@ -51,15 +52,21 @@ class SyncMeliPostSaleForTelegramJob implements ShouldBeUnique, ShouldQueue
         }
 
         if ($flows->count() === self::CHUNK_SIZE) {
-            self::dispatch($this->chatId, (int) $flows->last()->id, $synced, $failed)
+            self::dispatch($this->chatId, (int) $flows->last()->id, $synced, $failed, $this->lockOwner)
                 ->delay(now()->addSecond());
 
             return;
         }
 
+        $coordinator->release($this->lockOwner);
         $telegram->sendMessage($this->chatId, "✅ Sincronización de mensajería posventa terminada.\nActualizadas: {$synced}\nFallidas: {$failed}", [
             [['text' => '💬 Ver posventa', 'callback_data' => 'p']],
             [['text' => '🏠 Menú principal', 'callback_data' => 'm']],
         ]);
+    }
+
+    public function failed(?Throwable $error): void
+    {
+        app(TelegramPostSaleSyncCoordinator::class)->release($this->lockOwner);
     }
 }

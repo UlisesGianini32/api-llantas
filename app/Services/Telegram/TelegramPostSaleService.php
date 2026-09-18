@@ -42,9 +42,7 @@ class TelegramPostSaleService
         $total = (clone $query)->count();
         $lastPage = max(1, (int) ceil($total / self::PAGE_SIZE));
         $page = max(1, min($page, $lastPage));
-        $flows = $query->with('meliAccount')
-            ->orderByDesc('updated_at')
-            ->orderByDesc('id')
+        $flows = $this->ordered($query->with('meliAccount'))
             ->forPage($page, self::PAGE_SIZE)
             ->get();
         $keyboard = $flows->map(fn (MeliChatFlow $flow): array => [[
@@ -71,8 +69,6 @@ class TelegramPostSaleService
         if (! $flow) {
             return null;
         }
-        $this->syncFlow($flow);
-        $flow->refresh()->load('meliAccount');
         $snapshot = $this->snapshot($flow);
         $account = trim((string) $flow->meliAccount?->nickname) ?: 'Cuenta '.$flow->meliAccount?->meli_user_id;
         $product = $flow->sku ? 'SKU '.$flow->sku : ($flow->item_id ?: '—');
@@ -100,12 +96,17 @@ class TelegramPostSaleService
         if (! $flow) {
             return null;
         }
-        $history = $this->syncFlow($flow) ?? [];
+        $history = $this->syncFlow($flow);
+        $unavailable = $history === null;
+        $history ??= [];
         $offset = max(0, $offset);
         $chunk = collect($history)->reverse()->slice($offset, 5)->reverse()->values();
         $parts = $chunk->map(fn (array $message): string => ($message['role'] === 'seller' ? 'Vendedor' : 'Comprador')
             ."\n".($message['created'] ?? '')."\n\n".$this->text->fromMeli($message['text'] ?? ''));
-        $body = "📖 Conversación posventa · Pedido {$flow->order_id}\n\n".($parts->isEmpty() ? 'Sin mensajes disponibles.' : $parts->implode("\n\n────────\n\n"));
+        $emptyMessage = $unavailable
+            ? 'No fue posible actualizar la conversación en este momento.'
+            : 'Sin mensajes disponibles.';
+        $body = "📖 Conversación posventa · Pedido {$flow->order_id}\n\n".($parts->isEmpty() ? $emptyMessage : $parts->implode("\n\n────────\n\n"));
         $keyboard = [];
         if (count($history) > $offset + 5) {
             $keyboard[] = [['text' => '⬅️ Anteriores', 'callback_data' => "pc:{$id}:".($offset + 5)]];
@@ -208,18 +209,9 @@ class TelegramPostSaleService
     {
         $filter = $filter === 'p' ? 'p' : 'a';
         $query = $filter === 'p' ? $this->pendingQuery() : $this->baseQuery();
-        $newer = (clone $query)->where(function (Builder $query) use ($flow): void {
-            $query->where('updated_at', '>', $flow->updated_at)
-                ->orWhere(function (Builder $query) use ($flow): void {
-                    $query->where('updated_at', $flow->updated_at)->where('id', '>', $flow->id);
-                });
-        })->orderBy('updated_at')->orderBy('id')->first();
-        $older = (clone $query)->where(function (Builder $query) use ($flow): void {
-            $query->where('updated_at', '<', $flow->updated_at)
-                ->orWhere(function (Builder $query) use ($flow): void {
-                    $query->where('updated_at', $flow->updated_at)->where('id', '<', $flow->id);
-                });
-        })->orderByDesc('updated_at')->orderByDesc('id')->first();
+        [$newer, $older] = $flow->last_message_at === null
+            ? $this->nullTimestampNeighbors($query, $flow)
+            : $this->timestampedNeighbors($query, $flow);
         $navigation = [];
         if ($newer) {
             $navigation[] = ['text' => '⬅️ Anterior', 'callback_data' => "pd:{$newer->id}:{$filter}:{$page}"];
@@ -229,6 +221,47 @@ class TelegramPostSaleService
         }
 
         return $navigation;
+    }
+
+    private function timestampedNeighbors(Builder $query, MeliChatFlow $flow): array
+    {
+        $newer = (clone $query)->where(function (Builder $query) use ($flow): void {
+            $query->where('last_message_at', '>', $flow->last_message_at)
+                ->orWhere(function (Builder $query) use ($flow): void {
+                    $query->where('last_message_at', $flow->last_message_at)->where('id', '>', $flow->id);
+                });
+        })->orderBy('last_message_at')->orderBy('id')->first();
+        $older = (clone $query)->where(function (Builder $query) use ($flow): void {
+            $query->where('last_message_at', '<', $flow->last_message_at)
+                ->orWhereNull('last_message_at')
+                ->orWhere(function (Builder $query) use ($flow): void {
+                    $query->where('last_message_at', $flow->last_message_at)->where('id', '<', $flow->id);
+                });
+        });
+
+        return [$newer, $this->ordered($older)->first()];
+    }
+
+    private function nullTimestampNeighbors(Builder $query, MeliChatFlow $flow): array
+    {
+        $newer = (clone $query)->whereNull('last_message_at')->where('id', '>', $flow->id)
+            ->orderBy('id')->first();
+        if (! $newer) {
+            $newer = (clone $query)->whereNotNull('last_message_at')
+                ->orderBy('last_message_at')->orderBy('id')->first();
+        }
+        $older = (clone $query)->whereNull('last_message_at')->where('id', '<', $flow->id)
+            ->orderByDesc('id')->first();
+
+        return [$newer, $older];
+    }
+
+    private function ordered(Builder $query): Builder
+    {
+        return $query
+            ->orderByRaw('CASE WHEN last_message_at IS NULL THEN 1 ELSE 0 END')
+            ->orderByDesc('last_message_at')
+            ->orderByDesc('id');
     }
 
     private function baseQuery(): Builder

@@ -4,7 +4,6 @@ namespace App\Services\Telegram;
 
 use App\Jobs\ImportExcelFromTelegramJob;
 use App\Jobs\SyncMeliOpenClaimsForTelegramJob;
-use App\Jobs\SyncMeliPostSaleForTelegramJob;
 use App\Models\MeliChatFlow;
 use App\Models\MeliClaim;
 use App\Models\TelegramProcessedUpdate;
@@ -23,6 +22,7 @@ class TelegramOperationsService
         private TelegramStateService $states,
         private TelegramClaimService $claims,
         private TelegramPostSaleService $postSale,
+        private TelegramPostSaleSyncCoordinator $postSaleSync,
         private MeliClaimMessagePolicy $claimPolicy,
         private MeliClaimMessageSender $claimSender,
         private MeliMessageService $postSaleSender,
@@ -138,8 +138,11 @@ class TelegramOperationsService
             return;
         }
         if ($data === 'pu') {
-            SyncMeliPostSaleForTelegramJob::dispatch($chatId);
-            $this->telegram->editOrSend($chatId, $messageId, '🔄 La sincronización de mensajería posventa quedó en cola.', [[['text' => '💬 Posventa', 'callback_data' => 'p']], ...$this->homeKeyboard()]);
+            $started = $this->postSaleSync->start($chatId);
+            $message = $started
+                ? '🔄 La sincronización de mensajería posventa quedó en cola.'
+                : '🔄 La sincronización de mensajería posventa ya está en curso.';
+            $this->telegram->editOrSend($chatId, $messageId, $message, [[['text' => '💬 Posventa', 'callback_data' => 'p']], ...$this->homeKeyboard()]);
 
             return;
         }
