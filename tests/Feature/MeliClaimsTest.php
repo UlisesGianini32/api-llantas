@@ -4,9 +4,11 @@ namespace Tests\Feature;
 
 use App\Jobs\SyncMeliClaimJob;
 use App\Models\MeliAccount;
+use App\Models\MeliAccountUserAccess;
 use App\Models\MeliClaim;
 use App\Models\MeliClaimActionLog;
 use App\Models\User;
+use App\Services\MercadoLibre\Claims\MeliClaimActionService;
 use App\Services\MercadoLibre\Claims\MeliClaimsService;
 use App\Services\TelegramAlertService;
 use Illuminate\Database\Schema\Blueprint;
@@ -28,6 +30,7 @@ class MeliClaimsTest extends TestCase
     private object $actionMigration;
     private object $actionSourceMigration;
     private object $actionSecurityMigration;
+    private object $accountAccessMigration;
     private object $attachmentMigration;
     private object $telegramMigration;
     private User $user;
@@ -74,6 +77,8 @@ class MeliClaimsTest extends TestCase
         $this->actionSourceMigration->up();
         $this->actionSecurityMigration = require database_path('migrations/2026_09_18_000002_secure_telegram_claim_actions.php');
         $this->actionSecurityMigration->up();
+        $this->accountAccessMigration = require database_path('migrations/2026_09_18_000003_create_meli_account_user_accesses_table.php');
+        $this->accountAccessMigration->up();
         $this->attachmentMigration = require database_path('migrations/2026_09_02_000001_create_meli_claim_attachment_uploads_table.php');
         $this->attachmentMigration->up();
         $this->telegramMigration = require database_path('migrations/2026_09_15_000001_add_telegram_notified_at_to_meli_claims.php');
@@ -87,6 +92,7 @@ class MeliClaimsTest extends TestCase
     {
         $this->telegramMigration->down();
         $this->attachmentMigration->down();
+        $this->accountAccessMigration->down();
         $this->actionSecurityMigration->down();
         $this->actionSourceMigration->down();
         $this->actionMigration->down();
@@ -797,6 +803,76 @@ class MeliClaimsTest extends TestCase
         $this->assertSame('GET', $requests->first()->method());
         $this->assertDatabaseHas('meli_claim_action_logs', ['meli_claim_id' => $claim->id, 'source' => 'web', 'action' => 'refund', 'success' => true, 'remote_status' => 201]);
         $this->assertStringNotContainsString('economic-token', MeliClaimActionLog::query()->latest('id')->first()->toJson());
+    }
+
+    public function test_account_owner_retains_claim_action_access(): void
+    {
+        $claim = $this->claim($this->account(), ['claim_id' => 'OWNER-ACCESS']);
+
+        $this->assertTrue(app(MeliClaimActionService::class)->canAct($this->user, $claim));
+    }
+
+    public function test_delegated_operator_can_execute_and_is_the_audited_actor(): void
+    {
+        $account = $this->account(['access_token' => 'delegated-token']);
+        $claim = $this->claim($account, ['claim_id' => 'DELEGATED-REFUND']);
+        $operator = User::factory()->create(['role' => 'operations']);
+        MeliAccountUserAccess::query()->create([
+            'meli_account_id' => $account->id,
+            'user_id' => $operator->id,
+            'can_claim_actions' => true,
+            'active' => true,
+        ]);
+        $this->fakeEconomicApi('DELEGATED-REFUND', ['refund']);
+
+        $result = app(MeliClaimActionService::class)->execute($operator, $claim, 'refund');
+
+        $this->assertTrue($result['ok']);
+        $this->assertSame($this->user->id, $account->fresh()->user_id);
+        $this->assertDatabaseHas('meli_claim_action_logs', [
+            'meli_claim_id' => $claim->id,
+            'meli_account_id' => $account->id,
+            'user_id' => $operator->id,
+            'action' => 'refund',
+            'success' => true,
+        ]);
+    }
+
+    public function test_delegated_access_without_claim_action_permission_is_blocked(): void
+    {
+        [$operator, $claim] = $this->delegatedClaimAccess(['can_claim_actions' => false]);
+
+        $this->assertFalse(app(MeliClaimActionService::class)->canAct($operator, $claim));
+    }
+
+    public function test_inactive_delegated_access_is_blocked(): void
+    {
+        [$operator, $claim] = $this->delegatedClaimAccess(['active' => false]);
+
+        $this->assertFalse(app(MeliClaimActionService::class)->canAct($operator, $claim));
+    }
+
+    public function test_delegated_access_is_scoped_to_one_account(): void
+    {
+        $operator = User::factory()->create(['role' => 'operations']);
+        $allowedAccount = $this->account();
+        $otherClaim = $this->claim($this->account(), ['claim_id' => 'OTHER-ACCOUNT']);
+        MeliAccountUserAccess::query()->create([
+            'meli_account_id' => $allowedAccount->id,
+            'user_id' => $operator->id,
+            'can_claim_actions' => true,
+            'active' => true,
+        ]);
+
+        $this->assertFalse(app(MeliClaimActionService::class)->canAct($operator, $otherClaim));
+    }
+
+    public function test_delegated_access_does_not_bypass_user_route_permission(): void
+    {
+        [$operator, $claim] = $this->delegatedClaimAccess();
+        $operator->forceFill(['role' => 'disabled'])->save();
+
+        $this->assertFalse(app(MeliClaimActionService::class)->canAct($operator, $claim));
     }
 
     public function test_stale_local_action_stage_and_reason_never_authorize_when_fresh_seller_action_is_missing(): void
@@ -1626,6 +1702,23 @@ class MeliClaimsTest extends TestCase
     private function account(array $overrides = []): MeliAccount
     {
         return MeliAccount::factory()->create(['user_id' => $this->user->id, 'access_token' => 'token', 'expires_at' => now()->addHour(), ...$overrides]);
+    }
+
+    /** @return array{User, MeliClaim} */
+    private function delegatedClaimAccess(array $overrides = []): array
+    {
+        $operator = User::factory()->create(['role' => 'operations']);
+        $account = $this->account();
+        $claim = $this->claim($account);
+        MeliAccountUserAccess::query()->create([
+            'meli_account_id' => $account->id,
+            'user_id' => $operator->id,
+            'can_claim_actions' => true,
+            'active' => true,
+            ...$overrides,
+        ]);
+
+        return [$operator, $claim];
     }
 
     private function claim(MeliAccount $account, array $overrides = []): MeliClaim
