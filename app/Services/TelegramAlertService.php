@@ -16,6 +16,7 @@ class TelegramAlertService
             $chatIds = array_unique($this->resolveChatIds());
             if ($token === '' || $chatIds === []) {
                 Log::notice('TelegramAlertService: alerta de reclamo sin configuración', ['claim_id' => $claim->claim_id]);
+
                 return;
             }
 
@@ -30,7 +31,9 @@ class TelegramAlertService
             $lines[] = 'Motivo: '.mb_substr((string) ($claim->reason?->detail ?: $claim->reason?->name ?: $claim->reason_id ?: $claim->problem ?: '—'), 0, 300);
             $lines[] = 'Etapa: '.($claim->stage ?: '—');
             $lines[] = 'Responsable de acción: '.($claim->action_responsible ?: '—');
-            $lines[] = 'Afecta reputación: '.match ($claim->affects_reputation) { true => 'Sí', false => 'No', default => 'Sin determinar' };
+            $lines[] = 'Afecta reputación: '.match ($claim->affects_reputation) {
+                true => 'Sí', false => 'No', default => 'Sin determinar'
+            };
             $lines[] = 'Fecha límite: '.($claim->due_date?->toIso8601String() ?? '—');
             if ($claim->order && (int) $claim->order->meli_account_id === (int) $claim->meli_account_id) {
                 foreach ($claim->order->items->take(10) as $item) {
@@ -41,7 +44,9 @@ class TelegramAlertService
             // Bound UTF-16 code units as well as characters, keeping the direct URL intact.
             $url = route('meli.claims.show', $claim);
             $bodyLimit = 8000 - strlen(mb_convert_encoding("\n".$url, 'UTF-16LE', 'UTF-8'));
-            if ($bodyLimit < 1000) throw new \RuntimeException('La URL del reclamo excede el espacio disponible.');
+            if ($bodyLimit < 1000) {
+                throw new \RuntimeException('La URL del reclamo excede el espacio disponible.');
+            }
             $body = implode("\n", $lines);
             while (strlen(mb_convert_encoding($body, 'UTF-16LE', 'UTF-8')) > $bodyLimit) {
                 $body = mb_substr($body, 0, mb_strlen($body) - 100);
@@ -51,12 +56,19 @@ class TelegramAlertService
             // Atomic compare-and-set protects even callers holding stale model instances.
             $reserved = MeliClaim::query()->whereKey($claim->id)->whereNull('telegram_notified_at')
                 ->whereIn('status', ['opened', 'open'])->update(['telegram_notified_at' => now()]);
-            if ($reserved !== 1) return;
+            if ($reserved !== 1) {
+                return;
+            }
 
             foreach ($chatIds as $chatId) {
                 try {
                     $response = Http::connectTimeout(5)->timeout(15)->post("https://api.telegram.org/bot{$token}/sendMessage", [
-                        'chat_id' => $chatId, 'text' => $message,
+                        'chat_id' => $chatId,
+                        'text' => $message,
+                        'reply_markup' => ['inline_keyboard' => [
+                            [['text' => '📖 Ver reclamo', 'callback_data' => 'cd:'.$claim->id.':o:1']],
+                            [['text' => '✍️ Responder', 'callback_data' => 'cr:'.$claim->id]],
+                        ]],
                     ]);
                     if (! $response->successful() || $response->json('ok') !== true) {
                         Log::warning('TelegramAlertService: envío de reclamo rechazado', ['claim_id' => $claim->claim_id, 'status' => $response->status()]);
@@ -78,7 +90,7 @@ class TelegramAlertService
         ?string $exceptionMessage = null,
         ?string $exceptionClass = null
     ): void {
-        if (!filter_var((string) env('QUEUE_FAIL_TELEGRAM_ENABLED', true), FILTER_VALIDATE_BOOL)) {
+        if (! filter_var((string) env('QUEUE_FAIL_TELEGRAM_ENABLED', true), FILTER_VALIDATE_BOOL)) {
             return;
         }
 
@@ -96,14 +108,14 @@ class TelegramAlertService
         $appEnv = (string) config('app.env', 'unknown');
         $shortError = trim((string) $exceptionMessage);
         if ($shortError !== '' && mb_strlen($shortError) > 500) {
-            $shortError = mb_substr($shortError, 0, 500) . '...';
+            $shortError = mb_substr($shortError, 0, 500).'...';
         }
 
         $message = "ALERTA COLA FALLIDA\n"
-            . "App: {$appName} ({$appEnv})\n"
-            . "Conexion: {$connection}\n"
-            . "Queue: {$queue}\n"
-            . "Job: {$jobName}";
+            ."App: {$appName} ({$appEnv})\n"
+            ."Conexion: {$connection}\n"
+            ."Queue: {$queue}\n"
+            ."Job: {$jobName}";
 
         $class = trim((string) $exceptionClass);
         if ($class !== '') {
@@ -153,17 +165,17 @@ class TelegramAlertService
         $buyerName = trim($buyerName) !== '' ? trim($buyerName) : '—';
         $productLines = trim($productLines) !== '' ? trim($productLines) : '—';
         if (mb_strlen($productLines) > 1200) {
-            $productLines = mb_substr($productLines, 0, 1200) . '...';
+            $productLines = mb_substr($productLines, 0, 1200).'...';
         }
 
         $message = "MELI — Asesor solicitado (opcion 4)\n"
-            . "App: {$appName}\n"
-            . "Venta: {$orderId}\n"
-            . "Cliente: {$buyerName}\n"
-            . "Producto / unidades:\n{$productLines}";
+            ."App: {$appName}\n"
+            ."Venta: {$orderId}\n"
+            ."Cliente: {$buyerName}\n"
+            ."Producto / unidades:\n{$productLines}";
 
         if (mb_strlen($message) > 4000) {
-            $message = mb_substr($message, 0, 3990) . '...';
+            $message = mb_substr($message, 0, 3990).'...';
         }
 
         foreach ($chatIds as $chatId) {
