@@ -26,6 +26,7 @@ class MeliClaimsTest extends TestCase
     private object $migration;
     private object $detailMigration;
     private object $actionMigration;
+    private object $actionSourceMigration;
     private object $attachmentMigration;
     private object $telegramMigration;
     private User $user;
@@ -68,6 +69,8 @@ class MeliClaimsTest extends TestCase
         $this->detailMigration->up();
         $this->actionMigration = require database_path('migrations/2026_09_01_000001_create_meli_claim_action_logs_table.php');
         $this->actionMigration->up();
+        $this->actionSourceMigration = require database_path('migrations/2026_09_18_000001_add_source_to_meli_claim_action_logs_table.php');
+        $this->actionSourceMigration->up();
         $this->attachmentMigration = require database_path('migrations/2026_09_02_000001_create_meli_claim_attachment_uploads_table.php');
         $this->attachmentMigration->up();
         $this->telegramMigration = require database_path('migrations/2026_09_15_000001_add_telegram_notified_at_to_meli_claims.php');
@@ -81,6 +84,7 @@ class MeliClaimsTest extends TestCase
     {
         $this->telegramMigration->down();
         $this->attachmentMigration->down();
+        $this->actionSourceMigration->down();
         $this->actionMigration->down();
         $this->detailMigration->down();
         $this->migration->down();
@@ -787,7 +791,7 @@ class MeliClaimsTest extends TestCase
         $this->assertSame([], $posts->sole()->data());
         $this->assertTrue($posts->sole()->hasHeader('Authorization', 'Bearer economic-token'));
         $this->assertSame('GET', $requests->first()->method());
-        $this->assertDatabaseHas('meli_claim_action_logs', ['meli_claim_id' => $claim->id, 'action' => 'refund', 'success' => true, 'remote_status' => 201]);
+        $this->assertDatabaseHas('meli_claim_action_logs', ['meli_claim_id' => $claim->id, 'source' => 'web', 'action' => 'refund', 'success' => true, 'remote_status' => 201]);
         $this->assertStringNotContainsString('economic-token', MeliClaimActionLog::query()->latest('id')->first()->toJson());
     }
 
