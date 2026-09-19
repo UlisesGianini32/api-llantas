@@ -1724,15 +1724,20 @@ class AmsPedidosController extends Controller
             ."DIRECTION 1\r\n"
             ."CLS\r\n"
             /*
-             * Invertimos dentro de la KAMO sin usar REVERSE:
-             * fondo negro + BITMAP en modo XOR (2).
+             * KAMO KA-L1 / TD-402S:
+             *
+             * Polaridad validada fisicamente:
+             * 0 = negro
+             * 1 = blanco
+             *
+             * BITMAP directo en modo 0.
+             * Sin BAR negro previo y sin XOR.
              */
-            ."BAR 0,0,812,1624\r\n"
             ."BITMAP 0,0,"
             .$bytesPerRow
             .","
             .$height
-            .",2,";
+            .",0,";
 
         $footer =
             "\r\n"

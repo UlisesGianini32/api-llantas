@@ -558,7 +558,7 @@ export default function PedidosProcesar({
                  */
                 const config =
                     qz.configs.create({
-                        host: '192.168.68.119',
+                        host: '192.168.68.115',
                         port: 9100,
                     })
 
