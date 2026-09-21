@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\MeliAccount;
 use App\Models\MeliOrder;
 use App\Models\User;
 use App\Services\MeliOrderSyncService;
@@ -19,10 +20,50 @@ class AmsPedidosController extends Controller
     public function index(Request $request): Response
     {
         $fechaSeleccionada = $this->resolveFecha($request, false);
-
-        $rows = $this->basePedidosQuery()
-            ->whereDate('o.created_at', $fechaSeleccionada)
+        $accounts = $request->user()->meliAccounts()
+            ->orderByDesc('is_default')
+            ->orderBy('nickname')
+            ->orderBy('id')
             ->get();
+
+        $requestedAccount = trim((string) $request->input('account_id', ''));
+        $defaultAccount = $accounts->firstWhere('is_default', true) ?? $accounts->first();
+        $selectedAccountId = $requestedAccount === 'all'
+            ? null
+            : (int) ($accounts->firstWhere('id', (int) $requestedAccount)?->id ?? $defaultAccount?->id ?? 0);
+
+        $deliveryTypes = [
+            'all',
+            'mercado_envios',
+            'agreed_with_buyer',
+            'custom_shipping',
+            'pending_identification',
+        ];
+        $deliveryType = strtolower(trim((string) $request->input('delivery_type', 'all')));
+        if (! in_array($deliveryType, $deliveryTypes, true)) {
+            $deliveryType = 'all';
+        }
+
+        $query = $this->basePedidosQuery(true, $selectedAccountId ?: null)
+            ->whereDate('o.created_at', $fechaSeleccionada);
+
+        if ($selectedAccountId === null) {
+            $accountIds = $accounts->pluck('id')->map(fn ($id): int => (int) $id)->all();
+            $accountIds === []
+                ? $query->whereRaw('1 = 0')
+                : $query->whereIn('o.meli_account_id', $accountIds);
+        }
+
+        if ($deliveryType === 'pending_identification') {
+            $query->where(function ($pending): void {
+                $pending->whereIn('o.delivery_type', ['pending_shipment', 'unknown'])
+                    ->orWhereNull('o.delivery_type');
+            });
+        } elseif ($deliveryType !== 'all') {
+            $query->where('o.delivery_type', $deliveryType);
+        }
+
+        $rows = $query->get();
 
         $grouped = $this->computePedidosGrouped($rows);
 
@@ -35,6 +76,15 @@ class AmsPedidosController extends Controller
             'tituloPagina' => 'AMS - Pedidos del día',
             'subtitulo' => 'Mostrando pedidos vendidos el día:',
             'dateFilterUrl' => route('ams.pedidos.index'),
+            'meliAccounts' => $accounts->map(fn (MeliAccount $account): array => [
+                'id' => $account->id,
+                'name' => trim((string) $account->nickname) !== ''
+                    ? $account->nickname
+                    : 'Cuenta '.$account->meli_user_id,
+                'is_default' => $account->is_default,
+            ])->values()->all(),
+            'selectedMeliAccountId' => $selectedAccountId === null ? 'all' : (string) $selectedAccountId,
+            'deliveryType' => $deliveryType,
         ]);
     }
 
@@ -425,6 +475,8 @@ class AmsPedidosController extends Controller
 
         return $orders
 
+            ->leftJoin('meli_accounts as ma', 'ma.id', '=', 'o.meli_account_id')
+
             ->leftJoinSub($productsBySku, 'ps', function ($join) {
                 $join->on('ps.sku', '=', 'i.sku');
             })
@@ -448,11 +500,19 @@ class AmsPedidosController extends Controller
                 'o.created_at as fecha_pedido',
                 'o.shipping_process_date',
                 'o.shipping_id',
+                'o.pack_id as stored_pack_id',
                 'o.shipping_status',
                 'o.shipping_substatus',
                 'o.shipping_mode',
                 'o.shipping_type',
                 'o.shipping_logistic_type',
+                'o.delivery_type',
+                'o.delivery_classification_reason',
+                'o.needs_shipping_review',
+                'o.meli_account_id',
+                'ma.nickname as meli_account_nickname',
+                'ma.meli_user_id',
+                'ma.is_default as meli_account_is_default',
                 'o.shipping_raw as order_shipping_raw',
                 'o.raw as raw_order',
                 DB::raw("JSON_UNQUOTE(JSON_EXTRACT(o.raw, '$.pack_id')) as raw_pack_id"),
@@ -914,7 +974,7 @@ class AmsPedidosController extends Controller
                 }
             }
 
-            $packIdRaw = $row->raw_pack_id ?? null;
+            $packIdRaw = $row->stored_pack_id ?? $row->raw_pack_id ?? null;
             if ($packIdRaw === null || $packIdRaw === '') {
                 $packIdRaw = $raw['pack_id'] ?? null;
             }
@@ -925,9 +985,10 @@ class AmsPedidosController extends Controller
                 : '';
             $orderGroupPart = $orderIdStr !== '' ? $orderIdStr : ('id_' . $row->id_local);
 
+            $accountGroupPart = (string) ($row->meli_account_id ?? 'unknown');
             $groupKey = ($mergeByPack && $packId !== null)
-                ? ('pack_' . $packId)
-                : ('order_' . $orderGroupPart);
+                ? ('account_' . $accountGroupPart . '_pack_' . $packId)
+                : ('account_' . $accountGroupPart . '_order_' . $orderGroupPart);
 
             $rawItem = null;
             $rawItems = $raw['order_items'] ?? [];
@@ -991,6 +1052,11 @@ class AmsPedidosController extends Controller
 
             return (object) [
                 'group_key' => $groupKey,
+                'meli_account_id' => (int) ($row->meli_account_id ?? 0),
+                'meli_account_name' => trim((string) ($row->meli_account_nickname ?? '')) !== ''
+                    ? (string) $row->meli_account_nickname
+                    : 'Cuenta ' . ($row->meli_user_id ?? ''),
+                'meli_account_is_default' => (bool) ($row->meli_account_is_default ?? false),
                 'pack_id' => $packId,
                 'id_local' => (int) $row->id_local,
                 'item_row_id' => (int) ($row->item_row_id ?? 0),
@@ -1012,6 +1078,10 @@ class AmsPedidosController extends Controller
                     : null,
                 'ams_tipo' => $amsTipo,
                 'order_status' => (string) ($row->order_status ?? ''),
+                'buyer_nickname' => (string) data_get($raw, 'buyer.nickname', ''),
+                'delivery_type' => (string) ($row->delivery_type ?? 'unknown'),
+                'delivery_classification_reason' => (string) ($row->delivery_classification_reason ?? ''),
+                'needs_shipping_review' => (bool) ($row->needs_shipping_review ?? false),
                 'order_cancelled' => $this->isMeliOrderCancelledForPresentation($raw, $row->order_status ?? null),
                 'order_total_amount' => is_numeric($raw['total_amount'] ?? null) ? (float) $raw['total_amount'] : null,
                 'order_currency_id' => filled($raw['currency_id'] ?? null) ? (string) $raw['currency_id'] : null,
@@ -1059,6 +1129,9 @@ class AmsPedidosController extends Controller
 
                 return (object) [
                     'group_key' => $primer->group_key,
+                    'meli_account_id' => $primer->meli_account_id,
+                    'meli_account_name' => $primer->meli_account_name,
+                    'meli_account_is_default' => $primer->meli_account_is_default,
                     'pack_id' => $primer->pack_id,
                     'order_id' => $primer->order_id,
                     'orders' => $ordersByGroup->get($primer->group_key, collect()),
@@ -1066,6 +1139,12 @@ class AmsPedidosController extends Controller
                     'ams_tipo' => $primer->ams_tipo ?? 'OTRO',
                     'fecha_pedido' => $primer->fecha_pedido,
                     'shipping_id' => (string) ($primer->shipping_id ?? ''),
+                    'buyer_nickname' => $primer->buyer_nickname,
+                    'order_status' => $primer->order_status,
+                    'delivery_type' => $primer->delivery_type,
+                    'delivery_classification_reason' => $primer->delivery_classification_reason,
+                    'needs_shipping_review' => $primer->needs_shipping_review,
+                    'can_print_shipping_label' => trim((string) ($primer->shipping_id ?? '')) !== '',
                     'fecha_pedido_formateada' => $primer->fecha_pedido_formateada,
                     'ml_envio_status' => (string) ($primer->ml_envio_status ?? ''),
                     'ml_envio_substatus' => (string) ($primer->ml_envio_substatus ?? ''),
@@ -1098,6 +1177,9 @@ class AmsPedidosController extends Controller
             ->map(function ($p) use ($incluirMarca) {
                 $row = [
                     'group_key' => $p->group_key,
+                    'meli_account_id' => $p->meli_account_id ?? null,
+                    'meli_account_name' => $p->meli_account_name ?? '',
+                    'meli_account_is_default' => (bool) ($p->meli_account_is_default ?? false),
                     'order_id' => (string) $p->order_id,
                     'pack_id' => isset($p->pack_id) ? (string) $p->pack_id : null,
                     'orders' => collect($p->orders ?? [])->map(fn (mixed $order): array => (array) $order)->values()->all(),
@@ -1105,6 +1187,12 @@ class AmsPedidosController extends Controller
                     'ams_tipo' => $p->ams_tipo ?? 'OTRO',
                     'fecha_pedido_formateada' => $p->fecha_pedido_formateada,
                     'shipping_id' => (string) ($p->shipping_id ?? ''),
+                    'buyer_nickname' => (string) ($p->buyer_nickname ?? ''),
+                    'order_status' => (string) ($p->order_status ?? ''),
+                    'delivery_type' => (string) ($p->delivery_type ?? 'unknown'),
+                    'delivery_classification_reason' => (string) ($p->delivery_classification_reason ?? ''),
+                    'needs_shipping_review' => (bool) ($p->needs_shipping_review ?? false),
+                    'can_print_shipping_label' => (bool) ($p->can_print_shipping_label ?? false),
                     'ml_envio_status' => (string) ($p->ml_envio_status ?? ''),
                     'ml_envio_substatus' => (string) ($p->ml_envio_substatus ?? ''),
                     'ml_envio_label' => (string) ($p->ml_envio_label ?? ''),

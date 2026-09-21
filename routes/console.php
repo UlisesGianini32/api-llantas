@@ -107,19 +107,19 @@ Schedule::command('meli:sync-stock')
 
 $meliSyncOrdersUserId = (int) config('services.meli.sync_orders_user_id');
 if ($meliSyncOrdersUserId > 0) {
-    Schedule::command("meli:sync-orders --user_id={$meliSyncOrdersUserId} --today")
+    Schedule::command('meli:sync-orders --all-accounts --today')
         ->everyFiveMinutes()
         ->withoutOverlapping();
 
     // Re-sync de respaldo para órdenes que cambian de estado después del día de creación.
     // AMS "Como ML · etiqueta lista" no filtra por día; Mercado puede mostrar pedidos
     // de varios días atrás que recién quedaron listos para imprimir.
-    Schedule::command("meli:sync-orders --user_id={$meliSyncOrdersUserId} --days=14")
+    Schedule::command('meli:sync-orders --all-accounts --days=14')
         ->everyThirtyMinutes()
         ->withoutOverlapping();
 
     // Barrido amplio para que AMS no se quede corto frente al filtro "Últimos 2 meses" de ML.
-    Schedule::command("meli:sync-orders --user_id={$meliSyncOrdersUserId} --days=60")
+    Schedule::command('meli:sync-orders --all-accounts --days=60')
         ->dailyAt('03:30')
         ->withoutOverlapping();
 }
