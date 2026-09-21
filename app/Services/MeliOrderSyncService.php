@@ -6,6 +6,7 @@ use App\Models\MeliAccount;
 use App\Models\MeliOrder;
 use App\Models\MeliOrderItem;
 use App\Models\User;
+use App\Services\MercadoLibre\Orders\MeliOrderDeliveryClassifier;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
@@ -14,9 +15,13 @@ use JsonException;
 
 class MeliOrderSyncService
 {
+    /** @var array<string, ?string> */
+    private array $itemShippingModeCache = [];
+
     public function __construct(
         protected StockService $stockService,
-        protected SyscomOrderFromMeliService $syscomOrderFromMeli
+        protected SyscomOrderFromMeliService $syscomOrderFromMeli,
+        protected MeliOrderDeliveryClassifier $deliveryClassifier,
     ) {}
 
     /**
@@ -57,6 +62,7 @@ class MeliOrderSyncService
         $limit = 50;
         $totalSynced = 0;
         $ordersCount = 0;
+        $failedCount = 0;
 
         do {
             $response = Http::withToken($user->access_token)
@@ -107,13 +113,22 @@ class MeliOrderSyncService
                     continue;
                 }
 
-                $savedItems = $this->storeOrder(
-                    $user,
-                    $orderData
-                );
+                try {
+                    $savedItems = $this->storeOrder(
+                        $user,
+                        $orderData
+                    );
 
-                $ordersCount++;
-                $totalSynced += $savedItems;
+                    $ordersCount++;
+                    $totalSynced += $savedItems;
+                } catch (\Throwable $exception) {
+                    $failedCount++;
+                    Log::warning('ML order sync failed for one order', [
+                        'order_id' => $orderData['id'] ?? null,
+                        'meli_account_id' => $meliAccountId,
+                        'error' => $exception->getMessage(),
+                    ]);
+                }
             }
 
             $offset += $limit;
@@ -122,6 +137,7 @@ class MeliOrderSyncService
         return [
             'orders' => $ordersCount,
             'items' => $totalSynced,
+            'failed' => $failedCount,
             'seller_id' => $sellerId,
             'meli_account_id' => $meliAccountId,
             'date' => $date,
@@ -416,6 +432,31 @@ class MeliOrderSyncService
                     $createdAt
                 );
 
+                $packId = $this->stringOrNull(
+                    data_get($orderData, 'pack_id')
+                );
+
+                $existingOrder = MeliOrder::query()
+                    ->where('order_id', $orderId)
+                    ->first();
+
+                $itemShippingModes = $this->resolveItemShippingModes(
+                    $user,
+                    $orderData,
+                    $shipping['shipping_id'],
+                    $existingOrder
+                );
+
+                $delivery = $this->deliveryClassifier->classify(
+                    $orderData,
+                    $shipping['shipping_id'],
+                    $itemShippingModes
+                );
+
+                if ($delivery['shipping_mode'] !== null) {
+                    $shipping['shipping_mode'] = $delivery['shipping_mode'];
+                }
+
                 $displayId = $this->resolveDisplayId(
                     $orderData,
                     $shipping
@@ -439,6 +480,7 @@ class MeliOrderSyncService
                         'raw' => $orderData,
 
                         'shipping_id' => $shipping['shipping_id'],
+                        'pack_id' => $packId,
                         'shipping_mode' => $shipping['shipping_mode'],
                         'shipping_type' => $shipping['shipping_type'],
                         'shipping_status' => $shipping['shipping_status'],
@@ -446,6 +488,10 @@ class MeliOrderSyncService
                         'shipping_logistic_type' => $shipping[
                             'shipping_logistic_type'
                         ],
+                        'delivery_type' => $delivery['delivery_type'],
+                        'delivery_classification_reason' => $delivery['reason'],
+                        'delivery_classified_at' => now(),
+                        'needs_shipping_review' => $delivery['needs_review'],
                         'shipping_process_date' => $shipping[
                             'shipping_process_date'
                         ],
@@ -520,28 +566,6 @@ class MeliOrderSyncService
                     $savedItems++;
                 }
 
-                Log::info('ML order synced', [
-                    'order_id' => $orderId,
-                    'meli_account_id' => $meliAccountId,
-                    'meli_user_id' => (string) $user->meli_id,
-                    'status' => $status,
-                    'shipping_id' => $shipping['shipping_id'],
-                    'shipping_mode' => $shipping['shipping_mode'],
-                    'shipping_type' => $shipping['shipping_type'],
-                    'shipping_status' => $shipping['shipping_status'],
-                    'shipping_substatus' => $shipping[
-                        'shipping_substatus'
-                    ],
-                    'shipping_logistic_type' => $shipping[
-                        'shipping_logistic_type'
-                    ],
-                    'shipping_process_date' => $shipping[
-                        'shipping_process_date'
-                    ],
-                    'display_id' => $displayId,
-                    'items' => $savedItems,
-                ]);
-
                 $order->load('items');
 
                 /*
@@ -581,6 +605,111 @@ class MeliOrderSyncService
 
                 return $savedItems;
             }
+        );
+    }
+
+    /**
+     * Obtiene el modo de envío de cada artículo. Las respuestas se reutilizan
+     * durante toda la corrida y el snapshot persistido evita consultas cuando
+     * Mercado Libre no cambió la orden.
+     *
+     * @return list<?string>
+     */
+    protected function resolveItemShippingModes(
+        User $user,
+        array $orderData,
+        ?string $shippingId,
+        ?MeliOrder $existingOrder
+    ): array {
+        if ($shippingId !== null && trim($shippingId) !== '') {
+            return [];
+        }
+
+        $items = is_array($orderData['order_items'] ?? null)
+            ? $orderData['order_items']
+            : [];
+
+        if ($items === []) {
+            return [];
+        }
+
+        $reuseStoredMode = $this->canReuseStoredShippingMode($existingOrder, $orderData);
+        $modes = [];
+
+        foreach ($items as $orderItem) {
+            if (! is_array($orderItem)) {
+                $modes[] = null;
+
+                continue;
+            }
+
+            $mode = $this->stringOrNull(
+                data_get($orderItem, 'item.shipping.mode')
+                ?? data_get($orderItem, 'shipping.mode')
+            );
+
+            if ($mode === null && $reuseStoredMode) {
+                $mode = $this->stringOrNull($existingOrder?->shipping_mode);
+            }
+
+            if ($mode === null) {
+                $itemId = $this->stringOrNull(data_get($orderItem, 'item.id'));
+                $mode = $itemId !== null
+                    ? $this->fetchItemShippingMode($user, $itemId)
+                    : null;
+            }
+
+            $modes[] = $mode;
+        }
+
+        return $modes;
+    }
+
+    protected function canReuseStoredShippingMode(?MeliOrder $order, array $remote): bool
+    {
+        if (! $order || $order->needs_shipping_review || ! $order->delivery_classified_at || ! $order->shipping_mode) {
+            return false;
+        }
+
+        $storedRaw = $this->orderDataArrayFromModel($order);
+        $storedUpdated = $this->stringOrNull(
+            data_get($storedRaw, 'last_updated') ?? data_get($storedRaw, 'date_last_updated')
+        );
+        $remoteUpdated = $this->stringOrNull(
+            data_get($remote, 'last_updated') ?? data_get($remote, 'date_last_updated')
+        );
+
+        return $storedUpdated !== null && $storedUpdated === $remoteUpdated;
+    }
+
+    protected function fetchItemShippingMode(User $user, string $itemId): ?string
+    {
+        $cacheKey = implode(':', [
+            (string) ($this->resolveMeliAccountId($user) ?? $user->id),
+            $itemId,
+        ]);
+
+        if (array_key_exists($cacheKey, $this->itemShippingModeCache)) {
+            return $this->itemShippingModeCache[$cacheKey];
+        }
+
+        $response = Http::withToken($user->access_token)
+            ->timeout(30)
+            ->acceptJson()
+            ->get("https://api.mercadolibre.com/items/{$itemId}");
+
+        if (! $response->successful()) {
+            Log::warning('ML item shipping mode lookup failed', [
+                'item_id' => $itemId,
+                'status' => $response->status(),
+                'meli_account_id' => $this->resolveMeliAccountId($user),
+            ]);
+
+            return $this->itemShippingModeCache[$cacheKey] = null;
+        }
+
+        return $this->itemShippingModeCache[$cacheKey] = $this->stringOrNull(
+            data_get($response->json(), 'shipping.mode')
         );
     }
 
