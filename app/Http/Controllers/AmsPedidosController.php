@@ -919,25 +919,12 @@ class AmsPedidosController extends Controller
                     }
                 }
 
-                return (object) [
-                    'group_key' => $p->group_key,
-                    'pack_id' => $p->pack_id ?? null,
-                    'order_id' => $p->order_id,
-                    'orders' => $p->orders ?? collect(),
-                    'display_id' => $p->display_id,
-                    'ams_tipo' => $p->ams_tipo ?? 'OTRO',
-                    'fecha_pedido' => $p->fecha_pedido,
-                    'fecha_pedido_formateada' => $p->fecha_pedido_formateada,
-                    'ml_envio_status' => (string) ($p->ml_envio_status ?? ''),
-                    'ml_envio_substatus' => (string) ($p->ml_envio_substatus ?? ''),
-                    'ml_envio_label' => (string) ($p->ml_envio_label ?? ''),
+                return (object) array_merge((array) $p, [
                     'items' => $items,
-                    'total_piezas' => $p->total_piezas,
-                    'total_pedido' => $p->total_pedido,
                     'ams_marca_sort' => $minIdx,
                     'ams_marca_label' => $primaryLabel,
                     'ams_sku_sort' => $this->pedidoPrimarySkuSort($items),
-                ];
+                ]);
             })
             ->sort(function ($a, $b) {
                 $cmp = ((int) $a->ams_marca_sort) <=> ((int) $b->ams_marca_sort);

@@ -277,6 +277,72 @@ class MeliOrderDeliveryTest extends TestCase
                 ->where('pedidos.0.can_print_shipping_label', true));
     }
 
+    public function test_ams_brand_order_preserves_print_and_shipping_properties(): void
+    {
+        $account = $this->account('540', 'brand-order', true, 'Principal');
+        $alfaparf = $this->localOrder($account, '54001', 'mercado_envios', 'SHIP-ALFAPARF');
+        $wella = $this->localOrder($account, '54002', 'mercado_envios', 'SHIP-WELLA');
+
+        foreach ([
+            [$alfaparf, 'buyer-alfaparf', 'SKU-ALFA', 'Alfaparf producto'],
+            [$wella, 'buyer-wella', 'SKU-WELLA', 'Wella producto'],
+        ] as [$order, $buyer, $sku, $title]) {
+            $order->forceFill([
+                'shipping_status' => 'ready_to_ship',
+                'shipping_substatus' => 'ready_to_print',
+                'raw' => [
+                    'buyer' => ['nickname' => $buyer],
+                    'total_amount' => 100,
+                    'currency_id' => 'MXN',
+                ],
+            ])->save();
+            MeliOrderItem::query()->create([
+                'meli_order_id' => $order->id,
+                'item_id' => 'MLM-'.$sku,
+                'sku' => $sku,
+                'title' => $title,
+                'quantity' => 1,
+                'unit_price' => 100,
+            ]);
+        }
+
+        $request = ['fecha' => now()->toDateString(), 'alcance' => 'ml_listado'];
+
+        $this->get(route('ams.pedidos.procesar', $request + ['orden' => 'fecha']))
+            ->assertOk()
+            ->assertInertia(fn (Assert $page): Assert => $page
+                ->where('totalPedidos', 2)
+                ->where('pedidos', function ($pedidos): bool {
+                    $byOrder = collect($pedidos)->keyBy('order_id');
+
+                    $this->assertSame('SHIP-ALFAPARF', $byOrder['54001']['shipping_id']);
+                    $this->assertTrue($byOrder['54001']['can_print_shipping_label']);
+
+                    return true;
+                }));
+
+        $this->get(route('ams.pedidos.procesar', $request + ['orden' => 'marca']))
+            ->assertOk()
+            ->assertInertia(fn (Assert $page): Assert => $page
+                ->where('totalPedidos', 2)
+                ->where('pedidos.0.order_id', '54001')
+                ->where('pedidos.0.ams_marca_label', 'Alfaparf')
+                ->where('pedidos.0.shipping_id', 'SHIP-ALFAPARF')
+                ->where('pedidos.0.can_print_shipping_label', true)
+                ->where('pedidos.0.buyer_nickname', 'buyer-alfaparf')
+                ->where('pedidos.0.order_status', 'paid')
+                ->where('pedidos.0.ml_envio_status', 'ready_to_ship')
+                ->where('pedidos.0.ml_envio_substatus', 'ready_to_print')
+                ->where('pedidos.0.ml_envio_label', 'Listo para imprimir / empacar')
+                ->where('pedidos', function ($pedidos): bool {
+                    $this->assertCount(2, $pedidos);
+                    $this->assertSame('54001', $pedidos[0]['order_id']);
+                    $this->assertSame('54002', $pedidos[1]['order_id']);
+
+                    return true;
+                }));
+    }
+
     public function test_ams_uses_latest_publication_raw_image_without_duplicate_lines(): void
     {
         $account = $this->account('550', 'image-fallback', true, 'Principal');
