@@ -53,9 +53,14 @@ class MeliMenuAutomationService
 
         $this->syncFlowContext($flow, $data);
 
+        $flow = $flow->fresh();
+        if ($this->isAutomationSuppressed($flow)) {
+            return;
+        }
+
         if (($data['event_type'] ?? null) === 'buyer_message') {
-            if (! $flow->fresh()->menu_sent) {
-                $this->sendMenuIfNeeded($flow->fresh());
+            if (! $flow->menu_sent) {
+                $this->sendMenuIfNeeded($flow);
 
                 return;
             }
@@ -152,12 +157,15 @@ class MeliMenuAutomationService
     protected function syncFlowContext(MeliChatFlow $flow, array $data): void
     {
         $updates = [];
+        $shouldSyncMeta = ($data['event_type'] ?? null) === 'buyer_message'
+            || ! empty($data['site_id']);
 
         if (($data['event_type'] ?? null) === 'buyer_message') {
             $updates['last_message_role'] = 'customer';
             $updates['last_message_at'] = now();
             $updates['last_message_text'] = (string) ($data['message_text'] ?? '');
             $updates['last_message_synced_at'] = now();
+
         }
 
         if (! empty($data['pack_id'])) {
@@ -172,21 +180,37 @@ class MeliMenuAutomationService
             $updates['meli_account_id'] = $data['meli_account_id'];
         }
 
-        if (! empty($data['site_id'])) {
-            $updates['meta'] = array_merge($flow->meta ?? [], [
-                'site_id' => $data['site_id'],
-            ]);
-        }
+        if ($updates !== [] || $shouldSyncMeta) {
+            DB::transaction(function () use ($flow, $data, $updates): void {
+                $locked = MeliChatFlow::query()->lockForUpdate()->findOrFail($flow->id);
+                $lockedUpdates = $updates;
+                $meta = is_array($locked->meta) ? $locked->meta : [];
+                $metaChanged = false;
 
-        if ($updates !== []) {
-            $flow->update($updates);
-            $flow->refresh();
+                if (($data['event_type'] ?? null) === 'buyer_message'
+                    && ! isset($meta['conversation_started_by'])) {
+                    $meta['conversation_started_by'] = 'buyer';
+                    $meta['conversation_started_at'] = now()->toIso8601String();
+                    $metaChanged = true;
+                }
+
+                if (! empty($data['site_id'])) {
+                    $meta['site_id'] = $data['site_id'];
+                    $metaChanged = true;
+                }
+
+                if ($metaChanged) {
+                    $lockedUpdates['meta'] = $meta;
+                }
+
+                $locked->update($lockedUpdates);
+            });
         }
     }
 
     public function sendMenuIfNeeded(MeliChatFlow $flow): bool
     {
-        if ($flow->menu_sent) {
+        if ($flow->menu_sent || $this->isAutomationSuppressed($flow)) {
             return false;
         }
 
@@ -210,6 +234,9 @@ class MeliMenuAutomationService
     public function handleBuyerReply(MeliChatFlow $flow, string $buyerText): void
     {
         $flow = $flow->fresh();
+        if ($this->isAutomationSuppressed($flow)) {
+            return;
+        }
         $trimmed = trim($buyerText);
 
         if ($this->isBotMutedUntilMenu($flow)) {
@@ -250,6 +277,12 @@ class MeliMenuAutomationService
                 text: $this->buildInvalidOptionMessage()
             ),
         };
+    }
+
+    protected function isAutomationSuppressed(MeliChatFlow $flow): bool
+    {
+        return ($flow->meta['automation_suppressed'] ?? false) === true
+            || ($flow->meta['conversation_started_by'] ?? null) === 'seller';
     }
 
     protected function handleProductDetails(MeliChatFlow $flow): void

@@ -56,6 +56,9 @@ class MeliAgreedDeliveryMessagingTest extends TestCase
 
         $flow = MeliChatFlow::query()->sole();
         $this->assertSame('sent', data_get($flow->meta, 'delivery_details_request.status'));
+        $this->assertSame('seller', data_get($flow->meta, 'conversation_started_by'));
+        $this->assertTrue(data_get($flow->meta, 'automation_suppressed'));
+        $this->assertSame('ams', data_get($flow->meta, 'human_started_source'));
         $this->assertSame('clean', data_get($flow->meta, 'delivery_details_request.moderation_status'));
         $this->assertNotNull(data_get($flow->meta, 'delivery_details_request.requested_at'));
         $this->assertSame('MESSAGE-1', data_get($flow->meta, 'delivery_details_request_history.0.message_id'));
@@ -180,6 +183,10 @@ class MeliAgreedDeliveryMessagingTest extends TestCase
             ->assertUnprocessable()
             ->assertJsonPath('status', 'unavailable');
         $this->assertSame(0, $this->requests()->filter(fn (Request $request): bool => $request->method() === 'POST')->count());
+        $meta = (array) (MeliChatFlow::query()->sole()->meta ?? []);
+        $this->assertArrayNotHasKey('conversation_started_by', $meta);
+        $this->assertArrayNotHasKey('automation_suppressed', $meta);
+        $this->assertArrayNotHasKey('human_start_attempt', $meta);
     }
 
     public function test_blocked_conversation_returns_controlled_error(): void
@@ -290,6 +297,7 @@ class MeliAgreedDeliveryMessagingTest extends TestCase
             ->assertJsonPath('state.moderation_reason', 'personal_data');
 
         $this->assertNull(data_get(MeliChatFlow::query()->sole()->meta, 'delivery_details_request.requested_at'));
+        $this->assertArrayNotHasKey('conversation_started_by', (array) MeliChatFlow::query()->sole()->meta);
     }
 
     public function test_pending_moderation_is_an_accepted_warning_without_technical_error(): void
@@ -302,6 +310,7 @@ class MeliAgreedDeliveryMessagingTest extends TestCase
             ->assertJsonPath('ok', false)
             ->assertJsonPath('status', 'pending_moderation')
             ->assertJsonMissingPath('state.technical_error');
+        $this->assertTrue((bool) data_get(MeliChatFlow::query()->sole()->meta, 'automation_suppressed'));
     }
 
     public function test_uncertain_delivery_is_an_accepted_warning_without_claiming_failure_or_success(): void
@@ -314,6 +323,7 @@ class MeliAgreedDeliveryMessagingTest extends TestCase
             ->assertJsonPath('ok', false)
             ->assertJsonPath('status', 'uncertain')
             ->assertJsonMissingPath('state.technical_error');
+        $this->assertTrue((bool) data_get(MeliChatFlow::query()->sole()->meta, 'automation_suppressed'));
     }
 
     public function test_existing_conversation_uses_normal_messages_resource(): void
