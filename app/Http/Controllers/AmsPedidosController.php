@@ -506,6 +506,15 @@ class AmsPedidosController extends Controller
             ->where('p2.ml', '!=', '')
             ->groupBy('p2.ml');
 
+        $preferredPublicationByMlm = DB::table('meli_publications as mpl_latest')
+            ->select(
+                'mpl_latest.mlm',
+                DB::raw('COALESCE(MAX(CASE WHEN mpl_latest.is_current = 1 THEN mpl_latest.id END), MAX(mpl_latest.id)) as id')
+            )
+            ->whereNotNull('mpl_latest.mlm')
+            ->where('mpl_latest.mlm', '!=', '')
+            ->groupBy('mpl_latest.mlm');
+
         $orders = DB::table('meli_orders as o');
 
         // Este controlador corresponde a la cuenta principal.
@@ -532,6 +541,12 @@ class AmsPedidosController extends Controller
             ->leftJoinSub($productsByMl, 'pm', function ($join) {
                 $join->on('pm.ml', '=', 'i.item_id');
             })
+
+            ->leftJoinSub($preferredPublicationByMlm, 'mpl', function ($join) {
+                $join->on('mpl.mlm', '=', 'i.item_id');
+            })
+
+            ->leftJoin('meli_publications as mp', 'mp.id', '=', 'mpl.id')
 
             ->where(function ($q) {
                 $q->whereRaw("COALESCE(LOWER(JSON_UNQUOTE(JSON_EXTRACT(o.raw, '$.fulfilled'))), 'false') <> 'true'")
@@ -580,6 +595,11 @@ class AmsPedidosController extends Controller
                 'pm.name as ml_product_name',
                 'pm.thumbnail as ml_product_thumbnail',
                 'pm.price as ml_product_price',
+                DB::raw("CASE WHEN JSON_VALID(mp.raw) THEN COALESCE(
+                    NULLIF(JSON_UNQUOTE(JSON_EXTRACT(mp.raw, '$.pictures[0].secure_url')), ''),
+                    NULLIF(JSON_UNQUOTE(JSON_EXTRACT(mp.raw, '$.pictures[0].url')), ''),
+                    NULLIF(JSON_UNQUOTE(JSON_EXTRACT(mp.raw, '$.thumbnail')), '')
+                ) ELSE NULL END as publication_image"),
             ])
             ->orderByDesc('o.created_at')
             ->orderByDesc('o.order_id')
@@ -1087,7 +1107,12 @@ class AmsPedidosController extends Controller
 
             $imagen = $row->sku_product_thumbnail
                 ?: $row->ml_product_thumbnail
-                ?: ($rawItemInfo['thumbnail'] ?? null);
+                ?: ($rawItemInfo['thumbnail'] ?? null)
+                ?: ($row->publication_image ?? null);
+
+            if (is_string($imagen) && str_starts_with(strtolower($imagen), 'http://')) {
+                $imagen = 'https://'.substr($imagen, 7);
+            }
 
             $amsTipo = $this->classifyAmsTipo(
                 $row->shipping_mode,

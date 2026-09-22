@@ -144,8 +144,24 @@ class MeliOrderDeliveryTest extends TestCase
             $table->string('thumbnail')->nullable();
             $table->decimal('price', 14, 2)->default(0);
         });
+        Schema::create('meli_publications', function (Blueprint $table): void {
+            $table->id();
+            $table->foreignId('user_id')->nullable();
+            $table->foreignId('meli_account_id')->nullable();
+            $table->string('sku')->nullable();
+            $table->string('mlm')->nullable();
+            $table->json('pictures')->nullable();
+            $table->boolean('is_current')->default(false);
+            $table->json('raw')->nullable();
+            $table->timestamps();
+        });
 
         DB::connection()->getPdo()->sqliteCreateFunction('JSON_UNQUOTE', fn ($value) => $value, 1);
+        DB::connection()->getPdo()->sqliteCreateFunction('JSON_VALID', function ($value): int {
+            json_decode((string) $value);
+
+            return json_last_error() === JSON_ERROR_NONE ? 1 : 0;
+        }, 1);
 
         $this->user = User::factory()->create();
         $this->actingAs($this->user);
@@ -157,7 +173,7 @@ class MeliOrderDeliveryTest extends TestCase
 
     protected function tearDown(): void
     {
-        foreach (['products', 'meli_chat_flows', 'meli_order_items', 'meli_orders', 'meli_account_user_accesses', 'meli_accounts', 'users'] as $table) {
+        foreach (['meli_publications', 'products', 'meli_chat_flows', 'meli_order_items', 'meli_orders', 'meli_account_user_accesses', 'meli_accounts', 'users'] as $table) {
             Schema::dropIfExists($table);
         }
         DB::purge('sqlite');
@@ -259,6 +275,222 @@ class MeliOrderDeliveryTest extends TestCase
                 ->where('totalPedidos', 1)
                 ->where('pedidos.0.order_id', '60001')
                 ->where('pedidos.0.can_print_shipping_label', true));
+    }
+
+    public function test_ams_uses_latest_publication_raw_image_without_duplicate_lines(): void
+    {
+        $account = $this->account('550', 'image-fallback', true, 'Principal');
+        $order = $this->localOrder($account, '55001', 'agreed_with_buyer', null);
+        $item = MeliOrderItem::query()->create([
+            'meli_order_id' => $order->id,
+            'item_id' => 'MLM3342171869',
+            'sku' => 'SYSCOM-230417',
+            'title' => 'Producto Syscom',
+            'quantity' => 1,
+            'unit_price' => 100,
+        ]);
+
+        DB::table('products')->insert([
+            'sku' => 'SYSCOM-230417',
+            'ml' => null,
+            'name' => 'Producto Syscom',
+            'thumbnail' => null,
+            'price' => 100,
+        ]);
+        DB::table('meli_publications')->insert([
+            'user_id' => $this->user->id,
+            'meli_account_id' => null,
+            'sku' => 'SYSCOM-230417',
+            'mlm' => 'MLM3342171869',
+            'pictures' => null,
+            'is_current' => true,
+            'raw' => json_encode([
+                'pictures' => [[
+                    'secure_url' => 'https://cdn.example.test/current.jpg',
+                ]],
+            ], JSON_THROW_ON_ERROR),
+            'created_at' => now()->subMinute(),
+            'updated_at' => now()->subMinute(),
+        ]);
+        DB::table('meli_publications')->insert([
+            'user_id' => $this->user->id,
+            'meli_account_id' => null,
+            'sku' => 'SYSCOM-230417',
+            'mlm' => 'MLM3342171869',
+            'pictures' => null,
+            'is_current' => false,
+            'raw' => json_encode([
+                'pictures' => [[
+                    'secure_url' => 'https://cdn.example.test/stale.jpg',
+                ]],
+            ], JSON_THROW_ON_ERROR),
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $this->get(route('ams.pedidos.index', ['fecha' => now()->toDateString()]))
+            ->assertOk()
+            ->assertInertia(fn (Assert $page): Assert => $page
+                ->where('totalPedidos', 1)
+                ->where('pedidos.0.items', fn ($items): bool => count($items) === 1
+                    && $items[0]['item_id'] === $item->item_id
+                    && $items[0]['imagen'] === 'https://cdn.example.test/current.jpg'));
+    }
+
+    public function test_ams_uses_highest_publication_id_when_none_is_current(): void
+    {
+        $account = $this->account('552', 'image-fallback-no-current', true, 'Principal');
+        $order = $this->localOrder($account, '55201', 'agreed_with_buyer', null);
+        MeliOrderItem::query()->create([
+            'meli_order_id' => $order->id,
+            'item_id' => 'MLM-NO-CURRENT',
+            'sku' => 'SKU-NO-CURRENT',
+            'title' => 'Producto sin current',
+            'quantity' => 1,
+            'unit_price' => 100,
+        ]);
+
+        DB::table('products')->insert([
+            'sku' => 'SKU-NO-CURRENT',
+            'ml' => null,
+            'name' => 'Producto sin current',
+            'thumbnail' => null,
+            'price' => 100,
+        ]);
+        DB::table('meli_publications')->insert([
+            'user_id' => $this->user->id,
+            'meli_account_id' => null,
+            'sku' => 'SKU-NO-CURRENT',
+            'mlm' => 'MLM-NO-CURRENT',
+            'pictures' => null,
+            'is_current' => false,
+            'raw' => json_encode([
+                'pictures' => [[
+                    'secure_url' => 'https://cdn.example.test/older.jpg',
+                ]],
+            ], JSON_THROW_ON_ERROR),
+            'created_at' => now()->subMinute(),
+            'updated_at' => now()->subMinute(),
+        ]);
+        DB::table('meli_publications')->insert([
+            'user_id' => $this->user->id,
+            'meli_account_id' => null,
+            'sku' => 'SKU-NO-CURRENT',
+            'mlm' => 'MLM-NO-CURRENT',
+            'pictures' => null,
+            'is_current' => false,
+            'raw' => json_encode([
+                'pictures' => [[
+                    'secure_url' => 'https://cdn.example.test/newest.jpg',
+                ]],
+            ], JSON_THROW_ON_ERROR),
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $this->get(route('ams.pedidos.index', ['fecha' => now()->toDateString()]))
+            ->assertOk()
+            ->assertInertia(fn (Assert $page): Assert => $page
+                ->where('totalPedidos', 1)
+                ->where('pedidos.0.items.0.imagen', 'https://cdn.example.test/newest.jpg'));
+    }
+
+    public function test_ams_image_fallbacks_preserve_product_and_normalize_publication_urls(): void
+    {
+        $account = $this->account('551', 'image-fallbacks', true, 'Principal');
+        $cases = [
+            [
+                'order' => '55101',
+                'item' => 'MLM-THUMBNAIL',
+                'sku' => 'SKU-THUMBNAIL',
+                'product_thumbnail' => 'http://products.example.test/local.jpg',
+                'raw' => ['pictures' => [['secure_url' => 'https://cdn.example.test/should-not-win.jpg']]],
+                'expected' => 'https://products.example.test/local.jpg',
+            ],
+            [
+                'order' => '55102',
+                'item' => 'MLM-SECURE',
+                'sku' => 'SKU-SECURE',
+                'product_thumbnail' => null,
+                'raw' => ['pictures' => [['secure_url' => 'https://cdn.example.test/secure.jpg']]],
+                'expected' => 'https://cdn.example.test/secure.jpg',
+            ],
+            [
+                'order' => '55103',
+                'item' => 'MLM-URL',
+                'sku' => 'SKU-URL',
+                'product_thumbnail' => null,
+                'raw' => ['pictures' => [['secure_url' => '', 'url' => 'http://cdn.example.test/url.jpg']]],
+                'expected' => 'https://cdn.example.test/url.jpg',
+            ],
+            [
+                'order' => '55104',
+                'item' => 'MLM-THUMB',
+                'sku' => 'SKU-THUMB',
+                'product_thumbnail' => null,
+                'raw' => ['thumbnail' => 'http://cdn.example.test/thumbnail.jpg'],
+                'expected' => 'https://cdn.example.test/thumbnail.jpg',
+            ],
+            [
+                'order' => '55105',
+                'item' => 'MLM-INVALID',
+                'sku' => 'SKU-INVALID',
+                'product_thumbnail' => null,
+                'raw' => 'not-json',
+                'expected' => null,
+            ],
+        ];
+
+        foreach ($cases as $case) {
+            $order = $this->localOrder($account, $case['order'], 'agreed_with_buyer', null);
+            MeliOrderItem::query()->create([
+                'meli_order_id' => $order->id,
+                'item_id' => $case['item'],
+                'sku' => $case['sku'],
+                'title' => $case['sku'],
+                'quantity' => 1,
+                'unit_price' => 100,
+            ]);
+            DB::table('products')->insert([
+                'sku' => $case['sku'],
+                'ml' => null,
+                'name' => $case['sku'],
+                'thumbnail' => $case['product_thumbnail'],
+                'price' => 100,
+            ]);
+            DB::table('meli_publications')->insert([
+                'user_id' => $this->user->id,
+                'meli_account_id' => null,
+                'sku' => $case['sku'],
+                'mlm' => $case['item'],
+                'pictures' => null,
+                'is_current' => true,
+                'raw' => is_string($case['raw'])
+                    ? $case['raw']
+                    : json_encode($case['raw'], JSON_THROW_ON_ERROR),
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+        }
+
+        $this->get(route('ams.pedidos.index', ['fecha' => now()->toDateString()]))
+            ->assertOk()
+            ->assertInertia(function (Assert $page) use ($cases): Assert {
+                $page->where('totalPedidos', count($cases))
+                    ->where('pedidos', function ($pedidos) use ($cases): bool {
+                        $items = collect($pedidos)
+                            ->flatMap(fn (array $pedido): array => $pedido['items'] ?? [])
+                            ->keyBy('sku');
+
+                        foreach ($cases as $case) {
+                            $this->assertSame($case['expected'], $items->get($case['sku'])['imagen'] ?? null);
+                        }
+
+                        return true;
+                    });
+
+                return $page;
+            });
     }
 
     public function test_backfill_all_accounts_uses_the_shared_sync_service(): void
