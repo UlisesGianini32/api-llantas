@@ -3,10 +3,10 @@
 namespace App\Services\MercadoLibre\Claims;
 
 use App\Models\MeliAccount;
-use App\Models\MeliAccountUserAccess;
 use App\Models\MeliClaim;
 use App\Models\MeliClaimActionLog;
 use App\Models\User;
+use App\Services\MercadoLibre\MeliAccountAccessService;
 use App\Services\MercadoLibre\MeliApiRequestException;
 use App\Support\UserAccess;
 use Illuminate\Auth\Access\AuthorizationException;
@@ -25,6 +25,7 @@ class MeliClaimActionService
         private MeliClaimResolutionPolicy $policy,
         private MeliClaimResolutionService $resolutions,
         private MeliClaimsService $claims,
+        private MeliAccountAccessService $accountAccess,
     ) {}
 
     /** @return array{ok:bool,code:string,message:string,offers:list<array<string,mixed>>} */
@@ -176,15 +177,7 @@ class MeliClaimActionService
 
     public function hasAccountAccess(User $actor, MeliAccount|int $account): bool
     {
-        $accountId = $account instanceof MeliAccount ? $account->getKey() : $account;
-
-        return $actor->meliAccounts()->whereKey($accountId)->exists()
-            || MeliAccountUserAccess::query()
-                ->where('meli_account_id', $accountId)
-                ->where('user_id', $actor->getKey())
-                ->where('active', true)
-                ->where('can_claim_actions', true)
-                ->exists();
+        return $this->accountAccess->hasAccess($actor, $account);
     }
 
     private function accountFor(User $actor, MeliClaim $claim): MeliAccount

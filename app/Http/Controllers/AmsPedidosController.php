@@ -3,12 +3,17 @@
 namespace App\Http\Controllers;
 
 use App\Models\MeliAccount;
+use App\Models\MeliChatFlow;
 use App\Models\MeliOrder;
 use App\Models\User;
 use App\Services\MeliOrderSyncService;
+use App\Services\MercadoLibre\MeliAccountAccessService;
+use App\Services\MercadoLibre\Orders\MeliAgreedDeliveryMessagingService;
 use App\Support\AmsMarcaPedidos;
 use Carbon\Carbon;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Arr;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
@@ -17,10 +22,11 @@ use Inertia\Response;
 
 class AmsPedidosController extends Controller
 {
-    public function index(Request $request): Response
+    public function index(Request $request, MeliAccountAccessService $accountAccess): Response
     {
         $fechaSeleccionada = $this->resolveFecha($request, false);
-        $accounts = $request->user()->meliAccounts()
+        $accounts = MeliAccount::query()
+            ->whereIn('id', $accountAccess->accessibleAccountIds($request->user()))
             ->orderByDesc('is_default')
             ->orderBy('nickname')
             ->orderBy('id')
@@ -66,6 +72,7 @@ class AmsPedidosController extends Controller
         $rows = $query->get();
 
         $grouped = $this->computePedidosGrouped($rows);
+        $this->attachDeliveryMessagingState($grouped['pedidos']);
 
         return Inertia::render('Ams/PedidosIndex', [
             'pedidos' => $this->pedidosToInertiaArray($grouped['pedidos']),
@@ -86,6 +93,47 @@ class AmsPedidosController extends Controller
             'selectedMeliAccountId' => $selectedAccountId === null ? 'all' : (string) $selectedAccountId,
             'deliveryType' => $deliveryType,
         ]);
+    }
+
+    public function requestDeliveryDetails(
+        Request $request,
+        string $order,
+        MeliAgreedDeliveryMessagingService $messaging,
+        MeliAccountAccessService $accountAccess
+    ): JsonResponse {
+        $request->validate([
+            'resend' => ['sometimes', 'boolean'],
+        ]);
+
+        $meliOrder = MeliOrder::query()->with('meliAccount')->findOrFail($order);
+        if (! $meliOrder->meliAccount || ! $accountAccess->hasAccess($request->user(), $meliOrder->meliAccount)) {
+            abort(404);
+        }
+
+        $result = $messaging->request($request->user(), $meliOrder, $request->boolean('resend'));
+        $flow = $result['flow'] ?? null;
+        $publicState = Arr::only((array) ($result['state'] ?? []), [
+            'status',
+            'message_id',
+            'message_status',
+            'moderation_status',
+            'moderation_reason',
+            'requested_at',
+            'attempted_at',
+        ]);
+
+        return response()->json([
+            'ok' => $result['ok'],
+            'status' => $result['status'],
+            'message' => $result['message'],
+            'state' => $publicState,
+            'conversation_url' => $flow instanceof MeliChatFlow
+                ? route('meli.messaging.index', [
+                    'account_id' => $meliOrder->meli_account_id,
+                    'flow' => $flow->id,
+                ])
+                : null,
+        ], (int) $result['httpStatus']);
     }
 
     public function procesar(Request $request, MeliOrderSyncService $meliSync): Response
@@ -1129,6 +1177,7 @@ class AmsPedidosController extends Controller
 
                 return (object) [
                     'group_key' => $primer->group_key,
+                    'id_local' => $primer->id_local,
                     'meli_account_id' => $primer->meli_account_id,
                     'meli_account_name' => $primer->meli_account_name,
                     'meli_account_is_default' => $primer->meli_account_is_default,
@@ -1139,8 +1188,12 @@ class AmsPedidosController extends Controller
                     'ams_tipo' => $primer->ams_tipo ?? 'OTRO',
                     'fecha_pedido' => $primer->fecha_pedido,
                     'shipping_id' => (string) ($primer->shipping_id ?? ''),
+                    'shipping_mode' => (string) ($primer->shipping_mode ?? ''),
+                    'shipping_type' => (string) ($primer->shipping_type ?? ''),
+                    'shipping_logistic_type' => (string) ($primer->shipping_logistic_type ?? ''),
                     'buyer_nickname' => $primer->buyer_nickname,
                     'order_status' => $primer->order_status,
+                    'order_cancelled' => $primer->order_cancelled,
                     'delivery_type' => $primer->delivery_type,
                     'delivery_classification_reason' => $primer->delivery_classification_reason,
                     'needs_shipping_review' => $primer->needs_shipping_review,
@@ -1177,6 +1230,7 @@ class AmsPedidosController extends Controller
             ->map(function ($p) use ($incluirMarca) {
                 $row = [
                     'group_key' => $p->group_key,
+                    'id_local' => (int) ($p->id_local ?? 0),
                     'meli_account_id' => $p->meli_account_id ?? null,
                     'meli_account_name' => $p->meli_account_name ?? '',
                     'meli_account_is_default' => (bool) ($p->meli_account_is_default ?? false),
@@ -1193,6 +1247,13 @@ class AmsPedidosController extends Controller
                     'delivery_classification_reason' => (string) ($p->delivery_classification_reason ?? ''),
                     'needs_shipping_review' => (bool) ($p->needs_shipping_review ?? false),
                     'can_print_shipping_label' => (bool) ($p->can_print_shipping_label ?? false),
+                    'can_request_delivery_details' => (bool) ($p->can_request_delivery_details ?? false),
+                    'delivery_details_request_status' => $p->delivery_details_request_status ?? null,
+                    'delivery_details_requested_at' => $p->delivery_details_requested_at ?? null,
+                    'delivery_details_request_message_id' => $p->delivery_details_request_message_id ?? null,
+                    'delivery_details_request_moderation_status' => $p->delivery_details_request_moderation_status ?? null,
+                    'delivery_details_request_moderation_reason' => $p->delivery_details_request_moderation_reason ?? null,
+                    'conversation_url' => $p->conversation_url ?? null,
                     'ml_envio_status' => (string) ($p->ml_envio_status ?? ''),
                     'ml_envio_substatus' => (string) ($p->ml_envio_substatus ?? ''),
                     'ml_envio_label' => (string) ($p->ml_envio_label ?? ''),
@@ -1226,6 +1287,44 @@ class AmsPedidosController extends Controller
             })
             ->values()
             ->all();
+    }
+
+    private function attachDeliveryMessagingState(Collection $pedidos): void
+    {
+        $orderIds = $pedidos->pluck('order_id')->filter()->map(fn ($id): string => (string) $id)->unique()->values();
+        $accountIds = $pedidos->pluck('meli_account_id')->filter()->map(fn ($id): int => (int) $id)->unique()->values();
+
+        $flows = MeliChatFlow::query()
+            ->whereIn('meli_account_id', $accountIds)
+            ->whereIn('order_id', $orderIds)
+            ->orderByDesc('id')
+            ->get()
+            ->keyBy(fn (MeliChatFlow $flow): string => $flow->meli_account_id.':'.$flow->order_id);
+
+        foreach ($pedidos as $pedido) {
+            $flow = $flows->get($pedido->meli_account_id.':'.$pedido->order_id);
+            $state = $flow ? data_get($flow->meta, 'delivery_details_request', []) : [];
+            $state = is_array($state) ? $state : [];
+
+            $pedido->can_request_delivery_details = $pedido->delivery_type === 'agreed_with_buyer'
+                && in_array(strtolower((string) $pedido->order_status), ['paid', 'partially_paid'], true)
+                && ! ($pedido->order_cancelled ?? false)
+                && trim((string) $pedido->shipping_id) === ''
+                && ! in_array(strtolower((string) $pedido->shipping_mode), ['full', 'fulfillment'], true)
+                && ! in_array(strtolower((string) $pedido->shipping_type), ['full', 'fulfillment'], true)
+                && ! in_array(strtolower((string) $pedido->shipping_logistic_type), ['full', 'fulfillment'], true);
+            $pedido->delivery_details_request_status = $state['status'] ?? null;
+            $pedido->delivery_details_requested_at = $state['requested_at'] ?? null;
+            $pedido->delivery_details_request_message_id = $state['message_id'] ?? null;
+            $pedido->delivery_details_request_moderation_status = $state['moderation_status'] ?? null;
+            $pedido->delivery_details_request_moderation_reason = $state['moderation_reason'] ?? null;
+            $pedido->conversation_url = $flow
+                ? route('meli.messaging.index', [
+                    'account_id' => $pedido->meli_account_id,
+                    'flow' => $flow->id,
+                ])
+                : null;
+        }
     }
 
     /**

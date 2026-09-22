@@ -1,5 +1,14 @@
 import { router } from '@inertiajs/react'
+import axios from 'axios'
+import { useEffect, useState } from 'react'
 import AppShell from '@/Components/layout/AppShell'
+import {
+    deliveryDetailsMessage,
+    deliveryRequestButtonLabel,
+    deliveryRequestLabels,
+    deliveryRequestTone,
+    isDeliveryRequestRepeat,
+} from './meliAgreedDeliveryMessaging'
 
 const deliveryOptions = [
     ['all', 'Todos'],
@@ -42,6 +51,13 @@ export default function PedidosIndex({
     selectedMeliAccountId = 'all',
     deliveryType = 'all',
 }) {
+    const [displayedOrders, setDisplayedOrders] = useState(pedidos)
+    const [confirmingOrder, setConfirmingOrder] = useState(null)
+    const [sendingOrderId, setSendingOrderId] = useState(null)
+    const [actionMessage, setActionMessage] = useState(null)
+
+    useEffect(() => setDisplayedOrders(pedidos), [pedidos])
+
     const visit = (overrides = {}) => {
         router.get(dateFilterUrl, {
             fecha: fechaSeleccionada,
@@ -64,6 +80,42 @@ export default function PedidosIndex({
               year: 'numeric',
           })
         : ''
+
+    const sendDeliveryDetailsRequest = async () => {
+        if (!confirmingOrder || sendingOrderId !== null) return
+
+        setSendingOrderId(confirmingOrder.id_local)
+        setActionMessage(null)
+        try {
+            const response = await axios.post(`/ams/pedidos/${confirmingOrder.id_local}/solicitar-datos-envio`, {
+                resend: isDeliveryRequestRepeat(confirmingOrder.delivery_details_request_status),
+            }, { headers: { Accept: 'application/json' } })
+            const data = response.data || {}
+            setDisplayedOrders(current => current.map(order => order.id_local === confirmingOrder.id_local ? {
+                ...order,
+                delivery_details_request_status: data.status,
+                delivery_details_requested_at: data.state?.requested_at || order.delivery_details_requested_at,
+                delivery_details_request_message_id: data.state?.message_id || null,
+                delivery_details_request_moderation_status: data.state?.moderation_status || null,
+                conversation_url: data.conversation_url || order.conversation_url,
+            } : order))
+            setActionMessage({ type: deliveryRequestTone(data.status), text: data.message || 'Solicitud enviada al comprador.' })
+            setConfirmingOrder(null)
+        } catch (error) {
+            const data = error.response?.data || {}
+            if (data.status) {
+                setDisplayedOrders(current => current.map(order => order.id_local === confirmingOrder.id_local ? {
+                    ...order,
+                    delivery_details_request_status: data.status,
+                    conversation_url: data.conversation_url || order.conversation_url,
+                } : order))
+            }
+            setActionMessage({ type: 'error', text: data.message || 'No se pudo enviar la solicitud a Mercado Libre.' })
+            setConfirmingOrder(null)
+        } finally {
+            setSendingOrderId(null)
+        }
+    }
 
     return (
         <AppShell title={tituloPagina}>
@@ -107,12 +159,13 @@ export default function PedidosIndex({
                     </div>
 
                     <div className="mt-8 space-y-6">
-                        {pedidos.length === 0 ? (
+                        {actionMessage ? <div className={`rounded-xl border px-4 py-3 font-semibold ${actionMessage.type === 'success' ? 'border-emerald-400 bg-emerald-500/10 text-emerald-100' : actionMessage.type === 'warning' ? 'border-amber-400 bg-amber-500/10 text-amber-100' : 'border-red-400 bg-red-500/10 text-red-100'}`}>{actionMessage.text}</div> : null}
+                        {displayedOrders.length === 0 ? (
                             <div className="rounded-2xl border border-slate-600 bg-[#1f2d44] px-6 py-14 text-center">
                                 <div className="text-2xl font-semibold text-white sm:text-3xl">No hay pedidos para estos filtros</div>
                                 <p className="mt-2 text-lg text-slate-300">Cambia la fecha, cuenta o tipo de entrega.</p>
                             </div>
-                        ) : pedidos.map((pedido) => (
+                        ) : displayedOrders.map((pedido) => (
                             <article key={pedido.group_key} className="overflow-hidden rounded-2xl border border-slate-600 bg-[#1f2d44] shadow-lg">
                                 <div className="border-b border-slate-600 px-4 py-4">
                                     <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
@@ -123,7 +176,30 @@ export default function PedidosIndex({
                                         </div>
                                         <div className="text-sm text-slate-300">{pedido.fecha_pedido_formateada}</div>
                                     </div>
-                                    {pedido.delivery_type === 'agreed_with_buyer' ? <p className="mt-3 rounded-xl border border-amber-400/60 bg-amber-500/10 px-4 py-3 font-semibold text-amber-100">Entrega acordada con el comprador. Contacta al comprador para definir la entrega.</p> : null}
+                                    {pedido.delivery_type === 'agreed_with_buyer' ? (
+                                        <div className="mt-3 rounded-xl border border-amber-400/60 bg-amber-500/10 px-4 py-3 text-amber-100">
+                                            <p className="font-semibold">Entrega acordada con el comprador. Contacta al comprador para definir la entrega.</p>
+                                            {pedido.delivery_details_request_status ? (
+                                                <p className="mt-2 text-sm">
+                                                    <span className="font-bold">{deliveryRequestLabels[pedido.delivery_details_request_status] || 'Estado desconocido'}</span>
+                                                    {pedido.delivery_details_requested_at ? ` · ${new Date(pedido.delivery_details_requested_at).toLocaleString('es-MX')}` : ''}
+                                                </p>
+                                            ) : null}
+                                            <div className="mt-3 flex flex-wrap gap-2">
+                                                {pedido.can_request_delivery_details ? (
+                                                    <button
+                                                        type="button"
+                                                        disabled={sendingOrderId !== null}
+                                                        onClick={() => setConfirmingOrder(pedido)}
+                                                        className="rounded-lg bg-amber-300 px-4 py-2 text-sm font-bold text-slate-950 transition hover:bg-amber-200 disabled:cursor-not-allowed disabled:opacity-60"
+                                                    >
+                                                        {deliveryRequestButtonLabel(pedido.delivery_details_request_status, sendingOrderId === pedido.id_local)}
+                                                    </button>
+                                                ) : null}
+                                                {pedido.conversation_url ? <a href={pedido.conversation_url} className="rounded-lg border border-amber-300 px-4 py-2 text-sm font-bold text-amber-100 transition hover:bg-amber-300/10">Ver conversación</a> : null}
+                                            </div>
+                                        </div>
+                                    ) : null}
                                     <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
                                         <div><dt className="text-slate-400">Cuenta</dt><dd className="font-semibold text-white">{pedido.meli_account_name}</dd></div>
                                         <div><dt className="text-slate-400">Comprador</dt><dd className="font-semibold text-white">{pedido.buyer_nickname || 'No disponible'}</dd></div>
@@ -166,6 +242,24 @@ export default function PedidosIndex({
                         ))}
                     </div>
                 </div>
+
+                {confirmingOrder ? (
+                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4" role="dialog" aria-modal="true" aria-labelledby="delivery-details-title">
+                        <div className="w-full max-w-xl rounded-2xl border border-slate-600 bg-[#16253a] p-6 shadow-2xl">
+                            <h3 id="delivery-details-title" className="text-2xl font-bold text-white">
+                                {isDeliveryRequestRepeat(confirmingOrder.delivery_details_request_status) ? 'Confirmar reenvío' : 'Solicitar datos de envío'}
+                            </h3>
+                            <p className="mt-2 text-slate-300">Se enviará este mensaje al comprador mediante Mercado Libre:</p>
+                            <pre className="mt-4 whitespace-pre-wrap rounded-xl border border-slate-600 bg-slate-950/50 p-4 font-sans text-sm text-slate-100">{deliveryDetailsMessage}</pre>
+                            <div className="mt-6 flex justify-end gap-3">
+                                <button type="button" disabled={sendingOrderId !== null} onClick={() => setConfirmingOrder(null)} className="rounded-lg border border-slate-500 px-4 py-2 font-semibold text-white disabled:opacity-60">Cancelar</button>
+                                <button type="button" disabled={sendingOrderId !== null} onClick={sendDeliveryDetailsRequest} className="rounded-lg bg-amber-300 px-4 py-2 font-bold text-slate-950 disabled:cursor-not-allowed disabled:opacity-60">
+                                    {sendingOrderId !== null ? 'Enviando...' : 'Enviar mensaje'}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                ) : null}
             </section>
         </AppShell>
     )
