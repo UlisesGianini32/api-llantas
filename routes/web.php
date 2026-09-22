@@ -147,6 +147,9 @@ Route::middleware(['auth', 'role'])->group(function () {
 
     // PEDIDOS PRINCIPALES
     Route::get('/ams/pedidos', [AmsPedidosController::class, 'index'])->name('ams.pedidos.index');
+    Route::post('/ams/pedidos/{order}/solicitar-datos-envio', [AmsPedidosController::class, 'requestDeliveryDetails'])
+        ->whereNumber('order')
+        ->name('ams.pedidos.delivery_details.request');
     Route::get('/ams/pedidos-procesar', [AmsPedidosController::class, 'procesar'])->name('ams.pedidos.procesar');
     Route::get('/ams/pedidos-manana', [AmsPedidosController::class, 'procesarManana'])->name('ams.pedidos.manana');
 

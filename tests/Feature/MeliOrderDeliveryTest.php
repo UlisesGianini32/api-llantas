@@ -62,6 +62,15 @@ class MeliOrderDeliveryTest extends TestCase
             $table->boolean('is_default')->default(false);
             $table->timestamps();
         });
+        Schema::create('meli_account_user_accesses', function (Blueprint $table): void {
+            $table->id();
+            $table->foreignId('meli_account_id');
+            $table->foreignId('user_id');
+            $table->boolean('can_claim_actions')->default(false);
+            $table->boolean('active')->default(true);
+            $table->timestamps();
+            $table->unique(['meli_account_id', 'user_id']);
+        });
         Schema::create('meli_orders', function (Blueprint $table): void {
             $table->id();
             $table->foreignId('meli_account_id')->nullable();
@@ -99,6 +108,34 @@ class MeliOrderDeliveryTest extends TestCase
             $table->decimal('unit_price', 14, 2)->nullable();
             $table->timestamps();
         });
+        Schema::create('meli_chat_flows', function (Blueprint $table): void {
+            $table->id();
+            $table->foreignId('user_id')->nullable();
+            $table->foreignId('meli_account_id')->nullable();
+            $table->string('order_id')->nullable();
+            $table->string('pack_id')->nullable();
+            $table->string('conversation_id')->nullable();
+            $table->string('message_id')->nullable();
+            $table->string('last_inbound_message_id')->nullable();
+            $table->string('last_message_role')->nullable();
+            $table->timestamp('last_message_at')->nullable();
+            $table->text('last_message_text')->nullable();
+            $table->timestamp('last_message_synced_at')->nullable();
+            $table->string('buyer_id')->nullable();
+            $table->string('item_id')->nullable();
+            $table->string('sku')->nullable();
+            $table->boolean('menu_sent')->default(false);
+            $table->timestamp('menu_sent_at')->nullable();
+            $table->string('last_option_selected')->nullable();
+            $table->timestamp('last_option_selected_at')->nullable();
+            $table->boolean('requires_human')->default(false);
+            $table->timestamp('requires_human_at')->nullable();
+            $table->string('product_pdf_url')->nullable();
+            $table->string('catalog_pdf_url')->nullable();
+            $table->string('invoice_url')->nullable();
+            $table->json('meta')->nullable();
+            $table->timestamps();
+        });
         Schema::create('products', function (Blueprint $table): void {
             $table->id();
             $table->string('sku')->nullable();
@@ -120,7 +157,7 @@ class MeliOrderDeliveryTest extends TestCase
 
     protected function tearDown(): void
     {
-        foreach (['products', 'meli_order_items', 'meli_orders', 'meli_accounts', 'users'] as $table) {
+        foreach (['products', 'meli_chat_flows', 'meli_order_items', 'meli_orders', 'meli_account_user_accesses', 'meli_accounts', 'users'] as $table) {
             Schema::dropIfExists($table);
         }
         DB::purge('sqlite');
@@ -211,7 +248,8 @@ class MeliOrderDeliveryTest extends TestCase
                 ->where('totalPedidos', 1)
                 ->where('pedidos.0.order_id', '50001')
                 ->where('pedidos.0.meli_account_name', 'Principal')
-                ->where('pedidos.0.can_print_shipping_label', false));
+                ->where('pedidos.0.can_print_shipping_label', false)
+                ->where('pedidos.0.can_request_delivery_details', true));
 
         $this->get(route('ams.pedidos.index', ['fecha' => now()->toDateString(), 'account_id' => 'all']))
             ->assertInertia(fn (Assert $page) => $page->where('totalPedidos', 2));
