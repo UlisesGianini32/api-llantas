@@ -7,8 +7,10 @@ use App\Models\MeliChatFlow;
 use App\Models\User;
 use App\Support\MeliPostSaleMessaging;
 use Illuminate\Http\Client\Response;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 
 /**
  * Envío posventa:
@@ -144,7 +146,7 @@ class MeliMessageService
     }
 
     /**
-     * @return array{ok: bool, error: ?string, status: ?int}
+     * @return array{ok: bool, error: ?string, status: ?int, definitive_failure?: bool}
      */
     public function trySendMessage(
         MeliChatFlow $flow,
@@ -168,6 +170,7 @@ class MeliMessageService
                     'ok' => false,
                     'error' => 'La cuenta de Mercado Libre de esta conversación no tiene token de acceso.',
                     'status' => null,
+                    'definitive_failure' => true,
                 ];
             }
 
@@ -181,6 +184,7 @@ class MeliMessageService
                     'ok' => false,
                     'error' => 'Esta conversación no tiene pack u orden válido para enviar mensajes.',
                     'status' => null,
+                    'definitive_failure' => true,
                 ];
             }
 
@@ -247,6 +251,7 @@ class MeliMessageService
                     'ok' => true,
                     'error' => null,
                     'status' => $response->status(),
+                    'definitive_failure' => false,
                 ];
             }
 
@@ -270,6 +275,7 @@ class MeliMessageService
                     'ok' => false,
                     'error' => 'Mercado Libre no permite enviar este mensaje en este momento (política de la plataforma).',
                     'status' => $status,
+                    'definitive_failure' => $this->isDefinitiveHttpFailure($status),
                 ];
             }
 
@@ -294,6 +300,7 @@ class MeliMessageService
                 'ok' => false,
                 'error' => $human,
                 'status' => $status,
+                'definitive_failure' => $this->isDefinitiveHttpFailure($status),
             ];
         } catch (\Throwable $e) {
             Log::error('Excepción enviando mensaje a Mercado Libre', [
@@ -307,6 +314,7 @@ class MeliMessageService
                 'ok' => false,
                 'error' => $e->getMessage(),
                 'status' => null,
+                'definitive_failure' => false,
             ];
         }
     }
@@ -316,6 +324,179 @@ class MeliMessageService
         string $text
     ): bool {
         return $this->trySendMessage($flow, $text)['ok'];
+    }
+
+    /**
+     * Records an explicit seller action as the start of a conversation.
+     * Automatic bot messages must never call this method.
+     */
+    /** @return array{flow: MeliChatFlow, created: bool, token: ?string} */
+    public function prepareHumanStarted(
+        MeliChatFlow $flow,
+        ?int $userId = null,
+        string $source = 'manual'
+    ): array {
+        return DB::transaction(function () use ($flow, $userId, $source): array {
+            $locked = MeliChatFlow::query()->lockForUpdate()->find($flow->id);
+            if (! $locked) {
+                return ['flow' => $flow, 'created' => false, 'token' => null];
+            }
+
+            $meta = is_array($locked->meta) ? $locked->meta : [];
+
+            if (($meta['conversation_started_by'] ?? null) === 'buyer'
+                || $locked->menu_sent
+                || $locked->last_message_role === 'customer') {
+                return ['flow' => $locked, 'created' => false, 'token' => null];
+            }
+
+            if (($meta['conversation_started_by'] ?? null) === 'seller'
+                || ($meta['automation_suppressed'] ?? false) === true) {
+                return ['flow' => $locked, 'created' => false, 'token' => null];
+            }
+
+            $token = (string) Str::uuid();
+            $humanKeys = [
+                'conversation_started_by',
+                'automation_suppressed',
+                'human_started_at',
+                'human_started_by',
+                'human_started_source',
+            ];
+            $previous = [];
+            foreach ($humanKeys as $key) {
+                $previous[$key] = [
+                    'present' => array_key_exists($key, $meta),
+                    'value' => $meta[$key] ?? null,
+                ];
+            }
+
+            $meta['conversation_started_by'] = 'seller';
+            $meta['automation_suppressed'] = true;
+            $meta['human_started_at'] = now()->toIso8601String();
+            $meta['human_started_by'] = $userId;
+            $meta['human_started_source'] = $source;
+            $created = [];
+            foreach ($humanKeys as $key) {
+                $created[$key] = $meta[$key];
+            }
+            $meta['human_start_attempt'] = [
+                'token' => $token,
+                'previous' => $previous,
+                'created' => $created,
+                'previous_last_message_role' => $locked->last_message_role,
+                'previous_last_message_text' => $locked->last_message_text,
+            ];
+
+            $locked->forceFill(['meta' => $meta])->save();
+
+            return ['flow' => $locked, 'created' => true, 'token' => $token];
+        });
+    }
+
+    public function markHumanStarted(
+        MeliChatFlow $flow,
+        ?int $userId = null,
+        string $source = 'manual'
+    ): MeliChatFlow {
+        $prepared = $this->prepareHumanStarted($flow, $userId, $source);
+
+        return $prepared['created']
+            ? $this->commitHumanStarted($prepared['flow'], $prepared['token'])
+            : $prepared['flow'];
+    }
+
+    public function rollbackHumanStarted(MeliChatFlow $flow, ?string $token): MeliChatFlow
+    {
+        if (! $token) {
+            return $flow->fresh() ?? $flow;
+        }
+
+        return DB::transaction(function () use ($flow, $token): MeliChatFlow {
+            $locked = MeliChatFlow::query()->lockForUpdate()->find($flow->id);
+            if (! $locked) {
+                return $flow;
+            }
+
+            $meta = is_array($locked->meta) ? $locked->meta : [];
+            $attempt = $meta['human_start_attempt'] ?? null;
+            if (! is_array($attempt) || ($attempt['token'] ?? null) !== $token) {
+                return $locked;
+            }
+
+            // A seller message written after preparation proves another send
+            // succeeded; preserve the suppression in that case.
+            $sellerMessageWasCreated = $locked->last_message_role === 'seller'
+                && ($attempt['previous_last_message_role'] ?? null) !== 'seller'
+                && (string) $locked->last_message_text !== (string) ($attempt['previous_last_message_text'] ?? '');
+
+            unset($meta['human_start_attempt']);
+            if (! $sellerMessageWasCreated) {
+                foreach ((array) ($attempt['previous'] ?? []) as $key => $previous) {
+                    // If another process changed one of the fields we own,
+                    // leave that newer value intact instead of restoring stale
+                    // state from this attempt.
+                    if (! array_key_exists($key, $meta)
+                        || ! array_key_exists($key, (array) ($attempt['created'] ?? []))
+                        || $meta[$key] !== $attempt['created'][$key]) {
+                        continue;
+                    }
+
+                    if (($previous['present'] ?? false) === true) {
+                        $meta[$key] = $previous['value'] ?? null;
+                    } else {
+                        unset($meta[$key]);
+                    }
+                }
+            }
+
+            $locked->forceFill(['meta' => $meta])->save();
+
+            return $locked->fresh();
+        });
+    }
+
+    public function commitHumanStarted(MeliChatFlow $flow, ?string $token): MeliChatFlow
+    {
+        if (! $token) {
+            return $flow->fresh() ?? $flow;
+        }
+
+        return DB::transaction(function () use ($flow, $token): MeliChatFlow {
+            $locked = MeliChatFlow::query()->lockForUpdate()->find($flow->id);
+            if (! $locked) {
+                return $flow;
+            }
+
+            $meta = is_array($locked->meta) ? $locked->meta : [];
+            $attempt = $meta['human_start_attempt'] ?? null;
+            if (is_array($attempt) && ($attempt['token'] ?? null) === $token) {
+                unset($meta['human_start_attempt']);
+                $locked->forceFill(['meta' => $meta])->save();
+            }
+
+            return $locked->fresh();
+        });
+    }
+
+    public function humanStartLockName(MeliChatFlow $flow): string
+    {
+        return 'meli-human-started-chat:'.$flow->id;
+    }
+
+    public function isDefinitiveSendFailure(array $result): bool
+    {
+        return ($result['ok'] ?? false) !== true
+            && ($result['definitive_failure'] ?? false) === true;
+    }
+
+    public function isDefinitiveStartFailure(array $result): bool
+    {
+        return in_array((string) ($result['outcome'] ?? ''), [
+            'blocked',
+            'unavailable',
+            'rejected',
+        ], true);
     }
 
     public function truncateSellerText(string $text): string
@@ -440,6 +621,15 @@ class MeliMessageService
             $responseMessage,
             'blocked_by_'
         );
+    }
+
+    private function isDefinitiveHttpFailure(int $status): bool
+    {
+        if (in_array($status, [408, 425, 429], true)) {
+            return false;
+        }
+
+        return $status >= 400 && $status < 500;
     }
 
     /** @return array<string, mixed> */

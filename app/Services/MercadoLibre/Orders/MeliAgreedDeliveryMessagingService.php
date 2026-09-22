@@ -61,42 +61,61 @@ class MeliAgreedDeliveryMessagingService
                 );
             }
 
-            $this->saveState($flow, array_merge($previous, [
-                'status' => 'sending',
-                'attempted_at' => now()->toIso8601String(),
-                'error_code' => null,
-                'technical_error' => null,
-            ]));
+            $humanLock = Cache::lock($this->messages->humanStartLockName($flow), 180);
+            if (! $humanLock->get()) {
+                return $this->result(false, 'sending', 'La solicitud ya se está enviando.', 409, $flow, $previous);
+            }
 
-            $remote = $this->messages->tryStartConversation($flow->fresh(), self::MESSAGE);
-            $status = (string) ($remote['outcome'] ?? 'error');
-            $state = [
-                'status' => $status,
-                'message_id' => $remote['message_id'] ?? null,
-                'message_status' => $remote['message_status'] ?? null,
-                'moderation_status' => $remote['moderation_status'] ?? null,
-                'moderation_reason' => $remote['moderation_reason'] ?? null,
-                'requested_at' => $status === 'sent'
-                    ? now()->toIso8601String()
-                    : ($previous['requested_at'] ?? null),
-                'attempted_at' => now()->toIso8601String(),
-                'error_code' => $remote['error_code'] ?? null,
-                'technical_error' => $this->technicalError($remote),
-            ];
-            $this->saveState($flow->fresh(), $state);
+            try {
+                $prepared = $this->messages->prepareHumanStarted($flow, $operator->id, 'ams');
+                $flow = $prepared['flow'];
 
-            return $this->result(
-                (bool) ($remote['ok'] ?? false),
-                $status,
-                (string) ($remote['message'] ?? 'No se pudo enviar el mensaje.'),
-                match ($status) {
-                    'sent' => 200,
-                    'pending_moderation', 'uncertain' => 202,
-                    default => 422,
-                },
-                $flow,
-                $state
-            );
+                $this->saveState($flow, array_merge($previous, [
+                    'status' => 'sending',
+                    'attempted_at' => now()->toIso8601String(),
+                    'error_code' => null,
+                    'technical_error' => null,
+                ]));
+
+                $remote = $this->messages->tryStartConversation($flow->fresh(), self::MESSAGE);
+                $status = (string) ($remote['outcome'] ?? 'error');
+                $state = [
+                    'status' => $status,
+                    'message_id' => $remote['message_id'] ?? null,
+                    'message_status' => $remote['message_status'] ?? null,
+                    'moderation_status' => $remote['moderation_status'] ?? null,
+                    'moderation_reason' => $remote['moderation_reason'] ?? null,
+                    'requested_at' => $status === 'sent'
+                        ? now()->toIso8601String()
+                        : ($previous['requested_at'] ?? null),
+                    'attempted_at' => now()->toIso8601String(),
+                    'error_code' => $remote['error_code'] ?? null,
+                    'technical_error' => $this->technicalError($remote),
+                ];
+                $this->saveState($flow->fresh(), $state);
+
+                if ($prepared['created']
+                    && $this->messages->isDefinitiveStartFailure($remote)) {
+                    $flow = $this->messages->rollbackHumanStarted($flow, $prepared['token']);
+                } elseif ($prepared['created']) {
+                    $flow = $this->messages->commitHumanStarted($flow, $prepared['token']);
+                }
+
+                return $this->result(
+                    (bool) ($remote['ok'] ?? false),
+                    $status,
+                    (string) ($remote['message'] ?? 'No se pudo enviar el mensaje.'),
+                    match ($status) {
+                        'sent' => 200,
+                        'pending_moderation', 'uncertain' => 202,
+                        default => 422,
+                    },
+                    $flow,
+                    $state
+                );
+            } finally {
+                $humanLock->release();
+            }
         } finally {
             $lock->release();
         }

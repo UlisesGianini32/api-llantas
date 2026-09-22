@@ -11,6 +11,7 @@ use GuzzleHttp\Exception\ClientException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Inertia\Inertia;
 use Inertia\Response;
 
@@ -325,10 +326,31 @@ class MeliMessagingController extends Controller
             'text' => 'required|string|min:1|max:'.$max,
         ]);
 
-        $result = $messages->trySendMessage(
-            $flowModel,
-            (string) $request->input('text')
-        );
+        $lock = Cache::lock($messages->humanStartLockName($flowModel), 180);
+        if (! $lock->get()) {
+            return back()->with('err', 'La conversación ya está siendo procesada.');
+        }
+
+        try {
+            $prepared = $messages->prepareHumanStarted(
+                $flowModel,
+                $request->user()->id,
+                'messaging'
+            );
+            $result = $messages->trySendMessage(
+                $prepared['flow'],
+                (string) $request->input('text')
+            );
+
+            if ($prepared['created']
+                && $messages->isDefinitiveSendFailure($result)) {
+                $messages->rollbackHumanStarted($prepared['flow'], $prepared['token']);
+            } elseif ($prepared['created']) {
+                $messages->commitHumanStarted($prepared['flow'], $prepared['token']);
+            }
+        } finally {
+            $lock->release();
+        }
 
         if ($result['ok']) {
             return back()->with('ok', 'Mensaje enviado a Mercado Libre.');
