@@ -6,6 +6,7 @@ use App\Models\MeliAccount;
 use App\Models\MeliPublication;
 use App\Models\MeliSharedStockGroup;
 use App\Models\MeliSharedStockMember;
+use App\Services\MercadoLibre\MeliVariationStockPayloadBuilder;
 use Carbon\Carbon;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
@@ -15,9 +16,10 @@ use Throwable;
 
 class MeliSharedStockPushService
 {
-    public function __construct(private readonly MeliOAuthService $oauth)
-    {
-    }
+    public function __construct(
+        private readonly MeliOAuthService $oauth,
+        private readonly MeliVariationStockPayloadBuilder $variationStockPayload,
+    ) {}
 
     /** @return array<string, int> */
     public function pushGroup(MeliSharedStockGroup|int $group): array
@@ -102,12 +104,23 @@ class MeliSharedStockPushService
         $account = $publication->meliAccount;
         $this->ensureFreshAccessToken($account);
 
-        $payload = $member->variation_id
-            ? ['variations' => [[
-                'id' => is_numeric($member->variation_id) ? (int) $member->variation_id : $member->variation_id,
+        if ($member->variation_id) {
+            $remoteItem = $this->request(
+                $account,
+                'get',
+                '/items/'.$member->mlm,
+            )->json();
+
+            $payload = $this->variationStockPayload->build(
+                (array) ($remoteItem['variations'] ?? []),
+                (string) $member->variation_id,
+                $stock,
+            );
+        } else {
+            $payload = [
                 'available_quantity' => $stock,
-            ]]]
-            : ['available_quantity' => $stock];
+            ];
+        }
 
         $response = $this->request($account, 'put', '/items/'.$member->mlm, $payload);
         $responseItem = $response->json();
@@ -227,11 +240,13 @@ class MeliSharedStockPushService
 
             if ($response->status() === 401 && $attempt === 1) {
                 $this->ensureFreshAccessToken($account, true);
+
                 continue;
             }
 
             if ($response->status() === 429 || $response->serverError()) {
                 sleep(min(8, 2 ** ($attempt - 1)));
+
                 continue;
             }
 

@@ -11,12 +11,13 @@ use App\Models\User;
 use App\Services\MeliAccountPublicationSyncService;
 use App\Services\MeliRepublishService;
 use App\Services\MeliSharedStockManager;
+use App\Services\MercadoLibre\MeliVariationStockPayloadBuilder;
 use Illuminate\Http\Client\Response as HttpResponse;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Validation\ValidationException;
 use Inertia\Inertia;
@@ -202,7 +203,6 @@ class MeliSecondaryPublicationController extends Controller
         ]);
     }
 
-
     public function edit(Request $request, MeliPublication $publication): Response
     {
         /** @var User $owner */
@@ -253,6 +253,7 @@ class MeliSecondaryPublicationController extends Controller
         Request $request,
         MeliPublication $publication,
         MeliSharedStockManager $sharedStock,
+        MeliVariationStockPayloadBuilder $variationStockPayload,
     ): JsonResponse {
         $publication = $this->ownedPublication($request, $publication->id);
 
@@ -291,14 +292,6 @@ class MeliSecondaryPublicationController extends Controller
             ]);
         }
 
-        if ($hasStockChange && $variationId !== null && ! $variations->contains(
-            fn (array $variation) => (string) ($variation['id'] ?? '') === $variationId,
-        )) {
-            throw ValidationException::withMessages([
-                'publication' => 'La variante seleccionada ya no existe en esta publicación.',
-            ]);
-        }
-
         if ($hasStockChange && $logisticType === 'fulfillment') {
             throw ValidationException::withMessages([
                 'publication' => 'El stock FULL se administra físicamente en las bodegas de Mercado Libre y no puede editarse desde este campo.',
@@ -323,10 +316,26 @@ class MeliSecondaryPublicationController extends Controller
 
         if ($hasStockChange && ! $sharedMember) {
             if ($variationId !== null) {
-                $payload['variations'] = [[
-                    'id' => is_numeric($variationId) ? (int) $variationId : $variationId,
-                    'available_quantity' => (int) $validated['stock'],
-                ]];
+                $remoteItem = $this->meliRequest(
+                    $publication,
+                    'get',
+                    '/items/'.$publication->mlm,
+                )->json();
+
+                try {
+                    $payload = array_merge(
+                        $payload,
+                        $variationStockPayload->build(
+                            (array) ($remoteItem['variations'] ?? []),
+                            $variationId,
+                            (int) $validated['stock'],
+                        ),
+                    );
+                } catch (\RuntimeException $exception) {
+                    throw ValidationException::withMessages([
+                        'publication' => $exception->getMessage(),
+                    ]);
+                }
             } else {
                 $payload['available_quantity'] = (int) $validated['stock'];
             }
@@ -680,7 +689,6 @@ class MeliSecondaryPublicationController extends Controller
         return '';
     }
 
-
     /**
      * Oculta del Centro de Publicaciones los inventarios administrados
      * desde otros módulos:
@@ -755,11 +763,11 @@ class MeliSecondaryPublicationController extends Controller
          * raw puede guardar el item directamente o dentro de { item: ... }.
          */
         $query->whereRaw(
-            "LOWER(TRIM(COALESCE(".
+            'LOWER(TRIM(COALESCE('.
             "JSON_UNQUOTE(JSON_EXTRACT(raw, '$.item.shipping.logistic_type')), ".
             "JSON_UNQUOTE(JSON_EXTRACT(raw, '$.shipping.logistic_type')), ".
             "''".
-            "))) <> ?",
+            '))) <> ?',
             ['fulfillment']
         );
     }
