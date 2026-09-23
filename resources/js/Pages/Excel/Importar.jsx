@@ -1,7 +1,8 @@
-import { Link, useForm } from '@inertiajs/react'
+import { Link, useForm, usePage } from '@inertiajs/react'
 import AppShell from '@/Components/layout/AppShell'
 
 export default function ExcelImportar() {
+    const { flash = {} } = usePage().props
     const { data, setData, post, processing, errors, reset } = useForm({
         archivo: null,
     })
@@ -61,6 +62,15 @@ export default function ExcelImportar() {
                         </button>
                     </div>
                 </form>
+
+                {flash.warning && (
+                    <div className="rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-100">
+                        <p>{flash.warning}</p>
+                        <Link href="/llantas/comparador" className="mt-2 inline-block font-semibold underline">
+                            Revisar comparador
+                        </Link>
+                    </div>
+                )}
 
                 <div className="text-sm text-zinc-600 dark:text-gray-500">
                     <p>- El archivo debe contener las columnas esperadas.</p>
