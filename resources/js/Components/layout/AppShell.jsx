@@ -153,17 +153,30 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                     </NavItem>
                     <NavItem
                         href="/llantas"
-                        active={currentPath === '/llantas' || currentPath.startsWith('/llantas/')}
+                        active={
+                            currentPath === '/llantas'
+                            || (
+                                currentPath.startsWith('/llantas/')
+                                && !currentPath.startsWith('/llantas/comparador')
+                            )
+                        }
                         onNavigate={onNavigate}
                     >
                         Llantas
+                    </NavItem>
+                    <NavItem
+                        href="/llantas/comparador"
+                        active={currentPath.startsWith('/llantas/comparador')}
+                        onNavigate={onNavigate}
+                    >
+                        Comparador de llantas
                     </NavItem>
                     <NavItem
                         href="/productos"
                         active={currentPath === '/productos' || currentPath.startsWith('/productos/')}
                         onNavigate={onNavigate}
                     >
-                        Productos compuestos
+                        Llantas compuestas
                     </NavItem>
                     <NavItem
                         href="/price-rules"
@@ -185,21 +198,6 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                         onNavigate={onNavigate}
                     >
                         Importar Excel
-                    </NavItem>
-                    <NavItem
-                        href="/llantas/agotadas"
-                        active={currentPath.startsWith('/llantas/agotadas')}
-                        danger
-                        onNavigate={onNavigate}
-                    >
-                        Llantas agotadas
-                    </NavItem>
-                    <NavItem
-                        href="/llantas/no-actualizadas"
-                        active={currentPath.startsWith('/llantas/no-actualizadas')}
-                        onNavigate={onNavigate}
-                    >
-                        Llantas no actualizadas
                     </NavItem>
                 </div>
             </div>}

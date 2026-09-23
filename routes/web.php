@@ -7,6 +7,7 @@ use App\Http\Controllers\AuthController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\ExcelImportController;
 use App\Http\Controllers\LlantaController;
+use App\Http\Controllers\LlantaComparisonController;
 use App\Http\Controllers\MeliBatchRepublishController;
 use App\Http\Controllers\MeliCompareController;
 use App\Http\Controllers\MeliClaimController;
@@ -410,6 +411,10 @@ Route::get(
 
     // LLANTAS
     Route::get('/llantas', [LlantaController::class, 'indexWeb'])->name('llantas.index');
+    Route::get('/llantas/comparador', [LlantaComparisonController::class, 'index'])
+        ->name('llantas.comparador.index');
+    Route::post('/llantas/comparador/{comparison}/decision', [LlantaComparisonController::class, 'decide'])
+        ->name('llantas.comparador.decision');
     Route::get('/llantas/{id}/editar', [LlantaController::class, 'editWeb'])->name('llantas.edit');
     Route::put('/llantas/{id}', [LlantaController::class, 'updateWeb'])->name('llantas.update');
 
