@@ -569,6 +569,71 @@ class MeliBeautyScheduledPriceEligibilityTest extends TestCase
         $this->assertFalse($service->selectableItemsQuery($rule)->whereKey($withoutBrand)->exists());
     }
 
+    public function test_chiltepin_exception_is_limited_to_account_one_and_valid_items(): void
+    {
+        $service = app(MeliBeautyScheduledPriceService::class);
+        $chiltepin = MeliBrandGroup::factory()->create([
+            'name' => 'Chiltepin',
+            'slug' => 'chiltepin',
+            'active' => true,
+        ]);
+        $this->nonBeautyCategory('MLM-CHILTEPIN-CATEGORY');
+
+        $allowedRule = $this->ruleFor($this->account, $chiltepin);
+        $allowed = $this->extraBrandItem($this->account, $chiltepin, 'MLM-CHILTEPIN-ALLOWED');
+        $this->assertTrue($service->eligibleItemsQuery($allowedRule)->whereKey($allowed)->exists());
+
+        $allowed->forceFill(['status' => 'paused'])->save();
+        $this->assertTrue($service->selectableItemsQuery($allowedRule)->whereKey($allowed)->exists());
+
+        $accountTwo = MeliAccount::factory()->for($this->user)->create();
+        $accountTwoRule = $this->ruleFor($accountTwo, $chiltepin);
+        $accountTwoItem = $this->extraBrandItem($accountTwo, $chiltepin, 'MLM-CHILTEPIN-ACCOUNT-2');
+        $this->assertFalse($service->eligibleItemsQuery($accountTwoRule)->whereKey($accountTwoItem)->exists());
+
+        $otherBrand = MeliBrandGroup::factory()->create(['active' => true]);
+        $otherBrandItem = $this->extraBrandItem($this->account, $otherBrand, 'MLM-NON-BEAUTY-OTHER');
+        $otherBrandRule = $this->ruleFor($this->account, $otherBrand);
+        $this->assertFalse($service->eligibleItemsQuery($otherBrandRule)->whereKey($otherBrandItem)->exists());
+
+        foreach (['uncategorized', 'ignored'] as $classificationStatus) {
+            $invalid = $this->extraBrandItem($this->account, $chiltepin, 'MLM-CHILTEPIN-'.$classificationStatus);
+            $invalid->forceFill(['classification_status' => $classificationStatus])->save();
+            $this->assertFalse($service->eligibleItemsQuery($allowedRule)->whereKey($invalid)->exists());
+        }
+
+        $managed = $this->extraBrandItem($this->account, $chiltepin, 'MLM-CHILTEPIN-MANAGED');
+        DB::table('llantas')->insert(['MLM' => $managed->meli_item_id]);
+        $this->assertFalse($service->eligibleItemsQuery($allowedRule)->whereKey($managed)->exists());
+
+        $chiltepin->forceFill(['active' => false])->save();
+        $inactive = $this->extraBrandItem($this->account, $chiltepin, 'MLM-CHILTEPIN-INACTIVE');
+        $this->assertFalse($service->eligibleItemsQuery($allowedRule)->whereKey($inactive)->exists());
+    }
+
+    public function test_brand_options_show_chiltepin_only_for_account_one(): void
+    {
+        $chiltepin = MeliBrandGroup::factory()->create([
+            'name' => 'Chiltepin',
+            'slug' => 'chiltepin',
+            'active' => true,
+        ]);
+        $this->nonBeautyCategory('MLM-CHILTEPIN-CATEGORY');
+        $this->extraBrandItem($this->account, $chiltepin, 'MLM-CHILTEPIN-OPTIONS-ONE');
+
+        $accountTwo = MeliAccount::factory()->for($this->user)->create();
+        $this->extraBrandItem($accountTwo, $chiltepin, 'MLM-CHILTEPIN-OPTIONS-TWO');
+        $this->actingAs($this->user);
+
+        $this->get(route('meli-price-manager.scheduled-discounts.index', ['account' => $this->account->id]))
+            ->assertInertia(fn (Assert $page): Assert => $page
+                ->where('brandOptions', fn ($brands): bool => collect($brands)->pluck('slug')->contains('chiltepin')));
+
+        $this->get(route('meli-price-manager.scheduled-discounts.index', ['account' => $accountTwo->id]))
+            ->assertInertia(fn (Assert $page): Assert => $page
+                ->where('brandOptions', fn ($brands): bool => ! collect($brands)->pluck('slug')->contains('chiltepin')));
+    }
+
     public function test_dry_run_uses_price_discount_and_apply_confirms_prices_and_sale_price_before_state(): void
     {
         $this->account->forceFill(['access_token' => 'token'])->save();
@@ -1226,5 +1291,41 @@ class MeliBeautyScheduledPriceEligibilityTest extends TestCase
         DB::table('meli_categories')->updateOrInsert(['category_id' => $item->category_id], ['root_category_id' => 'MLM1246']);
 
         return $item;
+    }
+
+    private function ruleFor(MeliAccount $account, MeliBrandGroup $brand): MeliBeautyScheduledDiscount
+    {
+        return new MeliBeautyScheduledDiscount([
+            'meli_account_id' => $account->id,
+            'brand_group_id' => $brand->id,
+            'discount_percentage' => 10,
+            'starts_on' => '2026-09-01',
+            'ends_on' => '2026-09-30',
+            'starts_at' => '20:00',
+            'ends_at' => '06:00',
+            'timezone' => 'America/Mexico_City',
+            'active' => true,
+        ]);
+    }
+
+    private function extraBrandItem(MeliAccount $account, MeliBrandGroup $brand, string $itemId): MeliPriceManagerItem
+    {
+        return MeliPriceManagerItem::factory()
+            ->for($account, 'meliAccount')
+            ->for($brand, 'brandGroup')
+            ->create([
+                'meli_item_id' => $itemId,
+                'category_id' => 'MLM-CHILTEPIN-CATEGORY',
+                'classification_status' => 'categorized',
+                'status' => 'active',
+            ]);
+    }
+
+    private function nonBeautyCategory(string $categoryId): void
+    {
+        DB::table('meli_categories')->updateOrInsert(
+            ['category_id' => $categoryId],
+            ['root_category_id' => 'MLM185721']
+        );
     }
 }

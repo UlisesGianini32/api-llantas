@@ -25,6 +25,12 @@ return [
             'MLM1246', // Belleza y Cuidado Personal
         ],
         'allowed_category_ids' => [],
+        'extra_allowed_brands' => [
+            [
+                'meli_account_id' => 1,
+                'slug' => 'chiltepin',
+            ],
+        ],
         'default_timezone' => 'America/Mexico_City',
     ],
 ];
