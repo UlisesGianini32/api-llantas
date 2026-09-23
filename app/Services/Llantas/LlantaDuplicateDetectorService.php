@@ -9,8 +9,7 @@ class LlantaDuplicateDetectorService
 {
     public function __construct(
         private LlantaDescriptionParser $parser
-    ) {
-    }
+    ) {}
 
     /**
      * Busca posibles duplicados en toda la tabla llantas.
@@ -57,7 +56,7 @@ class LlantaDuplicateDetectorService
 
                 $rightParsed = $parsed[$right->id];
 
-                if (!$this->passesFastFilter($leftParsed, $rightParsed)) {
+                if (! $this->passesFastFilter($leftParsed, $rightParsed)) {
                     continue;
                 }
 
@@ -124,6 +123,20 @@ class LlantaDuplicateDetectorService
     }
 
     public function compareParsed(array $left, array $right): array
+    {
+        return $this->compareParsedInternal($left, $right, false);
+    }
+
+    /**
+     * Comparison-only scoring for the comparator. Legacy importer callers use
+     * compareParsed() and therefore keep their exact scoring behavior.
+     */
+    public function compareParsedForComparison(array $left, array $right): array
+    {
+        return $this->compareParsedInternal($left, $right, true);
+    }
+
+    private function compareParsedInternal(array $left, array $right, bool $useModelSignature): array
     {
         $vetoes = $this->findVetoes($left, $right);
 
@@ -204,11 +217,20 @@ class LlantaDuplicateDetectorService
             $left['tokens'],
             $right['tokens']
         );
+        $modelMatch = $useModelSignature
+            && filled($left['model_signature'] ?? null)
+            && ($left['model_signature'] ?? null) === ($right['model_signature'] ?? null);
 
-        $tokenPoints = $tokenSimilarity * 25;
+        if ($modelMatch) {
+            $tokenSimilarity = 1.0;
+        }
+
+        $tokenPoints = ($tokenSimilarity * 25) + ($modelMatch ? 5 : 0);
         $score += $tokenPoints;
 
-        if ($tokenSimilarity >= 0.99) {
+        if ($modelMatch) {
+            $reasons[] = 'Modelo normalizado igual';
+        } elseif ($tokenSimilarity >= 0.99) {
             $reasons[] = 'Modelo y palabras importantes iguales';
         } elseif ($tokenSimilarity >= 0.80) {
             $reasons[] = 'Modelo muy parecido';
@@ -319,7 +341,7 @@ class LlantaDuplicateDetectorService
         ];
     }
 
-    private function parseLlanta(Llanta $llanta): array
+    public function parseLlanta(Llanta $llanta): array
     {
         $parsed = $this->parser->parse(
             (string) $llanta->descripcion
@@ -348,7 +370,7 @@ class LlantaDuplicateDetectorService
         if (
             $parsed['marca'] === 'GENERICA'
             && filled($normalizedBrand)
-            && !in_array($normalizedBrand, ['GENERICA', 'N/A'], true)
+            && ! in_array($normalizedBrand, ['GENERICA', 'N/A'], true)
         ) {
             $parsed['marca'] = $normalizedBrand;
         }
@@ -356,7 +378,7 @@ class LlantaDuplicateDetectorService
         if (
             $parsed['medida'] === 'N/A'
             && filled($normalizedSize)
-            && !in_array($normalizedSize, ['GENERICA', 'N/A'], true)
+            && ! in_array($normalizedSize, ['GENERICA', 'N/A'], true)
         ) {
             $parsed['medida'] = str_replace('ZR', 'R', $normalizedSize);
         }
@@ -538,7 +560,7 @@ class LlantaDuplicateDetectorService
             return 0.0;
         }
 
-        $reasons[] = 'Mismo ' . $label;
+        $reasons[] = 'Mismo '.$label;
 
         return $points;
     }
