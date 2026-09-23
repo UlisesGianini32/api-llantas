@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Models\Llanta;
 use App\Models\LlantaComparisonDecision;
 use App\Models\User;
+use App\Services\Llantas\LlantaComparisonScannerService;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
@@ -144,7 +145,8 @@ class LlantaComparisonTest extends TestCase
     {
         $first = $this->tire('SKU-STATUS-A', 'MICHELIN PRIMACY 4 205/55R16', 1);
         $second = $this->tire('SKU-STATUS-B', 'MICHELIN PRIMACY4 205 55 R16', 2);
-        $this->actingAs(User::factory()->create());
+        $admin = User::factory()->create();
+        $this->actingAs($admin);
 
         $this->artisan('llantas:comparar', ['--min' => 86])->assertSuccessful();
         $decision = LlantaComparisonDecision::query()->sole();
@@ -152,10 +154,14 @@ class LlantaComparisonTest extends TestCase
         foreach (['same', 'different', 'ignored'] as $status) {
             $this->post(route('llantas.comparador.decision', $decision), ['status' => $status])
                 ->assertRedirect();
+            $decided = $decision->fresh();
+            $decidedAt = $decided->decided_at->toISOString();
             $this->artisan('llantas:comparar', ['--min' => 86])->assertSuccessful();
 
-            $this->assertSame($status, $decision->fresh()->status);
-            $this->assertNotNull($decision->fresh()->decided_at);
+            $afterScan = $decision->fresh();
+            $this->assertSame($status, $afterScan->status);
+            $this->assertSame($decidedAt, $afterScan->decided_at->toISOString());
+            $this->assertSame($admin->id, $afterScan->decided_by);
         }
     }
 
@@ -206,6 +212,61 @@ class LlantaComparisonTest extends TestCase
             'llanta_a_id' => 9991,
             'llanta_b_id' => 9992,
             'status' => 'pending',
+        ]);
+    }
+
+    public function test_scanner_reports_new_candidates_separately_from_refreshed_pending_rows(): void
+    {
+        $firstTire = $this->tire('SCAN-A', 'MICHELIN PRIMACY 4 205/55R16', 1);
+        $secondTire = $this->tire('SCAN-B', 'MICHELIN PRIMACY 4 205/55R16', 2);
+        $before = [
+            $firstTire->fresh()->getAttributes(),
+            $secondTire->fresh()->getAttributes(),
+        ];
+
+        $scanner = app(LlantaComparisonScannerService::class);
+        $first = $scanner->scan();
+        $second = $scanner->scan();
+
+        $this->assertSame(90.0, LlantaComparisonScannerService::DEFAULT_MIN_SCORE);
+        $this->assertSame(1, $first['new_candidates']);
+        $this->assertSame(0, $first['refreshed_candidates']);
+        $this->assertSame(1, $first['pending_total']);
+        $this->assertSame(0, $second['new_candidates']);
+        $this->assertSame(1, $second['refreshed_candidates']);
+        $this->assertSame(1, $second['pending_total']);
+        $this->assertSame($before[0], $firstTire->fresh()->getAttributes());
+        $this->assertSame($before[1], $secondTire->fresh()->getAttributes());
+    }
+
+    public function test_scanner_respects_existing_decision_and_keeps_pending_total(): void
+    {
+        $first = $this->tire('SCAN-DECISION-A', 'MICHELIN PRIMACY 4 205/55R16', 1);
+        $second = $this->tire('SCAN-DECISION-B', 'MICHELIN PRIMACY 4 205/55R16', 2);
+        $scanner = app(LlantaComparisonScannerService::class);
+        $scanner->scan();
+
+        $admin = User::factory()->create();
+        $decidedAt = now()->subMinute()->startOfSecond();
+        LlantaComparisonDecision::query()->sole()->update([
+            'status' => 'same',
+            'decided_by' => $admin->id,
+            'decided_at' => $decidedAt,
+        ]);
+
+        $metrics = $scanner->scan();
+
+        $this->assertSame(0, $metrics['new_candidates']);
+        $this->assertSame(1, $metrics['refreshed_candidates']);
+        $this->assertSame(1, $metrics['decisions_respected']);
+        $this->assertSame(0, $metrics['pending_total']);
+        $decision = LlantaComparisonDecision::query()->sole();
+        $this->assertSame($admin->id, $decision->decided_by);
+        $this->assertSame($decidedAt->toISOString(), $decision->decided_at->toISOString());
+        $this->assertDatabaseHas('llanta_comparison_decisions', [
+            'llanta_a_id' => min($first->id, $second->id),
+            'llanta_b_id' => max($first->id, $second->id),
+            'status' => 'same',
         ]);
     }
 
