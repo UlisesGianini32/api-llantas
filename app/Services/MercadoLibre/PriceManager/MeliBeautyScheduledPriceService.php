@@ -43,6 +43,7 @@ class MeliBeautyScheduledPriceService
     {
         $rootCategories = $this->configuredIds('allowed_root_category_ids');
         $categories = $this->configuredIds('allowed_category_ids');
+        $extraBrandSlugs = $this->extraAllowedBrandSlugs((int) $rule->meli_account_id);
 
         $query = MeliPriceManagerItem::query()
             ->managedCatalog()
@@ -51,23 +52,35 @@ class MeliBeautyScheduledPriceService
             ->where('classification_status', 'categorized')
             ->whereHas('brandGroup', fn (Builder $brand): Builder => $brand->where('active', true));
 
-        if (! Schema::hasTable('meli_categories') || ($rootCategories === [] && $categories === [])) {
+        $normalCategoryFilterAvailable = Schema::hasTable('meli_categories')
+            && ($rootCategories !== [] || $categories !== []);
+
+        if (! $normalCategoryFilterAvailable && $extraBrandSlugs === []) {
             return $query->whereRaw('1 = 0');
         }
 
-        return $query->where(function (Builder $beauty) use ($rootCategories, $categories): void {
-            if ($categories !== []) {
-                $beauty->whereIn('category_id', $categories);
+        return $query->where(function (Builder $eligible) use ($rootCategories, $categories, $extraBrandSlugs, $normalCategoryFilterAvailable): void {
+            if ($normalCategoryFilterAvailable) {
+                $eligible->where(function (Builder $beauty) use ($rootCategories, $categories): void {
+                    if ($categories !== []) {
+                        $beauty->whereIn('category_id', $categories);
+                    }
+
+                    $beauty->when($rootCategories !== [], function (Builder $beauty) use ($rootCategories): void {
+                        $beauty->orWhereExists(function ($category) use ($rootCategories): void {
+                            $category->selectRaw('1')
+                                ->from('meli_categories as beauty_categories')
+                                ->whereColumn('beauty_categories.category_id', 'meli_price_manager_items.category_id')
+                                ->whereIn('beauty_categories.root_category_id', $rootCategories);
+                        });
+                    });
+                });
             }
 
-            $beauty->when($rootCategories !== [], function (Builder $beauty) use ($rootCategories): void {
-                $beauty->orWhereExists(function ($category) use ($rootCategories): void {
-                    $category->selectRaw('1')
-                        ->from('meli_categories as beauty_categories')
-                        ->whereColumn('beauty_categories.category_id', 'meli_price_manager_items.category_id')
-                        ->whereIn('beauty_categories.root_category_id', $rootCategories);
-                });
-            });
+            if ($extraBrandSlugs !== []) {
+                $method = $normalCategoryFilterAvailable ? 'orWhereHas' : 'whereHas';
+                $eligible->{$method}('brandGroup', fn (Builder $brand): Builder => $brand->whereIn('slug', $extraBrandSlugs));
+            }
         });
     }
 
@@ -347,6 +360,20 @@ class MeliBeautyScheduledPriceService
             static fn (mixed $id): string => trim((string) $id),
             (array) config('meli_price_manager.beauty.'.$key, []),
         )));
+    }
+
+    /** @return list<string> */
+    private function extraAllowedBrandSlugs(int $accountId): array
+    {
+        return collect(config('meli_price_manager.beauty.extra_allowed_brands', []))
+            ->filter(fn (mixed $entry): bool => is_array($entry)
+                && (int) ($entry['meli_account_id'] ?? 0) === $accountId
+                && filled($entry['slug'] ?? null))
+            ->map(fn (array $entry): string => mb_strtolower(trim((string) $entry['slug'])))
+            ->filter()
+            ->unique()
+            ->values()
+            ->all();
     }
 
     /** @return array{action: string, status: string, base_price: float|null, promotional_price: float|null, target_price: float|null} */
