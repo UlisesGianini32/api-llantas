@@ -79,8 +79,8 @@ class LlantaComparisonTest extends TestCase
         $second = $this->tire('SKU-TWO', 'Michelin Primacy4 205 55 R16 91 V', 8);
         $before = [$first->fresh()->getAttributes(), $second->fresh()->getAttributes()];
 
-        $this->artisan('llantas:comparar')->assertSuccessful();
-        $this->artisan('llantas:comparar')->assertSuccessful();
+        $this->artisan('llantas:comparar', ['--min' => 86])->assertSuccessful();
+        $this->artisan('llantas:comparar', ['--min' => 86])->assertSuccessful();
 
         $this->assertSame(1, LlantaComparisonDecision::query()->count());
         $decision = LlantaComparisonDecision::query()->sole();
@@ -96,6 +96,32 @@ class LlantaComparisonTest extends TestCase
             ->count());
     }
 
+    public function test_persisted_score_matches_the_public_comparison_service(): void
+    {
+        $first = $this->tire(
+            'SUMAXX-A',
+            '265/65R18 SUMAXX ALL-TERRAIN AT LETRA BLANCA',
+            4,
+            'SUMAXX',
+            '265/65R18'
+        );
+        $second = $this->tire(
+            'SUMAXX-B',
+            '265/65R18 LT SUMAXX ALL-TERRAIN A/T LETRA BLANCA 10C',
+            8,
+            'SUMAXX',
+            '265/65R18'
+        );
+
+        $comparison = app(\App\Services\Llantas\LlantaComparisonService::class)
+            ->compare($first, $second);
+
+        $this->artisan('llantas:comparar')->assertSuccessful();
+
+        $decision = LlantaComparisonDecision::query()->sole();
+        $this->assertSame((float) $comparison['score'], (float) $decision->score);
+    }
+
     public function test_decision_status_is_persisted_and_not_reset_by_regeneration(): void
     {
         $first = $this->tire('SKU-A', 'MICHELIN PRIMACY 4 205/55R16', 1);
@@ -103,11 +129,11 @@ class LlantaComparisonTest extends TestCase
         $admin = User::factory()->create();
         $this->actingAs($admin);
 
-        $this->artisan('llantas:comparar')->assertSuccessful();
+        $this->artisan('llantas:comparar', ['--min' => 86])->assertSuccessful();
         $decision = LlantaComparisonDecision::query()->sole();
         $this->post(route('llantas.comparador.decision', $decision), ['status' => 'same'])
             ->assertRedirect();
-        $this->artisan('llantas:comparar')->assertSuccessful();
+        $this->artisan('llantas:comparar', ['--min' => 86])->assertSuccessful();
 
         $this->assertSame('same', $decision->fresh()->status);
         $this->assertNotNull($decision->fresh()->decided_at);
@@ -120,13 +146,13 @@ class LlantaComparisonTest extends TestCase
         $second = $this->tire('SKU-STATUS-B', 'MICHELIN PRIMACY4 205 55 R16', 2);
         $this->actingAs(User::factory()->create());
 
-        $this->artisan('llantas:comparar')->assertSuccessful();
+        $this->artisan('llantas:comparar', ['--min' => 86])->assertSuccessful();
         $decision = LlantaComparisonDecision::query()->sole();
 
         foreach (['same', 'different', 'ignored'] as $status) {
             $this->post(route('llantas.comparador.decision', $decision), ['status' => $status])
                 ->assertRedirect();
-            $this->artisan('llantas:comparar')->assertSuccessful();
+            $this->artisan('llantas:comparar', ['--min' => 86])->assertSuccessful();
 
             $this->assertSame($status, $decision->fresh()->status);
             $this->assertNotNull($decision->fresh()->decided_at);
@@ -138,7 +164,7 @@ class LlantaComparisonTest extends TestCase
         $first = $this->tire('SKU-LIST-A', 'MICHELIN PRIMACY 4 205/55R16', 1);
         $second = $this->tire('SKU-LIST-B', 'MICHELIN PRIMACY4 205 55 R16', 2);
         $this->actingAs(User::factory()->create());
-        $this->artisan('llantas:comparar')->assertSuccessful();
+        $this->artisan('llantas:comparar', ['--min' => 86])->assertSuccessful();
 
         $this->get(route('llantas.comparador.index'))
             ->assertOk()
@@ -183,12 +209,17 @@ class LlantaComparisonTest extends TestCase
         ]);
     }
 
-    private function tire(string $sku, string $description, int $stock): Llanta
-    {
+    private function tire(
+        string $sku,
+        string $description,
+        int $stock,
+        string $brand = 'MICHELIN',
+        string $size = '205/55R16'
+    ): Llanta {
         return Llanta::query()->create([
             'sku' => $sku,
-            'marca' => 'MICHELIN',
-            'medida' => '205/55R16',
+            'marca' => $brand,
+            'medida' => $size,
             'descripcion' => $description,
             'costo' => 100,
             'precio_ML' => 150,

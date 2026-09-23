@@ -34,6 +34,66 @@ class LlantaComparisonServiceTest extends TestCase
         }
     }
 
+    public function test_flotation_measures_keep_diameter_width_and_rim(): void
+    {
+        foreach ([
+            ['35X10.00R15', '37X10.00R15'],
+            ['32X10.00R16', '35X10.00R16'],
+        ] as [$leftSize, $rightSize]) {
+            $result = $this->service->compare(
+                $this->tire('LEFT-'.$leftSize, 'GENERICA', 'N/A', $leftSize),
+                $this->tire('RIGHT-'.$rightSize, 'GENERICA', 'N/A', $rightSize)
+            );
+
+            $this->assertTrue($result['vetoed']);
+            $this->assertSame(0.0, $result['score']);
+        }
+    }
+
+    public function test_flotation_measure_formatting_variants_match(): void
+    {
+        foreach ([
+            ['35X10.00R15', '35x10r15'],
+            ['33X12.50R17LT', '33x12.50r17lt'],
+        ] as [$leftSize, $rightSize]) {
+            $left = $this->tire('LEFT-'.$leftSize, 'GENERICA', 'N/A', $leftSize);
+            $right = $this->tire('RIGHT-'.$rightSize, 'GENERICA', 'N/A', $rightSize);
+
+            $this->assertSame(
+                $this->service->parse($left)['medida'],
+                $this->service->parse($right)['medida']
+            );
+            $this->assertFalse($this->service->compare($left, $right)['vetoed']);
+        }
+    }
+
+    public function test_flotation_measure_normalization_returns_expected_canonical_values(): void
+    {
+        foreach ([
+            ['35X10.00R15', '35X10R15'],
+            ['35x10r15', '35X10R15'],
+            ['33X12.50R17LT', '33X12.5R17LT'],
+            ['35X10.50R15', '35X10.5R15'],
+            ['35X12.50R20', '35X12.5R20'],
+        ] as [$description, $expected]) {
+            $llanta = $this->tire('CANONICAL-'.md5($description), 'GENERICA', 'N/A', $description);
+
+            $this->assertSame($expected, $this->service->parse($llanta)['medida']);
+        }
+    }
+
+    public function test_database_measure_is_used_when_description_has_no_recognized_measure(): void
+    {
+        $llanta = $this->tire(
+            'DB-MEASURE-FALLBACK',
+            'GENERICA',
+            '205/55R16',
+            'SUMAXX ALL-TERRAIN LETRA BLANCA'
+        );
+
+        $this->assertSame('205/55R16', $this->service->parse($llanta)['medida']);
+    }
+
     public function test_same_model_with_spacing_variants_gets_high_score(): void
     {
         $result = $this->service->compare(
@@ -56,6 +116,37 @@ class LlantaComparisonServiceTest extends TestCase
         $this->assertFalse($result['vetoed']);
         $this->assertLessThan(86, $result['score']);
         $this->assertNotEmpty($result['differences']);
+    }
+
+    public function test_distinct_model_codes_stay_below_candidate_threshold(): void
+    {
+        foreach ([
+            ['AMULET AT505', 'AMULET AF508'],
+            ['TECHSHIELD TS600', 'TECHSHIELD TS603'],
+            ['PEGASUS MTX', 'PEGASUS RTX'],
+            ['GRANDSTONE GT238', 'GRANDSTONE GT276'],
+        ] as [$leftDescription, $rightDescription]) {
+            $result = $this->service->compare(
+                $this->tire('LEFT-'.md5($leftDescription), 'GENERICA', '205/55R16', $leftDescription.' 205/55R16'),
+                $this->tire('RIGHT-'.md5($rightDescription), 'GENERICA', '205/55R16', $rightDescription.' 205/55R16')
+            );
+
+            $this->assertFalse($result['vetoed']);
+            $this->assertLessThan(90, $result['score']);
+        }
+    }
+
+    public function test_sumaxx_at_and_a_slash_t_are_same_model_but_technical_tokens_are_ignored(): void
+    {
+        $result = $this->service->compare(
+            $this->tire('SUMAXX-A', 'SUMAXX', '265/65R18', '265/65R18 SUMAXX ALL-TERRAIN AT LETRA BLANCA'),
+            $this->tire('SUMAXX-B', 'SUMAXX', '265/65R18', '265/65R18 LT SUMAXX ALL-TERRAIN A/T LETRA BLANCA 10C')
+        );
+
+        $this->assertFalse($result['vetoed']);
+        $this->assertSame(92.33, (float) $result['score']);
+        $this->assertGreaterThanOrEqual(90, $result['score']);
+        $this->assertContains('Modelo normalizado igual', $result['reasons']);
     }
 
     public function test_different_brands_are_vetoed_and_technical_mismatch_is_explained(): void

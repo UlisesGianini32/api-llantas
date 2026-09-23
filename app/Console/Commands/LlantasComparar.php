@@ -11,7 +11,7 @@ use Illuminate\Support\Carbon;
 class LlantasComparar extends Command
 {
     protected $signature = 'llantas:comparar
-                            {--min=86 : Puntaje mínimo para guardar un candidato}';
+                            {--min=90 : Puntaje mínimo para guardar un candidato}';
 
     protected $description = 'Genera candidatos de comparación de llantas sin modificar el inventario.';
 
