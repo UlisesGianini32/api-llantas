@@ -21,8 +21,16 @@ class LlantaComparisonService
         if (filled($llanta->marca)) {
             $parsed['marca'] = $this->parser->normalize((string) $llanta->marca);
         }
-        if (filled($llanta->medida)) {
-            $parsed['medida'] = $this->normalizeMeasure((string) $llanta->medida);
+        $descriptionMeasure = $this->extractComparisonMeasure(
+            (string) ($llanta->descripcion ?? '')
+        );
+        if ($descriptionMeasure !== 'N/A') {
+            $parsed['medida'] = $descriptionMeasure;
+        } elseif (filled($llanta->medida)) {
+            $databaseMeasure = $this->normalizeMeasure((string) $llanta->medida);
+            if ($databaseMeasure !== 'N/A') {
+                $parsed['medida'] = $databaseMeasure;
+            }
         }
         $parsed['model_signature'] = $this->modelSignature($llanta, $parsed);
 
@@ -96,7 +104,34 @@ class LlantaComparisonService
     {
         $value = $this->parser->normalize($measure);
         $value = str_replace('ZR', 'R', $value);
+        $value = (string) (preg_replace('/\s+/', '', $value) ?? $value);
 
-        return (string) (preg_replace('/\s+/', '', $value) ?? $value);
+        if (preg_match(
+            '/^(\d{2,3})X(\d{1,2})(?:\.(\d+))?(?:R|-)(\d{2}(?:\.5)?)(LT|TT|C)?$/',
+            $value,
+            $match
+        )) {
+            $width = $match[2].(isset($match[3]) ? '.'.$match[3] : '');
+            $width = (string) (rtrim(rtrim($width, '0'), '.') ?: '0');
+
+            return $match[1].'X'.$width.'R'.$match[4].($match[5] ?? '');
+        }
+
+        return $value;
+    }
+
+    private function extractComparisonMeasure(string $description): string
+    {
+        $normalized = $this->parser->normalize($description);
+
+        if (preg_match(
+            '/\b\d{2,3}X\d{1,2}(?:\.\d{1,2})?(?:R|-)\d{2}(?:\.5)?(?:LT|TT|C)?\b/',
+            $normalized,
+            $match
+        )) {
+            return $this->normalizeMeasure($match[0]);
+        }
+
+        return 'N/A';
     }
 }
