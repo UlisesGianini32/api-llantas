@@ -11,6 +11,7 @@ const sections = [
         { key: 'price_rules', label: 'Fórmulas de ventas', href: '/price-rules' },
         { key: 'syscom', label: 'SYSCOM → ML', href: '/syscom-ml' },
         { key: 'excel_import', label: 'Importar Excel', href: '/importar-excel' },
+        { key: 'inventory_products', label: 'Almacén', href: '/almacen/productos' },
     ] },
     { key: 'mercado_libre', label: 'Mercado Libre', items: [
         { key: 'meli_labels', label: 'Etiquetas Mercado Libre', href: '/mercado-libre/etiquetas' },

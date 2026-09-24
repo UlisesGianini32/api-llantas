@@ -6,6 +6,7 @@ use App\Http\Controllers\MeliOrderCancellationController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\ExcelImportController;
+use App\Http\Controllers\InventoryProductController;
 use App\Http\Controllers\LlantaController;
 use App\Http\Controllers\LlantaComparisonController;
 use App\Http\Controllers\MeliBatchRepublishController;
@@ -110,6 +111,21 @@ Route::middleware(['auth', 'role'])->group(function () {
 
     Route::get('/producto/export/shopify/tobeauty', [ProductoController::class, 'exportShopifyTobeauty'])
         ->name('producto.export.shopify.tobeauty');
+
+    // ALMACÉN: catálogo maestro independiente de llantas y Syscom.
+    Route::prefix('almacen/productos')->name('inventory.products.')->group(function () {
+        Route::get('/', [InventoryProductController::class, 'index'])->name('index');
+        Route::get('/crear', [InventoryProductController::class, 'create'])->name('create');
+        Route::post('/', [InventoryProductController::class, 'store'])->name('store');
+        Route::get('/{inventoryProduct}', [InventoryProductController::class, 'show'])
+            ->whereNumber('inventoryProduct')->name('show');
+        Route::get('/{inventoryProduct}/editar', [InventoryProductController::class, 'edit'])
+            ->whereNumber('inventoryProduct')->name('edit');
+        Route::put('/{inventoryProduct}', [InventoryProductController::class, 'update'])
+            ->whereNumber('inventoryProduct')->name('update');
+        Route::patch('/{inventoryProduct}/estado', [InventoryProductController::class, 'toggle'])
+            ->whereNumber('inventoryProduct')->name('toggle');
+    });
 
     // COMPARE
     Route::get('/ml/compare', [MeliCompareController::class, 'index'])->name('ml.compare');
