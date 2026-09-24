@@ -169,6 +169,13 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                     >
                         Movimientos
                     </NavItem>
+                    <NavItem
+                        href="/almacen/reservas"
+                        active={currentPath.startsWith('/almacen/reservas')}
+                        onNavigate={onNavigate}
+                    >
+                        Reservas
+                    </NavItem>
                     <NavItem href="/ml/compare" active={currentPath.startsWith('/ml/compare')} onNavigate={onNavigate}>
                         Comparar ML
                     </NavItem>

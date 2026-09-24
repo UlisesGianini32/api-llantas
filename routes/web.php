@@ -8,6 +8,7 @@ use App\Http\Controllers\ExcelImportController;
 use App\Http\Controllers\InventoryLocationController;
 use App\Http\Controllers\InventoryMovementController;
 use App\Http\Controllers\InventoryProductController;
+use App\Http\Controllers\InventoryReservationController;
 use App\Http\Controllers\LlantaComparisonController;
 use App\Http\Controllers\LlantaController;
 use App\Http\Controllers\MeliBatchRepublishController;
@@ -148,6 +149,22 @@ Route::middleware(['auth', 'role'])->group(function () {
         Route::post('/', [InventoryMovementController::class, 'store'])->name('store');
         Route::get('/{inventoryMovement}', [InventoryMovementController::class, 'show'])
             ->whereNumber('inventoryMovement')->name('show');
+    });
+
+    Route::prefix('almacen/reservas')->name('inventory.reservations.')->group(function () {
+        Route::get('/', [InventoryReservationController::class, 'index'])->name('index');
+        Route::get('/crear', [InventoryReservationController::class, 'create'])->name('create');
+        Route::post('/', [InventoryReservationController::class, 'store'])->name('store');
+        Route::get('/{inventoryReservation}', [InventoryReservationController::class, 'show'])
+            ->whereNumber('inventoryReservation')->name('show');
+        Route::post('/{inventoryReservation}/liberar', [InventoryReservationController::class, 'release'])
+            ->whereNumber('inventoryReservation')->name('release');
+        Route::post('/{inventoryReservation}/cancelar', [InventoryReservationController::class, 'cancel'])
+            ->whereNumber('inventoryReservation')->name('cancel');
+        Route::post('/{inventoryReservation}/expirar', [InventoryReservationController::class, 'expire'])
+            ->whereNumber('inventoryReservation')->name('expire');
+        Route::post('/{inventoryReservation}/cumplir', [InventoryReservationController::class, 'fulfill'])
+            ->whereNumber('inventoryReservation')->name('fulfill');
     });
 
     // COMPARE

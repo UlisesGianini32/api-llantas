@@ -14,6 +14,7 @@ const sections = [
         { key: 'inventory_products', label: 'Almacén', href: '/almacen/productos' },
         { key: 'inventory_locations', label: 'Ubicaciones', href: '/almacen/ubicaciones' },
         { key: 'inventory_movements', label: 'Movimientos', href: '/almacen/movimientos' },
+        { key: 'inventory_reservations', label: 'Reservas', href: '/almacen/reservas' },
     ] },
     { key: 'mercado_libre', label: 'Mercado Libre', items: [
         { key: 'meli_labels', label: 'Etiquetas Mercado Libre', href: '/mercado-libre/etiquetas' },

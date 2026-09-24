@@ -54,10 +54,13 @@ class InventoryProductsTest extends TestCase
         $primaryLocationMigration->up();
         $movementsMigration = require database_path('migrations/2026_09_24_000004_create_inventory_movements_table.php');
         $movementsMigration->up();
+        $reservationsMigration = require database_path('migrations/2026_09_24_000005_create_inventory_reservations_table.php');
+        $reservationsMigration->up();
     }
 
     protected function tearDown(): void
     {
+        Schema::dropIfExists('inventory_reservations');
         Schema::dropIfExists('inventory_movements');
         Schema::table('inventory_products', function (Blueprint $table): void {
             $table->dropForeign(['primary_location_id']);

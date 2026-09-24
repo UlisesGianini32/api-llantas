@@ -2,8 +2,10 @@
 
 namespace App\Services;
 
+use App\Models\InventoryLocation;
 use App\Models\InventoryMovement;
 use App\Models\InventoryProduct;
+use App\Models\InventoryReservation;
 use Illuminate\Support\Collection;
 
 class InventoryStockService
@@ -15,6 +17,61 @@ class InventoryStockService
         return (int) InventoryMovement::query()
             ->where('inventory_product_id', $productId)
             ->sum('quantity');
+    }
+
+    public function physicalStock(InventoryProduct|int $product): int
+    {
+        return $this->productStock($product);
+    }
+
+    public function physicalStockByLocation(
+        InventoryProduct|int $product,
+        InventoryLocation|int $location,
+    ): int {
+        $productId = $product instanceof InventoryProduct ? $product->getKey() : $product;
+        $locationId = $location instanceof InventoryLocation ? $location->getKey() : $location;
+
+        return (int) InventoryMovement::query()
+            ->where('inventory_product_id', $productId)
+            ->where('inventory_location_id', $locationId)
+            ->sum('quantity');
+    }
+
+    public function reservedStock(InventoryProduct|int $product): int
+    {
+        $productId = $product instanceof InventoryProduct ? $product->getKey() : $product;
+
+        return (int) InventoryReservation::query()
+            ->active()
+            ->where('inventory_product_id', $productId)
+            ->sum('quantity');
+    }
+
+    public function reservedStockByLocation(
+        InventoryProduct|int $product,
+        InventoryLocation|int $location,
+    ): int {
+        $productId = $product instanceof InventoryProduct ? $product->getKey() : $product;
+        $locationId = $location instanceof InventoryLocation ? $location->getKey() : $location;
+
+        return (int) InventoryReservation::query()
+            ->active()
+            ->where('inventory_product_id', $productId)
+            ->where('inventory_location_id', $locationId)
+            ->sum('quantity');
+    }
+
+    public function availableStock(InventoryProduct|int $product): int
+    {
+        return $this->physicalStock($product) - $this->reservedStock($product);
+    }
+
+    public function availableStockByLocation(
+        InventoryProduct|int $product,
+        InventoryLocation|int $location,
+    ): int {
+        return $this->physicalStockByLocation($product, $location)
+            - $this->reservedStockByLocation($product, $location);
     }
 
     /** @return Collection<int, object{inventory_location_id:int, quantity:int, location:object}> */

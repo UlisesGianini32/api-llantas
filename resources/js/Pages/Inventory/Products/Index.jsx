@@ -82,13 +82,15 @@ export default function InventoryProductsIndex({ products, filters }) {
                                     <th className="px-5 py-4">Público</th>
                                     <th className="px-5 py-4">Ubicación</th>
                                     <th className="px-5 py-4">Stock físico</th>
+                                    <th className="px-5 py-4">Reservado</th>
+                                    <th className="px-5 py-4">Disponible</th>
                                     <th className="px-5 py-4">Estado</th>
                                     <th className="px-5 py-4">Acciones</th>
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-slate-100 dark:divide-neutral-800">
                                 {products.data.length === 0 ? (
-                                    <tr><td colSpan="12" className="px-5 py-12 text-center text-slate-500">No hay productos para mostrar.</td></tr>
+                                    <tr><td colSpan="14" className="px-5 py-12 text-center text-slate-500">No hay productos para mostrar.</td></tr>
                                 ) : products.data.map((product) => (
                                     <tr key={product.id} className="align-top hover:bg-slate-50/70 dark:hover:bg-neutral-950/50">
                                         <td className="px-5 py-4 font-semibold text-slate-900 dark:text-white">{product.name}</td>
@@ -101,6 +103,8 @@ export default function InventoryProductsIndex({ products, filters }) {
                                         <td className="whitespace-nowrap px-5 py-4">{money(product.price_public)}</td>
                                         <td className="whitespace-nowrap px-5 py-4 text-slate-600 dark:text-slate-300">{product.primary_location?.code || 'Sin ubicación'}</td>
                                         <td className="whitespace-nowrap px-5 py-4 font-semibold">{Number(product.physical_stock || 0)}</td>
+                                        <td className="whitespace-nowrap px-5 py-4">{Number(product.reserved_stock || 0)}</td>
+                                        <td className="whitespace-nowrap px-5 py-4 font-semibold">{Number(product.physical_stock || 0) - Number(product.reserved_stock || 0)}</td>
                                         <td className="px-5 py-4">
                                             <span className={`rounded-full px-3 py-1 text-xs font-semibold ${product.is_active ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300' : 'bg-slate-100 text-slate-600 dark:bg-neutral-800 dark:text-slate-300'}`}>
                                                 {product.is_active ? 'Activo' : 'Inactivo'}

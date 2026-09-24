@@ -6,6 +6,7 @@ use App\Http\Requests\StoreInventoryProductRequest;
 use App\Http\Requests\UpdateInventoryProductRequest;
 use App\Models\InventoryLocation;
 use App\Models\InventoryProduct;
+use App\Models\InventoryReservation;
 use App\Services\InventoryStockService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -20,6 +21,10 @@ class InventoryProductController extends Controller
         $products = InventoryProduct::query()
             ->with('primaryLocation:id,code,name,is_active')
             ->withSum('movements as physical_stock', 'quantity')
+            ->withSum([
+                'reservations as reserved_stock' => fn ($query) => $query
+                    ->where('status', InventoryReservation::ACTIVE),
+            ], 'quantity')
             ->when($search !== '', function ($query) use ($search): void {
                 $query->where(function ($nested) use ($search): void {
                     $nested->where('name', 'like', "%{$search}%")
@@ -70,12 +75,57 @@ class InventoryProductController extends Controller
             ->orderByDesc('id')
             ->limit(10)
             ->get();
+        $physicalByLocation = $stock->productStockByLocation($inventoryProduct)
+            ->keyBy('inventory_location_id');
+        $reservedByLocation = InventoryReservation::query()
+            ->active()
+            ->where('inventory_product_id', $inventoryProduct->getKey())
+            ->whereNotNull('inventory_location_id')
+            ->select('inventory_location_id')
+            ->selectRaw('SUM(quantity) as quantity')
+            ->groupBy('inventory_location_id')
+            ->get()
+            ->keyBy('inventory_location_id');
+        $locationIds = $physicalByLocation->keys()
+            ->merge($reservedByLocation->keys())
+            ->unique()
+            ->values();
+        $locations = InventoryLocation::query()
+            ->whereIn('id', $locationIds)
+            ->get(['id', 'code', 'name'])
+            ->keyBy('id');
+        $stockByLocation = $locationIds->map(function ($locationId) use (
+            $physicalByLocation,
+            $reservedByLocation,
+            $locations,
+        ): array {
+            $physical = (int) ($physicalByLocation[$locationId]->quantity ?? 0);
+            $reserved = (int) ($reservedByLocation[$locationId]->quantity ?? 0);
+
+            return [
+                'inventory_location_id' => (int) $locationId,
+                'location' => $locations[$locationId] ?? null,
+                'physical_stock' => $physical,
+                'reserved_stock' => $reserved,
+                'available_stock' => $physical - $reserved,
+            ];
+        })->values();
+        $reservations = $inventoryProduct->reservations()
+            ->active()
+            ->with('location:id,code,name')
+            ->orderByDesc('created_at')
+            ->orderByDesc('id')
+            ->limit(10)
+            ->get();
 
         return Inertia::render('Inventory/Products/Show', [
             'product' => $inventoryProduct,
             'physicalStock' => $stock->productStock($inventoryProduct),
-            'stockByLocation' => $stock->productStockByLocation($inventoryProduct),
+            'reservedStock' => $stock->reservedStock($inventoryProduct),
+            'availableStock' => $stock->availableStock($inventoryProduct),
+            'stockByLocation' => $stockByLocation,
             'movements' => $movements,
+            'reservations' => $reservations,
         ]);
     }
 

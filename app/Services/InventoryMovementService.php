@@ -6,6 +6,7 @@ use App\Exceptions\InventoryInsufficientStockException;
 use App\Models\InventoryLocation;
 use App\Models\InventoryMovement;
 use App\Models\InventoryProduct;
+use App\Models\InventoryReservation;
 use App\Models\User;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
@@ -64,10 +65,19 @@ class InventoryMovementService
             }
 
             if ($quantity < 0) {
-                $available = (int) InventoryMovement::query()
+                $physical = (int) InventoryMovement::query()
                     ->where('inventory_product_id', $product->getKey())
                     ->where('inventory_location_id', $location->getKey())
                     ->sum('quantity');
+                $reserved = (int) InventoryReservation::query()
+                    ->active()
+                    ->where('inventory_product_id', $product->getKey())
+                    ->where(function ($query) use ($location): void {
+                        $query->where('inventory_location_id', $location->getKey())
+                            ->orWhereNull('inventory_location_id');
+                    })
+                    ->sum('quantity');
+                $available = $physical - $reserved;
                 $requested = abs((int) $quantity);
                 if ($available + $quantity < 0) {
                     throw new InventoryInsufficientStockException(

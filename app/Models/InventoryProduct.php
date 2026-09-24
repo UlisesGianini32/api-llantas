@@ -46,6 +46,11 @@ class InventoryProduct extends Model
         return $this->hasMany(InventoryMovement::class, 'inventory_product_id');
     }
 
+    public function reservations(): HasMany
+    {
+        return $this->hasMany(InventoryReservation::class, 'inventory_product_id');
+    }
+
     public function physicalStock(): int
     {
         return (int) $this->movements()->sum('quantity');
