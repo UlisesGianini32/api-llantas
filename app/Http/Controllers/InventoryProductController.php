@@ -6,6 +6,7 @@ use App\Http\Requests\StoreInventoryProductRequest;
 use App\Http\Requests\UpdateInventoryProductRequest;
 use App\Models\InventoryLocation;
 use App\Models\InventoryProduct;
+use App\Services\InventoryStockService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
@@ -18,6 +19,7 @@ class InventoryProductController extends Controller
         $search = trim((string) $request->input('search', ''));
         $products = InventoryProduct::query()
             ->with('primaryLocation:id,code,name,is_active')
+            ->withSum('movements as physical_stock', 'quantity')
             ->when($search !== '', function ($query) use ($search): void {
                 $query->where(function ($nested) use ($search): void {
                     $nested->where('name', 'like', "%{$search}%")
@@ -54,12 +56,26 @@ class InventoryProductController extends Controller
         return redirect()->route('inventory.products.index')->with('success', 'Producto creado correctamente.');
     }
 
-    public function show(InventoryProduct $inventoryProduct): Response
-    {
+    public function show(
+        InventoryProduct $inventoryProduct,
+        InventoryStockService $stock,
+    ): Response {
         $inventoryProduct->load('primaryLocation:id,code,name,is_active');
+        $movements = $inventoryProduct->movements()
+            ->with([
+                'location:id,code,name',
+                'createdBy:id,name',
+            ])
+            ->orderByDesc('occurred_at')
+            ->orderByDesc('id')
+            ->limit(10)
+            ->get();
 
         return Inertia::render('Inventory/Products/Show', [
             'product' => $inventoryProduct,
+            'physicalStock' => $stock->productStock($inventoryProduct),
+            'stockByLocation' => $stock->productStockByLocation($inventoryProduct),
+            'movements' => $movements,
         ]);
     }
 

@@ -2,52 +2,53 @@
 
 use App\Http\Controllers\AmsPedidosController;
 use App\Http\Controllers\AmsSecondaryOrdersController;
-use App\Http\Controllers\MeliOrderCancellationController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\ExcelImportController;
 use App\Http\Controllers\InventoryLocationController;
+use App\Http\Controllers\InventoryMovementController;
 use App\Http\Controllers\InventoryProductController;
-use App\Http\Controllers\LlantaController;
 use App\Http\Controllers\LlantaComparisonController;
+use App\Http\Controllers\LlantaController;
 use App\Http\Controllers\MeliBatchRepublishController;
-use App\Http\Controllers\MeliCompareController;
+use App\Http\Controllers\MeliClaimAttachmentController;
 use App\Http\Controllers\MeliClaimController;
 use App\Http\Controllers\MeliClaimMessageController;
-use App\Http\Controllers\MeliClaimAttachmentController;
 use App\Http\Controllers\MeliClaimResolutionController;
+use App\Http\Controllers\MeliCompareController;
 use App\Http\Controllers\MeliFullStockController;
+use App\Http\Controllers\MeliLabelController;
 use App\Http\Controllers\MeliMessagingController;
+use App\Http\Controllers\MeliOrderCancellationController;
 use App\Http\Controllers\MeliPriceManager\MeliAccountTaxProfileController;
-use App\Http\Controllers\MeliPriceManager\MeliCategorizedItemBrandController;
+use App\Http\Controllers\MeliPriceManager\MeliBeautyScheduledDiscountController;
 use App\Http\Controllers\MeliPriceManager\MeliBrandAliasController;
 use App\Http\Controllers\MeliPriceManager\MeliBrandGroupController;
 use App\Http\Controllers\MeliPriceManager\MeliBrandReclassificationController;
 use App\Http\Controllers\MeliPriceManager\MeliBulkCategorizedItemBrandController;
+use App\Http\Controllers\MeliPriceManager\MeliCategorizedItemBrandController;
 use App\Http\Controllers\MeliPriceManager\MeliItemClassificationActionController;
 use App\Http\Controllers\MeliPriceManager\MeliPriceManagerDashboardController;
-use App\Http\Controllers\MeliPriceManager\MeliBeautyScheduledDiscountController;
 use App\Http\Controllers\MeliPriceManager\MeliPriceSimulationController;
 use App\Http\Controllers\MeliPriceManager\MeliPriceUpdateController;
 use App\Http\Controllers\MeliPriceManager\MeliUncategorizedItemController;
-use App\Http\Controllers\MeliQuestionController;
 use App\Http\Controllers\MeliPublishController;
+use App\Http\Controllers\MeliQuestionController;
 use App\Http\Controllers\MeliRepublishController;
 use App\Http\Controllers\MeliSecondaryPublicationController;
 use App\Http\Controllers\PriceRulesController;
 use App\Http\Controllers\ProductoCompuestoController;
 use App\Http\Controllers\ProductoController;
 use App\Http\Controllers\ProductoSyncController;
-use App\Http\Controllers\Settings\ProfileController;
+use App\Http\Controllers\QzTrayController;
 use App\Http\Controllers\Settings\PasswordController;
+use App\Http\Controllers\Settings\ProfileController;
 use App\Http\Controllers\SyscomMeliController;
-use App\Http\Controllers\SystemHealthController;
 use App\Http\Controllers\SystemActionController;
+use App\Http\Controllers\SystemHealthController;
 use App\Http\Controllers\SystemLogController;
 use App\Http\Controllers\SystemQueueController;
 use App\Http\Controllers\SystemServerController;
-use App\Http\Controllers\QzTrayController;
-use App\Http\Controllers\MeliLabelController;
 use Illuminate\Support\Facades\Route;
 use Laravel\Fortify\Features;
 
@@ -59,7 +60,6 @@ Route::middleware(['auth', 'role'])->group(function () {
     // SISTEMA
     Route::get('/sistema/estado', [SystemHealthController::class, 'index'])
         ->name('system.health.index');
-
 
     Route::get('/sistema/servidor/metricas', [SystemServerController::class, 'metrics'])
         ->name('system.server.metrics');
@@ -142,6 +142,14 @@ Route::middleware(['auth', 'role'])->group(function () {
             ->whereNumber('inventoryLocation')->name('toggle');
     });
 
+    Route::prefix('almacen/movimientos')->name('inventory.movements.')->group(function () {
+        Route::get('/', [InventoryMovementController::class, 'index'])->name('index');
+        Route::get('/crear', [InventoryMovementController::class, 'create'])->name('create');
+        Route::post('/', [InventoryMovementController::class, 'store'])->name('store');
+        Route::get('/{inventoryMovement}', [InventoryMovementController::class, 'show'])
+            ->whereNumber('inventoryMovement')->name('show');
+    });
+
     // COMPARE
     Route::get('/ml/compare', [MeliCompareController::class, 'index'])->name('ml.compare');
     Route::post('/ml/compare/run', [MeliCompareController::class, 'run'])->name('ml.compare.run');
@@ -195,94 +203,91 @@ Route::middleware(['auth', 'role'])->group(function () {
         [AmsPedidosController::class, 'printShippingLabel']
     )->name('ams.pedidos.shipping_label');
 
-Route::get(
-    '/ams/pedidos/shipping-label/{shippingId}/zpl-raw',
-    [AmsPedidosController::class, 'rawShippingLabelZpl']
-)
-    ->whereNumber('shippingId')
-    ->name('ams.pedidos.shipping_label_zpl_raw');
+    Route::get(
+        '/ams/pedidos/shipping-label/{shippingId}/zpl-raw',
+        [AmsPedidosController::class, 'rawShippingLabelZpl']
+    )
+        ->whereNumber('shippingId')
+        ->name('ams.pedidos.shipping_label_zpl_raw');
 
+    Route::get(
+        '/ams/pedidos/shipping-label/{shippingId}/kamo-png',
+        [AmsPedidosController::class, 'kamoShippingLabelPng']
+    )
+        ->whereNumber('shippingId')
+        ->name('ams.pedidos.shipping_label_kamo_png');
 
-Route::get(
-    '/ams/pedidos/shipping-label/{shippingId}/kamo-png',
-    [AmsPedidosController::class, 'kamoShippingLabelPng']
-)
-    ->whereNumber('shippingId')
-    ->name('ams.pedidos.shipping_label_kamo_png');
+    Route::get(
+        '/ams/pedidos/shipping-label/{shippingId}/kamo-tspl',
+        [AmsPedidosController::class, 'kamoShippingLabelTspl']
+    )
+        ->whereNumber('shippingId')
+        ->name('ams.pedidos.shipping_label_kamo_tspl');
 
+    // PEDIDOS - CUENTAS SECUNDARIAS
+    Route::get(
+        '/ams/pedidos-secundaria',
+        [AmsSecondaryOrdersController::class, 'procesar']
+    )->name('ams.secondary.procesar');
 
-Route::get(
-    '/ams/pedidos/shipping-label/{shippingId}/kamo-tspl',
-    [AmsPedidosController::class, 'kamoShippingLabelTspl']
-)
-    ->whereNumber('shippingId')
-    ->name('ams.pedidos.shipping_label_kamo_tspl');
+    Route::post(
+        '/ams/pedidos-secundaria/sync',
+        [AmsSecondaryOrdersController::class, 'sync']
+    )->name('ams.secondary.sync');
 
-// PEDIDOS - CUENTAS SECUNDARIAS
-Route::get(
-    '/ams/pedidos-secundaria',
-    [AmsSecondaryOrdersController::class, 'procesar']
-)->name('ams.secondary.procesar');
+    Route::post(
+        '/ams/pedidos-secundaria/orders/{order}/cancel',
+        [MeliOrderCancellationController::class, 'store']
+    )->whereNumber('order')->name('ams.secondary.orders.cancel');
 
-Route::post(
-    '/ams/pedidos-secundaria/sync',
-    [AmsSecondaryOrdersController::class, 'sync']
-)->name('ams.secondary.sync');
+    Route::get(
+        '/ams/secundaria/pedidos/shipping-label/{shippingId}/print',
+        [AmsSecondaryOrdersController::class, 'shippingLabelPrintPage']
+    )
+        ->whereNumber('shippingId')
+        ->name('ams.secondary.shipping_label_print');
 
-Route::post(
-    '/ams/pedidos-secundaria/orders/{order}/cancel',
-    [MeliOrderCancellationController::class, 'store']
-)->whereNumber('order')->name('ams.secondary.orders.cancel');
+    Route::get(
+        '/ams/secundaria/pedidos/shipping-label/{shippingId}/zpl',
+        [AmsSecondaryOrdersController::class, 'downloadShippingLabelZpl']
+    )
+        ->whereNumber('shippingId')
+        ->name('ams.secondary.shipping_label_zpl');
 
-Route::get(
-    '/ams/secundaria/pedidos/shipping-label/{shippingId}/print',
-    [AmsSecondaryOrdersController::class, 'shippingLabelPrintPage']
-)
-    ->whereNumber('shippingId')
-    ->name('ams.secondary.shipping_label_print');
+    Route::get(
+        '/ams/secundaria/pedidos/shipping-label/{shippingId}/kamo-png',
+        [AmsSecondaryOrdersController::class, 'kamoShippingLabelPng']
+    )
+        ->whereNumber('shippingId')
+        ->name('ams.secondary.shipping_label_kamo_png');
 
-Route::get(
-    '/ams/secundaria/pedidos/shipping-label/{shippingId}/zpl',
-    [AmsSecondaryOrdersController::class, 'downloadShippingLabelZpl']
-)
-    ->whereNumber('shippingId')
-    ->name('ams.secondary.shipping_label_zpl');
+    Route::get(
+        '/ams/secundaria/pedidos/shipping-label/{shippingId}/kamo-tspl',
+        [AmsSecondaryOrdersController::class, 'kamoShippingLabelTspl']
+    )
+        ->whereNumber('shippingId')
+        ->name('ams.secondary.shipping_label_kamo_tspl');
 
+    Route::get(
+        '/ams/secundaria/pedidos/shipping-label/{shippingId}',
+        [AmsSecondaryOrdersController::class, 'printShippingLabel']
+    )
+        ->whereNumber('shippingId')
+        ->name('ams.secondary.shipping_label');
 
-Route::get(
-    '/ams/secundaria/pedidos/shipping-label/{shippingId}/kamo-png',
-    [AmsSecondaryOrdersController::class, 'kamoShippingLabelPng']
-)
-    ->whereNumber('shippingId')
-    ->name('ams.secondary.shipping_label_kamo_png');
+    Route::get(
+        '/ams/secundaria/pedidos/shipping-label/{shippingId}/zpl-raw',
+        [AmsSecondaryOrdersController::class, 'rawShippingLabelZpl']
+    )
+        ->whereNumber('shippingId')
+        ->name('ams.secondary.shipping_label_zpl_raw');
 
-Route::get(
-    '/ams/secundaria/pedidos/shipping-label/{shippingId}/kamo-tspl',
-    [AmsSecondaryOrdersController::class, 'kamoShippingLabelTspl']
-)
-    ->whereNumber('shippingId')
-    ->name('ams.secondary.shipping_label_kamo_tspl');
-
-Route::get(
-    '/ams/secundaria/pedidos/shipping-label/{shippingId}',
-    [AmsSecondaryOrdersController::class, 'printShippingLabel']
-)
-    ->whereNumber('shippingId')
-    ->name('ams.secondary.shipping_label');
-
-Route::get(
-    '/ams/secundaria/pedidos/shipping-label/{shippingId}/zpl-raw',
-    [AmsSecondaryOrdersController::class, 'rawShippingLabelZpl']
-)
-    ->whereNumber('shippingId')
-    ->name('ams.secondary.shipping_label_zpl_raw');
-
-        //QZTRAY
-        Route::get('/qz/certificate', [QzTrayController::class, 'certificate'])
-    ->name('qz.certificate');
+    // QZTRAY
+    Route::get('/qz/certificate', [QzTrayController::class, 'certificate'])
+        ->name('qz.certificate');
 
     Route::post('/qz/sign', [QzTrayController::class, 'sign'])
-    ->name('qz.sign');
+        ->name('qz.sign');
 
     // MERCADO LIBRE
     Route::get('/mercado-libre/etiquetas', [MeliLabelController::class, 'index'])->name('meli.labels.index');
@@ -357,13 +362,11 @@ Route::get(
     Route::delete('/producto/ml/secondary-publications', [MeliSecondaryPublicationController::class, 'destroy'])
         ->name('producto.ml.secondary-publications.destroy');
 
-
     // CENTRO DE PUBLICACIONES MERCADO LIBRE
     Route::get('/meli/publicaciones', [MeliSecondaryPublicationController::class, 'index'])
         ->name('meli.publications.index');
     Route::get('/meli/publicaciones/{publication}/editar', [MeliSecondaryPublicationController::class, 'edit'])
         ->name('meli.publications.edit');
-
 
     Route::put('/meli/publicaciones/{publication}', [MeliSecondaryPublicationController::class, 'update'])
         ->whereNumber('publication')
@@ -380,7 +383,6 @@ Route::get(
     Route::delete('/meli/publicaciones/{publication}', [MeliSecondaryPublicationController::class, 'destroy'])
         ->whereNumber('publication')
         ->name('meli.publications.destroy');
-
 
     // INVENTARIO FULL MERCADO LIBRE
     Route::get('/meli/full', [MeliFullStockController::class, 'index'])

@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use InvalidArgumentException;
 
 class InventoryProduct extends Model
@@ -38,6 +39,16 @@ class InventoryProduct extends Model
     public function primaryLocation(): BelongsTo
     {
         return $this->belongsTo(InventoryLocation::class, 'primary_location_id');
+    }
+
+    public function movements(): HasMany
+    {
+        return $this->hasMany(InventoryMovement::class, 'inventory_product_id');
+    }
+
+    public function physicalStock(): int
+    {
+        return (int) $this->movements()->sum('quantity');
     }
 
     public function setSkuAttribute($value): void

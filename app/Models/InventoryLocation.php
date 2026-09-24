@@ -29,6 +29,11 @@ class InventoryLocation extends Model
         return $this->hasMany(InventoryProduct::class, 'primary_location_id');
     }
 
+    public function movements(): HasMany
+    {
+        return $this->hasMany(InventoryMovement::class, 'inventory_location_id');
+    }
+
     public function setCodeAttribute($value): void
     {
         $code = mb_strtoupper(trim((string) $value));
