@@ -6,6 +6,7 @@ use App\Http\Controllers\MeliOrderCancellationController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\ExcelImportController;
+use App\Http\Controllers\InventoryLocationController;
 use App\Http\Controllers\InventoryProductController;
 use App\Http\Controllers\LlantaController;
 use App\Http\Controllers\LlantaComparisonController;
@@ -125,6 +126,20 @@ Route::middleware(['auth', 'role'])->group(function () {
             ->whereNumber('inventoryProduct')->name('update');
         Route::patch('/{inventoryProduct}/estado', [InventoryProductController::class, 'toggle'])
             ->whereNumber('inventoryProduct')->name('toggle');
+    });
+
+    Route::prefix('almacen/ubicaciones')->name('inventory.locations.')->group(function () {
+        Route::get('/', [InventoryLocationController::class, 'index'])->name('index');
+        Route::get('/crear', [InventoryLocationController::class, 'create'])->name('create');
+        Route::post('/', [InventoryLocationController::class, 'store'])->name('store');
+        Route::get('/{inventoryLocation}', [InventoryLocationController::class, 'show'])
+            ->whereNumber('inventoryLocation')->name('show');
+        Route::get('/{inventoryLocation}/editar', [InventoryLocationController::class, 'edit'])
+            ->whereNumber('inventoryLocation')->name('edit');
+        Route::put('/{inventoryLocation}', [InventoryLocationController::class, 'update'])
+            ->whereNumber('inventoryLocation')->name('update');
+        Route::patch('/{inventoryLocation}/estado', [InventoryLocationController::class, 'toggle'])
+            ->whereNumber('inventoryLocation')->name('toggle');
     });
 
     // COMPARE

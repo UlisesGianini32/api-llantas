@@ -25,6 +25,7 @@ class StoreInventoryProductRequest extends FormRequest
             'price_stylist' => ['nullable', 'numeric', 'min:0'],
             'price_public' => ['nullable', 'numeric', 'min:0'],
             'is_active' => ['sometimes', 'boolean'],
+            'primary_location_id' => ['nullable', 'integer', 'exists:inventory_locations,id'],
         ];
     }
 

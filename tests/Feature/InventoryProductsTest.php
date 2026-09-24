@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Models\InventoryLocation;
 use App\Models\InventoryProduct;
 use App\Models\User;
 use Illuminate\Database\Schema\Blueprint;
@@ -45,13 +46,21 @@ class InventoryProductsTest extends TestCase
             $table->id();
         });
 
-        $migration = require database_path('migrations/2026_09_24_000001_create_inventory_products_table.php');
-        $migration->up();
+        $productsMigration = require database_path('migrations/2026_09_24_000001_create_inventory_products_table.php');
+        $productsMigration->up();
+        $locationsMigration = require database_path('migrations/2026_09_24_000002_create_inventory_locations_table.php');
+        $locationsMigration->up();
+        $primaryLocationMigration = require database_path('migrations/2026_09_24_000003_add_primary_location_id_to_inventory_products_table.php');
+        $primaryLocationMigration->up();
     }
 
     protected function tearDown(): void
     {
+        Schema::table('inventory_products', function (Blueprint $table): void {
+            $table->dropForeign(['primary_location_id']);
+        });
         Schema::dropIfExists('inventory_products');
+        Schema::dropIfExists('inventory_locations');
         Schema::dropIfExists('llantas');
         Schema::dropIfExists('meli_accounts');
         Schema::dropIfExists('users');
@@ -78,6 +87,176 @@ class InventoryProductsTest extends TestCase
             'name' => 'Shampoo profesional',
         ]);
         $this->assertFalse(Schema::hasColumn('inventory_products', 'stock'));
+    }
+
+    public function test_admin_can_create_and_normalize_an_inventory_location(): void
+    {
+        $this->actingAs($this->admin());
+
+        $this->post(route('inventory.locations.store'), [
+            'code' => '  pasillo-a-1  ',
+            'name' => 'Pasillo A, Estante 1',
+            'sort_order' => null,
+        ])->assertRedirect(route('inventory.locations.index'));
+
+        $this->assertDatabaseHas('inventory_locations', [
+            'code' => 'PASILLO-A-1',
+            'name' => 'Pasillo A, Estante 1',
+            'sort_order' => null,
+        ]);
+    }
+
+    public function test_location_code_is_unique_and_sort_order_cannot_be_negative(): void
+    {
+        $this->actingAs($this->admin());
+        InventoryLocation::create(['code' => 'A1-1']);
+
+        $this->post(route('inventory.locations.store'), [
+            'code' => ' a1-1 ',
+            'name' => 'Duplicada',
+        ])->assertSessionHasErrors('code');
+
+        $this->post(route('inventory.locations.store'), [
+            'code' => 'A1-2',
+            'sort_order' => -1,
+        ])->assertSessionHasErrors('sort_order');
+    }
+
+    public function test_location_can_be_edited_and_deactivated(): void
+    {
+        $this->actingAs($this->admin());
+        $location = InventoryLocation::create(['code' => 'A1-1', 'is_active' => true]);
+
+        $this->put(route('inventory.locations.update', $location), [
+            'code' => ' a2-1 ',
+            'name' => 'Pasillo A',
+            'sort_order' => 0,
+            'is_active' => true,
+        ])->assertRedirect(route('inventory.locations.index'));
+
+        $this->patch(route('inventory.locations.toggle', $location->fresh()))->assertRedirect();
+
+        $this->assertDatabaseHas('inventory_locations', [
+            'id' => $location->id,
+            'code' => 'A2-1',
+            'is_active' => 0,
+        ]);
+    }
+
+    public function test_product_can_be_unassigned_or_assigned_to_an_existing_location(): void
+    {
+        $this->actingAs($this->admin());
+        $location = InventoryLocation::create(['code' => 'B2-3']);
+
+        $this->post(route('inventory.products.store'), [
+            'sku' => 'SKU-LOCATION',
+            'name' => 'Producto ubicado',
+            'primary_location_id' => $location->id,
+        ])->assertRedirect();
+
+        $product = InventoryProduct::query()->sole();
+        $this->assertSame($location->id, $product->primary_location_id);
+        $this->assertSame($location->id, $product->primaryLocation->id);
+        $this->assertTrue($location->fresh()->products->contains($product));
+
+        $this->put(route('inventory.products.update', $product), [
+            'sku' => $product->sku,
+            'name' => $product->name,
+            'primary_location_id' => null,
+        ])->assertRedirect();
+        $this->assertNull($product->fresh()->primary_location_id);
+    }
+
+    public function test_product_rejects_a_nonexistent_location(): void
+    {
+        $this->actingAs($this->admin());
+
+        $this->post(route('inventory.products.store'), [
+            'sku' => 'SKU-BAD-LOCATION',
+            'name' => 'Producto sin ubicación válida',
+            'primary_location_id' => 99999,
+        ])->assertSessionHasErrors('primary_location_id');
+    }
+
+    public function test_location_list_search_and_product_count_work_without_n_plus_one_data_shape(): void
+    {
+        $this->actingAs($this->admin());
+        $location = InventoryLocation::create(['code' => 'A1-1', 'name' => 'Pasillo Alpha']);
+        InventoryProduct::create(['sku' => 'SKU-COUNT', 'name' => 'Producto contado', 'primary_location_id' => $location->id]);
+
+        $this->get(route('inventory.locations.index', ['search' => 'A1-1']))
+            ->assertOk()
+            ->assertInertia(fn (Assert $page): Assert => $page
+                ->where('locations.data.0.code', 'A1-1')
+                ->where('locations.data.0.products_count', 1));
+
+        $this->get(route('inventory.locations.index', ['search' => 'Pasillo Alpha']))
+            ->assertOk()
+            ->assertInertia(fn (Assert $page): Assert => $page->where('locations.data.0.code', 'A1-1'));
+    }
+
+    public function test_location_detail_includes_its_primary_products(): void
+    {
+        $this->actingAs($this->admin());
+        $location = InventoryLocation::create(['code' => 'D4-2', 'name' => 'Detalle']);
+        $product = InventoryProduct::create([
+            'sku' => 'SKU-DETAIL-LOCATION',
+            'name' => 'Producto del detalle',
+            'barcode' => '7500000012345',
+            'primary_location_id' => $location->id,
+        ]);
+
+        $this->get(route('inventory.locations.show', $location))
+            ->assertOk()
+            ->assertInertia(fn (Assert $page): Assert => $page
+                ->where('location.code', 'D4-2')
+                ->where('location.products.0.id', $product->id)
+                ->where('location.products.0.sku', 'SKU-DETAIL-LOCATION')
+                ->where('location.products.0.barcode', '7500000012345'));
+    }
+
+    public function test_location_list_orders_defined_sort_order_before_null_then_code(): void
+    {
+        $this->actingAs($this->admin());
+        InventoryLocation::create(['code' => 'Z9-9', 'sort_order' => null]);
+        InventoryLocation::create(['code' => 'B2-1', 'sort_order' => 2]);
+        InventoryLocation::create(['code' => 'A1-1', 'sort_order' => 1]);
+
+        $this->get(route('inventory.locations.index'))
+            ->assertOk()
+            ->assertInertia(fn (Assert $page): Assert => $page
+                ->where('locations.data.0.code', 'A1-1')
+                ->where('locations.data.1.code', 'B2-1')
+                ->where('locations.data.2.code', 'Z9-9'));
+    }
+
+    public function test_product_search_by_location_code_and_inactive_location_remains_assigned(): void
+    {
+        $this->actingAs($this->admin());
+        $location = InventoryLocation::create(['code' => 'C3-4', 'is_active' => true]);
+        $product = InventoryProduct::create(['sku' => 'SKU-SEARCH-LOCATION', 'name' => 'Producto por ubicación', 'primary_location_id' => $location->id]);
+
+        $this->patch(route('inventory.locations.toggle', $location))->assertRedirect();
+        $this->assertSame($location->id, $product->fresh()->primary_location_id);
+
+        $this->get(route('inventory.products.index', ['search' => 'C3-4']))
+            ->assertOk()
+            ->assertInertia(fn (Assert $page): Assert => $page->where('products.data.0.sku', $product->sku));
+
+        $this->get(route('inventory.products.create'))
+            ->assertOk()
+            ->assertInertia(fn (Assert $page): Assert => $page->where('locations', []));
+
+        $this->get(route('inventory.products.edit', $product))
+            ->assertOk()
+            ->assertInertia(fn (Assert $page): Assert => $page->where('locations.0.id', $location->id));
+    }
+
+    public function test_operations_user_cannot_manage_inventory_locations(): void
+    {
+        $this->actingAs(User::factory()->create(['role' => User::ROLE_OPERATIONS]));
+
+        $this->get(route('inventory.locations.index'))->assertForbidden();
     }
 
     public function test_duplicate_sku_and_barcode_are_rejected(): void

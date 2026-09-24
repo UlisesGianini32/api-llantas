@@ -9,7 +9,7 @@ const fields = [
     ['price_public', 'Precio público'],
 ]
 
-export default function InventoryProductForm({ mode, product }) {
+export default function InventoryProductForm({ mode, product, locations = [] }) {
     const editing = mode === 'edit'
     const { data, setData, post, put, processing, errors } = useForm({
         sku: product?.sku || '',
@@ -22,6 +22,7 @@ export default function InventoryProductForm({ mode, product }) {
         price_stylist: product?.price_stylist ?? '',
         price_public: product?.price_public ?? '',
         is_active: product?.is_active ?? true,
+        primary_location_id: product?.primary_location_id ?? '',
     })
 
     const submit = (event) => {
@@ -46,6 +47,7 @@ export default function InventoryProductForm({ mode, product }) {
                         <label><span className="mb-1 block text-sm font-semibold">SKU *</span><input value={data.sku} onChange={(e) => setData('sku', e.target.value)} className="w-full rounded-xl border border-slate-300 px-4 py-2.5 font-mono dark:border-neutral-700 dark:bg-neutral-950 dark:text-white" />{fieldError('sku')}</label>
                         <label><span className="mb-1 block text-sm font-semibold">Código de barras</span><input value={data.barcode} onChange={(e) => setData('barcode', e.target.value)} inputMode="numeric" className="w-full rounded-xl border border-slate-300 px-4 py-2.5 font-mono dark:border-neutral-700 dark:bg-neutral-950 dark:text-white" />{fieldError('barcode')}</label>
                         <label className="sm:col-span-2"><span className="mb-1 block text-sm font-semibold">Descripción</span><textarea value={data.description} onChange={(e) => setData('description', e.target.value)} rows="4" className="w-full rounded-xl border border-slate-300 px-4 py-2.5 dark:border-neutral-700 dark:bg-neutral-950 dark:text-white" />{fieldError('description')}</label>
+                        <label className="sm:col-span-2"><span className="mb-1 block text-sm font-semibold">Ubicación principal</span><select value={data.primary_location_id} onChange={(e) => setData('primary_location_id', e.target.value || '')} className="w-full rounded-xl border border-slate-300 px-4 py-2.5 dark:border-neutral-700 dark:bg-neutral-950 dark:text-white"><option value="">Sin ubicación</option>{locations.map((location) => <option key={location.id} value={location.id}>{location.code}{location.name ? ` — ${location.name}` : ''}{!location.is_active ? ' (inactiva)' : ''}</option>)}</select>{fieldError('primary_location_id')}</label>
                         {fields.map(([key, label]) => <label key={key}><span className="mb-1 block text-sm font-semibold">{label}</span><input type="number" min="0" step="0.01" value={data[key]} onChange={(e) => setData(key, e.target.value)} className="w-full rounded-xl border border-slate-300 px-4 py-2.5 dark:border-neutral-700 dark:bg-neutral-950 dark:text-white" />{fieldError(key)}</label>)}
                         <label className="flex items-center gap-3 sm:col-span-2"><input type="checkbox" checked={Boolean(data.is_active)} onChange={(e) => setData('is_active', e.target.checked)} /> <span className="text-sm font-semibold">Producto activo</span></label>
                     </div>

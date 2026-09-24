@@ -12,6 +12,7 @@ const sections = [
         { key: 'syscom', label: 'SYSCOM → ML', href: '/syscom-ml' },
         { key: 'excel_import', label: 'Importar Excel', href: '/importar-excel' },
         { key: 'inventory_products', label: 'Almacén', href: '/almacen/productos' },
+        { key: 'inventory_locations', label: 'Ubicaciones', href: '/almacen/ubicaciones' },
     ] },
     { key: 'mercado_libre', label: 'Mercado Libre', items: [
         { key: 'meli_labels', label: 'Etiquetas Mercado Libre', href: '/mercado-libre/etiquetas' },

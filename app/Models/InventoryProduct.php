@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use InvalidArgumentException;
 
 class InventoryProduct extends Model
@@ -18,6 +19,7 @@ class InventoryProduct extends Model
         'price_stylist',
         'price_public',
         'is_active',
+        'primary_location_id',
     ];
 
     protected function casts(): array
@@ -29,7 +31,13 @@ class InventoryProduct extends Model
             'price_stylist' => 'decimal:2',
             'price_public' => 'decimal:2',
             'is_active' => 'boolean',
+            'primary_location_id' => 'integer',
         ];
+    }
+
+    public function primaryLocation(): BelongsTo
+    {
+        return $this->belongsTo(InventoryLocation::class, 'primary_location_id');
     }
 
     public function setSkuAttribute($value): void
