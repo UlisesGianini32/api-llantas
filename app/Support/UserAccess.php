@@ -30,6 +30,8 @@ final class UserAccess
         'inventory.kits.index',
         'inventory.kits.show',
         'inventory.kits.reservations.show',
+        'inventory.channels.index',
+        'inventory.channels.show',
     ];
 
     public static function canAccessRoute(User $user, ?string $routeName): bool

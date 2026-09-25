@@ -64,6 +64,7 @@ class InventoryReservationsTest extends TestCase
             '2026_09_24_000006_add_product_type_to_inventory_products_table.php',
             '2026_09_24_000007_create_inventory_kit_components_table.php',
             '2026_09_24_000008_create_inventory_kit_reservations_table.php',
+            '2026_09_25_000001_create_inventory_channel_links_table.php',
         ] as $migrationFile) {
             $migration = require database_path('migrations/'.$migrationFile);
             $migration->up();
@@ -72,6 +73,7 @@ class InventoryReservationsTest extends TestCase
 
     protected function tearDown(): void
     {
+        Schema::dropIfExists('inventory_channel_links');
         Schema::dropIfExists('inventory_kit_reservations');
         Schema::dropIfExists('inventory_kit_components');
         Schema::dropIfExists('inventory_reservations');

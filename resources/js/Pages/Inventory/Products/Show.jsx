@@ -6,7 +6,7 @@ function money(value) {
     return new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN', minimumFractionDigits: 2 }).format(Number(value))
 }
 
-export default function InventoryProductShow({ product, physicalStock = 0, reservedStock = 0, availableStock = 0, stockByLocation = [], movements = [], reservations = [], kitComponents = [] }) {
+export default function InventoryProductShow({ product, physicalStock = 0, reservedStock = 0, availableStock = 0, stockByLocation = [], movements = [], reservations = [], kitComponents = [], channelLinks = [] }) {
     return (
         <AppShell title="Producto de almacén">
             <Head title={product.name} />
@@ -17,6 +17,7 @@ export default function InventoryProductShow({ product, physicalStock = 0, reser
                     <div className="sm:col-span-2"><dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">Descripción</dt><dd className="mt-1 whitespace-pre-wrap text-slate-700 dark:text-slate-300">{product.description || '—'}</dd></div>
                 </div>
                 {product.product_type === 'KIT' && <section className="rounded-2xl border border-slate-200 bg-white dark:border-neutral-800 dark:bg-neutral-900"><div className="flex items-center justify-between border-b border-slate-200 px-5 py-4 font-bold dark:border-neutral-800"><span>Componentes del kit</span><Link href={`/almacen/kits/${product.id}/editar-componentes`} className="text-sm font-semibold text-indigo-600">Configurar</Link></div><div className="divide-y divide-slate-100 dark:divide-neutral-800">{kitComponents.length === 0 ? <p className="px-5 py-5 text-sm text-amber-700">Kit sin componentes configurados.</p> : kitComponents.map((row) => <div key={row.component.id} className="grid grid-cols-4 gap-2 px-5 py-3 text-sm"><span>{row.component.name} ({row.component.sku})</span><span>Requiere: {row.quantity}</span><span>Físico: {row.physical_stock}</span><strong>Disponible: {row.available_stock}</strong></div>)}</div></section>}
+                <section className="rounded-2xl border border-slate-200 bg-white dark:border-neutral-800 dark:bg-neutral-900"><div className="flex items-center justify-between border-b border-slate-200 px-5 py-4 font-bold dark:border-neutral-800"><span>Enlaces de canales</span><Link href="/almacen/canales" className="text-sm font-semibold text-indigo-600">Ver todos</Link></div><div className="divide-y divide-slate-100 dark:divide-neutral-800">{channelLinks.length === 0 ? <p className="px-5 py-5 text-sm text-slate-500">Sin enlaces configurados.</p> : channelLinks.map((link) => <div key={link.id} className="flex flex-wrap items-center justify-between gap-2 px-5 py-3 text-sm"><span className="font-semibold">{link.channel}</span><span className="font-mono">{link.external_listing_id || link.external_product_id || link.external_variant_id || '—'}</span><span>{link.is_active ? 'Activo' : 'Inactivo'}</span></div>)}</div></section>
                 <section className="rounded-2xl border border-slate-200 bg-white dark:border-neutral-800 dark:bg-neutral-900">
                     <div className="border-b border-slate-200 px-5 py-4 font-bold dark:border-neutral-800">Stock por ubicación</div>
                     <div className="divide-y divide-slate-100 dark:divide-neutral-800">

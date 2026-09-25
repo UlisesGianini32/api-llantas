@@ -73,6 +73,11 @@ class InventoryProduct extends Model
         return $this->hasMany(InventoryKitReservation::class, 'kit_product_id');
     }
 
+    public function channelLinks(): HasMany
+    {
+        return $this->hasMany(InventoryChannelLink::class, 'inventory_product_id');
+    }
+
     public function isKit(): bool
     {
         return $this->product_type === self::KIT;

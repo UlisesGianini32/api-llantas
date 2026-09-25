@@ -69,10 +69,13 @@ class InventoryMovementsTest extends TestCase
         $kitComponentsMigration->up();
         $kitReservationsMigration = require database_path('migrations/2026_09_24_000008_create_inventory_kit_reservations_table.php');
         $kitReservationsMigration->up();
+        $channelLinksMigration = require database_path('migrations/2026_09_25_000001_create_inventory_channel_links_table.php');
+        $channelLinksMigration->up();
     }
 
     protected function tearDown(): void
     {
+        Schema::dropIfExists('inventory_channel_links');
         Schema::dropIfExists('inventory_kit_reservations');
         Schema::dropIfExists('inventory_kit_components');
         Schema::dropIfExists('inventory_reservations');

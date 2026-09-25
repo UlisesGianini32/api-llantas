@@ -81,7 +81,11 @@ class InventoryProductController extends Controller
         InventoryStockService $stock,
         InventoryKitStockService $kitStock,
     ): Response {
-        $inventoryProduct->load(['primaryLocation:id,code,name,is_active', 'kitComponents.component:id,name,sku,product_type']);
+        $inventoryProduct->load([
+            'primaryLocation:id,code,name,is_active',
+            'kitComponents.component:id,name,sku,product_type',
+            'channelLinks',
+        ]);
         $movements = $inventoryProduct->movements()
             ->with([
                 'location:id,code,name',
@@ -145,6 +149,7 @@ class InventoryProductController extends Controller
             'reservedStock' => $isKit ? max(0, $physicalStock - $availableStock) : $stock->reservedStock($inventoryProduct),
             'availableStock' => $availableStock,
             'kitComponents' => $kitComponents,
+            'channelLinks' => $inventoryProduct->channelLinks,
             'stockByLocation' => $stockByLocation,
             'movements' => $movements,
             'reservations' => $reservations,

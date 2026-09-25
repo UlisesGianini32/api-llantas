@@ -183,6 +183,13 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                     >
                         Kits
                     </NavItem>
+                    <NavItem
+                        href="/almacen/canales"
+                        active={currentPath.startsWith('/almacen/canales')}
+                        onNavigate={onNavigate}
+                    >
+                        Enlaces de canales
+                    </NavItem>
                     <NavItem href="/ml/compare" active={currentPath.startsWith('/ml/compare')} onNavigate={onNavigate}>
                         Comparar ML
                     </NavItem>
@@ -365,6 +372,13 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
 >
     AMS Mañana
 </NavItem>
+{!isAdmin && <NavItem
+    href="/almacen/canales"
+    active={currentPath.startsWith('/almacen/canales')}
+    onNavigate={onNavigate}
+>
+    Enlaces de canales
+</NavItem>}
                 </div>
             </div>
 

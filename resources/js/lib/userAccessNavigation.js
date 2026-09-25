@@ -33,6 +33,7 @@ const sections = [
         { key: 'ams_process', label: 'AMS Procesar', href: '/ams/pedidos-procesar' },
         { key: 'ams_secondary', label: 'AMS Secundaria', href: '/ams/pedidos-secundaria' },
         { key: 'ams_tomorrow', label: 'AMS Mañana', href: '/ams/pedidos-manana' },
+        { key: 'inventory_channels', label: 'Enlaces de canales', href: '/almacen/canales' },
     ] },
     { key: 'system', label: 'Sistema', adminOnly: true, items: [
         { key: 'health', label: 'Estado del sistema', href: '/sistema/estado' },

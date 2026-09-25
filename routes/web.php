@@ -5,6 +5,7 @@ use App\Http\Controllers\AmsSecondaryOrdersController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\ExcelImportController;
+use App\Http\Controllers\InventoryChannelLinkController;
 use App\Http\Controllers\InventoryKitController;
 use App\Http\Controllers\InventoryKitReservationController;
 use App\Http\Controllers\InventoryLocationController;
@@ -189,6 +190,20 @@ Route::middleware(['auth', 'role'])->group(function () {
             ->whereNumber('inventoryKit')->name('reservations.store');
         Route::get('/{inventoryKit}', [InventoryKitController::class, 'show'])
             ->whereNumber('inventoryKit')->name('show');
+    });
+
+    Route::prefix('almacen/canales')->name('inventory.channels.')->group(function () {
+        Route::get('/', [InventoryChannelLinkController::class, 'index'])->name('index');
+        Route::get('/crear', [InventoryChannelLinkController::class, 'create'])->name('create');
+        Route::post('/', [InventoryChannelLinkController::class, 'store'])->name('store');
+        Route::get('/{inventoryChannelLink}', [InventoryChannelLinkController::class, 'show'])
+            ->whereNumber('inventoryChannelLink')->name('show');
+        Route::get('/{inventoryChannelLink}/editar', [InventoryChannelLinkController::class, 'edit'])
+            ->whereNumber('inventoryChannelLink')->name('edit');
+        Route::patch('/{inventoryChannelLink}', [InventoryChannelLinkController::class, 'update'])
+            ->whereNumber('inventoryChannelLink')->name('update');
+        Route::patch('/{inventoryChannelLink}/estado', [InventoryChannelLinkController::class, 'toggle'])
+            ->whereNumber('inventoryChannelLink')->name('toggle');
     });
 
     // COMPARE
