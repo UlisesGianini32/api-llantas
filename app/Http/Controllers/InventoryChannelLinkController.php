@@ -9,6 +9,7 @@ use App\Models\InventoryProduct;
 use App\Models\MeliAccount;
 use App\Services\InventoryChannelLinkService;
 use App\Services\InventoryMeliLinkImportService;
+use App\Services\InventoryMeliStockPilotService;
 use App\Services\InventoryMeliStockSyncService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -88,9 +89,13 @@ class InventoryChannelLinkController extends Controller
         ]);
     }
 
-    public function stock(Request $request, InventoryMeliStockSyncService $sync): Response
+    public function stock(Request $request, InventoryMeliStockSyncService $sync, InventoryMeliStockPilotService $pilot): Response
     {
         $filters = $request->only(['search', 'result', 'account_key', 'enabled', 'sku', 'link']);
+        $pilotPreview = null;
+        if (filled($filters['link'] ?? null) && is_numeric($filters['link'])) {
+            $pilotPreview = $pilot->preview((int) $filters['link']);
+        }
 
         return Inertia::render('Inventory/Channels/MercadoLibreStock', [
             'preview' => $request->boolean('analyze') ? $sync->preview($filters) : [
@@ -101,6 +106,7 @@ class InventoryChannelLinkController extends Controller
             'accounts' => MeliAccount::query()->orderBy('nickname')->get(['id', 'nickname', 'meli_user_id']),
             'statuses' => InventoryMeliStockSyncService::previewStatuses(),
             'canManage' => $request->user()?->isAdmin() ?? false,
+            'pilotPreview' => $pilotPreview,
         ]);
     }
 

@@ -19,6 +19,7 @@ class MeliSharedStockPushService
     public function __construct(
         private readonly MeliOAuthService $oauth,
         private readonly MeliVariationStockPayloadBuilder $variationStockPayload,
+        private readonly InventoryMeliStockOwnershipService $stockOwnership,
     ) {}
 
     /** @return array<string, int> */
@@ -78,6 +79,15 @@ class MeliSharedStockPushService
 
     private function pushMember(MeliSharedStockMember $member, int $stock): string
     {
+        if ($this->stockOwnership->shouldSkipLegacyListing(
+            (int) $member->meli_account_id,
+            (string) $member->mlm,
+        )) {
+            $this->markSkipped($member, 'Inventory administra el stock de este vínculo.');
+
+            return 'skipped';
+        }
+
         $publication = MeliPublication::query()
             ->with('meliAccount')
             ->whereKey($member->meli_publication_id)

@@ -174,14 +174,35 @@ class InventoryMeliStockSyncService
     /** @return array<string,mixed> */
     public function syncLink(InventoryChannelLink|int $link, ?int $userId = null, string $triggeredBy = 'manual'): array
     {
+        return $this->syncLinkInternal($link, $userId, $triggeredBy, null, true);
+    }
+
+    /** @return array<string,mixed> */
+    public function syncLinkUnderExistingLock(
+        InventoryChannelLink|int $link,
+        ?int $userId = null,
+        string $triggeredBy = 'manual',
+        ?int $previousKnownQuantity = null,
+    ): array {
+        return $this->syncLinkInternal($link, $userId, $triggeredBy, $previousKnownQuantity, false);
+    }
+
+    /** @return array<string,mixed> */
+    private function syncLinkInternal(
+        InventoryChannelLink|int $link,
+        ?int $userId,
+        string $triggeredBy,
+        ?int $previousKnownQuantity,
+        bool $acquireLock,
+    ): array {
         $link = $link instanceof InventoryChannelLink ? $link : InventoryChannelLink::query()->findOrFail($link);
         $row = collect($this->preview(['link' => $link->getKey()])['rows'])->first();
         if (! $row || $row['status'] !== self::READY) {
             return [...($row ?? ['id' => $link->id]), 'status' => $row['status'] ?? self::UNSUPPORTED];
         }
 
-        $lock = Cache::lock('inventory-meli-stock-sync:link:'.$link->getKey(), 600);
-        if (! $lock->get()) {
+        $lock = $acquireLock ? Cache::lock('inventory-meli-stock-sync:link:'.$link->getKey(), 600) : null;
+        if ($lock && ! $lock->get()) {
             return [...$row, 'status' => self::LOCKED, 'reason' => 'La sincronización ya está en curso.'];
         }
 
@@ -202,7 +223,7 @@ class InventoryMeliStockSyncService
                 'external_listing_id' => $link->external_listing_id,
                 'external_variant_id' => $link->external_variant_id,
                 'target_quantity' => $row['target'],
-                'previous_known_quantity' => $row['last_successful_target'],
+                'previous_known_quantity' => $previousKnownQuantity ?? $row['last_successful_target'],
                 'status' => InventoryChannelStockSync::FAILED,
                 'triggered_by' => $triggeredBy,
                 'created_by' => $userId,
@@ -226,7 +247,7 @@ class InventoryMeliStockSyncService
                 $audit->forceFill(['status' => InventoryChannelStockSync::SUCCESS, 'http_status' => $response->status(), 'finished_at' => now()])->save();
                 $link->forceFill(['last_synced_at' => now(), 'remote_status' => 'synced'])->save();
 
-                return [...$row, 'status' => InventoryChannelStockSync::SUCCESS, 'http_status' => $response->status()];
+                return [...$row, 'status' => InventoryChannelStockSync::SUCCESS, 'http_status' => $response->status(), 'audit_id' => $audit->id];
             } catch (Throwable $exception) {
                 $httpStatus = $exception instanceof MeliApiRequestException ? $exception->httpStatus() : null;
                 $audit->forceFill([
@@ -238,10 +259,10 @@ class InventoryMeliStockSyncService
                 ])->save();
                 Log::warning('Inventory MeLi stock sync failed', ['link_id' => $link->id, 'status' => $httpStatus, 'error' => $audit->error_message]);
 
-                return [...$row, 'status' => InventoryChannelStockSync::FAILED, 'http_status' => $httpStatus, 'reason' => $audit->error_message];
+                return [...$row, 'status' => InventoryChannelStockSync::FAILED, 'http_status' => $httpStatus, 'reason' => $audit->error_message, 'audit_id' => $audit->id];
             }
         } finally {
-            $lock->release();
+            $lock?->release();
         }
     }
 

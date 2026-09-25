@@ -2,13 +2,11 @@
 
 namespace App\Services;
 
-use App\Models\User;
 use App\Models\Llanta;
-use App\Models\SyscomMeliQueue;
-use App\Models\ProductoCompuesto;
 use App\Models\MeliPublication;
-use App\Services\SyscomMeliPublishService;
-use App\Services\SyscomProductPricingService;
+use App\Models\ProductoCompuesto;
+use App\Models\SyscomMeliQueue;
+use App\Models\User;
 use Carbon\Carbon;
 use GuzzleHttp\Client;
 use GuzzleHttp\Exception\TransferException;
@@ -19,21 +17,26 @@ use Illuminate\Support\Facades\Log;
 class MeliSyncService
 {
     protected $user;
+
     protected $client;
+
     protected $meliId;
+
     protected $accessToken;
 
-    public function __construct(protected MeliOAuthService $meliOAuth)
-    {
+    public function __construct(
+        protected MeliOAuthService $meliOAuth,
+        protected InventoryMeliStockOwnershipService $stockOwnership,
+    ) {
         $this->user = User::whereNotNull('meli_id')
             ->whereNotNull('access_token')
             ->first();
 
-        if (!$this->user) {
+        if (! $this->user) {
             throw new \Exception('No hay usuario con cuenta de MercadoLibre vinculada.');
         }
 
-        $this->meliId      = $this->user->meli_id;
+        $this->meliId = $this->user->meli_id;
         $this->accessToken = $this->user->access_token;
 
         $this->buildClient();
@@ -43,8 +46,8 @@ class MeliSyncService
     {
         $this->client = new Client([
             'headers' => [
-                'Authorization' => 'Bearer ' . $this->accessToken,
-                'Content-Type'  => 'application/json',
+                'Authorization' => 'Bearer '.$this->accessToken,
+                'Content-Type' => 'application/json',
             ],
             'http_errors' => false,
             'timeout' => 30,
@@ -86,17 +89,19 @@ class MeliSyncService
     /**
      * ¿El último estado guardado ya coincide con lo que enviaríamos en PUT?
      */
-    protected function rowMatchesPublication(array $row, ?MeliPublication $pub): bool
+    protected function rowMatchesPublication(array $row, ?MeliPublication $pub, bool $includeStock = true): bool
     {
         $item = $this->itemPayloadFromPublication($pub);
         if ($item === null) {
             return false;
         }
 
-        $targetQty = (int) $row['stock'];
-        $curQty = (int) ($item['available_quantity'] ?? PHP_INT_MIN);
-        if ($curQty !== $targetQty) {
-            return false;
+        if ($includeStock) {
+            $targetQty = (int) $row['stock'];
+            $curQty = (int) ($item['available_quantity'] ?? PHP_INT_MIN);
+            if ($curQty !== $targetQty) {
+                return false;
+            }
         }
 
         if (! isset($item['price'])) {
@@ -157,7 +162,7 @@ class MeliSyncService
 
                 $mlms = $this->findItemsBySku($llanta->sku);
 
-                if (!empty($mlms)) {
+                if (! empty($mlms)) {
 
                     // (Opcional) mantener columna MLM principal
                     $mlmPrincipal = $mlms[0];
@@ -204,14 +209,14 @@ class MeliSyncService
 
                     $this->applyItemUpdatesConcurrent($rows, $pubsByMlm);
 
-                    Log::info("MELI SYNC: [LLANTA] OK -> SKU {$llanta->sku} | MLMs=" . implode(',', $mlms));
+                    Log::info("MELI SYNC: [LLANTA] OK -> SKU {$llanta->sku} | MLMs=".implode(',', $mlms));
 
                 } else {
                     Log::warning("MELI SYNC: [LLANTA] NO encontrado en ML -> SKU {$llanta->sku}");
                 }
 
             } catch (\Throwable $e) {
-                Log::error("MELI SYNC: Error llanta {$llanta->sku}: " . $e->getMessage());
+                Log::error("MELI SYNC: Error llanta {$llanta->sku}: ".$e->getMessage());
             }
         }
     }
@@ -227,7 +232,7 @@ class MeliSyncService
 
                 $mlms = $this->findItemsBySku($producto->sku);
 
-                if (!empty($mlms)) {
+                if (! empty($mlms)) {
 
                     $mlmPrincipal = $mlms[0];
                     if ($producto->MLM !== $mlmPrincipal) {
@@ -248,14 +253,14 @@ class MeliSyncService
 
                     $this->applyItemUpdatesConcurrent($rows);
 
-                    Log::info("MELI SYNC: [COMP] OK -> SKU {$producto->sku} | MLMs=" . implode(',', $mlms));
+                    Log::info("MELI SYNC: [COMP] OK -> SKU {$producto->sku} | MLMs=".implode(',', $mlms));
 
                 } else {
                     Log::warning("MELI SYNC: [COMP] NO encontrado en ML -> SKU {$producto->sku} ({$producto->tipo})");
                 }
 
             } catch (\Throwable $e) {
-                Log::error("MELI SYNC: Error compuesto {$producto->sku}: " . $e->getMessage());
+                Log::error("MELI SYNC: Error compuesto {$producto->sku}: ".$e->getMessage());
             }
         }
     }
@@ -392,13 +397,14 @@ class MeliSyncService
 
         if ($status !== 200) {
             Log::warning("MELI SYNC: findItemsBySku HTTP {$status} | SKU {$sku} | body={$body}");
+
             return [];
         }
 
         $data = json_decode($body, true);
         $results = $data['results'] ?? [];
 
-        return array_values(array_filter($results, fn($x) => is_string($x) && $x !== ''));
+        return array_values(array_filter($results, fn ($x) => is_string($x) && $x !== ''));
     }
 
     /**
@@ -424,10 +430,12 @@ class MeliSyncService
 
         if ($status !== 200) {
             Log::warning("MELI SYNC: getItemDetail HTTP {$status} | item {$itemId} | body={$body}");
+
             return null;
         }
 
         $data = json_decode($body, true);
+
         return is_array($data) ? $data : null;
     }
 
@@ -449,15 +457,15 @@ class MeliSyncService
         MeliPublication::updateOrCreate(
             [
                 'user_id' => $this->user->id,
-                'mlm'     => $mlm,
+                'mlm' => $mlm,
             ],
             [
-                'sku'          => $sku,
-                'status'       => $item['status'] ?? null,
-                'sub_status'   => $this->normalizeSubStatusForPublication($item),
-                'permalink'    => $item['permalink'] ?? null,
+                'sku' => $sku,
+                'status' => $item['status'] ?? null,
+                'sub_status' => $this->normalizeSubStatusForPublication($item),
+                'permalink' => $item['permalink'] ?? null,
                 'last_sync_at' => now(),
-                'raw'          => $item,
+                'raw' => $item,
             ]
         );
     }
@@ -465,14 +473,31 @@ class MeliSyncService
     /**
      * Varios PUT /items/{id} en paralelo y persiste desde la respuesta (sin GET previo).
      *
-     * @param array<int, array{sku: string, mlm: string, stock: int, price: float, status?: ?string}> $rows
-     * @param Collection<string, MeliPublication>|null $pubScopeByMlm colección ya cargada (evita segundo SELECT en llantas)
+     * @param  array<int, array{sku: string, mlm: string, stock: int, price: float, status?: ?string}>  $rows
+     * @param  Collection<string, MeliPublication>|null  $pubScopeByMlm  colección ya cargada (evita segundo SELECT en llantas)
      */
     protected function applyItemUpdatesConcurrent(array $rows, ?Collection $pubScopeByMlm = null): void
     {
         $rows = array_values($rows);
         if ($rows === []) {
             return;
+        }
+
+        $legacyAccountId = $this->stockOwnership->legacyAccountIdForUser(
+            (int) $this->user->id,
+            (string) $this->meliId,
+        );
+        $inventoryOwnsStock = [];
+        foreach ($rows as $row) {
+            $mlm = (string) ($row['mlm'] ?? '');
+            $inventoryOwnsStock[$mlm] = $this->stockOwnership->shouldSkipLegacyListing($legacyAccountId, $mlm);
+            if ($inventoryOwnsStock[$mlm]) {
+                Log::warning('MELI SYNC: Inventory owns stock; legacy available_quantity omitted', [
+                    'account_id' => $legacyAccountId,
+                    'mlm' => $row['mlm'] ?? null,
+                    'sku' => $row['sku'] ?? null,
+                ]);
+            }
         }
 
         $shouldPutRows = [];
@@ -491,7 +516,8 @@ class MeliSyncService
 
             foreach ($rows as $row) {
                 $pub = $pubMap->get($row['mlm']);
-                if ($this->rowMatchesPublication($row, $pub)) {
+                $includeStock = ! ($inventoryOwnsStock[(string) $row['mlm']] ?? false);
+                if ($this->rowMatchesPublication($row, $pub, $includeStock)) {
                     $skippedMlms[] = $row['mlm'];
 
                     continue;
@@ -519,19 +545,19 @@ class MeliSyncService
         $concurrency = $this->syncConcurrency();
         $indexes401 = [];
 
-        $requests = function () use ($rows) {
+        $requests = function () use ($rows, $inventoryOwnsStock) {
             foreach ($rows as $row) {
-                yield function () use ($row) {
-                    $body = [
-                        'available_quantity' => $row['stock'],
-                        'price' => $row['price'],
-                    ];
+                yield function () use ($row, $inventoryOwnsStock) {
+                    $body = ['price' => $row['price']];
+                    if (! ($inventoryOwnsStock[(string) $row['mlm']] ?? false)) {
+                        $body['available_quantity'] = $row['stock'];
+                    }
                     if (isset($row['status']) && $row['status'] !== null && $row['status'] !== '') {
                         $body['status'] = $row['status'];
                     }
 
                     return $this->client->putAsync(
-                        'https://api.mercadolibre.com/items/' . $row['mlm'],
+                        'https://api.mercadolibre.com/items/'.$row['mlm'],
                         ['json' => $body]
                     );
                 };
@@ -585,6 +611,7 @@ class MeliSyncService
                     (int) $row['stock'],
                     (float) $row['price'],
                     $wantStatus,
+                    ! ($inventoryOwnsStock[(string) $row['mlm']] ?? false),
                 );
                 if (is_array($payload)) {
                     $this->upsertPublicationFromItemPayload($row['sku'], $row['mlm'], $payload);
@@ -597,14 +624,14 @@ class MeliSyncService
      * Actualiza stock y precio; opcionalmente status ML. Devuelve el JSON del ítem cuando HTTP 200.
      * ✅ Si recibe 401, refresca token y reintenta 1 vez.
      */
-    protected function updateItem(string $itemId, int $stock, float $price, ?string $status = null): ?array
+    protected function updateItem(string $itemId, int $stock, float $price, ?string $status = null, bool $includeStock = true): ?array
     {
         $url = "https://api.mercadolibre.com/items/{$itemId}";
 
-        $body = [
-            'available_quantity' => $stock,
-            'price' => $price,
-        ];
+        $body = ['price' => $price];
+        if ($includeStock) {
+            $body['available_quantity'] = $stock;
+        }
         if ($status !== null && $status !== '') {
             $body['status'] = $status;
         }
@@ -624,10 +651,12 @@ class MeliSyncService
 
         if ($http !== 200) {
             Log::error("MELI SYNC: Error actualizando item {$itemId} (HTTP {$http}) | body={$respBody}");
+
             return null;
         }
 
         $data = json_decode($respBody, true);
+
         return is_array($data) ? $data : null;
     }
 
@@ -636,7 +665,9 @@ class MeliSyncService
      */
     protected function ensureFreshToken(): void
     {
-        if (!$this->user->expires_at) return;
+        if (! $this->user->expires_at) {
+            return;
+        }
 
         if ($this->user->expires_at->lte(now()->addMinutes(10))) {
             Log::info("MELI SYNC: Token por expirar ({$this->user->expires_at}), refrescando...");
@@ -652,8 +683,9 @@ class MeliSyncService
         $clientId = (string) config('services.meli.client_id', '');
         $clientSecret = (string) config('services.meli.client_secret', '');
 
-        if ($clientId === '' || $clientSecret === '' || !$this->user->refresh_token) {
+        if ($clientId === '' || $clientSecret === '' || ! $this->user->refresh_token) {
             Log::error('MELI SYNC: No se puede refrescar token (faltan credenciales o refresh_token)');
+
             return;
         }
 
@@ -665,13 +697,14 @@ class MeliSyncService
             );
         } catch (\Throwable $e) {
             Log::error('MELI SYNC: refreshTokenNow falló | '.$e->getMessage());
+
             return;
         }
 
         $this->user->update([
-            'access_token'  => $data['access_token'],
+            'access_token' => $data['access_token'],
             'refresh_token' => $data['refresh_token'] ?? $this->user->refresh_token,
-            'expires_at'    => Carbon::now()->addSeconds((int)($data['expires_in'] ?? 0))->subMinutes(2),
+            'expires_at' => Carbon::now()->addSeconds((int) ($data['expires_in'] ?? 0))->subMinutes(2),
         ]);
 
         $this->accessToken = $this->user->access_token;
