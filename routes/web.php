@@ -198,6 +198,8 @@ Route::middleware(['auth', 'role'])->group(function () {
         Route::post('/', [InventoryChannelLinkController::class, 'store'])->name('store');
         Route::get('/mercado-libre/importar', [InventoryChannelLinkController::class, 'meliImport'])->name('mercado-libre.import');
         Route::post('/mercado-libre/importar', [InventoryChannelLinkController::class, 'applyMeliImport'])->name('mercado-libre.apply');
+        Route::get('/mercado-libre/stock', [InventoryChannelLinkController::class, 'stock'])->name('mercado-libre.stock');
+        Route::post('/mercado-libre/stock/sync', [InventoryChannelLinkController::class, 'syncMeliStock'])->name('mercado-libre.stock.sync');
         Route::get('/{inventoryChannelLink}', [InventoryChannelLinkController::class, 'show'])
             ->whereNumber('inventoryChannelLink')->name('show');
         Route::get('/{inventoryChannelLink}/editar', [InventoryChannelLinkController::class, 'edit'])
@@ -206,6 +208,8 @@ Route::middleware(['auth', 'role'])->group(function () {
             ->whereNumber('inventoryChannelLink')->name('update');
         Route::patch('/{inventoryChannelLink}/estado', [InventoryChannelLinkController::class, 'toggle'])
             ->whereNumber('inventoryChannelLink')->name('toggle');
+        Route::patch('/{inventoryChannelLink}/stock-sync', [InventoryChannelLinkController::class, 'toggleStockSync'])
+            ->whereNumber('inventoryChannelLink')->name('stock-sync.toggle');
     });
 
     // COMPARE

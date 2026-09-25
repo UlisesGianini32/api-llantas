@@ -48,6 +48,7 @@ class InventoryChannelLinkService
         $data['remote_currency'] = isset($data['remote_currency']) && trim((string) $data['remote_currency']) !== ''
             ? strtoupper(trim((string) $data['remote_currency']))
             : null;
+        $data['stock_sync_enabled'] = (bool) ($data['stock_sync_enabled'] ?? false);
         $data['identity_key'] = $this->identityKey($data);
 
         return $data;

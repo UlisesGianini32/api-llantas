@@ -9,6 +9,7 @@ use App\Models\InventoryProduct;
 use App\Models\MeliAccount;
 use App\Services\InventoryChannelLinkService;
 use App\Services\InventoryMeliLinkImportService;
+use App\Services\InventoryMeliStockSyncService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
@@ -78,11 +79,60 @@ class InventoryChannelLinkController extends Controller
     public function show(Request $request, InventoryChannelLink $inventoryChannelLink): Response
     {
         $inventoryChannelLink->load('product:id,sku,name,barcode');
+        $lastSuccess = $inventoryChannelLink->stockSyncs()->where('status', 'SUCCESS')->latest('id')->first();
 
         return Inertia::render('Inventory/Channels/Show', [
             'link' => $inventoryChannelLink,
             'canManage' => $request->user()?->isAdmin() ?? false,
+            'lastSuccessfulStockSync' => $lastSuccess,
         ]);
+    }
+
+    public function stock(Request $request, InventoryMeliStockSyncService $sync): Response
+    {
+        $filters = $request->only(['search', 'result', 'account_key', 'enabled', 'sku', 'link']);
+
+        return Inertia::render('Inventory/Channels/MercadoLibreStock', [
+            'preview' => $request->boolean('analyze') ? $sync->preview($filters) : [
+                'rows' => [],
+                'counts' => array_fill_keys(InventoryMeliStockSyncService::previewStatuses(), 0),
+                'filters' => $filters,
+            ],
+            'accounts' => MeliAccount::query()->orderBy('nickname')->get(['id', 'nickname', 'meli_user_id']),
+            'statuses' => InventoryMeliStockSyncService::previewStatuses(),
+            'canManage' => $request->user()?->isAdmin() ?? false,
+        ]);
+    }
+
+    public function toggleStockSync(Request $request, InventoryChannelLink $inventoryChannelLink): RedirectResponse
+    {
+        abort_unless($request->user()?->isAdmin(), 403);
+        abort_unless($inventoryChannelLink->channel === InventoryChannelLink::MERCADO_LIBRE, 404);
+        $inventoryChannelLink->update(['stock_sync_enabled' => $request->boolean('enabled')]);
+
+        return back()->with('success', $inventoryChannelLink->stock_sync_enabled
+            ? 'Sincronización de stock activada para este vínculo.'
+            : 'Sincronización de stock desactivada para este vínculo.');
+    }
+
+    public function syncMeliStock(Request $request, InventoryMeliStockSyncService $sync): RedirectResponse
+    {
+        abort_unless($request->user()?->isAdmin(), 403);
+        $validated = $request->validate([
+            'link_id' => ['nullable', 'integer', 'exists:inventory_channel_links,id', 'required_without:link_ids'],
+            'link_ids' => ['nullable', 'array', 'min:1', 'required_without:link_id'],
+            'link_ids.*' => ['integer', 'exists:inventory_channel_links,id'],
+        ]);
+        if (! empty($validated['link_ids'])) {
+            $batch = $sync->apply(['links' => $validated['link_ids']], $request->user()->id);
+
+            return back()->with('success', "Sincronización terminada: {$batch['imported']} vínculo(s) actualizado(s).");
+        }
+        $result = $sync->syncLink((int) $validated['link_id'], $request->user()->id, 'manual');
+
+        return back()->with($result['status'] === 'SUCCESS' ? 'success' : 'error', $result['status'] === 'SUCCESS'
+            ? 'Stock sincronizado correctamente.'
+            : ($result['reason'] ?? 'No fue posible sincronizar el stock.'));
     }
 
     public function edit(InventoryChannelLink $inventoryChannelLink): Response

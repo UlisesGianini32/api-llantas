@@ -34,6 +34,7 @@ const sections = [
         { key: 'ams_secondary', label: 'AMS Secundaria', href: '/ams/pedidos-secundaria' },
         { key: 'ams_tomorrow', label: 'AMS Mañana', href: '/ams/pedidos-manana' },
         { key: 'inventory_channels', label: 'Enlaces de canales', href: '/almacen/canales' },
+        { key: 'inventory_meli_stock', label: 'Stock ML', href: '/almacen/canales/mercado-libre/stock' },
     ] },
     { key: 'system', label: 'Sistema', adminOnly: true, items: [
         { key: 'health', label: 'Estado del sistema', href: '/sistema/estado' },

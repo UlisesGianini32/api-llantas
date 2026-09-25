@@ -49,10 +49,13 @@ class InventoryChannelLinksTest extends TestCase
         }
         $migration = require database_path('migrations/2026_09_25_000001_create_inventory_channel_links_table.php');
         $migration->up();
+        (require database_path('migrations/2026_09_25_000002_add_stock_sync_enabled_to_inventory_channel_links.php'))->up();
+        (require database_path('migrations/2026_09_25_000003_create_inventory_channel_stock_syncs_table.php'))->up();
     }
 
     protected function tearDown(): void
     {
+        Schema::dropIfExists('inventory_channel_stock_syncs');
         Schema::dropIfExists('inventory_channel_links');
         Schema::dropIfExists('inventory_kit_reservations');
         Schema::dropIfExists('inventory_kit_components');

@@ -4,6 +4,8 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class InventoryChannelLink extends Model
 {
@@ -30,6 +32,7 @@ class InventoryChannelLink extends Model
         'metadata',
         'is_active',
         'identity_key',
+        'stock_sync_enabled',
     ];
 
     protected function casts(): array
@@ -39,12 +42,23 @@ class InventoryChannelLink extends Model
             'last_synced_at' => 'datetime',
             'metadata' => 'array',
             'is_active' => 'boolean',
+            'stock_sync_enabled' => 'boolean',
         ];
     }
 
     public function product(): BelongsTo
     {
         return $this->belongsTo(InventoryProduct::class, 'inventory_product_id');
+    }
+
+    public function stockSyncs(): HasMany
+    {
+        return $this->hasMany(InventoryChannelStockSync::class);
+    }
+
+    public function lastSuccessfulStockSync(): HasOne
+    {
+        return $this->hasOne(InventoryChannelStockSync::class)->where('status', InventoryChannelStockSync::SUCCESS)->latestOfMany();
     }
 
     public static function channelLabel(string $channel): string

@@ -197,6 +197,9 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                     >
                         Importar vínculos ML
                     </NavItem>
+                    <NavItem href="/almacen/canales/mercado-libre/stock" active={currentPath.startsWith('/almacen/canales/mercado-libre/stock')} onNavigate={onNavigate}>
+                        Stock ML
+                    </NavItem>
                     <NavItem href="/ml/compare" active={currentPath.startsWith('/ml/compare')} onNavigate={onNavigate}>
                         Comparar ML
                     </NavItem>
@@ -392,6 +395,9 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
     onNavigate={onNavigate}
 >
     Importar vínculos ML
+</NavItem>}
+{!isAdmin && <NavItem href="/almacen/canales/mercado-libre/stock" active={currentPath.startsWith('/almacen/canales/mercado-libre/stock')} onNavigate={onNavigate}>
+    Stock ML
 </NavItem>}
                 </div>
             </div>
