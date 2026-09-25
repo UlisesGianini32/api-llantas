@@ -32,6 +32,7 @@ final class UserAccess
         'inventory.kits.reservations.show',
         'inventory.channels.index',
         'inventory.channels.show',
+        'inventory.channels.mercado-libre.import',
     ];
 
     public static function canAccessRoute(User $user, ?string $routeName): bool

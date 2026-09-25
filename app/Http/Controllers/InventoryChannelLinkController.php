@@ -6,7 +6,9 @@ use App\Http\Requests\StoreInventoryChannelLinkRequest;
 use App\Http\Requests\UpdateInventoryChannelLinkRequest;
 use App\Models\InventoryChannelLink;
 use App\Models\InventoryProduct;
+use App\Models\MeliAccount;
 use App\Services\InventoryChannelLinkService;
+use App\Services\InventoryMeliLinkImportService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
@@ -113,6 +115,34 @@ class InventoryChannelLinkController extends Controller
         $inventoryChannelLink->update(['is_active' => ! $inventoryChannelLink->is_active]);
 
         return back()->with('success', $inventoryChannelLink->is_active ? 'Enlace activado.' : 'Enlace desactivado.');
+    }
+
+    public function meliImport(Request $request, InventoryMeliLinkImportService $importer): Response
+    {
+        $filters = $request->only(['search', 'result', 'account_key']);
+        $preview = $request->boolean('analyze') ? $importer->preview($filters) : [
+            'rows' => [],
+            'counts' => array_fill_keys(InventoryMeliLinkImportService::classStatuses(), 0),
+            'filters' => $filters,
+        ];
+
+        return Inertia::render('Inventory/Channels/MercadoLibreImport', [
+            'preview' => $preview,
+            'accounts' => MeliAccount::query()->orderBy('nickname')->get(['id', 'nickname', 'meli_user_id']),
+            'canApply' => $request->user()?->isAdmin() ?? false,
+        ]);
+    }
+
+    public function applyMeliImport(Request $request, InventoryMeliLinkImportService $importer): RedirectResponse
+    {
+        abort_unless($request->user()?->isAdmin(), 403);
+        $result = $importer->apply($request->only(['search', 'result', 'account_key']));
+
+        return redirect()->route('inventory.channels.mercado-libre.import', [
+            'analyze' => 1,
+            ...array_filter($request->only(['search', 'account_key'])),
+        ])->with('success', "Importación completada: {$result['imported']} vínculo(s) creado(s).")
+            ->with('importErrors', $result['errors']);
     }
 
     private function products(?InventoryProduct $current = null)

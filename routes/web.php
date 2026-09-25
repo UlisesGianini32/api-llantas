@@ -196,6 +196,8 @@ Route::middleware(['auth', 'role'])->group(function () {
         Route::get('/', [InventoryChannelLinkController::class, 'index'])->name('index');
         Route::get('/crear', [InventoryChannelLinkController::class, 'create'])->name('create');
         Route::post('/', [InventoryChannelLinkController::class, 'store'])->name('store');
+        Route::get('/mercado-libre/importar', [InventoryChannelLinkController::class, 'meliImport'])->name('mercado-libre.import');
+        Route::post('/mercado-libre/importar', [InventoryChannelLinkController::class, 'applyMeliImport'])->name('mercado-libre.apply');
         Route::get('/{inventoryChannelLink}', [InventoryChannelLinkController::class, 'show'])
             ->whereNumber('inventoryChannelLink')->name('show');
         Route::get('/{inventoryChannelLink}/editar', [InventoryChannelLinkController::class, 'edit'])

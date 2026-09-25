@@ -59,7 +59,9 @@ class InventoryChannelLinkService
         $account = trim((string) ($data['account_key'] ?? ''));
         $account = $account === '' ? '-' : $account;
         $identifier = match ($channel) {
-            InventoryChannelLink::MERCADO_LIBRE => 'listing:'.trim((string) ($data['external_listing_id'] ?? '')),
+            InventoryChannelLink::MERCADO_LIBRE => filled($data['external_variant_id'] ?? null)
+                ? 'listing:'.trim((string) ($data['external_listing_id'] ?? '')).'|variation:'.trim((string) $data['external_variant_id'])
+                : 'listing:'.trim((string) ($data['external_listing_id'] ?? '')),
             InventoryChannelLink::AMAZON => filled($data['external_listing_id'] ?? null)
                 ? 'listing:'.trim((string) $data['external_listing_id'])
                 : 'product:'.trim((string) ($data['external_product_id'] ?? '')),
@@ -103,7 +105,10 @@ class InventoryChannelLinkService
         $channel = $data['channel'];
         $account = $data['account_key'] ?? null;
         $identifiers = match ($channel) {
-            InventoryChannelLink::MERCADO_LIBRE => ['external_listing_id' => $data['external_listing_id'] ?? null],
+            InventoryChannelLink::MERCADO_LIBRE => [
+                'external_listing_id' => $data['external_listing_id'] ?? null,
+                'external_variant_id' => $data['external_variant_id'] ?? null,
+            ],
             InventoryChannelLink::AMAZON => [
                 'external_listing_id' => $data['external_listing_id'] ?? null,
                 'external_product_id' => $data['external_product_id'] ?? null,
@@ -113,14 +118,23 @@ class InventoryChannelLinkService
         };
         $query = InventoryChannelLink::query()
             ->where('channel', $channel)
-            ->when(blank($account), fn ($builder) => $builder->whereNull('account_key'), fn ($builder) => $builder->where('account_key', $account))
-            ->where(function ($nested) use ($identifiers): void {
+            ->when(blank($account), fn ($builder) => $builder->whereNull('account_key'), fn ($builder) => $builder->where('account_key', $account));
+        if ($channel === InventoryChannelLink::MERCADO_LIBRE) {
+            $query->where('external_listing_id', $identifiers['external_listing_id'])
+                ->when(
+                    blank($identifiers['external_variant_id']),
+                    fn ($builder) => $builder->whereNull('external_variant_id'),
+                    fn ($builder) => $builder->where('external_variant_id', $identifiers['external_variant_id']),
+                );
+        } else {
+            $query->where(function ($nested) use ($identifiers): void {
                 foreach ($identifiers as $column => $value) {
                     if ($value !== null && $value !== '') {
                         $nested->orWhere($column, $value);
                     }
                 }
             });
+        }
         if ($ignoreId !== null) {
             $query->where('id', '<>', $ignoreId);
         }

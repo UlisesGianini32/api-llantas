@@ -190,6 +190,13 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                     >
                         Enlaces de canales
                     </NavItem>
+                    <NavItem
+                        href="/almacen/canales/mercado-libre/importar"
+                        active={currentPath.startsWith('/almacen/canales/mercado-libre/importar')}
+                        onNavigate={onNavigate}
+                    >
+                        Importar vínculos ML
+                    </NavItem>
                     <NavItem href="/ml/compare" active={currentPath.startsWith('/ml/compare')} onNavigate={onNavigate}>
                         Comparar ML
                     </NavItem>
@@ -378,6 +385,13 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
     onNavigate={onNavigate}
 >
     Enlaces de canales
+</NavItem>}
+{!isAdmin && <NavItem
+    href="/almacen/canales/mercado-libre/importar"
+    active={currentPath.startsWith('/almacen/canales/mercado-libre/importar')}
+    onNavigate={onNavigate}
+>
+    Importar vínculos ML
 </NavItem>}
                 </div>
             </div>
