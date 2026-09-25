@@ -57,7 +57,10 @@ class InventoryStockService
         return (int) InventoryReservation::query()
             ->active()
             ->where('inventory_product_id', $productId)
-            ->where('inventory_location_id', $locationId)
+            ->where(function ($query) use ($locationId): void {
+                $query->where('inventory_location_id', $locationId)
+                    ->orWhereNull('inventory_location_id');
+            })
             ->sum('quantity');
     }
 

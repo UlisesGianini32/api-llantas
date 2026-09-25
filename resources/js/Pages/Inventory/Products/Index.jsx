@@ -73,7 +73,7 @@ export default function InventoryProductsIndex({ products, filters }) {
                             <thead className="bg-slate-50 text-left text-xs font-semibold uppercase tracking-wide text-slate-500 dark:bg-neutral-950 dark:text-slate-400">
                                 <tr>
                                     <th className="px-5 py-4">Nombre</th>
-                                    <th className="px-5 py-4">SKU</th>
+                                    <th className="px-5 py-4">SKU / tipo</th>
                                     <th className="px-5 py-4">Código de barras</th>
                                     <th className="px-5 py-4">Costo</th>
                                     <th className="px-5 py-4">Mercado Libre</th>
@@ -94,7 +94,7 @@ export default function InventoryProductsIndex({ products, filters }) {
                                 ) : products.data.map((product) => (
                                     <tr key={product.id} className="align-top hover:bg-slate-50/70 dark:hover:bg-neutral-950/50">
                                         <td className="px-5 py-4 font-semibold text-slate-900 dark:text-white">{product.name}</td>
-                                        <td className="whitespace-nowrap px-5 py-4 font-mono text-xs text-slate-600 dark:text-slate-300">{product.sku}</td>
+                                        <td className="whitespace-nowrap px-5 py-4 font-mono text-xs text-slate-600 dark:text-slate-300">{product.sku}<div className="font-sans text-[10px] font-semibold">{product.product_type || 'SIMPLE'}</div></td>
                                         <td className="whitespace-nowrap px-5 py-4 font-mono text-xs text-slate-600 dark:text-slate-300">{product.barcode || '—'}</td>
                                         <td className="whitespace-nowrap px-5 py-4">{money(product.cost)}</td>
                                         <td className="whitespace-nowrap px-5 py-4">{money(product.price_mercado_libre)}</td>
@@ -104,7 +104,7 @@ export default function InventoryProductsIndex({ products, filters }) {
                                         <td className="whitespace-nowrap px-5 py-4 text-slate-600 dark:text-slate-300">{product.primary_location?.code || 'Sin ubicación'}</td>
                                         <td className="whitespace-nowrap px-5 py-4 font-semibold">{Number(product.physical_stock || 0)}</td>
                                         <td className="whitespace-nowrap px-5 py-4">{Number(product.reserved_stock || 0)}</td>
-                                        <td className="whitespace-nowrap px-5 py-4 font-semibold">{Number(product.physical_stock || 0) - Number(product.reserved_stock || 0)}</td>
+                                        <td className="whitespace-nowrap px-5 py-4 font-semibold">{Number(product.available_stock ?? (Number(product.physical_stock || 0) - Number(product.reserved_stock || 0)))}</td>
                                         <td className="px-5 py-4">
                                             <span className={`rounded-full px-3 py-1 text-xs font-semibold ${product.is_active ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300' : 'bg-slate-100 text-slate-600 dark:bg-neutral-800 dark:text-slate-300'}`}>
                                                 {product.is_active ? 'Activo' : 'Inactivo'}

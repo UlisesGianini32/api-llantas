@@ -3,6 +3,7 @@
 namespace App\Http\Requests;
 
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Rule;
 
 class StoreInventoryReservationRequest extends FormRequest
 {
@@ -14,7 +15,11 @@ class StoreInventoryReservationRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'inventory_product_id' => ['required', 'integer', 'exists:inventory_products,id'],
+            'inventory_product_id' => [
+                'required',
+                'integer',
+                Rule::exists('inventory_products', 'id')->where(fn ($query) => $query->where('is_active', true)->where('product_type', 'SIMPLE')),
+            ],
             'inventory_location_id' => ['required', 'integer', 'exists:inventory_locations,id'],
             'quantity' => ['required', 'integer', 'min:1'],
             'source_type' => ['nullable', 'string', 'max:255'],

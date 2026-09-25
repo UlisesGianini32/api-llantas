@@ -27,6 +27,9 @@ final class UserAccess
         'user-password.update',
         'appearance.edit',
         'two-factor.*',
+        'inventory.kits.index',
+        'inventory.kits.show',
+        'inventory.kits.reservations.show',
     ];
 
     public static function canAccessRoute(User $user, ?string $routeName): bool

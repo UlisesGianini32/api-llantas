@@ -9,8 +9,15 @@ use InvalidArgumentException;
 
 class InventoryProduct extends Model
 {
+    public const SIMPLE = 'SIMPLE';
+
+    public const KIT = 'KIT';
+
+    public const TYPES = [self::SIMPLE, self::KIT];
+
     protected $fillable = [
         'sku',
+        'product_type',
         'barcode',
         'name',
         'description',
@@ -51,8 +58,37 @@ class InventoryProduct extends Model
         return $this->hasMany(InventoryReservation::class, 'inventory_product_id');
     }
 
+    public function kitComponents(): HasMany
+    {
+        return $this->hasMany(InventoryKitComponent::class, 'kit_product_id');
+    }
+
+    public function usedInKits(): HasMany
+    {
+        return $this->hasMany(InventoryKitComponent::class, 'component_product_id');
+    }
+
+    public function kitReservations(): HasMany
+    {
+        return $this->hasMany(InventoryKitReservation::class, 'kit_product_id');
+    }
+
+    public function isKit(): bool
+    {
+        return $this->product_type === self::KIT;
+    }
+
+    public function isSimple(): bool
+    {
+        return ! $this->isKit();
+    }
+
     public function physicalStock(): int
     {
+        if ($this->isKit()) {
+            return 0;
+        }
+
         return (int) $this->movements()->sum('quantity');
     }
 

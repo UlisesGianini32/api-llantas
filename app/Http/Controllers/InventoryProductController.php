@@ -7,6 +7,7 @@ use App\Http\Requests\UpdateInventoryProductRequest;
 use App\Models\InventoryLocation;
 use App\Models\InventoryProduct;
 use App\Models\InventoryReservation;
+use App\Services\InventoryKitStockService;
 use App\Services\InventoryStockService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -15,11 +16,11 @@ use Inertia\Response;
 
 class InventoryProductController extends Controller
 {
-    public function index(Request $request): Response
+    public function index(Request $request, InventoryKitStockService $kitStock): Response
     {
         $search = trim((string) $request->input('search', ''));
         $products = InventoryProduct::query()
-            ->with('primaryLocation:id,code,name,is_active')
+            ->with(['primaryLocation:id,code,name,is_active', 'kitComponents.component:id,name,sku'])
             ->withSum('movements as physical_stock', 'quantity')
             ->withSum([
                 'reservations as reserved_stock' => fn ($query) => $query
@@ -39,6 +40,20 @@ class InventoryProductController extends Controller
             ->paginate(25)
             ->withQueryString();
 
+        $kitStocks = $kitStock->stocksForKits($products->getCollection());
+        $products->getCollection()->each(function (InventoryProduct $product) use ($kitStocks): void {
+            if ($product->isKit()) {
+                $stock = $kitStocks->get($product->getKey(), ['physical_stock' => 0, 'available_stock' => 0]);
+                $physical = $stock['physical_stock'];
+                $available = $stock['available_stock'];
+                $product->setAttribute('physical_stock', $physical);
+                $product->setAttribute('reserved_stock', max(0, $physical - $available));
+                $product->setAttribute('available_stock', $available);
+            } else {
+                $product->setAttribute('available_stock', (int) $product->physical_stock - (int) ($product->reserved_stock ?? 0));
+            }
+        });
+
         return Inertia::render('Inventory/Products/Index', [
             'products' => $products,
             'filters' => ['search' => $search],
@@ -56,7 +71,7 @@ class InventoryProductController extends Controller
 
     public function store(StoreInventoryProductRequest $request): RedirectResponse
     {
-        InventoryProduct::create($request->validated());
+        InventoryProduct::create([...$request->validated(), 'product_type' => $request->validated('product_type', InventoryProduct::SIMPLE)]);
 
         return redirect()->route('inventory.products.index')->with('success', 'Producto creado correctamente.');
     }
@@ -64,8 +79,9 @@ class InventoryProductController extends Controller
     public function show(
         InventoryProduct $inventoryProduct,
         InventoryStockService $stock,
+        InventoryKitStockService $kitStock,
     ): Response {
-        $inventoryProduct->load('primaryLocation:id,code,name,is_active');
+        $inventoryProduct->load(['primaryLocation:id,code,name,is_active', 'kitComponents.component:id,name,sku,product_type']);
         $movements = $inventoryProduct->movements()
             ->with([
                 'location:id,code,name',
@@ -118,11 +134,17 @@ class InventoryProductController extends Controller
             ->limit(10)
             ->get();
 
+        $isKit = $inventoryProduct->isKit();
+        $physicalStock = $isKit ? $kitStock->physicalStock($inventoryProduct) : $stock->physicalStock($inventoryProduct);
+        $availableStock = $isKit ? $kitStock->availableStock($inventoryProduct) : $stock->availableStock($inventoryProduct);
+        $kitComponents = $isKit ? $kitStock->componentSummary($inventoryProduct) : [];
+
         return Inertia::render('Inventory/Products/Show', [
             'product' => $inventoryProduct,
-            'physicalStock' => $stock->productStock($inventoryProduct),
-            'reservedStock' => $stock->reservedStock($inventoryProduct),
-            'availableStock' => $stock->availableStock($inventoryProduct),
+            'physicalStock' => $physicalStock,
+            'reservedStock' => $isKit ? max(0, $physicalStock - $availableStock) : $stock->reservedStock($inventoryProduct),
+            'availableStock' => $availableStock,
+            'kitComponents' => $kitComponents,
             'stockByLocation' => $stockByLocation,
             'movements' => $movements,
             'reservations' => $reservations,
@@ -140,7 +162,21 @@ class InventoryProductController extends Controller
 
     public function update(UpdateInventoryProductRequest $request, InventoryProduct $inventoryProduct): RedirectResponse
     {
-        $inventoryProduct->update($request->validated());
+        $data = $request->validated();
+        $targetType = $data['product_type'] ?? $inventoryProduct->product_type;
+        if ($targetType !== $inventoryProduct->product_type) {
+            $physical = app(InventoryStockService::class)->physicalStock($inventoryProduct);
+            $reserved = app(InventoryStockService::class)->reservedStock($inventoryProduct);
+            if ($inventoryProduct->isSimple() && $targetType === InventoryProduct::KIT && ($physical !== 0 || $reserved !== 0)) {
+                return back()->withInput()->withErrors(['product_type' => 'No se puede convertir a kit mientras tenga stock físico o reservas activas.']);
+            }
+            if ($inventoryProduct->isKit() && $targetType === InventoryProduct::SIMPLE) {
+                if ($inventoryProduct->kitComponents()->exists() || $inventoryProduct->kitReservations()->active()->exists()) {
+                    return back()->withInput()->withErrors(['product_type' => 'No se puede convertir a producto simple mientras tenga componentes o reservas activas.']);
+                }
+            }
+        }
+        $inventoryProduct->update($data);
 
         return redirect()->route('inventory.products.index')->with('success', 'Producto actualizado correctamente.');
     }

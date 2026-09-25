@@ -1,0 +1,6 @@
+import AppShell from '@/Components/layout/AppShell'
+import { Head, Link } from '@inertiajs/react'
+
+export default function InventoryKitReservationShow({ reservation }) {
+    return <AppShell title="Reserva de kit"><Head title={`Reserva #${reservation.id}`} /><div className="mx-auto max-w-3xl space-y-6"><Link href={`/almacen/kits/${reservation.kit_product_id}`} className="text-sm font-semibold text-indigo-600">← Volver al kit</Link><h1 className="text-3xl font-bold">Reserva #{reservation.id}</h1><div className="rounded-2xl border bg-white p-5 dark:border-neutral-800 dark:bg-neutral-900"><p><strong>{reservation.kit?.name}</strong> · {reservation.quantity} unidades</p><p className="mt-2 text-sm text-slate-500">Estado: {reservation.status} · {reservation.reference || 'Sin referencia'}</p></div><section className="rounded-2xl border bg-white dark:border-neutral-800 dark:bg-neutral-900"><h2 className="border-b p-5 font-bold">Reservas componentes</h2>{reservation.component_reservations?.map((child) => <div key={child.id} className="grid grid-cols-4 border-b p-4 text-sm"><span>{child.product?.name}</span><span>{child.quantity}</span><span>{child.location?.code}</span><strong>{child.status}</strong></div>)}</section></div></AppShell>
+}

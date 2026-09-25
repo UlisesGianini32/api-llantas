@@ -5,6 +5,8 @@ use App\Http\Controllers\AmsSecondaryOrdersController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\ExcelImportController;
+use App\Http\Controllers\InventoryKitController;
+use App\Http\Controllers\InventoryKitReservationController;
 use App\Http\Controllers\InventoryLocationController;
 use App\Http\Controllers\InventoryMovementController;
 use App\Http\Controllers\InventoryProductController;
@@ -165,6 +167,28 @@ Route::middleware(['auth', 'role'])->group(function () {
             ->whereNumber('inventoryReservation')->name('expire');
         Route::post('/{inventoryReservation}/cumplir', [InventoryReservationController::class, 'fulfill'])
             ->whereNumber('inventoryReservation')->name('fulfill');
+    });
+
+    Route::prefix('almacen/kits')->name('inventory.kits.')->group(function () {
+        Route::get('/', [InventoryKitController::class, 'index'])->name('index');
+        Route::get('/reservas/{inventoryKitReservation}', [InventoryKitReservationController::class, 'show'])
+            ->whereNumber('inventoryKitReservation')->name('reservations.show');
+        Route::post('/reservas/{reservation}/liberar', [InventoryKitReservationController::class, 'release'])
+            ->whereNumber('reservation')->name('reservations.release');
+        Route::post('/reservas/{reservation}/cancelar', [InventoryKitReservationController::class, 'cancel'])
+            ->whereNumber('reservation')->name('reservations.cancel');
+        Route::post('/reservas/{reservation}/expirar', [InventoryKitReservationController::class, 'expire'])
+            ->whereNumber('reservation')->name('reservations.expire');
+        Route::post('/reservas/{reservation}/cumplir', [InventoryKitReservationController::class, 'fulfill'])
+            ->whereNumber('reservation')->name('reservations.fulfill');
+        Route::get('/{inventoryKit}/editar-componentes', [InventoryKitController::class, 'edit'])
+            ->whereNumber('inventoryKit')->name('edit');
+        Route::put('/{inventoryKit}/componentes', [InventoryKitController::class, 'updateComponents'])
+            ->whereNumber('inventoryKit')->name('components.update');
+        Route::post('/{inventoryKit}/reservas', [InventoryKitController::class, 'reserve'])
+            ->whereNumber('inventoryKit')->name('reservations.store');
+        Route::get('/{inventoryKit}', [InventoryKitController::class, 'show'])
+            ->whereNumber('inventoryKit')->name('show');
     });
 
     // COMPARE

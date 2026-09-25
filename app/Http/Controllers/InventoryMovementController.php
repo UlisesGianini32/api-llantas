@@ -12,6 +12,7 @@ use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
 use Inertia\Response;
+use InvalidArgumentException;
 
 class InventoryMovementController extends Controller
 {
@@ -57,6 +58,7 @@ class InventoryMovementController extends Controller
         return Inertia::render('Inventory/Movements/Form', [
             'products' => InventoryProduct::query()
                 ->where('is_active', true)
+                ->where('product_type', InventoryProduct::SIMPLE)
                 ->orderBy('name')
                 ->get(['id', 'name', 'sku']),
             'locations' => InventoryLocation::query()
@@ -78,7 +80,7 @@ class InventoryMovementController extends Controller
     ): RedirectResponse {
         try {
             $movements->recordManual($request->validated(), $request->user());
-        } catch (InventoryInsufficientStockException $exception) {
+        } catch (InventoryInsufficientStockException|InvalidArgumentException $exception) {
             return back()
                 ->withInput()
                 ->withErrors(['quantity' => $exception->getMessage()]);

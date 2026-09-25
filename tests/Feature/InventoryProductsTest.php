@@ -56,11 +56,22 @@ class InventoryProductsTest extends TestCase
         $movementsMigration->up();
         $reservationsMigration = require database_path('migrations/2026_09_24_000005_create_inventory_reservations_table.php');
         $reservationsMigration->up();
+        $productTypeMigration = require database_path('migrations/2026_09_24_000006_add_product_type_to_inventory_products_table.php');
+        $productTypeMigration->up();
+        $kitComponentsMigration = require database_path('migrations/2026_09_24_000007_create_inventory_kit_components_table.php');
+        $kitComponentsMigration->up();
+        $kitReservationsMigration = require database_path('migrations/2026_09_24_000008_create_inventory_kit_reservations_table.php');
+        $kitReservationsMigration->up();
     }
 
     protected function tearDown(): void
     {
+        Schema::dropIfExists('inventory_kit_reservations');
+        Schema::dropIfExists('inventory_kit_components');
         Schema::dropIfExists('inventory_reservations');
+        Schema::table('inventory_products', function (Blueprint $table): void {
+            $table->dropIndex(['product_type']);
+        });
         Schema::dropIfExists('inventory_movements');
         Schema::table('inventory_products', function (Blueprint $table): void {
             $table->dropForeign(['primary_location_id']);

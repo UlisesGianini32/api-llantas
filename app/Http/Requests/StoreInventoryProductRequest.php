@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests;
 
+use App\Models\InventoryProduct;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
@@ -16,6 +17,7 @@ class StoreInventoryProductRequest extends FormRequest
     {
         return [
             'sku' => ['required', 'string', 'max:100', 'regex:/\S/', Rule::unique('inventory_products', 'sku')],
+            'product_type' => ['sometimes', 'string', Rule::in(InventoryProduct::TYPES)],
             'barcode' => ['nullable', 'string', 'max:100', Rule::unique('inventory_products', 'barcode')],
             'name' => ['required', 'string', 'max:255'],
             'description' => ['nullable', 'string'],

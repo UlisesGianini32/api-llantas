@@ -46,6 +46,9 @@ class InventoryMovementService
             if (! $product) {
                 throw (new ModelNotFoundException)->setModel(InventoryProduct::class);
             }
+            if ($product->isKit()) {
+                throw new InvalidArgumentException('Los kits no tienen inventario físico propio; el inventario se administra mediante sus componentes.');
+            }
 
             $location = InventoryLocation::query()
                 ->find($data['inventory_location_id'] ?? null);

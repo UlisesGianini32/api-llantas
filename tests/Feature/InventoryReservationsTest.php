@@ -61,6 +61,9 @@ class InventoryReservationsTest extends TestCase
             '2026_09_24_000003_add_primary_location_id_to_inventory_products_table.php',
             '2026_09_24_000004_create_inventory_movements_table.php',
             '2026_09_24_000005_create_inventory_reservations_table.php',
+            '2026_09_24_000006_add_product_type_to_inventory_products_table.php',
+            '2026_09_24_000007_create_inventory_kit_components_table.php',
+            '2026_09_24_000008_create_inventory_kit_reservations_table.php',
         ] as $migrationFile) {
             $migration = require database_path('migrations/'.$migrationFile);
             $migration->up();
@@ -69,7 +72,12 @@ class InventoryReservationsTest extends TestCase
 
     protected function tearDown(): void
     {
+        Schema::dropIfExists('inventory_kit_reservations');
+        Schema::dropIfExists('inventory_kit_components');
         Schema::dropIfExists('inventory_reservations');
+        Schema::table('inventory_products', function (Blueprint $table): void {
+            $table->dropIndex(['product_type']);
+        });
         Schema::dropIfExists('inventory_movements');
         Schema::table('inventory_products', function (Blueprint $table): void {
             $table->dropForeign(['primary_location_id']);

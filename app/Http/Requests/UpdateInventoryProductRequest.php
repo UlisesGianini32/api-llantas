@@ -20,6 +20,7 @@ class UpdateInventoryProductRequest extends FormRequest
 
         return [
             'sku' => ['required', 'string', 'max:100', 'regex:/\S/', Rule::unique('inventory_products', 'sku')->ignore($productId)],
+            'product_type' => ['sometimes', 'string', Rule::in(InventoryProduct::TYPES)],
             'barcode' => ['nullable', 'string', 'max:100', Rule::unique('inventory_products', 'barcode')->ignore($productId)],
             'name' => ['required', 'string', 'max:255'],
             'description' => ['nullable', 'string'],

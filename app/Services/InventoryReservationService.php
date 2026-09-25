@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Exceptions\InventoryInsufficientStockException;
+use App\Models\InventoryKitReservation;
 use App\Models\InventoryLocation;
 use App\Models\InventoryMovement;
 use App\Models\InventoryProduct;
@@ -49,6 +50,9 @@ class InventoryReservationService
                 ->find($data['inventory_product_id'] ?? null);
             if (! $product) {
                 throw (new ModelNotFoundException)->setModel(InventoryProduct::class);
+            }
+            if ($product->isKit()) {
+                throw new InvalidArgumentException('Las reservas de kits deben hacerse mediante InventoryKitService.');
             }
 
             $locationId = $data['inventory_location_id'] ?? null;
@@ -111,6 +115,9 @@ class InventoryReservationService
         return DB::transaction(function () use ($reservation): InventoryReservation {
             $locked = $this->lockReservation($reservation);
             $this->assertActive($locked);
+            if ($locked->source_type === InventoryKitReservation::SOURCE_TYPE) {
+                throw new InvalidArgumentException('Las reservas de componentes de un kit deben gestionarse desde la reserva padre.');
+            }
             if (! $locked->expires_at || $locked->expires_at->isFuture()) {
                 throw new InvalidArgumentException('La reserva todavía no ha vencido.');
             }
@@ -127,7 +134,7 @@ class InventoryReservationService
     /**
      * Fulfill a reservation and create its physical outbound movement atomically.
      *
-     * @param  array{type?: string, reference?: ?string, reference_type?: ?string, reference_id?: ?int, notes?: ?string, external_key?: ?string}  $movementData
+     * @param  array{type?: string, reference?: ?string, reference_type?: ?string, reference_id?: ?int, notes?: ?string, metadata?: ?array, external_key?: ?string, allow_kit_child?: bool}  $movementData
      */
     public function fulfill(
         InventoryReservation|int $reservation,
@@ -137,6 +144,9 @@ class InventoryReservationService
         return DB::transaction(function () use ($reservation, $movementData, $user): InventoryReservation {
             $locked = $this->lockReservation($reservation);
             $this->assertActive($locked);
+            if ($locked->source_type === InventoryKitReservation::SOURCE_TYPE && ! ($movementData['allow_kit_child'] ?? false)) {
+                throw new InvalidArgumentException('Las reservas de componentes de un kit deben cumplirse desde la reserva padre.');
+            }
 
             $locationId = $locked->inventory_location_id ?? ($movementData['inventory_location_id'] ?? null);
             if ($locationId === null) {
@@ -165,6 +175,7 @@ class InventoryReservationService
                 'reference_id' => $movementData['reference_id'] ?? $locked->getKey(),
                 'reference' => $movementData['reference'] ?? $locked->reference,
                 'notes' => $movementData['notes'] ?? null,
+                'metadata' => $movementData['metadata'] ?? null,
                 'external_key' => $movementData['external_key'] ?? "reservation:{$locked->getKey()}:fulfill",
             ], $user);
 
@@ -180,6 +191,9 @@ class InventoryReservationService
         return DB::transaction(function () use ($reservation, $status, $timestampColumn): InventoryReservation {
             $locked = $this->lockReservation($reservation);
             $this->assertActive($locked);
+            if ($locked->source_type === InventoryKitReservation::SOURCE_TYPE) {
+                throw new InvalidArgumentException('Las reservas de componentes de un kit deben gestionarse desde la reserva padre.');
+            }
             $locked->forceFill([
                 'status' => $status,
                 $timestampColumn => now(),
