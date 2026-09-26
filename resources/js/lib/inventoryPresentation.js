@@ -16,6 +16,10 @@ const RESERVATION_STATUS_LABELS = {
     EXPIRED: 'Expirada',
 }
 
+const RESERVATION_SOURCE_LABELS = {
+    inventory_kit_reservation: 'Reserva de kit',
+}
+
 const dateTimeFormatter = new Intl.DateTimeFormat('es-MX', {
     timeZone: 'America/Hermosillo',
     year: 'numeric',
@@ -53,7 +57,9 @@ export function reservationSourceLabel({ source_type: sourceType, source_id: sou
     const hasSourceId = sourceId !== null && sourceId !== undefined && sourceId !== ''
 
     if (!hasSourceType && !hasSourceId) return 'Manual'
-    if (hasSourceType && hasSourceId) return `${sourceType} · #${sourceId}`
 
-    return hasSourceType ? sourceType : `#${sourceId}`
+    const sourceLabel = RESERVATION_SOURCE_LABELS[sourceType] || sourceType
+    if (hasSourceType && hasSourceId) return `${sourceLabel} · #${sourceId}`
+
+    return hasSourceType ? sourceLabel : `#${sourceId}`
 }

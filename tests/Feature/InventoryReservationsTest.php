@@ -115,6 +115,46 @@ class InventoryReservationsTest extends TestCase
         $this->assertSame(3, app(InventoryStockService::class)->reservedStock($product));
     }
 
+    public function test_local_expiration_is_stored_as_the_correct_hermosillo_instant_and_missing_expiration_stays_null(): void
+    {
+        $service = app(InventoryReservationService::class);
+        [$product, $location] = $this->productAndLocation('SKU-LOCAL-EXPIRATION');
+        $this->seedInitial($product, $location, 10);
+
+        $reservation = $service->create([
+            ...$this->reservationData($product, $location, 1),
+            'expires_at' => '2026-09-26T10:06',
+        ]);
+        $withoutExpiration = $service->create($this->reservationData($product, $location, 1));
+
+        $this->assertSame('2026-09-26 10:06', $reservation->expires_at->copy()->setTimezone('America/Hermosillo')->format('Y-m-d H:i'));
+        $this->assertStringStartsWith('2026-09-26T17:06:00', $reservation->toArray()['expires_at']);
+        $this->assertStringEndsWith('Z', $reservation->toArray()['expires_at']);
+        $this->assertNull($withoutExpiration->expires_at);
+        $this->assertNull($withoutExpiration->toArray()['expires_at']);
+    }
+
+    public function test_local_expiration_can_be_expired_using_the_stored_utc_instant(): void
+    {
+        Carbon::setTestNow(Carbon::create(2026, 9, 26, 17, 7, 'UTC'));
+
+        try {
+            $service = app(InventoryReservationService::class);
+            [$product, $location] = $this->productAndLocation('SKU-LOCAL-EXPIRE');
+            $this->seedInitial($product, $location, 2);
+            $reservation = $service->create([
+                ...$this->reservationData($product, $location, 1),
+                'expires_at' => '2026-09-26T10:06',
+            ]);
+
+            $service->expire($reservation);
+
+            $this->assertSame(InventoryReservation::EXPIRED, $reservation->fresh()->status);
+        } finally {
+            Carbon::setTestNow();
+        }
+    }
+
     public function test_quantity_must_be_positive(): void
     {
         [$product, $location] = $this->productAndLocation();

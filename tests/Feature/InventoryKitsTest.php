@@ -206,6 +206,69 @@ class InventoryKitsTest extends TestCase
         $this->assertDatabaseCount('inventory_kit_reservations', 2);
     }
 
+    public function test_local_kit_expiration_is_stored_as_the_correct_hermosillo_instant_and_shared_with_children(): void
+    {
+        [$kit, $shampoo, $conditioner, $first, $second] = $this->kitFixture();
+        $this->seedInventoryFixture($shampoo, $first, 10);
+        $this->seedInventoryFixture($conditioner, $second, 10);
+        app(InventoryKitService::class)->replaceComponents($kit, [
+            ['component_product_id' => $shampoo->id, 'quantity' => 1],
+            ['component_product_id' => $conditioner->id, 'quantity' => 1],
+        ]);
+
+        $reservation = app(InventoryKitService::class)->reserve([
+            'kit_product_id' => $kit->id,
+            'quantity' => 1,
+            'expires_at' => '2026-09-26T10:06',
+        ]);
+        $children = $reservation->componentReservations()->get();
+        $withoutExpiration = app(InventoryKitService::class)->reserve([
+            'kit_product_id' => $kit->id,
+            'quantity' => 1,
+        ]);
+        $withoutExpirationChildren = $withoutExpiration->componentReservations()->get();
+
+        $this->assertSame('2026-09-26 10:06', $reservation->expires_at->copy()->setTimezone('America/Hermosillo')->format('Y-m-d H:i'));
+        $this->assertStringStartsWith('2026-09-26T17:06:00', $reservation->toArray()['expires_at']);
+        $this->assertCount(2, $children);
+        foreach ($children as $child) {
+            $this->assertSame('2026-09-26 10:06', $child->expires_at->copy()->setTimezone('America/Hermosillo')->format('Y-m-d H:i'));
+            $this->assertSame(InventoryKitReservation::SOURCE_TYPE, $child->source_type);
+        }
+        $this->assertNull($withoutExpiration->expires_at);
+        foreach ($withoutExpirationChildren as $child) {
+            $this->assertNull($child->expires_at);
+        }
+    }
+
+    public function test_local_kit_expiration_expires_the_parent_and_all_children(): void
+    {
+        Carbon::setTestNow(Carbon::create(2026, 9, 26, 17, 7, 'UTC'));
+
+        try {
+            [$kit, $shampoo, $conditioner, $first, $second] = $this->kitFixture();
+            $this->seedInventoryFixture($shampoo, $first, 10);
+            $this->seedInventoryFixture($conditioner, $second, 10);
+            app(InventoryKitService::class)->replaceComponents($kit, [
+                ['component_product_id' => $shampoo->id, 'quantity' => 1],
+                ['component_product_id' => $conditioner->id, 'quantity' => 1],
+            ]);
+            $service = app(InventoryKitService::class);
+            $reservation = $service->reserve([
+                'kit_product_id' => $kit->id,
+                'quantity' => 1,
+                'expires_at' => '2026-09-26T10:06',
+            ]);
+
+            $service->expire($reservation);
+
+            $this->assertSame(InventoryKitReservation::EXPIRED, $reservation->fresh()->status);
+            $this->assertSame(0, InventoryReservation::active()->count());
+        } finally {
+            Carbon::setTestNow();
+        }
+    }
+
     public function test_release_cancel_and_expire_release_all_children(): void
     {
         [$kit, $shampoo, $conditioner, $first, $second] = $this->kitFixture();

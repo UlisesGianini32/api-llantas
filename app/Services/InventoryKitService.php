@@ -9,7 +9,7 @@ use App\Models\InventoryLocation;
 use App\Models\InventoryProduct;
 use App\Models\InventoryReservation;
 use App\Models\User;
-use Carbon\Carbon;
+use App\Support\InventoryDateTime;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Support\Facades\DB;
 use InvalidArgumentException;
@@ -82,7 +82,7 @@ class InventoryKitService
                 'reference' => $data['reference'] ?? null,
                 'external_key' => $externalKey,
                 'expires_at' => isset($data['expires_at']) && $data['expires_at'] !== ''
-                    ? Carbon::parse($data['expires_at'])
+                    ? InventoryDateTime::toUtc($data['expires_at'])
                     : null,
                 'metadata' => $data['metadata'] ?? null,
                 'created_by' => $data['created_by'] ?? $user?->getKey(),
