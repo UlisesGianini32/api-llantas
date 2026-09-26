@@ -104,6 +104,32 @@ class InventoryMeliLinkImportTest extends TestCase
         $this->assertDatabaseCount('inventory_channel_links', 0);
     }
 
+    public function test_exact_sku_filter_is_applied_in_sql_before_preview_materializes_rows(): void
+    {
+        [$account] = $this->fixture();
+        $this->product('74469516556');
+        $this->publication($account, '74469516556', '74469516556');
+        for ($index = 1; $index <= 250; $index++) {
+            $this->publication($account, 'MLM-BULK-'.$index, 'SKU-BULK-'.$index);
+        }
+
+        $publicationQueries = [];
+        DB::listen(function ($query) use (&$publicationQueries): void {
+            if (str_contains($query->sql, 'meli_publications')) {
+                $publicationQueries[] = $query;
+            }
+        });
+
+        $preview = $this->service()->preview(['search' => '74469516556']);
+
+        $this->assertCount(1, $preview['rows']);
+        $this->assertSame(1, $preview['total_rows']);
+        $this->assertSame('74469516556', $preview['rows'][0]['sku']);
+        $this->assertTrue(collect($publicationQueries)->contains(
+            fn ($query): bool => str_contains(strtolower($query->sql), 'like')
+        ));
+    }
+
     public function test_sku_trim_is_supported_but_unknown_and_missing_are_reported(): void
     {
         [$account] = $this->fixture();
@@ -219,6 +245,53 @@ class InventoryMeliLinkImportTest extends TestCase
         $this->assertSame($before, $publication->fresh()->toArray());
         $this->assertDatabaseCount('inventory_movements', 0);
         $this->assertDatabaseCount('inventory_reservations', 0);
+        $this->assertFalse((bool) InventoryChannelLink::query()->first()->stock_sync_enabled);
+    }
+
+    public function test_global_preview_is_capped_without_losing_total_count(): void
+    {
+        [$account] = $this->fixture();
+        for ($index = 1; $index <= 205; $index++) {
+            $this->publication($account, 'MLM-LIMIT-'.$index, 'SKU-LIMIT-'.$index);
+        }
+
+        $preview = $this->service()->preview();
+
+        $this->assertCount(InventoryMeliLinkImportService::PREVIEW_ROW_LIMIT, $preview['rows']);
+        $this->assertSame(205, $preview['total_rows']);
+        $this->assertTrue($preview['rows_truncated']);
+        $this->assertSame(InventoryMeliLinkImportService::PREVIEW_ROW_LIMIT, $preview['row_limit']);
+
+        $expectedVisibleIds = MeliPublication::query()
+            ->orderBy('id')
+            ->limit(InventoryMeliLinkImportService::PREVIEW_ROW_LIMIT)
+            ->pluck('id')
+            ->map(fn (mixed $id): int => (int) $id)
+            ->all();
+        $visibleIds = collect($preview['rows'])
+            ->map(fn (array $row): int => (int) $row['metadata']['legacy_id'])
+            ->all();
+
+        $this->assertSame($expectedVisibleIds, $visibleIds);
+    }
+
+    public function test_filtered_import_does_not_import_rows_from_other_skus_or_accounts(): void
+    {
+        [$first] = $this->fixture('FILTERED');
+        [$second] = $this->fixture('OTHER');
+        $firstProduct = $this->product('SKU-IMPORT-FILTERED');
+        $secondProduct = $this->product('SKU-IMPORT-OTHER');
+        $this->publication($first, 'MLM-IMPORT-FILTERED', $firstProduct->sku);
+        $this->publication($second, 'MLM-IMPORT-OTHER', $secondProduct->sku);
+
+        $result = $this->service()->apply(['search' => 'MLM-IMPORT-FILTERED', 'account_key' => (string) $first->id]);
+
+        $this->assertSame(1, $result['imported']);
+        $this->assertDatabaseHas('inventory_channel_links', [
+            'external_listing_id' => 'MLM-IMPORT-FILTERED',
+            'inventory_product_id' => $firstProduct->id,
+        ]);
+        $this->assertDatabaseMissing('inventory_channel_links', ['external_listing_id' => 'MLM-IMPORT-OTHER']);
     }
 
     public function test_preview_filters_by_account_result_and_searches_sku_or_mlm(): void

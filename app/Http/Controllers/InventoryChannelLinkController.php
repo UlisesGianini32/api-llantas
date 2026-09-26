@@ -180,6 +180,9 @@ class InventoryChannelLinkController extends Controller
             'rows' => [],
             'counts' => array_fill_keys(InventoryMeliLinkImportService::classStatuses(), 0),
             'filters' => $filters,
+            'total_rows' => 0,
+            'rows_truncated' => false,
+            'row_limit' => InventoryMeliLinkImportService::PREVIEW_ROW_LIMIT,
         ];
 
         return Inertia::render('Inventory/Channels/MercadoLibreImport', [
@@ -196,7 +199,7 @@ class InventoryChannelLinkController extends Controller
 
         return redirect()->route('inventory.channels.mercado-libre.import', [
             'analyze' => 1,
-            ...array_filter($request->only(['search', 'account_key'])),
+            ...array_filter($request->only(['search', 'result', 'account_key'])),
         ])->with('success', "Importación completada: {$result['imported']} vínculo(s) creado(s).")
             ->with('importErrors', $result['errors']);
     }

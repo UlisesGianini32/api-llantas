@@ -24,6 +24,10 @@ class InventoryMeliLinkImportService
 
     public const UNSUPPORTED = 'UNSUPPORTED';
 
+    public const PREVIEW_ROW_LIMIT = 200;
+
+    private const PUBLICATION_CHUNK_SIZE = 50;
+
     /** @return list<string> */
     public static function classStatuses(): array
     {
@@ -40,107 +44,43 @@ class InventoryMeliLinkImportService
 
     public function __construct(private readonly InventoryChannelLinkService $links) {}
 
-    /** @return array{rows:list<array<string,mixed>>,counts:array<string,int>,filters:array<string,string>} */
+    /** @return array{rows:list<array<string,mixed>>,counts:array<string,int>,filters:array<string,string>,total_rows:int,rows_truncated:bool,row_limit:int} */
     public function preview(array $filters = []): array
     {
-        $filters = [
-            'search' => trim((string) ($filters['search'] ?? '')),
-            'result' => strtoupper(trim((string) ($filters['result'] ?? ''))),
-            'account_key' => trim((string) ($filters['account_key'] ?? '')),
-        ];
-        $publications = MeliPublication::query()
-            ->with('meliAccount:id,nickname,meli_user_id')
-            ->when($filters['account_key'] !== '', fn ($query) => $query->where('meli_account_id', (int) $filters['account_key']))
-            ->whereNotNull('mlm')
-            ->orderBy('meli_account_id')
-            ->orderBy('mlm')
-            ->orderBy('id')
-            ->get();
-
-        $candidates = $publications->flatMap(fn (MeliPublication $publication): Collection => $this->candidatesFor($publication));
-        $skus = $candidates->pluck('sku')->filter()->unique()->values();
-        $productsBySku = InventoryProduct::query()->whereIn('sku', $skus)->get()->groupBy(fn (InventoryProduct $product): string => trim((string) $product->sku));
-        $existing = InventoryChannelLink::query()
-            ->where('channel', InventoryChannelLink::MERCADO_LIBRE)
-            ->get()
-            ->keyBy(fn (InventoryChannelLink $link): string => $link->identity_key);
-
-        $rows = $candidates->map(function (array $candidate) use ($productsBySku, $existing): array {
-            $row = $candidate;
-            $sku = trim((string) ($candidate['sku'] ?? ''));
-            $matches = $sku === '' ? collect() : $productsBySku->get($sku, collect());
-            $product = $matches->count() === 1 ? $matches->first() : null;
-            $payload = $product === null ? null : $this->linkPayload($candidate, $product);
-            $identityKey = $payload === null
-                ? $this->links->identityKey($candidate)
-                : $this->links->identityKey($payload);
-            $existingLink = $existing->get($identityKey);
-
-            if ($candidate['forced_status'] !== null) {
-                $status = $candidate['forced_status'];
-                $reason = $candidate['forced_reason'] ?? 'Estructura no soportada.';
-            } elseif (blank($candidate['account_key'])) {
-                $status = self::UNSUPPORTED;
-                $reason = 'La publicación no tiene una cuenta Mercado Libre identificable.';
-            } elseif ($sku === '') {
-                $status = self::MISSING_SKU;
-                $reason = 'La publicación o variación no tiene seller SKU utilizable.';
-            } elseif ($matches->count() > 1) {
-                $status = self::AMBIGUOUS;
-                $reason = 'El SKU coincide con más de un InventoryProduct.';
-            } elseif ($existingLink !== null && $product !== null && (int) $existingLink->inventory_product_id !== (int) $product->getKey()) {
-                $status = self::CONFLICT;
-                $reason = 'La identidad externa ya está vinculada a otro InventoryProduct.';
-            } elseif ($existingLink !== null) {
-                $status = self::ALREADY_LINKED;
-                $reason = 'El vínculo externo correcto ya existe.';
-            } elseif ($product === null) {
-                $status = self::PRODUCT_NOT_FOUND;
-                $reason = 'No existe un InventoryProduct con ese SKU.';
-            } else {
-                $status = self::MATCHED;
-                $reason = 'SKU exacto encontrado; el vínculo puede importarse.';
-            }
-
-            $row['status'] = $status;
-            $row['reason'] = $reason;
-            $row['inventory_product_id'] = $product?->getKey();
-            $row['inventory_product_sku'] = $product?->sku;
-            $row['identity_key'] = $identityKey;
-
-            return $row;
-        })->filter(function (array $row) use ($filters): bool {
-            if ($filters['result'] !== '' && $row['status'] !== $filters['result']) {
-                return false;
-            }
-            if ($filters['search'] !== '') {
-                $needle = strtolower($filters['search']);
-
-                return str_contains(strtolower((string) ($row['sku'] ?? '')), $needle)
-                    || str_contains(strtolower((string) ($row['mlm'] ?? '')), $needle);
-            }
-
-            return true;
-        })->values()->all();
-
+        $filters = $this->normalizeFilters($filters);
         $counts = array_fill_keys(self::classStatuses(), 0);
-        foreach ($rows as $row) {
-            $counts[$row['status']] = ($counts[$row['status']] ?? 0) + 1;
-        }
+        $rows = [];
+        $totalRows = 0;
 
-        return ['rows' => $rows, 'counts' => $counts, 'filters' => $filters];
+        $this->eachFilteredRow($filters, function (array $row) use (&$counts, &$rows, &$totalRows): void {
+            $totalRows++;
+            $counts[$row['status']] = ($counts[$row['status']] ?? 0) + 1;
+            if (count($rows) < self::PREVIEW_ROW_LIMIT) {
+                $rows[] = $row;
+            }
+        });
+
+        return [
+            'rows' => $rows,
+            'counts' => $counts,
+            'filters' => $filters,
+            'total_rows' => $totalRows,
+            'rows_truncated' => $totalRows > self::PREVIEW_ROW_LIMIT,
+            'row_limit' => self::PREVIEW_ROW_LIMIT,
+        ];
     }
 
     /** @return array{preview:array<string,mixed>,imported:int,errors:list<string>} */
     public function apply(array $filters = []): array
     {
-        $preview = $this->preview($filters);
+        $filters = $this->normalizeFilters($filters);
         $imported = 0;
         $errors = [];
 
-        foreach ($preview['rows'] as $row) {
+        // Apply the complete filtered set without materializing the legacy catalog.
+        $this->eachFilteredRow($filters, function (array $row) use (&$imported, &$errors): void {
             if ($row['status'] !== self::MATCHED) {
-                continue;
+                return;
             }
 
             try {
@@ -151,9 +91,151 @@ class InventoryMeliLinkImportService
             } catch (InvalidArgumentException $exception) {
                 $errors[] = $row['mlm'].($row['variation_id'] ? ':'.$row['variation_id'] : '').' — '.$exception->getMessage();
             }
-        }
+        });
 
         return ['preview' => $this->preview($filters), 'imported' => $imported, 'errors' => $errors];
+    }
+
+    /** @param array<string,string> $filters */
+    private function eachFilteredRow(array $filters, callable $consumer): void
+    {
+        $this->publicationQuery($filters)->chunkById(self::PUBLICATION_CHUNK_SIZE, function (Collection $publications) use ($filters, $consumer): void {
+            $candidates = $publications->flatMap(fn (MeliPublication $publication): Collection => $this->candidatesFor($publication));
+            $skus = $candidates->pluck('sku')
+                ->filter()
+                ->map(fn (mixed $sku): string => trim((string) $sku))
+                ->unique()
+                ->values();
+            $productsBySku = $skus->isEmpty()
+                ? collect()
+                : InventoryProduct::query()
+                    ->select(['id', 'sku'])
+                    ->whereIn('sku', $skus)
+                    ->get()
+                    ->groupBy(fn (InventoryProduct $product): string => trim((string) $product->sku));
+
+            $identityKeys = $candidates
+                ->map(fn (array $candidate): string => $this->candidateIdentityKey($candidate))
+                ->unique()
+                ->values();
+            $existing = $identityKeys->isEmpty()
+                ? collect()
+                : InventoryChannelLink::query()
+                    ->where('channel', InventoryChannelLink::MERCADO_LIBRE)
+                    ->whereIn('identity_key', $identityKeys)
+                    ->pluck('inventory_product_id', 'identity_key');
+
+            foreach ($candidates as $candidate) {
+                $row = $this->classifyCandidate($candidate, $productsBySku, $existing);
+                if ($this->matchesFilters($row, $filters)) {
+                    $consumer($row);
+                }
+            }
+        }, 'id');
+    }
+
+    /** @param array<string,string> $filters */
+    private function publicationQuery(array $filters)
+    {
+        return MeliPublication::query()
+            ->select(['id', 'meli_account_id', 'sku', 'mlm', 'status', 'permalink', 'last_sync_at', 'raw'])
+            ->with('meliAccount:id,nickname,meli_user_id')
+            ->when($filters['account_key'] !== '', fn ($query) => $query->where('meli_account_id', (int) $filters['account_key']))
+            ->when($filters['search'] !== '', function ($query) use ($filters): void {
+                $like = '%'.$filters['search'].'%';
+                $query->where(function ($nested) use ($like): void {
+                    $nested->where('sku', 'like', $like)
+                        ->orWhere('mlm', 'like', $like)
+                        // Variation seller SKUs live inside the legacy JSON snapshot.
+                        ->orWhere('raw', 'like', $like);
+                });
+            })
+            ->whereNotNull('mlm')
+            // chunkById advances with the cursor column. Do not sort by another
+            // column first or records with lower IDs can be skipped between chunks.
+            ->orderBy('id');
+    }
+
+    /** @param array<string,mixed> $filters @return array<string,string> */
+    private function normalizeFilters(array $filters): array
+    {
+        return [
+            'search' => trim((string) ($filters['search'] ?? '')),
+            'result' => strtoupper(trim((string) ($filters['result'] ?? ''))),
+            'account_key' => trim((string) ($filters['account_key'] ?? '')),
+        ];
+    }
+
+    /** @param array<string,mixed> $candidate */
+    private function candidateIdentityKey(array $candidate): string
+    {
+        return $this->links->identityKey([
+            'channel' => InventoryChannelLink::MERCADO_LIBRE,
+            'account_key' => $candidate['account_key'],
+            'external_listing_id' => $candidate['mlm'],
+            'external_variant_id' => $candidate['variation_id'],
+        ]);
+    }
+
+    /** @param array<string,mixed> $candidate */
+    private function classifyCandidate(array $candidate, Collection $productsBySku, Collection $existing): array
+    {
+        $row = $candidate;
+        $sku = trim((string) ($candidate['sku'] ?? ''));
+        $matches = $sku === '' ? collect() : $productsBySku->get($sku, collect());
+        $product = $matches->count() === 1 ? $matches->first() : null;
+        $identityKey = $this->candidateIdentityKey($candidate);
+        $existingProductId = $existing->get($identityKey);
+
+        if ($candidate['forced_status'] !== null) {
+            $status = $candidate['forced_status'];
+            $reason = $candidate['forced_reason'] ?? 'Estructura no soportada.';
+        } elseif (blank($candidate['account_key'])) {
+            $status = self::UNSUPPORTED;
+            $reason = 'La publicación no tiene una cuenta Mercado Libre identificable.';
+        } elseif ($sku === '') {
+            $status = self::MISSING_SKU;
+            $reason = 'La publicación o variación no tiene seller SKU utilizable.';
+        } elseif ($matches->count() > 1) {
+            $status = self::AMBIGUOUS;
+            $reason = 'El SKU coincide con más de un InventoryProduct.';
+        } elseif ($existingProductId !== null && $product !== null && (int) $existingProductId !== (int) $product->getKey()) {
+            $status = self::CONFLICT;
+            $reason = 'La identidad externa ya está vinculada a otro InventoryProduct.';
+        } elseif ($existingProductId !== null) {
+            $status = self::ALREADY_LINKED;
+            $reason = 'El vínculo externo correcto ya existe.';
+        } elseif ($product === null) {
+            $status = self::PRODUCT_NOT_FOUND;
+            $reason = 'No existe un InventoryProduct con ese SKU.';
+        } else {
+            $status = self::MATCHED;
+            $reason = 'SKU exacto encontrado; el vínculo puede importarse.';
+        }
+
+        $row['status'] = $status;
+        $row['reason'] = $reason;
+        $row['inventory_product_id'] = $product?->getKey();
+        $row['inventory_product_sku'] = $product?->sku;
+        $row['identity_key'] = $identityKey;
+
+        return $row;
+    }
+
+    /** @param array<string,mixed> $row @param array<string,string> $filters */
+    private function matchesFilters(array $row, array $filters): bool
+    {
+        if ($filters['result'] !== '' && $row['status'] !== $filters['result']) {
+            return false;
+        }
+        if ($filters['search'] === '') {
+            return true;
+        }
+
+        $needle = strtolower($filters['search']);
+
+        return str_contains(strtolower((string) ($row['sku'] ?? '')), $needle)
+            || str_contains(strtolower((string) ($row['mlm'] ?? '')), $needle);
     }
 
     /** @return Collection<int, array<string,mixed>> */
