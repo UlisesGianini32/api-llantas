@@ -15,7 +15,7 @@ return new class extends Migration
             $table->unsignedInteger('quantity');
             $table->timestamps();
 
-            $table->unique(['kit_product_id', 'component_product_id']);
+            $table->unique(['kit_product_id', 'component_product_id'], 'inv_kit_component_pair_uq');
         });
     }
 

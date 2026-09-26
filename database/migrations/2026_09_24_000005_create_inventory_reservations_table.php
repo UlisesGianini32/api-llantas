@@ -33,7 +33,7 @@ return new class extends Migration
             $table->timestamp('fulfilled_at')->nullable();
             $table->timestamps();
 
-            $table->index(['inventory_product_id', 'inventory_location_id', 'status']);
+            $table->index(['inventory_product_id', 'inventory_location_id', 'status'], 'inv_res_product_location_status_idx');
             $table->index('status');
             $table->index('expires_at');
             $table->index('created_at');

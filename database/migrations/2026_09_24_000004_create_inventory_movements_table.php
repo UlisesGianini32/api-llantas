@@ -31,7 +31,7 @@ return new class extends Migration
             $table->string('external_key', 191)->nullable()->unique();
             $table->timestamps();
 
-            $table->index(['inventory_product_id', 'inventory_location_id']);
+            $table->index(['inventory_product_id', 'inventory_location_id'], 'inv_mov_product_location_idx');
             $table->index(['type', 'occurred_at']);
         });
     }
