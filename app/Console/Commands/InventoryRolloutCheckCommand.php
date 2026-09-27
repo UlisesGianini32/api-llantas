@@ -29,6 +29,7 @@ class InventoryRolloutCheckCommand extends Command
         '2026_09_25_000002_add_stock_sync_enabled_to_inventory_channel_links',
         '2026_09_25_000003_create_inventory_channel_stock_syncs_table',
         '2026_09_25_000004_add_verification_to_inventory_channel_stock_syncs',
+        '2026_09_26_000001_add_remote_user_product_id_to_inventory_channel_links',
     ];
 
     /** @var array<string,string> */
@@ -82,7 +83,7 @@ class InventoryRolloutCheckCommand extends Command
             return count($applied).' migraciones Inventory aplicadas';
         }, true);
 
-        foreach (['stock_sync_enabled', 'identity_key'] as $column) {
+        foreach (['stock_sync_enabled', 'identity_key', 'remote_user_product_id'] as $column) {
             $this->check($checks, $failures, $warnings, 'column:inventory_channel_links.'.$column, function () use ($column): string {
                 if (! Schema::hasColumn('inventory_channel_links', $column)) {
                     throw new \RuntimeException('columna ausente');

@@ -64,6 +64,8 @@ class MeliSyncStockOwnershipTest extends TestCase
             $table->string('channel');
             $table->string('account_key')->nullable();
             $table->string('external_listing_id')->nullable();
+            $table->string('external_variant_id')->nullable();
+            $table->string('remote_user_product_id')->nullable();
             $table->string('identity_key');
             $table->boolean('is_active')->default(true);
             $table->boolean('stock_sync_enabled')->default(false);
@@ -139,6 +141,41 @@ class MeliSyncStockOwnershipTest extends TestCase
         $this->assertSame(4, $body['available_quantity']);
         $this->assertSame(19.75, $body['price']);
         $this->assertSame('active', $body['status']);
+    }
+
+    public function test_owned_shared_group_sibling_omits_legacy_stock_but_keeps_price_and_status(): void
+    {
+        $owned = $this->link('MLM-SHARED-OWNED', true);
+        $owned->update(['remote_user_product_id' => 'MLMU-SHARED']);
+        $sibling = $this->link('MLM-SHARED-SIBLING', false);
+        $sibling->update(['remote_user_product_id' => 'MLMU-SHARED']);
+        $this->publication('MLM-SHARED-SIBLING');
+        $history = [];
+        $this->invokeWriter([['sku' => 'SKU-SHARED-SIBLING', 'mlm' => 'MLM-SHARED-SIBLING', 'stock' => 4, 'price' => 19.75, 'status' => 'active']], $history);
+
+        $body = json_decode((string) $history[0]['request']->getBody(), true);
+        $this->assertArrayNotHasKey('available_quantity', $body);
+        $this->assertSame(19.75, $body['price']);
+        $this->assertSame('active', $body['status']);
+    }
+
+    public function test_shared_group_ownership_does_not_cross_accounts_or_variations(): void
+    {
+        $owned = $this->link('MLM-SCOPE-OWNED', true);
+        $owned->update(['remote_user_product_id' => 'MLMU-SCOPE']);
+        $otherAccount = MeliAccount::query()->create(['user_id' => $this->user->id, 'meli_user_id' => 'MELI-OTHER', 'access_token' => 'token']);
+        $otherProductId = DB::table('inventory_products')->insertGetId(['sku' => 'SKU-OTHER-ACCOUNT', 'name' => 'Other', 'created_at' => now(), 'updated_at' => now()]);
+        InventoryChannelLink::query()->create([
+            'inventory_product_id' => $otherProductId, 'channel' => InventoryChannelLink::MERCADO_LIBRE,
+            'account_key' => (string) $otherAccount->id, 'external_listing_id' => 'MLM-OTHER-ACCOUNT',
+            'identity_key' => 'mercado_libre|account:'.$otherAccount->id.'|listing:MLM-OTHER-ACCOUNT',
+            'remote_user_product_id' => 'MLMU-SCOPE', 'is_active' => true, 'stock_sync_enabled' => false,
+        ]);
+        $variation = $this->link('MLM-SCOPE-VARIATION', false);
+        $variation->update(['remote_user_product_id' => 'MLMU-SCOPE', 'external_variant_id' => '9']);
+        $ownership = app(\App\Services\InventoryMeliStockOwnershipService::class);
+        $this->assertFalse($ownership->shouldSkipLegacyListing((int) $otherAccount->id, 'MLM-OTHER-ACCOUNT'));
+        $this->assertFalse($ownership->shouldSkipLegacyListing((int) $this->account->id, 'MLM-SCOPE-VARIATION'));
     }
 
     private function runLegacyWriter(string $mlm, bool $stockOwned): array

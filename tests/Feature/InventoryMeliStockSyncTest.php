@@ -77,6 +77,7 @@ class InventoryMeliStockSyncTest extends TestCase
         foreach (glob(database_path('migrations/2026_09_25_00000*.php')) as $path) {
             (require $path)->up();
         }
+        (require database_path('migrations/2026_09_26_000001_add_remote_user_product_id_to_inventory_channel_links.php'))->up();
     }
 
     protected function tearDown(): void
@@ -103,7 +104,7 @@ class InventoryMeliStockSyncTest extends TestCase
 
     public function test_simple_stock_uses_global_available_and_zero_is_sent(): void
     {
-        Http::fake(['https://api.mercadolibre.com/items/*' => Http::response(['id' => 'MLM-1'], 200)]);
+        Http::fake(['https://api.mercadolibre.com/items/*' => Http::response(['id' => 'MLM-1', 'available_quantity' => 1], 200)]);
         $product = $this->product('SIMPLE-STOCK');
         $this->movement($product, 10);
         $this->reserve($product, 3);
@@ -117,6 +118,188 @@ class InventoryMeliStockSyncTest extends TestCase
         $result = $service->syncLink($link->fresh());
         $this->assertSame(InventoryChannelStockSync::SUCCESS, $result['status']);
         Http::assertSent(fn ($request) => $request->method() === 'PUT' && $request->data()['available_quantity'] === 0);
+    }
+
+    public function test_shared_user_product_group_sends_one_put_from_lowest_link_id(): void
+    {
+        Http::fake(['https://api.mercadolibre.com/items/*' => Http::response(['available_quantity' => 0], 200)]);
+        $product = $this->product('SHARED-GROUP');
+        $this->movement($product, 6);
+        $account = $this->account();
+        $first = $this->enabled($this->linkForAccount($product, $account, ['external_listing_id' => 'MLM-GROUP-A', 'remote_user_product_id' => 'MLMU-GROUP']));
+        $second = $this->enabled($this->linkForAccount($product, $account, ['external_listing_id' => 'MLM-GROUP-B', 'remote_user_product_id' => 'MLMU-GROUP']));
+
+        app(InventoryMeliStockSyncService::class)->apply(['links' => [$second->id, $first->id]]);
+
+        $this->assertSame(1, Http::recorded(fn (HttpRequest $request) => $request->method() === 'PUT')->count());
+        $this->assertSame($first->id, InventoryChannelStockSync::query()->latest('id')->value('inventory_channel_link_id'));
+        $this->assertSame($first->id, app(InventoryMeliStockSyncService::class)->preview(['link' => $second->id])['rows'][0]['representative_link_id']);
+    }
+
+    public function test_shared_user_product_conflict_between_products_blocks_all_puts(): void
+    {
+        Http::fake(['https://api.mercadolibre.com/items/*' => Http::response(['available_quantity' => 0], 200)]);
+        $account = $this->account();
+        $first = $this->enabled($this->linkForAccount($this->product('SHARED-CONFLICT-A'), $account, ['external_listing_id' => 'MLM-CONFLICT-A', 'remote_user_product_id' => 'MLMU-CONFLICT']));
+        $second = $this->enabled($this->linkForAccount($this->product('SHARED-CONFLICT-B'), $account, ['external_listing_id' => 'MLM-CONFLICT-B', 'remote_user_product_id' => 'MLMU-CONFLICT']));
+
+        $result = app(InventoryMeliStockSyncService::class)->syncLink($first);
+
+        $this->assertSame(InventoryMeliStockSyncService::REMOTE_USER_PRODUCT_CONFLICT, $result['status']);
+        $this->assertSame([$first->id, $second->id], $result['link_ids']);
+        $this->assertSame([$first->inventory_product_id, $second->inventory_product_id], $result['product_ids']);
+        Http::assertNotSent(fn (HttpRequest $request) => $request->method() === 'PUT');
+    }
+
+    public function test_group_identity_scopes_account_and_excludes_variations_and_null_ids(): void
+    {
+        $groups = app(\App\Services\InventoryMeliSharedStockGroupService::class);
+        $product = $this->product('GROUP-SCOPE');
+        $one = $this->account();
+        $two = $this->account();
+        $a = $this->enabled($this->linkForAccount($product, $one, ['remote_user_product_id' => 'MLMU-SCOPE']));
+        $aSibling = $this->enabled($this->linkForAccount($product, $one, ['external_listing_id' => 'MLM-SCOPE-SIBLING', 'remote_user_product_id' => 'MLMU-SCOPE']));
+        $b = $this->enabled($this->linkForAccount($product, $two, ['remote_user_product_id' => 'MLMU-SCOPE']));
+        $variation = $this->enabled($this->linkForAccount($product, $one, ['external_listing_id' => 'MLM-VARIATION-SCOPE', 'external_variant_id' => '44', 'remote_user_product_id' => 'MLMU-SCOPE']));
+        $null = $this->enabled($this->linkForAccount($product, $one, ['external_listing_id' => 'MLM-NULL-GROUP']));
+
+        $this->assertSame([$a->id, $aSibling->id], $groups->links($a, true)->pluck('id')->all());
+        $this->assertSame($groups->lockKey($a), $groups->lockKey($aSibling));
+        $this->assertNotSame($groups->lockKey($a), $groups->lockKey($b));
+        $this->assertFalse($groups->isGrouped($variation));
+        $this->assertFalse($groups->isGrouped($null));
+        $this->assertNotSame($groups->lockKey($variation), $groups->lockKey($null));
+    }
+
+    public function test_sync_does_not_put_when_remote_quantity_matches_target(): void
+    {
+        $product = $this->product('NO-CHANGE');
+        $this->movement($product, 3);
+        $link = $this->enabled($this->link($product));
+        Http::fake(['https://api.mercadolibre.com/items/*' => Http::response(['available_quantity' => 3], 200)]);
+
+        $result = app(InventoryMeliStockSyncService::class)->syncLink($link);
+
+        $this->assertSame(InventoryMeliStockSyncService::NO_CHANGE, $result['status']);
+        $this->assertTrue((bool) InventoryChannelStockSync::query()->latest('id')->value('metadata->no_change'));
+        Http::assertNotSent(fn (HttpRequest $request) => $request->method() === 'PUT');
+    }
+
+    public function test_first_discovery_relocks_shared_group_and_avoids_redundant_put(): void
+    {
+        $account = $this->account();
+        $product = $this->product('FIRST-DISCOVERY');
+        $this->movement($product, 6);
+        $first = $this->enabled($this->linkForAccount($product, $account, ['external_listing_id' => 'MLM-DISCOVERY-A']));
+        $second = $this->enabled($this->linkForAccount($product, $account, ['external_listing_id' => 'MLM-DISCOVERY-B']));
+        $putCount = 0;
+        Http::fake(function (HttpRequest $request) use (&$putCount, $first) {
+            if ($request->method() === 'PUT') {
+                $putCount++;
+
+                return Http::response(['id' => $first->external_listing_id], 200);
+            }
+            if ($putCount > 0 && str_ends_with($request->url(), '/'.$first->external_listing_id)) {
+                return Http::response(['available_quantity' => 6, 'user_product_id' => 'MLMU-DISCOVERY'], 200);
+            }
+
+            return Http::response(['available_quantity' => 0, 'user_product_id' => 'MLMU-DISCOVERY'], 200);
+        });
+
+        app(InventoryMeliStockSyncService::class)->apply(['links' => [$first->id, $second->id]]);
+
+        $this->assertSame(1, $putCount);
+        $this->assertSame('MLMU-DISCOVERY', $first->fresh()->remote_user_product_id);
+        $this->assertSame('MLMU-DISCOVERY', $second->fresh()->remote_user_product_id);
+    }
+
+    public function test_first_discovery_rebuilds_payload_and_audit_target_after_stock_change(): void
+    {
+        $account = $this->account();
+        $product = $this->product('DISCOVERY-TARGET-REFRESH');
+        $this->movement($product, 6);
+        $link = $this->enabled($this->linkForAccount($product, $account, ['external_listing_id' => 'MLM-DISCOVERY-TARGET']));
+        $reads = 0;
+        Http::fake(function (HttpRequest $request) use (&$reads, $product, $link) {
+            if ($request->method() === 'PUT') {
+                return Http::response(['id' => $link->external_listing_id], 200);
+            }
+
+            $reads++;
+            if ($reads === 1) {
+                $this->movement($product, -1, InventoryMovement::ADJUSTMENT_OUT);
+            }
+
+            return Http::response(['available_quantity' => 0, 'user_product_id' => 'MLMU-TARGET-REFRESH'], 200);
+        });
+
+        $initialPreview = app(InventoryMeliStockSyncService::class)->preview(['link' => $link->id])['rows'][0];
+        $result = app(InventoryMeliStockSyncService::class)->syncLink($link);
+
+        $this->assertSame(6, $initialPreview['target']);
+        $this->assertSame(InventoryChannelStockSync::SUCCESS, $result['status']);
+        $puts = Http::recorded(fn (HttpRequest $request): bool => $request->method() === 'PUT');
+        $this->assertCount(1, $puts);
+        $this->assertSame(5, $puts->first()->data()['available_quantity']);
+        $audit = InventoryChannelStockSync::query()->latest('id')->first();
+        $this->assertSame(5, $audit->target_quantity);
+    }
+
+    public function test_shared_group_requires_a_non_empty_account_key(): void
+    {
+        $link = $this->link($this->product('NO-ACCOUNT-GROUP'), [
+            'account_key' => null,
+            'remote_user_product_id' => 'MLMU-NO-ACCOUNT',
+        ]);
+
+        $groups = app(\App\Services\InventoryMeliSharedStockGroupService::class);
+
+        $this->assertFalse($groups->isGrouped($link));
+    }
+
+    public function test_first_discovery_preserves_conflict_status_and_does_not_put(): void
+    {
+        Http::fake(['https://api.mercadolibre.com/items/*' => Http::response(['available_quantity' => 0, 'user_product_id' => 'MLMU-FIRST-CONFLICT'], 200)]);
+        $account = $this->account();
+        $first = $this->enabled($this->linkForAccount($this->product('DISCOVERY-CONFLICT-A'), $account, ['external_listing_id' => 'MLM-DISCOVERY-CONFLICT-A']));
+        $second = $this->enabled($this->linkForAccount($this->product('DISCOVERY-CONFLICT-B'), $account, ['external_listing_id' => 'MLM-DISCOVERY-CONFLICT-B', 'remote_user_product_id' => 'MLMU-FIRST-CONFLICT']));
+
+        $result = app(InventoryMeliStockSyncService::class)->syncLink($first);
+
+        $this->assertSame(InventoryMeliStockSyncService::REMOTE_USER_PRODUCT_CONFLICT, $result['status']);
+        $this->assertSame([$first->id, $second->id], $result['link_ids']);
+        $this->assertSame([$first->inventory_product_id, $second->inventory_product_id], $result['product_ids']);
+        Http::assertNotSent(fn (HttpRequest $request): bool => $request->method() === 'PUT');
+    }
+
+    public function test_known_group_change_aborts_without_put_under_old_lock(): void
+    {
+        Http::fake(['https://api.mercadolibre.com/items/*' => Http::response(['available_quantity' => 4, 'user_product_id' => 'MLMU-B'], 200)]);
+        $account = $this->account();
+        $link = $this->enabled($this->linkForAccount($this->product('GROUP-CHANGED'), $account, ['external_listing_id' => 'MLM-GROUP-CHANGED', 'remote_user_product_id' => 'MLMU-A']));
+
+        $result = app(InventoryMeliStockSyncService::class)->syncLink($link);
+
+        $this->assertSame(InventoryMeliStockSyncService::REMOTE_GROUP_CHANGED, $result['status']);
+        $this->assertSame('MLMU-B', $link->fresh()->remote_user_product_id);
+        Http::assertNotSent(fn (HttpRequest $request): bool => $request->method() === 'PUT');
+    }
+
+    public function test_group_representative_malformed_quantity_cannot_use_sibling_quantity(): void
+    {
+        Http::fake(['https://api.mercadolibre.com/items/*' => Http::response(['user_product_id' => 'MLMU-MALFORMED'], 200)]);
+        $account = $this->account();
+        $product = $this->product('GROUP-MALFORMED');
+        $this->movement($product, 5);
+        $representative = $this->enabled($this->linkForAccount($product, $account, ['external_listing_id' => 'MLM-MALFORMED-REP', 'remote_user_product_id' => 'MLMU-MALFORMED']));
+        $sibling = $this->enabled($this->linkForAccount($product, $account, ['external_listing_id' => 'MLM-MALFORMED-SIB', 'remote_user_product_id' => 'MLMU-MALFORMED']));
+
+        $result = app(InventoryMeliStockSyncService::class)->syncLink($sibling);
+
+        $this->assertNotSame(InventoryMeliStockSyncService::NO_CHANGE, $result['status']);
+        $this->assertSame(InventoryChannelStockSync::FAILED, $result['status']);
+        $this->assertSame('MALFORMED_RESPONSE', InventoryChannelStockSync::query()->latest('id')->value('error_code'));
+        Http::assertNotSent(fn (HttpRequest $request): bool => $request->method() === 'PUT');
     }
 
     public function test_inactive_product_is_skipped_without_sending_zero(): void
@@ -176,7 +359,7 @@ class InventoryMeliStockSyncTest extends TestCase
         $this->assertDatabaseHas('inventory_channel_stock_syncs', ['status' => InventoryChannelStockSync::SUCCESS, 'target_quantity' => 0]);
         $failMutatingRequest = true;
         $sync->syncLink($link->fresh());
-        Http::assertSentCount(2);
+        Http::assertSentCount(4);
         Http::assertSent(fn (HttpRequest $request): bool => $request->method() === 'PUT'
             && $request->url() === 'https://api.mercadolibre.com/items/MLM-A'
             && $request->data()['available_quantity'] === 0);

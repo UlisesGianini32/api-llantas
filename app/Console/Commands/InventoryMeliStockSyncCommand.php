@@ -23,8 +23,12 @@ class InventoryMeliStockSyncCommand extends Command
             'link' => $this->option('link'),
         ], fn ($value) => $value !== null && $value !== '');
         $preview = $sync->preview($filters);
-        $this->table(['SKU', 'MLM', 'Variante', 'Target', 'Estado'], array_map(fn (array $row): array => [
-            $row['sku'] ?? '—', $row['external_listing_id'] ?? '—', $row['external_variant_id'] ?? '—', $row['target'], $row['status'],
+        $this->table(['SKU', 'MLM', 'Variante', 'Remote user product', 'Siblings', 'Target', 'Estado / diagnóstico'], array_map(fn (array $row): array => [
+            $row['sku'] ?? '—', $row['external_listing_id'] ?? '—', $row['external_variant_id'] ?? '—',
+            $row['remote_user_product_id'] ?? '—', implode(',', $row['sibling_link_ids'] ?? []) ?: '—',
+            $row['target'], $row['status'].(! empty($row['remote_user_product_conflict'])
+                ? ' links='.implode(',', $row['conflict_link_ids']).' products='.implode(',', $row['conflict_product_ids'])
+                : ''),
         ], $preview['rows']));
         $this->line($this->option('apply') ? 'Ejecutando vínculos elegibles...' : 'Dry-run: no se modificó Mercado Libre.');
         if (! $this->option('apply')) {

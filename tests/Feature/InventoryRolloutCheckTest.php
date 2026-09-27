@@ -27,6 +27,7 @@ class InventoryRolloutCheckTest extends TestCase
         '2026_09_25_000002_add_stock_sync_enabled_to_inventory_channel_links',
         '2026_09_25_000003_create_inventory_channel_stock_syncs_table',
         '2026_09_25_000004_add_verification_to_inventory_channel_stock_syncs',
+        '2026_09_26_000001_add_remote_user_product_id_to_inventory_channel_links',
     ];
 
     protected function setUp(): void
@@ -68,6 +69,7 @@ class InventoryRolloutCheckTest extends TestCase
             $table->string('account_key')->nullable();
             $table->string('external_listing_id')->nullable();
             $table->string('identity_key');
+            $table->string('remote_user_product_id', 64)->nullable();
             $table->boolean('is_active')->default(true);
             $table->boolean('stock_sync_enabled')->default(false);
             $table->timestamps();

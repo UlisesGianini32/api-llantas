@@ -84,6 +84,7 @@ class InventoryMeliStockPilotTest extends TestCase
         foreach (glob(database_path('migrations/2026_09_25_00000*.php')) as $path) {
             (require $path)->up();
         }
+        (require database_path('migrations/2026_09_26_000001_add_remote_user_product_id_to_inventory_channel_links.php'))->up();
     }
 
     protected function tearDown(): void
@@ -106,15 +107,57 @@ class InventoryMeliStockPilotTest extends TestCase
     {
         $link = $this->readyLink(7, 'MLM-PREVIEW');
         Http::fake(fn (HttpRequest $request) => $request->method() === 'GET'
-            ? Http::response(['id' => 'MLM-PREVIEW', 'available_quantity' => 10], 200)
+            ? Http::response(['id' => 'MLM-PREVIEW', 'available_quantity' => 10, 'user_product_id' => 'MLMU-PREVIEW'], 200)
             : Http::response([], 200));
 
         $result = app(InventoryMeliStockPilotService::class)->preview($link);
 
         $this->assertSame(10, $result['remote_current_quantity']);
         $this->assertSame(-3, $result['delta']);
+        $this->assertSame('MLMU-PREVIEW', $link->fresh()->remote_user_product_id);
         Http::assertSent(fn (HttpRequest $request): bool => $request->method() === 'GET');
         Http::assertNotSent(fn (HttpRequest $request): bool => $request->method() === 'PUT');
+    }
+
+    public function test_pilot_apply_delta_zero_records_no_change_without_put(): void
+    {
+        $link = $this->readyLink(5, 'MLM-NO-CHANGE-PILOT');
+        Http::fake(['https://api.mercadolibre.com/items/*' => Http::response(['available_quantity' => 5, 'user_product_id' => 'MLMU-NO-CHANGE'], 200)]);
+
+        $result = app(InventoryMeliStockPilotService::class)->apply($link);
+
+        $this->assertSame(InventoryMeliStockSyncService::NO_CHANGE, $result['write_status']);
+        $this->assertSame(InventoryChannelStockSync::VERIFIED, $result['verification_status']);
+        $this->assertTrue((bool) InventoryChannelStockSync::query()->latest('id')->value('metadata->no_change'));
+        Http::assertNotSent(fn (HttpRequest $request) => $request->method() === 'PUT');
+    }
+
+    public function test_pilot_preview_explains_drift_from_recent_audited_sibling_write(): void
+    {
+        $account = $this->account();
+        $product = $this->product('SIBLING-DRIFT');
+        $sibling = $this->enabled($this->linkForAccount($product, $account, ['external_listing_id' => 'MLM-SIBLING-DRIFT', 'remote_user_product_id' => 'MLMU-DRIFT']));
+        $representative = $this->enabled($this->linkForAccount($product, $account, ['external_listing_id' => 'MLM-REP-DRIFT', 'remote_user_product_id' => 'MLMU-DRIFT']));
+        InventoryChannelStockSync::create([
+            'inventory_channel_link_id' => $sibling->id, 'inventory_product_id' => $product->id,
+            'channel' => InventoryChannelLink::MERCADO_LIBRE, 'account_key' => (string) $account->id,
+            'external_listing_id' => $sibling->external_listing_id, 'target_quantity' => 13,
+            'previous_known_quantity' => 13, 'status' => InventoryChannelStockSync::SUCCESS,
+            'started_at' => now()->subMinutes(5), 'finished_at' => now()->subMinutes(4),
+        ]);
+        InventoryChannelStockSync::create([
+            'inventory_channel_link_id' => $representative->id, 'inventory_product_id' => $product->id,
+            'channel' => InventoryChannelLink::MERCADO_LIBRE, 'account_key' => (string) $account->id,
+            'external_listing_id' => $representative->external_listing_id, 'target_quantity' => 14,
+            'previous_known_quantity' => 13, 'status' => InventoryChannelStockSync::SUCCESS,
+            'started_at' => now()->subMinute(), 'finished_at' => now(),
+        ]);
+        Http::fake(['https://api.mercadolibre.com/items/*' => Http::response(['available_quantity' => 14, 'user_product_id' => 'MLMU-DRIFT'], 200)]);
+
+        $result = app(InventoryMeliStockPilotService::class)->preview($sibling);
+
+        $this->assertFalse($result['remote_drift']);
+        $this->assertTrue($result['remote_drift_explained']);
     }
 
     public function test_apply_requires_exact_confirmation_and_writes_only_after_match(): void
@@ -139,6 +182,104 @@ class InventoryMeliStockPilotTest extends TestCase
             '--confirm' => 'MLM-CONFIRM',
         ]));
         Http::assertSent(fn (HttpRequest $request): bool => $request->method() === 'PUT');
+    }
+
+    public function test_pilot_requires_representative_write_identity_for_shared_sibling(): void
+    {
+        $account = $this->account();
+        $product = $this->product('CONFIRM-SHARED');
+        $this->movement($product, 7);
+        $representative = $this->enabled($this->linkForAccount($product, $account, ['external_listing_id' => 'MLM-CONFIRM-REP', 'remote_user_product_id' => 'MLMU-CONFIRM']));
+        $sibling = $this->enabled($this->linkForAccount($product, $account, ['external_listing_id' => 'MLM-CONFIRM-SIB', 'remote_user_product_id' => 'MLMU-CONFIRM']));
+        Http::fake(fn (HttpRequest $request) => $request->method() === 'GET'
+            ? Http::response(['available_quantity' => 6, 'user_product_id' => 'MLMU-CONFIRM'], 200)
+            : Http::response(['id' => 'MLM-CONFIRM-REP'], 200));
+
+        $this->assertSame(1, Artisan::call('inventory:meli-stock-pilot', [
+            '--link' => $sibling->id, '--apply' => true, '--confirm' => $sibling->external_listing_id,
+        ]));
+        Http::assertNotSent(fn (HttpRequest $request): bool => $request->method() === 'PUT');
+
+        $this->assertSame(0, Artisan::call('inventory:meli-stock-pilot', [
+            '--link' => $sibling->id, '--apply' => true, '--confirm' => $representative->external_listing_id,
+        ]));
+        Http::assertSent(fn (HttpRequest $request): bool => $request->method() === 'PUT' && str_ends_with($request->url(), '/MLM-CONFIRM-REP'));
+    }
+
+    public function test_final_confirmation_is_rechecked_when_representative_changes_after_preview(): void
+    {
+        $account = $this->account();
+        $product = $this->product('CONFIRM-TOCTOU');
+        $this->movement($product, 7);
+        $representative = $this->enabled($this->linkForAccount($product, $account, ['external_listing_id' => 'MLM-TOCTOU-REP', 'remote_user_product_id' => 'MLMU-TOCTOU']));
+        $sibling = $this->enabled($this->linkForAccount($product, $account, ['external_listing_id' => 'MLM-TOCTOU-SIB', 'remote_user_product_id' => 'MLMU-TOCTOU']));
+        $reads = 0;
+        Http::fake(function (HttpRequest $request) use ($representative, &$reads) {
+            if ($request->method() === 'PUT') {
+                return Http::response(['id' => $representative->external_listing_id], 200);
+            }
+            $reads++;
+            if ($reads === 2) {
+                $representative->fresh()->update(['stock_sync_enabled' => false]);
+            }
+
+            return Http::response(['available_quantity' => 6, 'user_product_id' => 'MLMU-TOCTOU'], 200);
+        });
+        $preview = app(InventoryMeliStockPilotService::class)->preview($sibling);
+        $result = app(InventoryMeliStockPilotService::class)->apply($sibling, null, $preview['write_identity']);
+
+        $this->assertSame(InventoryMeliStockSyncService::CONFIRMATION_MISMATCH, $result['write_status']);
+        Http::assertNotSent(fn (HttpRequest $request): bool => $request->method() === 'PUT');
+    }
+
+    public function test_shared_sibling_preview_quantity_does_not_skip_representative_put(): void
+    {
+        $account = $this->account();
+        $product = $this->product('REPRESENTATIVE-REMOTE');
+        $this->movement($product, 14);
+        $representative = $this->enabled($this->linkForAccount($product, $account, ['external_listing_id' => 'MLM-REP-13', 'remote_user_product_id' => 'MLMU-REP']));
+        $sibling = $this->enabled($this->linkForAccount($product, $account, ['external_listing_id' => 'MLM-SIB-14', 'remote_user_product_id' => 'MLMU-REP']));
+        Http::fake(function (HttpRequest $request) use ($representative, $sibling) {
+            if ($request->method() === 'PUT') {
+                return Http::response(['id' => $representative->external_listing_id], 200);
+            }
+            return str_ends_with($request->url(), '/'.$sibling->external_listing_id)
+                ? Http::response(['available_quantity' => 14, 'user_product_id' => 'MLMU-REP'], 200)
+                : Http::response(['available_quantity' => 13, 'user_product_id' => 'MLMU-REP'], 200);
+        });
+
+        $result = app(InventoryMeliStockPilotService::class)->apply($sibling);
+
+        $this->assertSame(InventoryChannelStockSync::SUCCESS, $result['write_status']);
+        Http::assertSent(fn (HttpRequest $request): bool => $request->method() === 'PUT' && str_ends_with($request->url(), '/'.$representative->external_listing_id));
+    }
+
+    public function test_representative_verified_with_unpropagated_sibling_records_pending_without_second_put(): void
+    {
+        $account = $this->account();
+        $product = $this->product('SIBLING-PENDING');
+        $this->movement($product, 7);
+        $representative = $this->enabled($this->linkForAccount($product, $account, ['external_listing_id' => 'MLM-PENDING-REP', 'remote_user_product_id' => 'MLMU-PENDING']));
+        $sibling = $this->enabled($this->linkForAccount($product, $account, ['external_listing_id' => 'MLM-PENDING-SIB', 'remote_user_product_id' => 'MLMU-PENDING']));
+        $representativeGets = 0;
+        Http::fake(function (HttpRequest $request) use ($representative, $sibling, &$representativeGets) {
+            if ($request->method() === 'PUT') {
+                return Http::response(['id' => $representative->external_listing_id], 200);
+            }
+            if (str_ends_with($request->url(), '/'.$sibling->external_listing_id)) {
+                return Http::response(['available_quantity' => 5, 'user_product_id' => 'MLMU-PENDING'], 200);
+            }
+            $representativeGets++;
+
+            return Http::response(['available_quantity' => $representativeGets >= 4 ? 7 : 5, 'user_product_id' => 'MLMU-PENDING'], 200);
+        });
+
+        $result = app(InventoryMeliStockPilotService::class)->apply($representative);
+        $audit = InventoryChannelStockSync::query()->latest('id')->first();
+
+        $this->assertSame(InventoryChannelStockSync::VERIFIED, $result['verification_status']);
+        $this->assertSame('PENDING_OR_MISMATCH', data_get($audit->metadata, 'sibling_verification.0.status'));
+        $this->assertSame(1, Http::recorded(fn (HttpRequest $request): bool => $request->method() === 'PUT')->count());
     }
 
     public function test_wrong_confirmation_performs_no_put(): void
@@ -439,6 +580,7 @@ class InventoryMeliStockPilotTest extends TestCase
         $result = app(InventoryMeliStockPilotService::class)->preview($link);
 
         $this->assertTrue($result['remote_drift']);
+        $this->assertFalse($result['remote_drift_explained']);
     }
 
     public function test_previous_known_quantity_is_pre_put_remote_quantity(): void

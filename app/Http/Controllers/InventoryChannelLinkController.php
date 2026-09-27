@@ -11,6 +11,7 @@ use App\Services\InventoryChannelLinkService;
 use App\Services\InventoryMeliLinkImportService;
 use App\Services\InventoryMeliStockPilotService;
 use App\Services\InventoryMeliStockSyncService;
+use App\Services\InventoryMeliSharedStockGroupService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
@@ -77,15 +78,22 @@ class InventoryChannelLinkController extends Controller
         return redirect()->route('inventory.channels.index')->with('success', 'Enlace de canal creado correctamente.');
     }
 
-    public function show(Request $request, InventoryChannelLink $inventoryChannelLink): Response
+    public function show(Request $request, InventoryChannelLink $inventoryChannelLink, InventoryMeliSharedStockGroupService $groups): Response
     {
         $inventoryChannelLink->load('product:id,sku,name,barcode');
         $lastSuccess = $inventoryChannelLink->stockSyncs()->where('status', 'SUCCESS')->latest('id')->first();
+        $siblings = $groups->isGrouped($inventoryChannelLink)
+            ? $groups->links($inventoryChannelLink, true)->map(fn (InventoryChannelLink $link) => (int) $link->id)->values()
+            : collect();
 
         return Inertia::render('Inventory/Channels/Show', [
             'link' => $inventoryChannelLink,
             'canManage' => $request->user()?->isAdmin() ?? false,
             'lastSuccessfulStockSync' => $lastSuccess,
+            'sharedStockGroup' => $groups->isGrouped($inventoryChannelLink) ? [
+                'remote_user_product_id' => $inventoryChannelLink->remote_user_product_id,
+                'link_ids' => $siblings,
+            ] : null,
         ]);
     }
 

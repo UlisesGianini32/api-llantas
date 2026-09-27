@@ -81,6 +81,9 @@ Migraciones Inventory de Tickets 1–9:
 - `2026_09_25_000002_add_stock_sync_enabled_to_inventory_channel_links`
 - `2026_09_25_000003_create_inventory_channel_stock_syncs_table`
 - `2026_09_25_000004_add_verification_to_inventory_channel_stock_syncs`
+- `2026_09_26_000001_add_remote_user_product_id_to_inventory_channel_links`
+
+Mercado Libre descubre `remote_user_product_id` en lecturas remotas ya existentes. El stock simple se agrupa solo por `account_key + remote_user_product_id`, nunca entre cuentas ni para variaciones. Un grupo tiene un representante determinista (menor ID activo y habilitado), un único PUT y un lock común. Si los vínculos habilitados del grupo pertenecen a distintos productos Inventory, se bloquea con `REMOTE_USER_PRODUCT_CONFLICT`. Delta cero no hace PUT. Los siblings pueden reflejar stock por propagación remota; las verificaciones y los drifts explicados quedan registrados en auditoría. El importador sigue sin HTTP adicional y el scheduler Inventory continúa desactivado.
 
 No usar `migrate:refresh`, `migrate:reset` ni `migrate:rollback` global. Después, si las caches son compatibles:
 

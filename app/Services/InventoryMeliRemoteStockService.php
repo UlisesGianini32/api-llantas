@@ -24,7 +24,7 @@ class InventoryMeliRemoteStockService
 
     public function __construct(private readonly MeliAccountApiClient $api) {}
 
-    /** @return array{status:string,quantity:?int,http_status:?int,error:?string} */
+    /** @return array{status:string,quantity:?int,http_status:?int,error:?string,user_product_id:?string} */
     public function read(InventoryChannelLink $link, ?MeliAccount $account = null): array
     {
         $account ??= ctype_digit((string) $link->account_key)
@@ -63,6 +63,7 @@ class InventoryMeliRemoteStockService
                         'quantity' => (int) $variation['available_quantity'],
                         'http_status' => $response->status(),
                         'error' => null,
+                        'user_product_id' => null,
                     ];
                 }
 
@@ -73,11 +74,19 @@ class InventoryMeliRemoteStockService
                 return $this->failure(self::MALFORMED_RESPONSE, $response->status());
             }
 
+            $userProductId = is_string($item['user_product_id'] ?? null) && $item['user_product_id'] !== ''
+                ? $item['user_product_id']
+                : null;
+            if ($userProductId !== null && $link->channel === InventoryChannelLink::MERCADO_LIBRE) {
+                $link->forceFill(['remote_user_product_id' => $userProductId])->save();
+            }
+
             return [
                 'status' => self::OK,
                 'quantity' => (int) $item['available_quantity'],
                 'http_status' => $response->status(),
                 'error' => null,
+                'user_product_id' => $userProductId,
             ];
         } catch (Throwable $exception) {
             $status = $exception instanceof MeliApiRequestException ? $exception->httpStatus() : null;
@@ -94,6 +103,7 @@ class InventoryMeliRemoteStockService
             'quantity' => null,
             'http_status' => $httpStatus,
             'error' => $error,
+            'user_product_id' => null,
         ];
     }
 

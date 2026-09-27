@@ -35,10 +35,33 @@ class InventoryMeliStockOwnershipService
             return $this->legacySkipCache[$key];
         }
 
-        return $this->legacySkipCache[$key] = InventoryChannelLink::query()
+        $owned = InventoryChannelLink::query()
             ->where('channel', InventoryChannelLink::MERCADO_LIBRE)
             ->where('account_key', (string) $accountId)
             ->where('external_listing_id', trim($listingId))
+            ->where('is_active', true)
+            ->where('stock_sync_enabled', true)
+            ->exists();
+
+        if ($owned) {
+            return $this->legacySkipCache[$key] = true;
+        }
+
+        $link = InventoryChannelLink::query()
+            ->where('channel', InventoryChannelLink::MERCADO_LIBRE)
+            ->where('account_key', (string) $accountId)
+            ->where('external_listing_id', trim($listingId))
+            ->whereNull('external_variant_id')
+            ->first();
+        if (! $link || blank($link->remote_user_product_id)) {
+            return $this->legacySkipCache[$key] = false;
+        }
+
+        return $this->legacySkipCache[$key] = InventoryChannelLink::query()
+            ->where('channel', InventoryChannelLink::MERCADO_LIBRE)
+            ->where('account_key', (string) $accountId)
+            ->where('remote_user_product_id', $link->remote_user_product_id)
+            ->whereNull('external_variant_id')
             ->where('is_active', true)
             ->where('stock_sync_enabled', true)
             ->exists();

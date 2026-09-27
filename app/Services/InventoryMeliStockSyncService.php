@@ -10,7 +10,6 @@ use App\Services\MercadoLibre\MeliAccountApiClient;
 use App\Services\MercadoLibre\MeliApiRequestException;
 use App\Services\MercadoLibre\MeliVariationStockPayloadBuilder;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
-use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Throwable;
@@ -33,11 +32,20 @@ class InventoryMeliStockSyncService
 
     public const LOCKED = 'LOCKED';
 
+    public const REMOTE_USER_PRODUCT_CONFLICT = 'REMOTE_USER_PRODUCT_CONFLICT';
+
+    public const NO_CHANGE = 'NO_CHANGE';
+
+    public const CONFIRMATION_MISMATCH = 'CONFIRMATION_MISMATCH';
+
+    public const REMOTE_GROUP_CHANGED = 'REMOTE_GROUP_CHANGED';
+
     public function __construct(
         private readonly InventoryStockService $stock,
         private readonly InventoryKitStockService $kitStock,
         private readonly MeliAccountApiClient $api,
         private readonly MeliVariationStockPayloadBuilder $variationPayload,
+        private readonly InventoryMeliSharedStockGroupService $groups,
     ) {}
 
     /** @return list<string> */
@@ -52,6 +60,7 @@ class InventoryMeliStockSyncService
             self::INVALID_EXTERNAL_ID,
             self::UNSUPPORTED,
             self::LOCKED,
+            self::REMOTE_USER_PRODUCT_CONFLICT,
         ];
     }
 
@@ -107,6 +116,14 @@ class InventoryMeliStockSyncService
                 Log::warning('Inventory MeLi stock availability was clamped to zero', ['link_id' => $link->id, 'available' => $available]);
             }
 
+            $grouped = $this->groups->isGrouped($link);
+            $siblings = $grouped ? $this->groups->links($link, true) : collect([$link]);
+            $groupConflict = $grouped ? $this->groups->conflict($link) : ['conflict' => false, 'link_ids' => [], 'product_ids' => []];
+            if ($status === self::READY && $groupConflict['conflict']) {
+                $status = self::REMOTE_USER_PRODUCT_CONFLICT;
+                $reason = 'El user_product_id remoto pertenece a varios productos Inventory.';
+            }
+
             return [
                 'id' => (int) $link->id,
                 'inventory_product_id' => $product?->id,
@@ -121,6 +138,13 @@ class InventoryMeliStockSyncService
                 'account_name' => $account?->nickname,
                 'external_listing_id' => $link->external_listing_id,
                 'external_variant_id' => $link->external_variant_id,
+                'remote_user_product_id' => $link->remote_user_product_id,
+                'shared_stock_group' => $grouped ? $link->remote_user_product_id : null,
+                'sibling_link_ids' => $grouped ? $siblings->pluck('id')->map(fn ($id) => (int) $id)->all() : [],
+                'representative_link_id' => $grouped ? (int) ($siblings->first()?->id ?? $link->id) : (int) $link->id,
+                'remote_user_product_conflict' => $groupConflict['conflict'],
+                'conflict_link_ids' => $groupConflict['link_ids'],
+                'conflict_product_ids' => $groupConflict['product_ids'],
                 'stock_sync_enabled' => (bool) $link->stock_sync_enabled,
                 'is_active' => (bool) $link->is_active,
                 'status' => $status,
@@ -155,11 +179,22 @@ class InventoryMeliStockSyncService
     {
         $rows = $this->preview($filters)['rows'];
         $results = [];
+        $processedGroups = [];
         foreach ($rows as $row) {
             if ($row['status'] !== self::READY) {
                 continue;
             }
-            $results[] = $this->syncLink(InventoryChannelLink::query()->findOrFail($row['id']), $userId, 'manual');
+            $groupKey = $row['shared_stock_group'] === null
+                ? 'link:'.$row['id']
+                : 'group:'.hash('sha256', $row['account_key']."\0".$row['shared_stock_group']);
+            if (isset($processedGroups[$groupKey])) {
+                continue;
+            }
+            $processedGroups[$groupKey] = true;
+            $representativeId = (int) ($row['representative_link_id'] ?? $row['id']);
+            $representative = InventoryChannelLink::query()->find($representativeId)
+                ?? InventoryChannelLink::query()->findOrFail($row['id']);
+            $results[] = $this->syncLink($representative, $userId, 'manual');
         }
 
         return ['imported' => count(array_filter($results, fn (array $result): bool => $result['status'] === InventoryChannelStockSync::SUCCESS)), 'results' => $results];
@@ -183,8 +218,10 @@ class InventoryMeliStockSyncService
         ?int $userId = null,
         string $triggeredBy = 'manual',
         ?int $previousKnownQuantity = null,
+        ?int $requestedLinkId = null,
+        ?string $confirmedWriteIdentity = null,
     ): array {
-        return $this->syncLinkInternal($link, $userId, $triggeredBy, $previousKnownQuantity, false);
+        return $this->syncLinkInternal($link, $userId, $triggeredBy, $previousKnownQuantity, false, $requestedLinkId, $confirmedWriteIdentity);
     }
 
     /** @return array<string,mixed> */
@@ -194,14 +231,32 @@ class InventoryMeliStockSyncService
         string $triggeredBy,
         ?int $previousKnownQuantity,
         bool $acquireLock,
+        ?int $requestedLinkId = null,
+        ?string $confirmedWriteIdentity = null,
     ): array {
         $link = $link instanceof InventoryChannelLink ? $link : InventoryChannelLink::query()->findOrFail($link);
+        $requestedLinkId ??= (int) $link->getKey();
         $row = collect($this->preview(['link' => $link->getKey()])['rows'])->first();
         if (! $row || $row['status'] !== self::READY) {
             return [...($row ?? ['id' => $link->id]), 'status' => $row['status'] ?? self::UNSUPPORTED];
         }
 
-        $lock = $acquireLock ? Cache::lock('inventory-meli-stock-sync:link:'.$link->getKey(), 600) : null;
+        if ($this->groups->isGrouped($link)) {
+            $conflict = $this->groups->conflict($link);
+            if ($conflict['conflict']) {
+                Log::warning('Inventory MeLi shared stock ownership conflict', [
+                    'remote_user_product_id' => $link->remote_user_product_id,
+                    'link_ids' => $conflict['link_ids'],
+                    'product_ids' => $conflict['product_ids'],
+                ]);
+
+                return [...$row, 'status' => self::REMOTE_USER_PRODUCT_CONFLICT, 'reason' => 'REMOTE_USER_PRODUCT_CONFLICT', ...$conflict];
+            }
+            $link = $this->groups->representative($link)->fresh(['product']);
+            $row = collect($this->preview(['link' => $link->getKey()])['rows'])->first() ?? $row;
+        }
+
+        $lock = $acquireLock ? $this->groups->lock($link) : null;
         if ($lock && ! $lock->get()) {
             return [...$row, 'status' => self::LOCKED, 'reason' => 'La sincronización ya está en curso.'];
         }
@@ -228,15 +283,147 @@ class InventoryMeliStockSyncService
                 'triggered_by' => $triggeredBy,
                 'created_by' => $userId,
                 'started_at' => $started,
-                'metadata' => ['negative_available_clamped' => $row['available'] < 0],
+                'metadata' => [
+                    'negative_available_clamped' => $row['available'] < 0,
+                    'requested_link_id' => $requestedLinkId,
+                    ...($this->groups->isGrouped($link) ? [
+                        'shared_stock_group' => $link->remote_user_product_id,
+                        'representative' => true,
+                        'representative_link_id' => (int) $link->id,
+                        'sibling_link_ids' => $this->groups->links($link, true)->pluck('id')->map(fn ($id) => (int) $id)->all(),
+                    ] : []),
+                ],
             ]);
+            if ($confirmedWriteIdentity !== null && $confirmedWriteIdentity !== $this->identity($link)) {
+                return $this->abortAudit($audit, $row, self::CONFIRMATION_MISMATCH, 'La identidad confirmada no coincide con la identidad final de escritura.');
+            }
             try {
                 $this->api->ensureFreshAccessToken($account);
-                $payload = ['available_quantity' => $row['target']];
                 if (filled($link->external_variant_id)) {
                     $remote = $this->api->request($account, 'get', '/items/'.rawurlencode((string) $link->external_listing_id));
-                    $payload = $this->variationPayload->build((array) $remote->json('variations', []), (string) $link->external_variant_id, $row['target']);
+                    $item = $remote->json();
+                    $variation = collect((array) ($item['variations'] ?? []))->first(fn ($v) => (string) ($v['id'] ?? '') === (string) $link->external_variant_id);
+                    if (is_numeric($variation['available_quantity'] ?? null)) {
+                        $previousKnownQuantity = (int) $variation['available_quantity'];
+                        $audit->forceFill(['previous_known_quantity' => $previousKnownQuantity])->save();
+                    }
+                    if (is_numeric($variation['available_quantity'] ?? null) && (int) $variation['available_quantity'] === (int) $row['target']) {
+                        return $this->recordNoChange($audit, $row, (int) $variation['available_quantity']);
+                    }
+                    $payload = $this->variationPayload->build((array) ($item['variations'] ?? []), (string) $link->external_variant_id, $row['target']);
+                } else {
+                    if ($previousKnownQuantity === null) {
+                        $lockKeyBeforeDiscovery = $this->groups->lockKey($link);
+                        $representativeWasRead = false;
+                        $hadKnownRemoteGroup = $this->groups->isGrouped($link);
+                        $knownRemoteUserProductId = $link->remote_user_product_id;
+                        $remote = $this->api->request($account, 'get', '/items/'.rawurlencode((string) $link->external_listing_id));
+                        $item = $remote->json();
+                        $remoteUserProductId = is_string($item['user_product_id'] ?? null) ? $item['user_product_id'] : null;
+                        if ($remoteUserProductId !== null && $remoteUserProductId !== '') {
+                            $link->forceFill(['remote_user_product_id' => $remoteUserProductId])->save();
+                            $row['remote_user_product_id'] = $remoteUserProductId;
+                            if ($hadKnownRemoteGroup && $remoteUserProductId !== (string) $knownRemoteUserProductId) {
+                                return $this->abortAudit($audit, $row, self::REMOTE_GROUP_CHANGED, 'La identidad remota cambió; reintentar con el lock del nuevo grupo.', self::REMOTE_GROUP_CHANGED, [
+                                    'remote_user_product_id' => $remoteUserProductId,
+                                ]);
+                            }
+                            if ($lockKeyBeforeDiscovery !== $this->groups->lockKey($link)) {
+                                $lock?->release();
+                                $lock = $this->groups->lock($link);
+                                if (! $lock->get()) {
+                                    return $this->abortAudit($audit, $row, self::LOCKED, 'La sincronización del grupo remoto ya está en curso.');
+                                }
+                                $link = $this->groups->representative($link)->fresh(['product']);
+                                $freshRow = collect($this->preview(['link' => $link->getKey()])['rows'])->first();
+                                if (is_array($freshRow) && array_key_exists('target', $freshRow)) {
+                                    $audit->forceFill(['target_quantity' => $freshRow['target']])->save();
+                                }
+                                if (($freshRow['status'] ?? null) === self::REMOTE_USER_PRODUCT_CONFLICT) {
+                                    return $this->abortAudit($audit, $freshRow, self::REMOTE_USER_PRODUCT_CONFLICT, 'REMOTE_USER_PRODUCT_CONFLICT', self::REMOTE_USER_PRODUCT_CONFLICT, [
+                                        'link_ids' => $freshRow['conflict_link_ids'] ?? [],
+                                        'product_ids' => $freshRow['conflict_product_ids'] ?? [],
+                                    ]);
+                                }
+                                if (! $freshRow || $freshRow['status'] !== self::READY) {
+                                    throw new \RuntimeException('El grupo remoto dejó de ser elegible durante la sincronización.');
+                                }
+                                $row = $freshRow;
+                                if ($confirmedWriteIdentity !== null && $confirmedWriteIdentity !== $this->identity($link)) {
+                                    return $this->abortAudit($audit, $row, self::CONFIRMATION_MISMATCH, 'La identidad confirmada no coincide con la identidad final de escritura.');
+                                }
+                                $account = MeliAccount::query()->find((int) $link->account_key);
+                                $representativeRemote = $this->api->request($account, 'get', '/items/'.rawurlencode((string) $link->external_listing_id));
+                                $representativeItem = $representativeRemote->json();
+                                $representativeUserProductId = $representativeItem['user_product_id'] ?? null;
+                                if (! is_string($representativeUserProductId) || $representativeUserProductId === '' || $representativeUserProductId !== (string) $link->remote_user_product_id) {
+                                    if (is_string($representativeUserProductId) && $representativeUserProductId !== '') {
+                                        $link->forceFill(['remote_user_product_id' => $representativeUserProductId])->save();
+                                    }
+
+                                    return $this->abortAudit($audit, $row, self::REMOTE_GROUP_CHANGED, 'La identidad remota del representante cambió; reintentar con el nuevo grupo.', self::REMOTE_GROUP_CHANGED, [
+                                        'remote_user_product_id' => $representativeUserProductId,
+                                    ]);
+                                }
+                                if (! is_numeric($representativeItem['available_quantity'] ?? null)) {
+                                    return $this->abortAudit($audit, $row, self::FAILED, 'La cantidad remota del representante no es válida.', 'MALFORMED_RESPONSE');
+                                }
+                                $representativeWasRead = true;
+                                $previousKnownQuantity = is_numeric($representativeItem['available_quantity'] ?? null)
+                                    ? (int) $representativeItem['available_quantity']
+                                    : null;
+                                $audit->forceFill([
+                                    'inventory_channel_link_id' => $link->id,
+                                    'inventory_product_id' => $link->inventory_product_id,
+                                    'external_listing_id' => $link->external_listing_id,
+                                    'previous_known_quantity' => $previousKnownQuantity,
+                                ])->save();
+                            }
+                            $knownGroupLinks = $this->groups->links($link, true);
+                            $representativeId = (int) ($knownGroupLinks->first()?->id ?? $link->id);
+                            $audit->forceFill(['metadata' => array_merge((array) $audit->metadata, [
+                                'shared_stock_group' => $remoteUserProductId,
+                                'representative' => $representativeId === (int) $link->id,
+                                'representative_link_id' => $representativeId,
+                                'sibling_link_ids' => $knownGroupLinks->pluck('id')->map(fn ($id) => (int) $id)->all(),
+                            ])])->save();
+                            $conflict = $this->groups->conflict($link);
+                            if ($conflict['conflict']) {
+                                $audit->forceFill([
+                                    'status' => InventoryChannelStockSync::FAILED,
+                                    'error_code' => self::REMOTE_USER_PRODUCT_CONFLICT,
+                                    'error_message' => 'REMOTE_USER_PRODUCT_CONFLICT',
+                                    'finished_at' => now(),
+                                    'metadata' => array_merge((array) $audit->metadata, $conflict, ['remote_user_product_id' => $remoteUserProductId]),
+                                ])->save();
+
+                                return [...$row, 'status' => self::REMOTE_USER_PRODUCT_CONFLICT, 'reason' => 'REMOTE_USER_PRODUCT_CONFLICT', ...$conflict];
+                            }
+                        }
+                        if (! $representativeWasRead && $this->groups->isGrouped($link)) {
+                            $remoteRepresentativeId = $item['user_product_id'] ?? null;
+                            if (! is_string($remoteRepresentativeId) || $remoteRepresentativeId === '' || $remoteRepresentativeId !== (string) $link->remote_user_product_id) {
+                                if (is_string($remoteRepresentativeId) && $remoteRepresentativeId !== '') {
+                                    $link->forceFill(['remote_user_product_id' => $remoteRepresentativeId])->save();
+                                }
+
+                                return $this->abortAudit($audit, $row, self::REMOTE_GROUP_CHANGED, 'La identidad remota del representante cambió; reintentar con el nuevo grupo.', self::REMOTE_GROUP_CHANGED, [
+                                    'remote_user_product_id' => $remoteRepresentativeId,
+                                ]);
+                            }
+                            if (! is_numeric($item['available_quantity'] ?? null)) {
+                                return $this->abortAudit($audit, $row, self::FAILED, 'La cantidad remota del representante no es válida.', 'MALFORMED_RESPONSE');
+                            }
+                            $representativeWasRead = true;
+                        }
+                        $previousKnownQuantity ??= is_numeric($item['available_quantity'] ?? null) ? (int) $item['available_quantity'] : null;
+                        $audit->forceFill(['previous_known_quantity' => $previousKnownQuantity])->save();
+                    }
+                    if ($previousKnownQuantity !== null && $previousKnownQuantity === (int) $row['target']) {
+                        return $this->recordNoChange($audit, $row, $previousKnownQuantity);
+                    }
                 }
+                $payload ??= ['available_quantity' => $row['target']];
                 $response = $this->api->request($account, 'put', '/items/'.rawurlencode((string) $link->external_listing_id), $payload);
                 if (! $response->successful()) {
                     throw new MeliApiRequestException(
@@ -264,6 +451,42 @@ class InventoryMeliStockSyncService
         } finally {
             $lock?->release();
         }
+    }
+
+    private function recordNoChange(InventoryChannelStockSync $audit, array $row, int $quantity): array
+    {
+        $audit->forceFill([
+            'status' => InventoryChannelStockSync::SUCCESS,
+            'previous_known_quantity' => $quantity,
+            'verified_quantity' => $quantity,
+            'verification_status' => InventoryChannelStockSync::VERIFIED,
+            'verified_at' => now(),
+            'finished_at' => now(),
+            'metadata' => array_merge((array) $audit->metadata, ['no_change' => true, 'put_skipped' => true]),
+        ])->save();
+
+        return [...$row, 'status' => self::NO_CHANGE, 'audit_id' => $audit->id, 'verified_quantity' => $quantity];
+    }
+
+    private function identity(InventoryChannelLink $link): string
+    {
+        return filled($link->external_variant_id)
+            ? $link->external_listing_id.':'.$link->external_variant_id
+            : (string) $link->external_listing_id;
+    }
+
+    /** @param array<string,mixed> $row @param array<string,mixed> $extra */
+    private function abortAudit(InventoryChannelStockSync $audit, array $row, string $status, string $reason, ?string $errorCode = null, array $extra = []): array
+    {
+        $audit->forceFill([
+            'status' => InventoryChannelStockSync::FAILED,
+            'error_code' => $errorCode ?? $status,
+            'error_message' => $reason,
+            'finished_at' => now(),
+            'metadata' => array_merge((array) $audit->metadata, $extra),
+        ])->save();
+
+        return [...$row, 'status' => $status, 'reason' => $reason, 'audit_id' => $audit->id, ...$extra];
     }
 
     private function stockValues(?InventoryProduct $product): array

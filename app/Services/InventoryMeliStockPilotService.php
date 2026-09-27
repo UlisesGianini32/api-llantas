@@ -4,7 +4,6 @@ namespace App\Services;
 
 use App\Models\InventoryChannelLink;
 use App\Models\InventoryChannelStockSync;
-use Illuminate\Support\Facades\Cache;
 
 class InventoryMeliStockPilotService
 {
@@ -22,10 +21,13 @@ class InventoryMeliStockPilotService
 
     public const UNVERIFIED = InventoryChannelStockSync::UNVERIFIED;
 
+    public const CONFIRMATION_MISMATCH = InventoryMeliStockSyncService::CONFIRMATION_MISMATCH;
+
     public function __construct(
         private readonly InventoryMeliStockSyncService $sync,
         private readonly InventoryMeliRemoteStockService $remote,
         private readonly InventoryMeliStockOwnershipService $ownership,
+        private readonly InventoryMeliSharedStockGroupService $groups,
     ) {}
 
     /** @return array<string,mixed> */
@@ -54,11 +56,32 @@ class InventoryMeliStockPilotService
             $eligibility = $ownership['status'];
         }
 
+        $link->refresh();
+        $grouped = $this->groups->isGrouped($link);
+        $siblings = $grouped ? $this->groups->links($link, true) : collect([$link]);
+        $representative = $grouped ? ($siblings->first() ?? $link) : $link;
+        $conflict = $grouped ? $this->groups->conflict($link) : ['conflict' => false, 'link_ids' => [], 'product_ids' => []];
+        if ($conflict['conflict'] && $eligibility === InventoryMeliStockSyncService::READY) {
+            $eligibility = InventoryMeliStockSyncService::REMOTE_USER_PRODUCT_CONFLICT;
+        }
+
         $remoteQuantity = $remote['quantity'] ?? null;
         $lastTarget = $lastSuccess?->target_quantity;
 
+        $remoteDrift = $lastTarget !== null && $remoteQuantity !== null && (int) $lastTarget !== (int) $remoteQuantity;
+        $explainedDrift = $remoteDrift && $grouped && $this->hasRecentExplainingGroupWrite($link, $lastSuccess, (int) $remoteQuantity);
+
         return [
             ...$row,
+            'remote_user_product_id' => $link->remote_user_product_id,
+            'shared_stock_group' => $grouped ? $link->remote_user_product_id : null,
+            'sibling_link_ids' => $grouped ? $siblings->pluck('id')->map(fn ($id) => (int) $id)->all() : [],
+            'representative_link_id' => $grouped ? (int) ($siblings->first()?->id ?? $link->id) : (int) $link->id,
+            'requested_identity' => $this->identity($link),
+            'write_identity' => $this->identity($representative),
+            'remote_user_product_conflict' => $conflict['conflict'],
+            'conflict_link_ids' => $conflict['link_ids'],
+            'conflict_product_ids' => $conflict['product_ids'],
             'identity' => $this->identity($link),
             'simple_or_kit' => $row['product_type'] ?? null,
             'physical' => $row['physical'] ?? null,
@@ -73,7 +96,8 @@ class InventoryMeliStockPilotService
             'verified_quantity' => $lastSuccess?->verified_quantity,
             'verification_status' => $lastSuccess?->verification_status,
             'verified_at' => $lastSuccess?->verified_at?->toISOString(),
-            'remote_drift' => $lastTarget !== null && $remoteQuantity !== null && (int) $lastTarget !== (int) $remoteQuantity,
+            'remote_drift' => $remoteDrift && ! $explainedDrift,
+            'remote_drift_explained' => $explainedDrift,
             'legacy_writer_detected' => $ownership['legacy_writer_detected'],
             'legacy_conflict' => $link->is_active && $link->stock_sync_enabled && $ownership['legacy_writer_detected'],
             'legacy_sources' => $ownership['legacy_sources'],
@@ -86,7 +110,7 @@ class InventoryMeliStockPilotService
     }
 
     /** @return array<string,mixed> */
-    public function apply(InventoryChannelLink|int $link, ?int $userId = null): array
+    public function apply(InventoryChannelLink|int $link, ?int $userId = null, ?string $confirmedWriteIdentity = null): array
     {
         $preview = $this->preview($link);
         if ($preview['eligibility'] !== self::READY) {
@@ -100,7 +124,16 @@ class InventoryMeliStockPilotService
         $link = $link instanceof InventoryChannelLink
             ? $link->fresh(['product'])
             : InventoryChannelLink::query()->with('product')->findOrFail($link);
-        $lock = Cache::lock('inventory-meli-stock-sync:link:'.$link->getKey(), 600);
+        $requestedLinkId = (int) $link->id;
+        $link->refresh();
+        $conflict = $this->groups->conflict($link);
+        if ($conflict['conflict']) {
+            return [...$preview, 'write_status' => InventoryMeliStockSyncService::REMOTE_USER_PRODUCT_CONFLICT, 'verification_status' => null, ...$conflict];
+        }
+        $link = $this->groups->representative($link)->fresh(['product']);
+        $preview['representative_link_id'] = (int) $link->id;
+        $preview['write_identity'] = $this->identity($link);
+        $lock = $this->groups->lock($link);
         if (! $lock->get()) {
             return [...$preview, 'eligibility' => self::LOCKED, 'write_status' => self::LOCKED, 'verification_status' => null];
         }
@@ -119,9 +152,14 @@ class InventoryMeliStockPilotService
                 $link,
                 $userId,
                 'pilot',
-                is_numeric($preview['remote_current_quantity'] ?? null) ? (int) $preview['remote_current_quantity'] : null,
+                $this->groups->isGrouped($link) ? null : (is_numeric($preview['remote_current_quantity'] ?? null) ? (int) $preview['remote_current_quantity'] : null),
+                $requestedLinkId,
+                $confirmedWriteIdentity,
             );
             if ($result['status'] !== InventoryChannelStockSync::SUCCESS) {
+                if ($result['status'] === InventoryMeliStockSyncService::NO_CHANGE) {
+                    return [...$preview, ...$result, 'write_status' => InventoryMeliStockSyncService::NO_CHANGE, 'verification_status' => InventoryChannelStockSync::VERIFIED];
+                }
                 return [...$preview, 'write_status' => $result['status'], 'verification_status' => null, 'reason' => $result['reason'] ?? null];
             }
 
@@ -133,11 +171,22 @@ class InventoryMeliStockPilotService
             };
             $audit = InventoryChannelStockSync::query()->find($result['audit_id'] ?? null);
             if ($audit) {
+                $siblingVerification = [];
+                foreach ($this->groups->links($link, true)->where('id', '!=', $link->id) as $sibling) {
+                    $siblingRemote = $this->remote->read($sibling);
+                    $siblingVerification[] = [
+                        'link_id' => (int) $sibling->id,
+                        'status' => $siblingRemote['status'] === InventoryMeliRemoteStockService::OK
+                            ? ((int) $siblingRemote['quantity'] === (int) $result['target'] ? 'PROPAGATED' : 'PENDING_OR_MISMATCH')
+                            : 'UNVERIFIED',
+                        'quantity' => $siblingRemote['quantity'],
+                    ];
+                }
                 $audit->forceFill([
                     'verified_quantity' => $after['quantity'],
                     'verification_status' => $verificationStatus,
                     'verified_at' => now(),
-                    'metadata' => array_merge((array) $audit->metadata, ['pilot' => true]),
+                    'metadata' => array_merge((array) $audit->metadata, ['pilot' => true, 'representative' => true, 'sibling_verification' => $siblingVerification]),
                 ])->save();
             }
 
@@ -182,5 +231,27 @@ class InventoryMeliStockPilotService
             'legacy_sources' => $ownership['legacy_sources'],
             'legacy_ownership_status' => $ownership['status'],
         ];
+    }
+
+    private function hasRecentExplainingGroupWrite(InventoryChannelLink $link, ?InventoryChannelStockSync $lastSuccess, int $remoteQuantity): bool
+    {
+        $query = InventoryChannelStockSync::query()
+            ->where('channel', InventoryChannelLink::MERCADO_LIBRE)
+            ->where('account_key', $link->account_key)
+            ->where('status', InventoryChannelStockSync::SUCCESS)
+            ->where('target_quantity', $remoteQuantity)
+            ->where(function ($query): void {
+                $query->whereNull('metadata->put_skipped')->orWhere('metadata->put_skipped', false);
+            })
+            ->whereHas('link', fn ($links) => $links
+                ->where('channel', InventoryChannelLink::MERCADO_LIBRE)
+                ->where('account_key', $link->account_key)
+                ->where('remote_user_product_id', $link->remote_user_product_id)
+                ->whereNull('external_variant_id'));
+        if ($lastSuccess?->finished_at) {
+            $query->where('finished_at', '>', $lastSuccess->finished_at);
+        }
+
+        return $query->where('finished_at', '>=', now()->subDay())->exists();
     }
 }

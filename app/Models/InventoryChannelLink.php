@@ -23,6 +23,7 @@ class InventoryChannelLink extends Model
         'account_key',
         'external_product_id',
         'external_variant_id',
+        'remote_user_product_id',
         'external_listing_id',
         'external_url',
         'remote_status',
