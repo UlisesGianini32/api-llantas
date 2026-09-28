@@ -46,25 +46,43 @@ return new class extends Migration
         }
 
         if (! Schema::hasTable('inventory_channel_order_allocations')) {
-            Schema::create('inventory_channel_order_allocations', function (Blueprint $table): void {
-                $table->id();
-                $table->string('channel', 32);
-                $table->string('account_key', 64);
-                $table->string('remote_order_id', 64);
-                $table->string('remote_line_key', 191);
-                $table->string('identity_hash', 64)->unique();
-                $table->foreignId('inventory_channel_link_id')->nullable()->constrained('inventory_channel_links')->nullOnDelete();
-                $table->foreignId('inventory_product_id')->nullable()->constrained('inventory_products')->nullOnDelete();
-                $table->string('reservation_kind', 16)->nullable();
-                $table->unsignedBigInteger('reservation_id')->nullable();
-                $table->unsignedInteger('quantity')->default(0);
-                $table->unsignedInteger('reservation_version')->default(0);
-                $table->string('status', 32)->default('PENDING');
-                $table->string('diagnostic_code', 64)->nullable();
-                $table->json('diagnostic_metadata')->nullable();
-                $table->timestamps();
-                $table->index(['channel', 'account_key', 'remote_order_id'], 'inv_order_alloc_order_idx');
-                $table->index(['reservation_kind', 'reservation_id'], 'inv_order_alloc_res_idx');
+            $this->createAllocationTable();
+        }
+
+        if (! Schema::hasIndex('inventory_channel_order_allocations', 'inv_order_alloc_identity_uq', 'unique')) {
+            $duplicateIdentity = DB::table('inventory_channel_order_allocations')
+                ->select('identity_hash')
+                ->groupBy('identity_hash')
+                ->havingRaw('COUNT(*) > 1')
+                ->exists();
+
+            if ($duplicateIdentity) {
+                throw new RuntimeException(
+                    'No se puede crear el índice único inv_order_alloc_identity_uq: existen identity_hash duplicados.'
+                );
+            }
+
+            Schema::table('inventory_channel_order_allocations', function (Blueprint $table): void {
+                $table->unique('identity_hash', 'inv_order_alloc_identity_uq');
+            });
+        }
+
+        $this->ensureAllocationIndex('inventory_channel_link_id', 'inv_order_alloc_link_idx');
+        $this->ensureAllocationIndex('inventory_product_id', 'inv_order_alloc_product_idx');
+        $this->ensureAllocationIndex(['channel', 'account_key', 'remote_order_id'], 'inv_order_alloc_order_idx');
+        $this->ensureAllocationIndex(['reservation_kind', 'reservation_id'], 'inv_order_alloc_res_idx');
+
+        if (! $this->hasAllocationForeignKey('inventory_channel_link_id', 'inventory_channel_links')) {
+            Schema::table('inventory_channel_order_allocations', function (Blueprint $table): void {
+                $table->foreign('inventory_channel_link_id', 'inv_order_alloc_link_fk')
+                    ->references('id')->on('inventory_channel_links')->nullOnDelete();
+            });
+        }
+
+        if (! $this->hasAllocationForeignKey('inventory_product_id', 'inventory_products')) {
+            Schema::table('inventory_channel_order_allocations', function (Blueprint $table): void {
+                $table->foreign('inventory_product_id', 'inv_order_alloc_product_fk')
+                    ->references('id')->on('inventory_products')->nullOnDelete();
             });
         }
     }
@@ -124,5 +142,49 @@ return new class extends Migration
                 $table->dropColumn('order_reservation_enabled');
             });
         }
+    }
+
+    private function createAllocationTable(): void
+    {
+        Schema::create('inventory_channel_order_allocations', function (Blueprint $table): void {
+            $table->id();
+            $table->string('channel', 32);
+            $table->string('account_key', 64);
+            $table->string('remote_order_id', 64);
+            $table->string('remote_line_key', 191);
+            $table->string('identity_hash', 64);
+            $table->unsignedBigInteger('inventory_channel_link_id')->nullable();
+            $table->unsignedBigInteger('inventory_product_id')->nullable();
+            $table->string('reservation_kind', 16)->nullable();
+            $table->unsignedBigInteger('reservation_id')->nullable();
+            $table->unsignedInteger('quantity')->default(0);
+            $table->unsignedInteger('reservation_version')->default(0);
+            $table->string('status', 32)->default('PENDING');
+            $table->string('diagnostic_code', 64)->nullable();
+            $table->json('diagnostic_metadata')->nullable();
+            $table->timestamps();
+        });
+    }
+
+    /** @param array<int,string>|string $columns */
+    private function ensureAllocationIndex(array|string $columns, string $name): void
+    {
+        if (Schema::hasIndex('inventory_channel_order_allocations', $name)) {
+            return;
+        }
+
+        Schema::table('inventory_channel_order_allocations', function (Blueprint $table) use ($columns, $name): void {
+            $table->index($columns, $name);
+        });
+    }
+
+    private function hasAllocationForeignKey(string $column, string $foreignTable, string $foreignColumn = 'id'): bool
+    {
+        return collect(Schema::getForeignKeys('inventory_channel_order_allocations'))
+            ->contains(function (array $foreignKey) use ($column, $foreignTable, $foreignColumn): bool {
+                return $foreignKey['columns'] === [$column]
+                    && $foreignKey['foreign_table'] === $foreignTable
+                    && $foreignKey['foreign_columns'] === [$foreignColumn];
+            });
     }
 };
