@@ -11,9 +11,11 @@ use App\Services\MeliOrderSyncService;
 use App\Services\MeliSharedStockOrderService;
 use App\Services\StockService;
 use App\Services\SyscomOrderFromMeliService;
+use App\Jobs\ReconcileInventoryMeliOrderReservationsJob;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Schema;
 use Inertia\Testing\AssertableInertia as Assert;
@@ -101,6 +103,8 @@ class MeliOrderDeliveryTest extends TestCase
             $table->id();
             $table->foreignId('meli_order_id');
             $table->string('item_id')->nullable();
+            $table->string('variation_id')->nullable();
+            $table->string('remote_line_key')->nullable();
             $table->string('sku')->nullable();
             $table->string('title')->nullable();
             $table->string('variation_text')->nullable();
@@ -201,6 +205,39 @@ class MeliOrderDeliveryTest extends TestCase
         $this->assertSame(2, MeliOrder::query()->count());
         $this->assertSame(2, MeliOrderItem::query()->count());
         $this->assertSame($itemLookups, $this->itemLookupCount());
+    }
+
+    public function test_sync_service_reservation_dispatch_is_optional_and_uses_committed_local_order_id(): void
+    {
+        $disabledAccount = $this->account('950', 'automation-sync-off-token', true, 'Automatizacion OFF');
+        $enabledAccount = $this->account('951', 'automation-sync-on-token', false, 'Automatizacion ON');
+        Bus::fake();
+        $this->fakeOrdersApi([
+            'automation-sync-off-token' => [$this->remoteOrder('95001', 'MLM-AUTO-SYNC-OFF')],
+            'automation-sync-on-token' => [$this->remoteOrder('95002', 'MLM-AUTO-SYNC-ON')],
+        ], [
+            'MLM-AUTO-SYNC-OFF' => 'not_specified',
+            'MLM-AUTO-SYNC-ON' => 'not_specified',
+        ]);
+
+        config()->set('inventory.meli_order_reservations.automatic', false);
+        $syncOff = app(MeliOrderSyncService::class)->syncDay($this->apiUser($disabledAccount), now()->toDateString());
+        $this->assertSame(1, $syncOff['orders'], json_encode($syncOff));
+        $this->assertDatabaseHas('meli_orders', ['order_id' => '95001']);
+        Bus::assertNothingDispatched();
+
+        config()->set('inventory.meli_order_reservations.automatic', true);
+        $syncOn = app(MeliOrderSyncService::class)->syncDay($this->apiUser($enabledAccount), now()->toDateString());
+        $this->assertSame(1, $syncOn['orders'], json_encode($syncOn));
+
+        $localOrder = MeliOrder::query()->where('order_id', '95002')->sole();
+        $this->assertDatabaseHas('meli_order_items', [
+            'meli_order_id' => $localOrder->id,
+            'remote_line_key' => 'MLM-AUTO-SYNC-ON:',
+        ]);
+        Bus::assertDispatched(ReconcileInventoryMeliOrderReservationsJob::class, function (ReconcileInventoryMeliOrderReservationsJob $job) use ($localOrder): bool {
+            return $job->meliOrderId === $localOrder->id && $job->queue === 'meli';
+        });
     }
 
     public function test_pending_order_becomes_mercado_envios_when_shipment_appears(): void

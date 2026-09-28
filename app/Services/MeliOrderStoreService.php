@@ -10,6 +10,10 @@ use Illuminate\Support\Facades\Schema;
 
 class MeliOrderStoreService
 {
+    public function __construct(
+        private readonly InventoryMeliOrderReservationDispatcher $reservationDispatcher,
+    ) {}
+
     public function storeFromOrderApiResponse(array $orderData): MeliOrder
     {
         return DB::transaction(function () use ($orderData) {
@@ -58,6 +62,8 @@ class MeliOrderStoreService
                 'order_id' => $order->order_id,
                 'items' => count($items),
             ]);
+
+            $this->reservationDispatcher->dispatchAfterCommit($order);
 
             return $order;
         });

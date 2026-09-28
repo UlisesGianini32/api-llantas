@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Jobs\ReconcileInventoryMeliOrderReservationsJob;
 use App\Models\InventoryChannelLink;
 use App\Models\InventoryChannelOrderAllocation;
 use App\Models\InventoryKitComponent;
@@ -90,6 +91,56 @@ class InventoryMeliOrderReservationFlowTest extends TestCase
         $this->assertSame(8, app(InventoryStockService::class)->physicalStock($product));
     }
 
+    public function test_automatic_job_is_idempotent_and_releases_when_order_is_cancelled(): void
+    {
+        [$product] = $this->stockedProduct('SKU-AUTO', 5);
+        $this->link($product, 1, 'MLM-AUTO', null, true);
+        $order = $this->order(1, 1101, 'paid', [['item_id' => 'MLM-AUTO', 'key' => 'MLM-AUTO:', 'qty' => 2]]);
+
+        $job = new ReconcileInventoryMeliOrderReservationsJob($order->id);
+        $job->handle(app(InventoryMeliOrderReservationService::class));
+        $job->handle(app(InventoryMeliOrderReservationService::class));
+        $this->assertSame(1, InventoryReservation::active()->count());
+        $this->assertSame(2, InventoryReservation::active()->sum('quantity'));
+
+        $order->update(['status' => 'cancelled']);
+        (new ReconcileInventoryMeliOrderReservationsJob($order->id))->handle(app(InventoryMeliOrderReservationService::class));
+        $this->assertSame(0, InventoryReservation::active()->count());
+        $this->assertGreaterThanOrEqual(1, InventoryReservation::query()->count());
+    }
+
+    public function test_automatic_job_reads_fresh_cancelled_state_before_first_execution(): void
+    {
+        [$product] = $this->stockedProduct('SKU-AUTO-FRESH', 3);
+        $this->link($product, 1, 'MLM-AUTO-FRESH', null, true);
+        $order = $this->order(1, 1102, 'paid', [['item_id' => 'MLM-AUTO-FRESH', 'key' => 'MLM-AUTO-FRESH:', 'qty' => 1]]);
+        $order->update(['status' => 'cancelled']);
+
+        (new ReconcileInventoryMeliOrderReservationsJob($order->id))->handle(app(InventoryMeliOrderReservationService::class));
+        $this->assertSame(0, InventoryReservation::count());
+        $this->assertSame(0, InventoryChannelOrderAllocation::count());
+    }
+
+    public function test_automatic_job_preserves_ignore_opt_out_and_insufficient_outcomes(): void
+    {
+        [$ignoredProduct] = $this->stockedProduct('SKU-AUTO-IGNORED', 2);
+        $this->link($ignoredProduct, 1, 'MLM-AUTO-IGNORED', null, true);
+        $ignored = $this->order(1, 1103, 'pending', [['item_id' => 'MLM-AUTO-IGNORED', 'key' => 'MLM-AUTO-IGNORED:', 'qty' => 1]]);
+        (new ReconcileInventoryMeliOrderReservationsJob($ignored->id))->handle(app(InventoryMeliOrderReservationService::class));
+
+        [$optOutProduct] = $this->stockedProduct('SKU-AUTO-OPTOUT', 2);
+        $this->link($optOutProduct, 1, 'MLM-AUTO-OPTOUT', null, false);
+        $optOut = $this->order(1, 1104, 'paid', [['item_id' => 'MLM-AUTO-OPTOUT', 'key' => 'MLM-AUTO-OPTOUT:', 'qty' => 1]]);
+        (new ReconcileInventoryMeliOrderReservationsJob($optOut->id))->handle(app(InventoryMeliOrderReservationService::class));
+
+        [$lowStockProduct] = $this->stockedProduct('SKU-AUTO-LOW', 0);
+        $this->link($lowStockProduct, 1, 'MLM-AUTO-LOW', null, true);
+        $lowStock = $this->order(1, 1105, 'paid', [['item_id' => 'MLM-AUTO-LOW', 'key' => 'MLM-AUTO-LOW:', 'qty' => 1]]);
+        (new ReconcileInventoryMeliOrderReservationsJob($lowStock->id))->handle(app(InventoryMeliOrderReservationService::class));
+
+        $this->assertSame(0, InventoryReservation::active()->count());
+    }
+
     public function test_ignored_status_is_a_safe_noop_without_prior_allocation(): void
     {
         [$product] = $this->stockedProduct('SKU-IGNORED', 5); $this->link($product, 1, 'MLM-IGNORED', null, true);
@@ -127,12 +178,12 @@ class InventoryMeliOrderReservationFlowTest extends TestCase
         $order = $this->order(1, 1002, 'paid', [['item_id' => 'MLM-L', 'key' => null, 'qty' => 1]]);
         $service = app(InventoryMeliOrderReservationService::class);
         $this->assertSame('LEGACY_LINE_IDENTITY_UNKNOWN', $service->preview($order)[0]['action']);
-        $service->apply($order);
+        (new ReconcileInventoryMeliOrderReservationsJob($order->id))->handle($service);
         $this->assertSame(0, InventoryReservation::count());
         $order->items()->delete();
         $this->line($order, 'MLM-L', null, 'MLM-L:', 1);
         $this->assertSame('RESERVE', $service->preview($order->fresh()->load('items'))[0]['action']);
-        $service->apply($order->fresh()->load('items'));
+        (new ReconcileInventoryMeliOrderReservationsJob($order->id))->handle($service);
         $this->assertSame(1, InventoryReservation::active()->count());
     }
 
@@ -272,7 +323,12 @@ class InventoryMeliOrderReservationFlowTest extends TestCase
         $this->link($left, 1, 'MLM-G1', null, true, true, true, 'SHARED');
         $this->link($right, 1, 'MLM-G2', null, true, true, true, 'SHARED');
         $groupOrder = $this->order(1, 1009, 'paid', [['item_id' => 'MLM-G1', 'key' => 'MLM-G1:', 'qty' => 1]]);
-        $this->assertSame('REMOTE_USER_PRODUCT_CONFLICT', app(InventoryMeliOrderReservationService::class)->preview($groupOrder)[0]['action']);
+        $service = app(InventoryMeliOrderReservationService::class);
+        $this->assertSame('REMOTE_USER_PRODUCT_CONFLICT', $service->preview($groupOrder)[0]['action']);
+        (new ReconcileInventoryMeliOrderReservationsJob($groupOrder->id))->handle($service);
+        $allocation = InventoryChannelOrderAllocation::query()->where('remote_order_id', '1009')->sole();
+        $this->assertSame('REMOTE_USER_PRODUCT_CONFLICT', $allocation->diagnostic_code);
+        $this->assertNull($allocation->reservation_id);
     }
 
     public function test_variations_do_not_enter_shared_group_and_groups_are_account_scoped(): void

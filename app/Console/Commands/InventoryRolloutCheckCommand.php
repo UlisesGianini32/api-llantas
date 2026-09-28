@@ -49,6 +49,37 @@ class InventoryRolloutCheckCommand extends Command
         $checks = [];
         $failures = 0;
         $warnings = 0;
+        $automationEnabled = (bool) config('inventory.meli_order_reservations.automatic', false);
+
+        $this->check($checks, $failures, $warnings, 'meli-order-reservation-automation', function () use ($automationEnabled): string {
+            $status = $automationEnabled ? 'ENABLED' : 'DISABLED';
+            if ($automationEnabled && ! Schema::hasTable('inventory_channel_order_allocations')) {
+                throw new \RuntimeException('falta inventory_channel_order_allocations');
+            }
+            if ($automationEnabled && ! Schema::hasColumn('inventory_channel_links', 'order_reservation_enabled')) {
+                throw new \RuntimeException('falta inventory_channel_links.order_reservation_enabled');
+            }
+            if ($automationEnabled && ! Schema::hasColumn('meli_order_items', 'remote_line_key')) {
+                throw new \RuntimeException('falta meli_order_items.remote_line_key');
+            }
+            if ($automationEnabled && ! Schema::hasColumn('meli_order_items', 'variation_id')) {
+                throw new \RuntimeException('falta meli_order_items.variation_id');
+            }
+
+            $allocations = Schema::hasTable('inventory_channel_order_allocations')
+                ? DB::table('inventory_channel_order_allocations')->count()
+                : 0;
+            $links = Schema::hasColumn('inventory_channel_links', 'order_reservation_enabled')
+                ? DB::table('inventory_channel_links')->where('order_reservation_enabled', true)->count()
+                : 0;
+
+            return sprintf('%s; queue=%s; order_reservation_links=%d; allocations=%d',
+                $status,
+                (string) config('inventory.meli_order_reservations.queue', 'meli'),
+                $links,
+                $allocations,
+            );
+        }, true);
 
         $this->check($checks, $failures, $warnings, 'database', function (): string {
             DB::connection()->getPdo();
@@ -223,6 +254,18 @@ class InventoryRolloutCheckCommand extends Command
 
         $state = $failures > 0 ? 'FAIL' : ($warnings > 0 ? 'WARN' : 'PASS');
         $this->line("Inventory rollout check: {$state}");
+        $automationCheck = array_values(array_filter(
+            $checks,
+            fn (mixed $value): bool => is_array($value) && ($value['name'] ?? null) === 'meli-order-reservation-automation',
+        ))[0] ?? null;
+        if (is_array($automationCheck)) {
+            $this->line(sprintf(
+                '%s | %s | %s',
+                $automationCheck['name'],
+                $automationCheck['status'],
+                $automationCheck['message'],
+            ));
+        }
         $this->table(['Check', 'Estado', 'Detalle'], array_map(
             fn (array $check): array => [$check['name'], $check['status'], $check['message']],
             array_values(array_filter($checks, fn (mixed $value): bool => is_array($value) && isset($value['name']))),

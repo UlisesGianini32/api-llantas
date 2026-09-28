@@ -2,7 +2,7 @@
 
 ## Scope and local order data
 
-`meli_orders.order_id` is the remote order ID and `meli_account_id` identifies the local Mercado Libre account. The current order sync stores Mercado Libre's order `status` unchanged. Each `meli_order_items` row stores the listing as `item_id`, the sold count as `quantity`, and now also stores `variation_id` plus `remote_line_key` (`MLM:variation`). The order sync still owns persistence of the legacy order and does not invoke Inventory reservations.
+`meli_orders.order_id` is the remote order ID and `meli_account_id` identifies the local Mercado Libre account. The current order sync stores Mercado Libre's order `status` unchanged. Each `meli_order_items` row stores the listing as `item_id`, the sold count as `quantity`, and now also stores `variation_id` plus `remote_line_key` (`MLM:variation`). Legacy order persistence remains independent; Ticket 13 optionally dispatches the reconciler after that persistence commits.
 
 The policy currently classifies local `paid` as reservable and `cancelled` as release. Every other status is ignored because this application has no locally established safe reservation meaning for those states. Preview/apply reports these lines as `IGNORED_STATUS`; apply returns before any allocation transaction and leaves existing allocations untouched. Fulfillment/shipment statuses do not cause physical Inventory movements.
 
@@ -37,7 +37,15 @@ Mutation requires one explicit remote order ID:
 php artisan inventory:meli-order-reservations --order=200000001 --apply
 ```
 
-The command does not offer an all-orders apply mode. There is no webhook, queue, or scheduler integration for reservations in this ticket. `--apply` is repeatable and safe for the same order.
+The command does not offer an all-orders apply mode. `--apply` is repeatable and safe for the same order.
+
+## Ticket 13 automatic reconciliation
+
+Automatic reconciliation is controlled only by `INVENTORY_MELI_ORDER_RESERVATIONS_AUTOMATIC` (config key `inventory.meli_order_reservations.automatic`) and defaults to `false`. When enabled, the existing order persistence boundaries register `ReconcileInventoryMeliOrderReservationsJob` with `DB::afterCommit`; the job receives only the local `MeliOrder` ID, reloads the current order and lines, and runs on the `meli` queue. No uniqueness lock is used because Ticket 12 idempotency already handles duplicate jobs and this avoids hiding a later cancellation behind an earlier queued job.
+
+The dispatcher is best effort at the post-commit dispatch boundary: it logs local order ID, remote order ID, account, exception class, and a bounded message with authorization and token values redacted, without rethrowing into legacy order persistence. This also applies when the queue driver is `sync`, because that driver executes the job inside the after-commit callback. Unexpected exceptions from a direct worker invocation of the job are not swallowed and can be retried by the normal queue worker. Business outcomes such as ignored status, opt-out, insufficient inventory, unmatched links, and shared-stock conflicts finish normally with Ticket 12 diagnostics. Inventory automation never changes physical stock, fulfillment state, Mercado Libre status, or remote stock.
+
+`inventory:rollout-check` reports the automation state, queue, enabled order-reservation links, and allocation count. It does not fail when automation is disabled. If automation is enabled while the allocation table, order opt-in column, or line identity columns (`variation_id`, `remote_line_key`) are missing, the check fails safely. Disable the flag to roll back the automation without changing the manual command or Ticket 12 allocations.
 
 ## Rollback and operations
 

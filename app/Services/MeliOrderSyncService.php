@@ -23,6 +23,7 @@ class MeliOrderSyncService
         protected StockService $stockService,
         protected SyscomOrderFromMeliService $syscomOrderFromMeli,
         protected MeliOrderDeliveryClassifier $deliveryClassifier,
+        protected InventoryMeliOrderReservationDispatcher $reservationDispatcher,
     ) {}
 
     /**
@@ -613,6 +614,8 @@ class MeliOrderSyncService
                  */
                 $this->syscomOrderFromMeli
                     ->handleAfterMeliSync($user, $order);
+
+                $this->reservationDispatcher->dispatchAfterCommit($order);
 
                 return $savedItems;
             }

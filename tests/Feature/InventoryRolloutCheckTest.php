@@ -72,6 +72,7 @@ class InventoryRolloutCheckTest extends TestCase
             $table->string('remote_user_product_id', 64)->nullable();
             $table->boolean('is_active')->default(true);
             $table->boolean('stock_sync_enabled')->default(false);
+            $table->boolean('order_reservation_enabled')->default(false);
             $table->timestamps();
         });
         Schema::create('inventory_channel_stock_syncs', function (Blueprint $table): void {
@@ -93,6 +94,8 @@ class InventoryRolloutCheckTest extends TestCase
 
     protected function tearDown(): void
     {
+        Schema::dropIfExists('inventory_channel_order_allocations');
+        Schema::dropIfExists('meli_order_items');
         foreach (['meli_accounts', 'inventory_channel_stock_syncs', 'inventory_channel_links', 'inventory_kit_reservations', 'inventory_kit_components', 'inventory_reservations', 'inventory_movements', 'inventory_locations', 'inventory_products', 'migrations'] as $table) {
             Schema::dropIfExists($table);
         }
@@ -131,7 +134,32 @@ class InventoryRolloutCheckTest extends TestCase
     public function test_clean_setup_passes(): void
     {
         $this->assertSame(0, Artisan::call('inventory:rollout-check'));
-        $this->assertStringContainsString('PASS', Artisan::output());
+        $output = Artisan::output();
+        $this->assertStringContainsString('PASS', $output);
+        $this->assertStringContainsString('DISABLED', $output);
+    }
+
+    public function test_automatic_reservations_require_the_allocation_table_when_enabled(): void
+    {
+        config()->set('inventory.meli_order_reservations.automatic', true);
+        $this->assertSame(1, Artisan::call('inventory:rollout-check'));
+        $this->assertStringContainsString('inventory_channel_order_allocations', Artisan::output());
+    }
+
+    public function test_enabled_automation_passes_when_ticket_twelve_schema_is_complete(): void
+    {
+        Schema::create('meli_order_items', function (Blueprint $table): void {
+            $table->id();
+            $table->string('variation_id')->nullable();
+            $table->string('remote_line_key')->nullable();
+        });
+        Schema::create('inventory_channel_order_allocations', function (Blueprint $table): void {
+            $table->id();
+        });
+        config()->set('inventory.meli_order_reservations.automatic', true);
+
+        $this->assertSame(0, Artisan::call('inventory:rollout-check'));
+        $this->assertStringContainsString('ENABLED', Artisan::output());
     }
 
     public function test_enabled_links_are_highlighted(): void
