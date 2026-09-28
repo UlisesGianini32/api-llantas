@@ -128,7 +128,8 @@ class InventoryMeliStockPilotTest extends TestCase
 
         $this->assertSame(InventoryMeliStockSyncService::NO_CHANGE, $result['write_status']);
         $this->assertSame(InventoryChannelStockSync::VERIFIED, $result['verification_status']);
-        $this->assertTrue((bool) InventoryChannelStockSync::query()->latest('id')->value('metadata->no_change'));
+        $audit = InventoryChannelStockSync::query()->latest('id')->firstOrFail();
+        $this->assertTrue((bool) data_get($audit->metadata, 'no_change'));
         Http::assertNotSent(fn (HttpRequest $request) => $request->method() === 'PUT');
     }
 
@@ -243,6 +244,7 @@ class InventoryMeliStockPilotTest extends TestCase
             if ($request->method() === 'PUT') {
                 return Http::response(['id' => $representative->external_listing_id], 200);
             }
+
             return str_ends_with($request->url(), '/'.$sibling->external_listing_id)
                 ? Http::response(['available_quantity' => 14, 'user_product_id' => 'MLMU-REP'], 200)
                 : Http::response(['available_quantity' => 13, 'user_product_id' => 'MLMU-REP'], 200);
@@ -271,7 +273,7 @@ class InventoryMeliStockPilotTest extends TestCase
             }
             $representativeGets++;
 
-            return Http::response(['available_quantity' => $representativeGets >= 4 ? 7 : 5, 'user_product_id' => 'MLMU-PENDING'], 200);
+            return Http::response(['available_quantity' => $representativeGets >= 3 ? 7 : 5, 'user_product_id' => 'MLMU-PENDING'], 200);
         });
 
         $result = app(InventoryMeliStockPilotService::class)->apply($representative);

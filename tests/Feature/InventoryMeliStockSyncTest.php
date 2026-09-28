@@ -122,7 +122,7 @@ class InventoryMeliStockSyncTest extends TestCase
 
     public function test_shared_user_product_group_sends_one_put_from_lowest_link_id(): void
     {
-        Http::fake(['https://api.mercadolibre.com/items/*' => Http::response(['available_quantity' => 0], 200)]);
+        Http::fake(['https://api.mercadolibre.com/items/*' => Http::response(['available_quantity' => 0, 'user_product_id' => 'MLMU-GROUP'], 200)]);
         $product = $this->product('SHARED-GROUP');
         $this->movement($product, 6);
         $account = $this->account();
@@ -148,6 +148,8 @@ class InventoryMeliStockSyncTest extends TestCase
         $this->assertSame(InventoryMeliStockSyncService::REMOTE_USER_PRODUCT_CONFLICT, $result['status']);
         $this->assertSame([$first->id, $second->id], $result['link_ids']);
         $this->assertSame([$first->inventory_product_id, $second->inventory_product_id], $result['product_ids']);
+        $this->assertSame([$first->id, $second->id], $result['conflict_link_ids']);
+        $this->assertSame([$first->inventory_product_id, $second->inventory_product_id], $result['conflict_product_ids']);
         Http::assertNotSent(fn (HttpRequest $request) => $request->method() === 'PUT');
     }
 
@@ -181,7 +183,8 @@ class InventoryMeliStockSyncTest extends TestCase
         $result = app(InventoryMeliStockSyncService::class)->syncLink($link);
 
         $this->assertSame(InventoryMeliStockSyncService::NO_CHANGE, $result['status']);
-        $this->assertTrue((bool) InventoryChannelStockSync::query()->latest('id')->value('metadata->no_change'));
+        $audit = InventoryChannelStockSync::query()->latest('id')->firstOrFail();
+        $this->assertTrue((bool) data_get($audit->metadata, 'no_change'));
         Http::assertNotSent(fn (HttpRequest $request) => $request->method() === 'PUT');
     }
 
@@ -240,7 +243,9 @@ class InventoryMeliStockSyncTest extends TestCase
         $this->assertSame(InventoryChannelStockSync::SUCCESS, $result['status']);
         $puts = Http::recorded(fn (HttpRequest $request): bool => $request->method() === 'PUT');
         $this->assertCount(1, $puts);
-        $this->assertSame(5, $puts->first()->data()['available_quantity']);
+        $record = $puts->first();
+        $request = $record[0];
+        $this->assertSame(5, $request->data()['available_quantity']);
         $audit = InventoryChannelStockSync::query()->latest('id')->first();
         $this->assertSame(5, $audit->target_quantity);
     }
@@ -269,6 +274,8 @@ class InventoryMeliStockSyncTest extends TestCase
         $this->assertSame(InventoryMeliStockSyncService::REMOTE_USER_PRODUCT_CONFLICT, $result['status']);
         $this->assertSame([$first->id, $second->id], $result['link_ids']);
         $this->assertSame([$first->inventory_product_id, $second->inventory_product_id], $result['product_ids']);
+        $this->assertSame([$first->id, $second->id], $result['conflict_link_ids']);
+        $this->assertSame([$first->inventory_product_id, $second->inventory_product_id], $result['conflict_product_ids']);
         Http::assertNotSent(fn (HttpRequest $request): bool => $request->method() === 'PUT');
     }
 
@@ -564,7 +571,7 @@ class InventoryMeliStockSyncTest extends TestCase
         $this->assertSame('meli', $job->queue);
         $link->update(['stock_sync_enabled' => false]);
         $job->handle(app(InventoryMeliStockSyncService::class));
-        Http::assertSentCount(1);
+        $this->assertSame(1, Http::recorded(fn (HttpRequest $request): bool => $request->method() === 'PUT')->count());
     }
 
     public function test_sync_does_not_create_movements_reservations_or_modify_legacy_publication(): void

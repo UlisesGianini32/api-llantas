@@ -238,7 +238,14 @@ class InventoryMeliStockSyncService
         $requestedLinkId ??= (int) $link->getKey();
         $row = collect($this->preview(['link' => $link->getKey()])['rows'])->first();
         if (! $row || $row['status'] !== self::READY) {
-            return [...($row ?? ['id' => $link->id]), 'status' => $row['status'] ?? self::UNSUPPORTED];
+            $status = $row['status'] ?? self::UNSUPPORTED;
+            $result = [...($row ?? ['id' => $link->id]), 'status' => $status];
+            if ($status === self::REMOTE_USER_PRODUCT_CONFLICT) {
+                $result['link_ids'] = $result['link_ids'] ?? $result['conflict_link_ids'] ?? [];
+                $result['product_ids'] = $result['product_ids'] ?? $result['conflict_product_ids'] ?? [];
+            }
+
+            return $result;
         }
 
         if ($this->groups->isGrouped($link)) {
@@ -366,7 +373,7 @@ class InventoryMeliStockSyncService
                                     ]);
                                 }
                                 if (! is_numeric($representativeItem['available_quantity'] ?? null)) {
-                                    return $this->abortAudit($audit, $row, self::FAILED, 'La cantidad remota del representante no es válida.', 'MALFORMED_RESPONSE');
+                                    return $this->abortAudit($audit, $row, InventoryChannelStockSync::FAILED, 'La cantidad remota del representante no es válida.', 'MALFORMED_RESPONSE');
                                 }
                                 $representativeWasRead = true;
                                 $previousKnownQuantity = is_numeric($representativeItem['available_quantity'] ?? null)
@@ -412,7 +419,7 @@ class InventoryMeliStockSyncService
                                 ]);
                             }
                             if (! is_numeric($item['available_quantity'] ?? null)) {
-                                return $this->abortAudit($audit, $row, self::FAILED, 'La cantidad remota del representante no es válida.', 'MALFORMED_RESPONSE');
+                                return $this->abortAudit($audit, $row, InventoryChannelStockSync::FAILED, 'La cantidad remota del representante no es válida.', 'MALFORMED_RESPONSE');
                             }
                             $representativeWasRead = true;
                         }
