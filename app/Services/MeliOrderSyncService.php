@@ -11,6 +11,7 @@ use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Schema;
 use JsonException;
 
 class MeliOrderSyncService
@@ -522,6 +523,8 @@ class MeliOrderSyncService
                     : [];
 
                 $savedItems = 0;
+                $storesLineIdentity = Schema::hasColumn('meli_order_items', 'variation_id')
+                    && Schema::hasColumn('meli_order_items', 'remote_line_key');
 
                 foreach ($items as $item) {
                     if (!is_array($item)) {
@@ -534,6 +537,10 @@ class MeliOrderSyncService
                         ? $item['item']
                         : [];
 
+                    $variationId = data_get($itemInfo, 'variation_id') ?? data_get($item, 'variation_id');
+                    $listingId = trim((string) ($itemInfo['id'] ?? ''));
+                    $lineKey = $listingId !== '' ? $listingId.':'.(string) ($variationId ?? '') : null;
+
                     $variationText = $this->buildVariationText(
                         $itemInfo,
                         $item
@@ -544,6 +551,10 @@ class MeliOrderSyncService
                         'item_id' => (string) (
                             $itemInfo['id'] ?? ''
                         ),
+                        ...($storesLineIdentity ? [
+                            'variation_id' => $variationId !== null ? (string) $variationId : null,
+                            'remote_line_key' => $lineKey,
+                        ] : []),
                         'sku' => (string) (
                             $itemInfo['seller_sku']
                             ?? $itemInfo['seller_custom_field']

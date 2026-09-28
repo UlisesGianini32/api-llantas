@@ -11,6 +11,8 @@ class MeliOrderItem extends Model
     protected $fillable = [
         'meli_order_id',
         'item_id',
+        'variation_id',
+        'remote_line_key',
         'sku',
         'title',
         'variation_text',

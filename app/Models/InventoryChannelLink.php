@@ -34,6 +34,7 @@ class InventoryChannelLink extends Model
         'is_active',
         'identity_key',
         'stock_sync_enabled',
+        'order_reservation_enabled',
     ];
 
     protected function casts(): array
@@ -44,6 +45,7 @@ class InventoryChannelLink extends Model
             'metadata' => 'array',
             'is_active' => 'boolean',
             'stock_sync_enabled' => 'boolean',
+            'order_reservation_enabled' => 'boolean',
         ];
     }
 

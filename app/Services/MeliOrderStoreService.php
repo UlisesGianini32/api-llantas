@@ -6,6 +6,7 @@ use App\Models\MeliOrder;
 use App\Models\MeliOrderItem;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Schema;
 
 class MeliOrderStoreService
 {
@@ -32,13 +33,21 @@ class MeliOrderStoreService
             MeliOrderItem::where('meli_order_id', $order->id)->delete();
 
             $items = $orderData['order_items'] ?? [];
+            $storesLineIdentity = Schema::hasColumn('meli_order_items', 'variation_id')
+                && Schema::hasColumn('meli_order_items', 'remote_line_key');
 
             foreach ($items as $item) {
                 $itemInfo = $item['item'] ?? [];
+                $variationId = $itemInfo['variation_id'] ?? $item['variation_id'] ?? null;
+                $listingId = trim((string) ($itemInfo['id'] ?? ''));
 
                 MeliOrderItem::create([
                     'meli_order_id' => $order->id,
                     'item_id' => (string) ($itemInfo['id'] ?? ''),
+                    ...($storesLineIdentity ? [
+                        'variation_id' => $variationId !== null ? (string) $variationId : null,
+                        'remote_line_key' => $listingId !== '' ? $listingId.':'.(string) ($variationId ?? '') : null,
+                    ] : []),
                     'sku' => $itemInfo['seller_sku'] ?? null,
                     'quantity' => (int) ($item['quantity'] ?? 0),
                     'unit_price' => (float) ($item['unit_price'] ?? 0),
