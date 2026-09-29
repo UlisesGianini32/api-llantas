@@ -4,6 +4,7 @@ namespace App\Jobs;
 
 use App\Models\MeliOrder;
 use App\Services\InventoryMeliAffectedStockDispatcher;
+use App\Services\InventoryMeliOrderReservationCutover;
 use App\Services\InventoryMeliOrderReservationService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -28,6 +29,26 @@ class ReconcileInventoryMeliOrderReservationsJob implements ShouldQueue
         if (! $order) {
             Log::warning('Inventory Meli order reservation skipped: local order missing', [
                 'meli_order_id' => $this->meliOrderId,
+            ]);
+
+            return;
+        }
+
+        if (! (bool) config('inventory.meli_order_reservations.automatic', false)) {
+            Log::info('Inventory Meli order reservation skipped: automation disabled', [
+                'meli_order_id' => $order->id,
+                'remote_order_id' => $order->order_id,
+                'meli_account_id' => $order->meli_account_id,
+            ]);
+
+            return;
+        }
+
+        if (! app(InventoryMeliOrderReservationCutover::class)->allows($order)) {
+            Log::info('Inventory Meli order reservation skipped: outside automatic cutover', [
+                'meli_order_id' => $order->id,
+                'remote_order_id' => $order->order_id,
+                'meli_account_id' => $order->meli_account_id,
             ]);
 
             return;

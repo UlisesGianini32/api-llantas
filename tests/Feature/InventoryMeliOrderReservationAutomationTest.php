@@ -24,6 +24,7 @@ class InventoryMeliOrderReservationAutomationTest extends TestCase
         config()->set('database.default', 'sqlite');
         config()->set('database.connections.sqlite.database', ':memory:');
         DB::purge('sqlite');
+        config()->set('inventory.meli_order_reservations.automatic', true);
         config()->set(
             'inventory.meli_order_reservations.automatic_after',
             '2000-01-01T00:00:00+00:00'
@@ -96,6 +97,54 @@ class InventoryMeliOrderReservationAutomationTest extends TestCase
         } catch (\RuntimeException) {
         }
         Bus::assertNothingDispatched();
+    }
+
+    public function test_queued_job_does_nothing_if_automation_is_disabled_before_execution(): void
+    {
+        $order = $this->order('paid');
+
+        config()->set('inventory.meli_order_reservations.automatic', false);
+
+        $service = Mockery::mock(InventoryMeliOrderReservationService::class);
+        $service->shouldNotReceive('apply');
+
+        (new ReconcileInventoryMeliOrderReservationsJob($order->id))
+            ->handle($service);
+    }
+
+    public function test_queued_job_does_nothing_for_order_before_cutover(): void
+    {
+        config()->set(
+            'inventory.meli_order_reservations.automatic_after',
+            '2026-09-29T12:00:00-07:00'
+        );
+
+        $order = $this->order(
+            'paid',
+            '2026-09-29T11:59:59-07:00'
+        );
+
+        $service = Mockery::mock(InventoryMeliOrderReservationService::class);
+        $service->shouldNotReceive('apply');
+
+        (new ReconcileInventoryMeliOrderReservationsJob($order->id))
+            ->handle($service);
+    }
+
+    public function test_queued_job_does_nothing_when_cutover_is_missing(): void
+    {
+        config()->set(
+            'inventory.meli_order_reservations.automatic_after',
+            null
+        );
+
+        $order = $this->order('paid');
+
+        $service = Mockery::mock(InventoryMeliOrderReservationService::class);
+        $service->shouldNotReceive('apply');
+
+        (new ReconcileInventoryMeliOrderReservationsJob($order->id))
+            ->handle($service);
     }
 
     public function test_job_loads_the_current_order_state_and_repeated_jobs_are_allowed(): void

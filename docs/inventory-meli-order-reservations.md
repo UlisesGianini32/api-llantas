@@ -37,15 +37,26 @@ Mutation requires one explicit remote order ID:
 php artisan inventory:meli-order-reservations --order=200000001 --apply
 ```
 
-The command does not offer an all-orders apply mode. `--apply` is repeatable and safe for the same order.
+The command does not offer an all-orders apply mode. `--apply` is repeatable and safe for the same order. The manual `--apply` path is intentionally not restricted by the automatic cutover and remains an explicit operator escape hatch.
 
 ## Ticket 13 automatic reconciliation
 
-Automatic reconciliation is controlled only by `INVENTORY_MELI_ORDER_RESERVATIONS_AUTOMATIC` (config key `inventory.meli_order_reservations.automatic`) and defaults to `false`. When enabled, the existing order persistence boundaries register `ReconcileInventoryMeliOrderReservationsJob` with `DB::afterCommit`; the job receives only the local `MeliOrder` ID, reloads the current order and lines, and runs on the `meli` queue. No uniqueness lock is used because Ticket 12 idempotency already handles duplicate jobs and this avoids hiding a later cancellation behind an earlier queued job.
+Automatic reconciliation requires two explicit gates:
+
+- `INVENTORY_MELI_ORDER_RESERVATIONS_AUTOMATIC=true`
+- `INVENTORY_MELI_ORDER_RESERVATIONS_AUTOMATIC_AFTER=<ISO-8601 timestamp with explicit timezone>`
+
+The cutover is evaluated against Mercado Libre's original `raw.date_created`, not the local `created_at` or `updated_at`. Missing, invalid, or timezone-less cutover values fail closed. Orders with missing or invalid `raw.date_created` also fail closed. Historical orders created before the configured cutover are never automatically reconciled.
+
+When both gates allow the order, the existing order persistence boundaries register `ReconcileInventoryMeliOrderReservationsJob` with `DB::afterCommit`; the job receives only the local `MeliOrder` ID, reloads the current order and lines, and runs on the `meli` queue. The dispatcher checks the automatic flag and cutover before enqueueing, and the job checks both again immediately before applying reservations. This second check prevents an already queued job from applying after automation is disabled or after a configuration change.
+
+No uniqueness lock is used because Ticket 12 idempotency already handles duplicate jobs and this avoids hiding a later cancellation behind an earlier queued job.
 
 The dispatcher is best effort at the post-commit dispatch boundary: it logs local order ID, remote order ID, account, exception class, and a bounded message with authorization and token values redacted, without rethrowing into legacy order persistence. This also applies when the queue driver is `sync`, because that driver executes the job inside the after-commit callback. Unexpected exceptions from a direct worker invocation of the job are not swallowed and can be retried by the normal queue worker. Business outcomes such as ignored status, opt-out, insufficient inventory, unmatched links, and shared-stock conflicts finish normally with Ticket 12 diagnostics. Inventory automation never changes physical stock, fulfillment state, Mercado Libre status, or remote stock.
 
 `inventory:rollout-check` reports the automation state, queue, enabled order-reservation links, and allocation count. It does not fail when automation is disabled. If automation is enabled while the allocation table, order opt-in column, or line identity columns (`variation_id`, `remote_line_key`) are missing, the check fails safely. Disable the flag to roll back the automation without changing the manual command or Ticket 12 allocations.
+
+Before enabling automatic reconciliation in production, establish the physical Inventory quantities as the baseline, configure the cutover timestamp, enable only the intended `order_reservation_enabled` links, and enable the global automatic flag last. Once automatic allocations exist, do not move the cutover timestamp forward casually: doing so can block later cancellation reconciliation for orders that were valid under the original cutover.
 
 ## Rollback and operations
 

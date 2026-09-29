@@ -32,6 +32,11 @@ class InventoryMeliOrderReservationFlowTest extends TestCase
         config()->set('database.default', 'sqlite');
         config()->set('database.connections.sqlite.database', ':memory:');
         DB::purge('sqlite');
+        config()->set('inventory.meli_order_reservations.automatic', true);
+        config()->set(
+            'inventory.meli_order_reservations.automatic_after',
+            '2000-01-01T00:00:00+00:00'
+        );
         Schema::create('users', function (Blueprint $table): void {
             $table->id(); $table->string('name'); $table->string('email')->unique(); $table->string('password');
             $table->string('role')->default('admin'); $table->timestamps();
@@ -57,7 +62,8 @@ class InventoryMeliOrderReservationFlowTest extends TestCase
         ] as $file) (require database_path('migrations/'.$file))->up();
         Schema::create('meli_orders', function (Blueprint $table): void {
             $table->id(); $table->unsignedBigInteger('meli_account_id')->nullable();
-            $table->unsignedBigInteger('order_id'); $table->string('status')->nullable(); $table->timestamps();
+            $table->unsignedBigInteger('order_id'); $table->string('status')->nullable();
+            $table->json('raw')->nullable(); $table->timestamps();
         });
         Schema::create('meli_order_items', function (Blueprint $table): void {
             $table->id(); $table->foreignId('meli_order_id')->constrained('meli_orders')->cascadeOnDelete();
@@ -738,7 +744,12 @@ class InventoryMeliOrderReservationFlowTest extends TestCase
 
     private function order(int $account, int $remoteId, string $status, array $lines): MeliOrder
     {
-        $order = MeliOrder::create(['meli_account_id' => $account, 'order_id' => $remoteId, 'status' => $status]);
+        $order = MeliOrder::create([
+            'meli_account_id' => $account,
+            'order_id' => $remoteId,
+            'status' => $status,
+            'raw' => ['date_created' => '2026-09-29T12:00:00-07:00'],
+        ]);
         foreach ($lines as $line) $this->line($order, $line['item_id'], $line['variation'] ?? null, $line['key'], $line['qty']);
         return $order->load('items');
     }
