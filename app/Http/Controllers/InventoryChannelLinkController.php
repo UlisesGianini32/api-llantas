@@ -9,9 +9,10 @@ use App\Models\InventoryProduct;
 use App\Models\MeliAccount;
 use App\Services\InventoryChannelLinkService;
 use App\Services\InventoryMeliLinkImportService;
+use App\Services\InventoryMeliSharedStockGroupService;
 use App\Services\InventoryMeliStockPilotService;
 use App\Services\InventoryMeliStockSyncService;
-use App\Services\InventoryMeliSharedStockGroupService;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
@@ -209,6 +210,84 @@ class InventoryChannelLinkController extends Controller
             'analyze' => 1,
             ...array_filter($request->only(['search', 'result', 'account_key'])),
         ])->with('success', "Importación completada: {$result['imported']} vínculo(s) creado(s).")
+            ->with('importErrors', $result['errors']);
+    }
+
+    public function searchProducts(Request $request): JsonResponse
+    {
+        $q = trim((string) $request->input('q', ''));
+        if ($q === '') {
+            return response()->json([]);
+        }
+
+        $products = InventoryProduct::query()
+            ->select(['id', 'sku', 'barcode', 'name', 'price_public', 'is_active'])
+            ->where('is_active', true)
+            ->where(function ($query) use ($q): void {
+                $query->where('sku', 'like', "%{$q}%")
+                    ->orWhere('name', 'like', "%{$q}%")
+                    ->orWhere('barcode', 'like', "%{$q}%");
+            })
+            ->orderBy('name')
+            ->limit(25)
+            ->get();
+
+        return response()->json($products);
+    }
+
+    public function linkManual(Request $request, InventoryChannelLinkService $linkService): RedirectResponse
+    {
+        abort_unless($request->user()?->isAdmin(), 403);
+
+        $validated = $request->validate([
+            'inventory_product_id' => ['required', 'integer', 'exists:inventory_products,id'],
+            'account_key' => ['required', 'string'],
+            'external_listing_id' => ['required', 'string'],
+            'external_variant_id' => ['nullable', 'string'],
+            'external_product_id' => ['nullable', 'string'],
+            'external_url' => ['nullable', 'string'],
+            'remote_status' => ['nullable', 'string'],
+            'remote_price' => ['nullable', 'numeric'],
+            'remote_currency' => ['nullable', 'string'],
+        ]);
+
+        try {
+            $linkService->create([
+                ...$validated,
+                'channel' => InventoryChannelLink::MERCADO_LIBRE,
+                'metadata' => [
+                    'source' => 'manual_assisted_mapping',
+                    'mapped_by_user_id' => $request->user()->id,
+                    'mapped_at' => now()->toIso8601String(),
+                ],
+            ]);
+        } catch (InvalidArgumentException $exception) {
+            return back()->with('error', $exception->getMessage());
+        }
+
+        return back()->with('success', "Publicación {$validated['external_listing_id']} vinculada exitosamente.");
+    }
+
+    public function linkSelected(Request $request, InventoryMeliLinkImportService $importer): RedirectResponse
+    {
+        abort_unless($request->user()?->isAdmin(), 403);
+
+        $validated = $request->validate([
+            'items' => ['required', 'array', 'min:1'],
+            'items.*.inventory_product_id' => ['required', 'integer', 'exists:inventory_products,id'],
+            'items.*.account_key' => ['required', 'string'],
+            'items.*.mlm' => ['required', 'string'],
+            'items.*.variation_id' => ['nullable', 'string'],
+            'items.*.external_product_id' => ['nullable', 'string'],
+            'items.*.external_url' => ['nullable', 'string'],
+            'items.*.remote_status' => ['nullable', 'string'],
+            'items.*.remote_price' => ['nullable', 'numeric'],
+            'items.*.remote_currency' => ['nullable', 'string'],
+        ]);
+
+        $result = $importer->applySelected($validated['items']);
+
+        return back()->with('success', "Se vincularon {$result['imported']} publicaciones seleccionadas.")
             ->with('importErrors', $result['errors']);
     }
 

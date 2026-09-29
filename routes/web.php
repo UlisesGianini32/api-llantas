@@ -198,6 +198,9 @@ Route::middleware(['auth', 'role'])->group(function () {
         Route::post('/', [InventoryChannelLinkController::class, 'store'])->name('store');
         Route::get('/mercado-libre/importar', [InventoryChannelLinkController::class, 'meliImport'])->name('mercado-libre.import');
         Route::post('/mercado-libre/importar', [InventoryChannelLinkController::class, 'applyMeliImport'])->name('mercado-libre.apply');
+        Route::get('/mercado-libre/buscar-productos', [InventoryChannelLinkController::class, 'searchProducts'])->name('mercado-libre.search-products');
+        Route::post('/mercado-libre/vincular-manual', [InventoryChannelLinkController::class, 'linkManual'])->name('mercado-libre.link-manual');
+        Route::post('/mercado-libre/vincular-seleccionados', [InventoryChannelLinkController::class, 'linkSelected'])->name('mercado-libre.link-selected');
         Route::get('/mercado-libre/stock', [InventoryChannelLinkController::class, 'stock'])->name('mercado-libre.stock');
         Route::post('/mercado-libre/stock/sync', [InventoryChannelLinkController::class, 'syncMeliStock'])->name('mercado-libre.stock.sync');
         Route::get('/{inventoryChannelLink}', [InventoryChannelLinkController::class, 'show'])

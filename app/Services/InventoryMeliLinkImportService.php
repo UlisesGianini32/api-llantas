@@ -96,6 +96,42 @@ class InventoryMeliLinkImportService
         return ['preview' => $this->preview($filters), 'imported' => $imported, 'errors' => $errors];
     }
 
+    /**
+     * @param  list<array<string,mixed>>  $items
+     * @return array{imported:int,errors:list<string>}
+     */
+    public function applySelected(array $items): array
+    {
+        $imported = 0;
+        $errors = [];
+
+        foreach ($items as $item) {
+            try {
+                $product = InventoryProduct::query()->findOrFail((int) $item['inventory_product_id']);
+                $this->links->create([
+                    'inventory_product_id' => $product->getKey(),
+                    'channel' => InventoryChannelLink::MERCADO_LIBRE,
+                    'account_key' => (string) $item['account_key'],
+                    'external_listing_id' => (string) $item['mlm'],
+                    'external_variant_id' => ! empty($item['variation_id']) ? (string) $item['variation_id'] : null,
+                    'external_product_id' => ! empty($item['external_product_id']) ? (string) $item['external_product_id'] : null,
+                    'external_url' => ! empty($item['external_url']) ? (string) $item['external_url'] : null,
+                    'remote_status' => ! empty($item['remote_status']) ? (string) $item['remote_status'] : null,
+                    'remote_price' => isset($item['remote_price']) && is_numeric($item['remote_price']) ? round((float) $item['remote_price'], 2) : null,
+                    'remote_currency' => ! empty($item['remote_currency']) ? (string) $item['remote_currency'] : null,
+                    'metadata' => [
+                        'source' => 'assisted_ui_import',
+                    ],
+                ]);
+                $imported++;
+            } catch (InvalidArgumentException $exception) {
+                $errors[] = ($item['mlm'] ?? 'MLM').(! empty($item['variation_id']) ? ':'.$item['variation_id'] : '').' — '.$exception->getMessage();
+            }
+        }
+
+        return ['imported' => $imported, 'errors' => $errors];
+    }
+
     /** @param array<string,string> $filters */
     private function eachFilteredRow(array $filters, callable $consumer): void
     {
@@ -310,6 +346,8 @@ class InventoryMeliLinkImportService
             'account_key' => (string) $publication->meli_account_id,
             'account_name' => $publication->meliAccount?->nickname,
             'mlm' => $mlm,
+            'title' => $item['title'] ?? ($publication->title ?? null),
+            'thumbnail' => $item['thumbnail'] ?? ($item['pictures'][0]['url'] ?? null),
             'variation_id' => $variationId,
             'sku' => trim($sku),
             'catalog_product_id' => $data['catalog_product_id'] ?? $item['catalog_product_id'] ?? null,

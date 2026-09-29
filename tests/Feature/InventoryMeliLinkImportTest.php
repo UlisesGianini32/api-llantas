@@ -488,6 +488,68 @@ class InventoryMeliLinkImportTest extends TestCase
         ]);
     }
 
+    public function test_search_products_endpoint_returns_json_results(): void
+    {
+        [$account, $admin] = $this->fixture();
+        $this->product('SEARCH-TARGET-1');
+        $this->product('SEARCH-TARGET-2');
+        $this->product('OTHER-ITEM');
+
+        $response = $this->actingAs($admin)
+            ->getJson(route('inventory.channels.mercado-libre.search-products', ['q' => 'TARGET']));
+
+        $response->assertOk();
+        $this->assertCount(2, $response->json());
+    }
+
+    public function test_link_manual_creates_channel_link(): void
+    {
+        [$account, $admin] = $this->fixture();
+        $product = $this->product('MANUAL-TARGET');
+
+        $response = $this->actingAs($admin)
+            ->post(route('inventory.channels.mercado-libre.link-manual'), [
+                'inventory_product_id' => $product->id,
+                'account_key' => (string) $account->id,
+                'external_listing_id' => 'MLM-MANUAL-123',
+                'remote_price' => 150.00,
+            ]);
+
+        $response->assertRedirect();
+        $this->assertDatabaseHas('inventory_channel_links', [
+            'inventory_product_id' => $product->id,
+            'external_listing_id' => 'MLM-MANUAL-123',
+            'channel' => InventoryChannelLink::MERCADO_LIBRE,
+        ]);
+    }
+
+    public function test_link_selected_creates_channel_links_in_bulk(): void
+    {
+        [$account, $admin] = $this->fixture();
+        $p1 = $this->product('BULK-1');
+        $p2 = $this->product('BULK-2');
+
+        $response = $this->actingAs($admin)
+            ->post(route('inventory.channels.mercado-libre.link-selected'), [
+                'items' => [
+                    [
+                        'inventory_product_id' => $p1->id,
+                        'account_key' => (string) $account->id,
+                        'mlm' => 'MLM-BULK-1',
+                    ],
+                    [
+                        'inventory_product_id' => $p2->id,
+                        'account_key' => (string) $account->id,
+                        'mlm' => 'MLM-BULK-2',
+                    ],
+                ],
+            ]);
+
+        $response->assertRedirect();
+        $this->assertDatabaseHas('inventory_channel_links', ['external_listing_id' => 'MLM-BULK-1']);
+        $this->assertDatabaseHas('inventory_channel_links', ['external_listing_id' => 'MLM-BULK-2']);
+    }
+
     private function service(): InventoryMeliLinkImportService
     {
         return app(InventoryMeliLinkImportService::class);
