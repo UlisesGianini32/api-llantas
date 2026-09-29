@@ -10,9 +10,17 @@ use Throwable;
 
 class InventoryMeliOrderReservationDispatcher
 {
+    public function __construct(
+        private readonly InventoryMeliOrderReservationCutover $cutover,
+    ) {}
+
     public function dispatchAfterCommit(MeliOrder $order): void
     {
         if (! (bool) config('inventory.meli_order_reservations.automatic', false)) {
+            return;
+        }
+
+        if (! $this->cutover->allows($order)) {
             return;
         }
 

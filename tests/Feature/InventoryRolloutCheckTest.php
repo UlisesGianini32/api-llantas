@@ -157,9 +157,64 @@ class InventoryRolloutCheckTest extends TestCase
             $table->id();
         });
         config()->set('inventory.meli_order_reservations.automatic', true);
+        config()->set(
+            'inventory.meli_order_reservations.automatic_after',
+            '2026-09-29T12:00:00-07:00'
+        );
 
         $this->assertSame(0, Artisan::call('inventory:rollout-check'));
-        $this->assertStringContainsString('ENABLED', Artisan::output());
+
+        $output = Artisan::output();
+
+        $this->assertStringContainsString('ENABLED', $output);
+        $this->assertStringContainsString('cutover=', $output);
+    }
+
+    public function test_enabled_automation_requires_cutover(): void
+    {
+        Schema::create('meli_order_items', function (Blueprint $table): void {
+            $table->id();
+            $table->string('variation_id')->nullable();
+            $table->string('remote_line_key')->nullable();
+        });
+
+        Schema::create('inventory_channel_order_allocations', function (Blueprint $table): void {
+            $table->id();
+        });
+
+        config()->set('inventory.meli_order_reservations.automatic', true);
+        config()->set('inventory.meli_order_reservations.automatic_after', null);
+
+        $this->assertSame(1, Artisan::call('inventory:rollout-check'));
+        $this->assertStringContainsString(
+            'INVENTORY_MELI_ORDER_RESERVATIONS_AUTOMATIC_AFTER',
+            Artisan::output()
+        );
+    }
+
+    public function test_enabled_automation_rejects_cutover_without_timezone(): void
+    {
+        Schema::create('meli_order_items', function (Blueprint $table): void {
+            $table->id();
+            $table->string('variation_id')->nullable();
+            $table->string('remote_line_key')->nullable();
+        });
+
+        Schema::create('inventory_channel_order_allocations', function (Blueprint $table): void {
+            $table->id();
+        });
+
+        config()->set('inventory.meli_order_reservations.automatic', true);
+        config()->set(
+            'inventory.meli_order_reservations.automatic_after',
+            '2026-09-29 12:00:00'
+        );
+
+        $this->assertSame(1, Artisan::call('inventory:rollout-check'));
+        $this->assertStringContainsString(
+            'INVENTORY_MELI_ORDER_RESERVATIONS_AUTOMATIC_AFTER',
+            Artisan::output()
+        );
     }
 
     public function test_enabled_links_are_highlighted(): void

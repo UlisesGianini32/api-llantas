@@ -3,6 +3,7 @@
 namespace App\Console\Commands;
 
 use App\Models\InventoryChannelLink;
+use App\Services\InventoryMeliOrderReservationCutover;
 use Illuminate\Console\Command;
 use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Support\Facades\DB;
@@ -50,8 +51,9 @@ class InventoryRolloutCheckCommand extends Command
         $failures = 0;
         $warnings = 0;
         $automationEnabled = (bool) config('inventory.meli_order_reservations.automatic', false);
+        $reservationCutover = app(InventoryMeliOrderReservationCutover::class);
 
-        $this->check($checks, $failures, $warnings, 'meli-order-reservation-automation', function () use ($automationEnabled): string {
+        $this->check($checks, $failures, $warnings, 'meli-order-reservation-automation', function () use ($automationEnabled, $reservationCutover): string {
             $status = $automationEnabled ? 'ENABLED' : 'DISABLED';
             if ($automationEnabled && ! Schema::hasTable('inventory_channel_order_allocations')) {
                 throw new \RuntimeException('falta inventory_channel_order_allocations');
@@ -65,6 +67,11 @@ class InventoryRolloutCheckCommand extends Command
             if ($automationEnabled && ! Schema::hasColumn('meli_order_items', 'variation_id')) {
                 throw new \RuntimeException('falta meli_order_items.variation_id');
             }
+            if ($automationEnabled && ! $reservationCutover->configuredAt()) {
+                throw new \RuntimeException(
+                    'falta o es invalido INVENTORY_MELI_ORDER_RESERVATIONS_AUTOMATIC_AFTER; use ISO-8601 con zona horaria'
+                );
+            }
 
             $allocations = Schema::hasTable('inventory_channel_order_allocations')
                 ? DB::table('inventory_channel_order_allocations')->count()
@@ -73,8 +80,12 @@ class InventoryRolloutCheckCommand extends Command
                 ? DB::table('inventory_channel_links')->where('order_reservation_enabled', true)->count()
                 : 0;
 
-            return sprintf('%s; queue=%s; order_reservation_links=%d; allocations=%d',
+            $cutover = $reservationCutover->configuredAt();
+            $cutoverLabel = $cutover?->toIso8601String() ?? 'UNSET';
+
+            return sprintf('%s; cutover=%s; queue=%s; order_reservation_links=%d; allocations=%d',
                 $status,
+                $cutoverLabel,
                 (string) config('inventory.meli_order_reservations.queue', 'meli'),
                 $links,
                 $allocations,

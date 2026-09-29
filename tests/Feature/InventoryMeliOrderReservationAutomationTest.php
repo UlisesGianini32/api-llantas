@@ -24,6 +24,10 @@ class InventoryMeliOrderReservationAutomationTest extends TestCase
         config()->set('database.default', 'sqlite');
         config()->set('database.connections.sqlite.database', ':memory:');
         DB::purge('sqlite');
+        config()->set(
+            'inventory.meli_order_reservations.automatic_after',
+            '2000-01-01T00:00:00+00:00'
+        );
         Schema::create('meli_orders', function (Blueprint $table): void {
             $table->id();
             $table->unsignedBigInteger('meli_account_id')->nullable();
@@ -124,6 +128,7 @@ class InventoryMeliOrderReservationAutomationTest extends TestCase
         $order = app(MeliOrderStoreService::class)->storeFromOrderApiResponse([
             'id' => 4001,
             'status' => 'paid',
+            'date_created' => '2026-09-29T12:00:00-07:00',
             'order_items' => [[
                 'item' => ['id' => 'MLM-AUTOMATION'],
                 'quantity' => 1,
@@ -155,6 +160,7 @@ class InventoryMeliOrderReservationAutomationTest extends TestCase
         $order = app(MeliOrderStoreService::class)->storeFromOrderApiResponse([
             'id' => 4010,
             'status' => 'paid',
+            'date_created' => '2026-09-29T12:00:00-07:00',
             'order_items' => [[
                 'item' => ['id' => 'MLM-SYNC-FAIL'],
                 'quantity' => 1,
@@ -194,12 +200,17 @@ class InventoryMeliOrderReservationAutomationTest extends TestCase
         $this->assertStringNotContainsString('ReconcileInventoryMeliOrderReservationsJob', $consoleRoutes);
     }
 
-    private function order(string $status): MeliOrder
-    {
+    private function order(
+        string $status,
+        ?string $dateCreated = '2026-09-29T12:00:00-07:00'
+    ): MeliOrder {
         return MeliOrder::create([
             'meli_account_id' => 1,
             'order_id' => 3000 + MeliOrder::query()->count(),
             'status' => $status,
+            'raw' => $dateCreated === null
+                ? []
+                : ['date_created' => $dateCreated],
         ]);
     }
 }
