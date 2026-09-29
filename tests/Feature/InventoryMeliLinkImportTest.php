@@ -435,6 +435,59 @@ class InventoryMeliLinkImportTest extends TestCase
         $this->assertArrayHasKey(InventoryMeliLinkImportService::UNSUPPORTED, $counts);
     }
 
+    public function test_barcode_and_leading_zeroes_matching_are_supported(): void
+    {
+        [$account] = $this->fixture();
+        $productWithBarcode = InventoryProduct::create(['sku' => 'INTERNAL-101', 'barcode' => '074469516556', 'name' => 'JOICO Hair Product']);
+        $productTrimmed = InventoryProduct::create(['sku' => '74469509169', 'barcode' => '74469509169', 'name' => 'JOICO Shampoo']);
+
+        // Publication 1 matches by barcode
+        $this->publication($account, 'MLM-BARCODE', '074469516556', ['title' => 'JOICO Hair Product']);
+        // Publication 2 has padded leading zero (12 digits) matching trimmed product (11 digits)
+        $this->publication($account, 'MLM-TRIMMED', '074469509169', ['title' => 'JOICO Shampoo']);
+
+        $preview = $this->service()->preview(['search' => 'JOICO']);
+        $this->assertSame(2, $preview['counts'][InventoryMeliLinkImportService::MATCHED]);
+
+        $applied = $this->service()->apply(['search' => 'JOICO']);
+        $this->assertSame(2, $applied['imported']);
+
+        $this->assertDatabaseHas('inventory_channel_links', [
+            'inventory_product_id' => $productWithBarcode->id,
+            'external_listing_id' => 'MLM-BARCODE',
+        ]);
+        $this->assertDatabaseHas('inventory_channel_links', [
+            'inventory_product_id' => $productTrimmed->id,
+            'external_listing_id' => 'MLM-TRIMMED',
+        ]);
+    }
+
+    public function test_artisan_command_previews_and_applies_links(): void
+    {
+        [$account] = $this->fixture();
+        $product = $this->product('SKU-COMMAND');
+        $this->publication($account, 'MLM-CMD', 'SKU-COMMAND');
+
+        // Dry-run preview
+        $this->artisan('inventory:meli-link-import', ['--search' => 'SKU-COMMAND'])
+            ->expectsOutputToContain('Modo preview (dry-run)')
+            ->assertExitCode(0);
+
+        $this->assertDatabaseMissing('inventory_channel_links', [
+            'external_listing_id' => 'MLM-CMD',
+        ]);
+
+        // Apply
+        $this->artisan('inventory:meli-link-import', ['--search' => 'SKU-COMMAND', '--apply' => true])
+            ->expectsOutputToContain('Importación completada: 1 vínculo(s) creado(s).')
+            ->assertExitCode(0);
+
+        $this->assertDatabaseHas('inventory_channel_links', [
+            'inventory_product_id' => $product->id,
+            'external_listing_id' => 'MLM-CMD',
+        ]);
+    }
+
     private function service(): InventoryMeliLinkImportService
     {
         return app(InventoryMeliLinkImportService::class);

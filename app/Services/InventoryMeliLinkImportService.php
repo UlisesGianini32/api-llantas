@@ -106,13 +106,35 @@ class InventoryMeliLinkImportService
                 ->map(fn (mixed $sku): string => trim((string) $sku))
                 ->unique()
                 ->values();
-            $productsBySku = $skus->isEmpty()
+            $trimmedSkus = $skus->map(fn (string $sku): string => ltrim($sku, '0'))
+                ->filter(fn (string $sku): bool => $sku !== '')
+                ->unique()
+                ->values();
+
+            $products = ($skus->isEmpty() && $trimmedSkus->isEmpty())
                 ? collect()
                 : InventoryProduct::query()
-                    ->select(['id', 'sku'])
-                    ->whereIn('sku', $skus)
-                    ->get()
-                    ->groupBy(fn (InventoryProduct $product): string => trim((string) $product->sku));
+                    ->select(['id', 'sku', 'barcode', 'name'])
+                    ->where(function ($query) use ($skus, $trimmedSkus): void {
+                        if ($skus->isNotEmpty()) {
+                            $query->whereIn('sku', $skus)
+                                ->orWhereIn('barcode', $skus);
+                        }
+                        if ($trimmedSkus->isNotEmpty()) {
+                            $query->orWhereIn('sku', $trimmedSkus)
+                                ->orWhereIn('barcode', $trimmedSkus);
+                        }
+                    })
+                    ->get();
+
+            $productMaps = [
+                'byExactSku' => $products->groupBy(fn (InventoryProduct $p): string => trim((string) $p->sku)),
+                'byExactBarcode' => $products->filter(fn (InventoryProduct $p): bool => filled($p->barcode))
+                    ->groupBy(fn (InventoryProduct $p): string => trim((string) $p->barcode)),
+                'byTrimmedSku' => $products->groupBy(fn (InventoryProduct $p): string => ltrim(trim((string) $p->sku), '0')),
+                'byTrimmedBarcode' => $products->filter(fn (InventoryProduct $p): bool => filled($p->barcode))
+                    ->groupBy(fn (InventoryProduct $p): string => ltrim(trim((string) $p->barcode), '0')),
+            ];
 
             $identityKeys = $candidates
                 ->map(fn (array $candidate): string => $this->candidateIdentityKey($candidate))
@@ -126,7 +148,7 @@ class InventoryMeliLinkImportService
                     ->pluck('inventory_product_id', 'identity_key');
 
             foreach ($candidates as $candidate) {
-                $row = $this->classifyCandidate($candidate, $productsBySku, $existing);
+                $row = $this->classifyCandidate($candidate, $productMaps, $existing);
                 if ($this->matchesFilters($row, $filters)) {
                     $consumer($row);
                 }
@@ -177,12 +199,26 @@ class InventoryMeliLinkImportService
         ]);
     }
 
-    /** @param array<string,mixed> $candidate */
-    private function classifyCandidate(array $candidate, Collection $productsBySku, Collection $existing): array
+    /** @param array<string,mixed> $candidate @param array<string,Collection> $productMaps */
+    private function classifyCandidate(array $candidate, array $productMaps, Collection $existing): array
     {
         $row = $candidate;
         $sku = trim((string) ($candidate['sku'] ?? ''));
-        $matches = $sku === '' ? collect() : $productsBySku->get($sku, collect());
+        $trimmed = ltrim($sku, '0');
+
+        $matches = collect();
+        if ($sku !== '') {
+            if ($productMaps['byExactSku']->has($sku)) {
+                $matches = $productMaps['byExactSku']->get($sku, collect());
+            } elseif ($productMaps['byExactBarcode']->has($sku)) {
+                $matches = $productMaps['byExactBarcode']->get($sku, collect());
+            } elseif ($trimmed !== '' && $productMaps['byTrimmedSku']->has($trimmed)) {
+                $matches = $productMaps['byTrimmedSku']->get($trimmed, collect());
+            } elseif ($trimmed !== '' && $productMaps['byTrimmedBarcode']->has($trimmed)) {
+                $matches = $productMaps['byTrimmedBarcode']->get($trimmed, collect());
+            }
+        }
+
         $product = $matches->count() === 1 ? $matches->first() : null;
         $identityKey = $this->candidateIdentityKey($candidate);
         $existingProductId = $existing->get($identityKey);
@@ -198,7 +234,7 @@ class InventoryMeliLinkImportService
             $reason = 'La publicación o variación no tiene seller SKU utilizable.';
         } elseif ($matches->count() > 1) {
             $status = self::AMBIGUOUS;
-            $reason = 'El SKU coincide con más de un InventoryProduct.';
+            $reason = 'El SKU o código de barras coincide con más de un InventoryProduct.';
         } elseif ($existingProductId !== null && $product !== null && (int) $existingProductId !== (int) $product->getKey()) {
             $status = self::CONFLICT;
             $reason = 'La identidad externa ya está vinculada a otro InventoryProduct.';
@@ -207,16 +243,17 @@ class InventoryMeliLinkImportService
             $reason = 'El vínculo externo correcto ya existe.';
         } elseif ($product === null) {
             $status = self::PRODUCT_NOT_FOUND;
-            $reason = 'No existe un InventoryProduct con ese SKU.';
+            $reason = 'No existe un InventoryProduct con ese SKU o código de barras.';
         } else {
             $status = self::MATCHED;
-            $reason = 'SKU exacto encontrado; el vínculo puede importarse.';
+            $reason = 'Coincidencia encontrada; el vínculo puede importarse.';
         }
 
         $row['status'] = $status;
         $row['reason'] = $reason;
         $row['inventory_product_id'] = $product?->getKey();
         $row['inventory_product_sku'] = $product?->sku;
+        $row['inventory_product_name'] = $product?->name;
         $row['identity_key'] = $identityKey;
 
         return $row;
@@ -235,7 +272,9 @@ class InventoryMeliLinkImportService
         $needle = strtolower($filters['search']);
 
         return str_contains(strtolower((string) ($row['sku'] ?? '')), $needle)
-            || str_contains(strtolower((string) ($row['mlm'] ?? '')), $needle);
+            || str_contains(strtolower((string) ($row['mlm'] ?? '')), $needle)
+            || str_contains(strtolower((string) ($row['inventory_product_sku'] ?? '')), $needle)
+            || str_contains(strtolower((string) ($row['inventory_product_name'] ?? '')), $needle);
     }
 
     /** @return Collection<int, array<string,mixed>> */
