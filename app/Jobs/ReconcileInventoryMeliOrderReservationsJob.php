@@ -3,6 +3,7 @@
 namespace App\Jobs;
 
 use App\Models\MeliOrder;
+use App\Services\InventoryMeliAffectedStockDispatcher;
 use App\Services\InventoryMeliOrderReservationService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -23,6 +24,7 @@ class ReconcileInventoryMeliOrderReservationsJob implements ShouldQueue
     public function handle(InventoryMeliOrderReservationService $service): void
     {
         $order = MeliOrder::query()->with('items')->find($this->meliOrderId);
+
         if (! $order) {
             Log::warning('Inventory Meli order reservation skipped: local order missing', [
                 'meli_order_id' => $this->meliOrderId,
@@ -32,7 +34,22 @@ class ReconcileInventoryMeliOrderReservationsJob implements ShouldQueue
         }
 
         $results = $service->apply($order);
+
+        /*
+         * Re-discover affected products from the persisted allocations rather
+         * than trusting only the current action result.
+         *
+         * This is intentional: a retry can return NO_CHANGE after the
+         * reservation was already committed, but it must still have another
+         * opportunity to converge Mercado Libre stock if the previous stock
+         * dispatch failed.
+         */
+        $stockSyncJobsDispatched = app(
+            InventoryMeliAffectedStockDispatcher::class
+        )->dispatchForOrder($order);
+
         $actions = [];
+
         foreach ($results as $result) {
             $action = (string) ($result['action'] ?? 'UNKNOWN');
             $actions[$action] = ($actions[$action] ?? 0) + 1;
@@ -43,6 +60,7 @@ class ReconcileInventoryMeliOrderReservationsJob implements ShouldQueue
             'remote_order_id' => $order->order_id,
             'meli_account_id' => $order->meli_account_id,
             'actions' => $actions,
+            'stock_sync_jobs_dispatched' => $stockSyncJobsDispatched,
         ]);
     }
 }

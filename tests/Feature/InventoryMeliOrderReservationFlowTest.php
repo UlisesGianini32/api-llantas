@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Jobs\ReconcileInventoryMeliOrderReservationsJob;
+use App\Jobs\SyncInventoryMeliStockLinkJob;
 use App\Models\InventoryChannelLink;
 use App\Models\InventoryChannelOrderAllocation;
 use App\Models\InventoryKitComponent;
@@ -17,6 +18,7 @@ use App\Services\InventoryMeliOrderReservationService;
 use App\Services\InventoryStockService;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Artisan;
+use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Schema;
@@ -421,6 +423,302 @@ class InventoryMeliOrderReservationFlowTest extends TestCase
         $this->assertNotNull($order->fresh());
     }
 
+    public function test_reconcile_dispatches_one_stock_job_per_remote_group_and_retry_can_converge_again(): void
+    {
+        Bus::fake();
+
+        [$product] = $this->stockedProduct('SKU-DISPATCH', 10);
+
+        $groupA = $this->link(
+            $product,
+            1,
+            'MLM-DISPATCH-A',
+            null,
+            true,
+            true,
+            true,
+            'GROUP-A'
+        );
+
+        $this->link(
+            $product,
+            1,
+            'MLM-DISPATCH-A-SIBLING',
+            null,
+            true,
+            true,
+            true,
+            'GROUP-A'
+        );
+
+        $groupB = $this->link(
+            $product,
+            1,
+            'MLM-DISPATCH-B',
+            null,
+            true,
+            true,
+            true,
+            'GROUP-B'
+        );
+
+        $kit = InventoryProduct::create([
+            'sku' => 'SKU-DISPATCH-KIT',
+            'name' => 'Dependent kit',
+            'product_type' => InventoryProduct::KIT,
+            'is_active' => true,
+        ]);
+
+        InventoryKitComponent::create([
+            'kit_product_id' => $kit->id,
+            'component_product_id' => $product->id,
+            'quantity' => 1,
+        ]);
+
+        $kitLink = $this->link(
+            $kit,
+            1,
+            'MLM-DISPATCH-KIT',
+            null,
+            true,
+            true,
+            true,
+            'GROUP-KIT'
+        );
+
+        $order = $this->order(
+            1,
+            1201,
+            'paid',
+            [[
+                'item_id' => 'MLM-DISPATCH-A',
+                'key' => 'MLM-DISPATCH-A:',
+                'qty' => 1,
+            ]]
+        );
+
+        $job = new ReconcileInventoryMeliOrderReservationsJob($order->id);
+
+        $job->handle(app(InventoryMeliOrderReservationService::class));
+
+        $expected = [$groupA->id, $groupB->id, $kitLink->id];
+        sort($expected);
+
+        $actual = Bus::dispatched(SyncInventoryMeliStockLinkJob::class)
+            ->map(fn (SyncInventoryMeliStockLinkJob $job): int => $job->linkId)
+            ->sort()
+            ->values()
+            ->all();
+
+        $this->assertSame($expected, $actual);
+        $this->assertSame(1, InventoryReservation::active()->sum('quantity'));
+
+        /*
+         * The second reconciliation is NO_CHANGE for Inventory, but it should
+         * deliberately enqueue the affected stock groups again. That gives a
+         * failed previous remote sync another convergence opportunity.
+         */
+        $job->handle(app(InventoryMeliOrderReservationService::class));
+
+        $this->assertCount(
+            6,
+            Bus::dispatched(SyncInventoryMeliStockLinkJob::class)
+        );
+
+        $this->assertSame(1, InventoryReservation::active()->sum('quantity'));
+    }
+
+    public function test_kit_sale_dispatches_kit_components_and_other_kits_using_the_components(): void
+    {
+        Bus::fake();
+
+        [$left] = $this->stockedProduct('SKU-KIT-LEFT', 10);
+        [$right] = $this->stockedProduct('SKU-KIT-RIGHT', 10);
+
+        $soldKit = InventoryProduct::create([
+            'sku' => 'SKU-SOLD-KIT',
+            'name' => 'Sold kit',
+            'product_type' => InventoryProduct::KIT,
+            'is_active' => true,
+        ]);
+
+        InventoryKitComponent::create([
+            'kit_product_id' => $soldKit->id,
+            'component_product_id' => $left->id,
+            'quantity' => 1,
+        ]);
+
+        InventoryKitComponent::create([
+            'kit_product_id' => $soldKit->id,
+            'component_product_id' => $right->id,
+            'quantity' => 1,
+        ]);
+
+        $otherKit = InventoryProduct::create([
+            'sku' => 'SKU-OTHER-KIT',
+            'name' => 'Other kit',
+            'product_type' => InventoryProduct::KIT,
+            'is_active' => true,
+        ]);
+
+        InventoryKitComponent::create([
+            'kit_product_id' => $otherKit->id,
+            'component_product_id' => $left->id,
+            'quantity' => 1,
+        ]);
+
+        $soldKitLink = $this->link(
+            $soldKit,
+            1,
+            'MLM-SOLD-KIT',
+            null,
+            true,
+            true,
+            true,
+            'GROUP-SOLD-KIT'
+        );
+
+        $leftLink = $this->link(
+            $left,
+            1,
+            'MLM-KIT-LEFT',
+            null,
+            true,
+            true,
+            true,
+            'GROUP-LEFT'
+        );
+
+        $rightLink = $this->link(
+            $right,
+            1,
+            'MLM-KIT-RIGHT',
+            null,
+            true,
+            true,
+            true,
+            'GROUP-RIGHT'
+        );
+
+        $otherKitLink = $this->link(
+            $otherKit,
+            1,
+            'MLM-OTHER-KIT',
+            null,
+            true,
+            true,
+            true,
+            'GROUP-OTHER-KIT'
+        );
+
+        $order = $this->order(
+            1,
+            1202,
+            'paid',
+            [[
+                'item_id' => 'MLM-SOLD-KIT',
+                'key' => 'MLM-SOLD-KIT:',
+                'qty' => 1,
+            ]]
+        );
+
+        (new ReconcileInventoryMeliOrderReservationsJob($order->id))
+            ->handle(app(InventoryMeliOrderReservationService::class));
+
+        $expected = [
+            $soldKitLink->id,
+            $leftLink->id,
+            $rightLink->id,
+            $otherKitLink->id,
+        ];
+
+        sort($expected);
+
+        $actual = Bus::dispatched(SyncInventoryMeliStockLinkJob::class)
+            ->map(fn (SyncInventoryMeliStockLinkJob $job): int => $job->linkId)
+            ->sort()
+            ->values()
+            ->all();
+
+        $this->assertSame($expected, $actual);
+
+        $this->assertSame(
+            1,
+            InventoryKitReservation::where(
+                'status',
+                InventoryKitReservation::ACTIVE
+            )->sum('quantity')
+        );
+
+        $this->assertSame(2, InventoryReservation::active()->sum('quantity'));
+    }
+
+    public function test_affected_stock_dispatch_uses_only_active_stock_sync_enabled_links(): void
+    {
+        Bus::fake();
+
+        [$product] = $this->stockedProduct('SKU-FILTER-DISPATCH', 5);
+
+        $this->link(
+            $product,
+            1,
+            'MLM-SOLD-DISABLED',
+            null,
+            true,
+            true,
+            false,
+            'GROUP-DISABLED'
+        );
+
+        $enabled = $this->link(
+            $product,
+            1,
+            'MLM-OTHER-ENABLED',
+            null,
+            true,
+            true,
+            true,
+            'GROUP-ENABLED'
+        );
+
+        $this->link(
+            $product,
+            1,
+            'MLM-OTHER-INACTIVE',
+            null,
+            true,
+            false,
+            true,
+            'GROUP-INACTIVE'
+        );
+
+        $order = $this->order(
+            1,
+            1203,
+            'paid',
+            [[
+                'item_id' => 'MLM-SOLD-DISABLED',
+                'key' => 'MLM-SOLD-DISABLED:',
+                'qty' => 1,
+            ]]
+        );
+
+        (new ReconcileInventoryMeliOrderReservationsJob($order->id))
+            ->handle(app(InventoryMeliOrderReservationService::class));
+
+        Bus::assertDispatchedTimes(
+            SyncInventoryMeliStockLinkJob::class,
+            1
+        );
+
+        Bus::assertDispatched(
+            SyncInventoryMeliStockLinkJob::class,
+            fn (SyncInventoryMeliStockLinkJob $job): bool =>
+                $job->linkId === $enabled->id
+        );
+
+        $this->assertSame(1, InventoryReservation::active()->sum('quantity'));
+    }
     private function stockedProduct(string $sku, int $quantity): array
     {
         $location = InventoryLocation::create(['code' => 'LOC-'.substr(hash('sha1', $sku), 0, 8), 'name' => 'Test', 'is_active' => true]);
