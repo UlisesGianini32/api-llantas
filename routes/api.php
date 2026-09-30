@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\AmazonWebhookController;
 use App\Http\Controllers\MeliChatWebhookController;
 use App\Http\Controllers\MeliWebhookController;
 use App\Http\Controllers\ShopifyWebhookController;
@@ -16,3 +17,6 @@ Route::post('/webhooks/mercadolibre/chat-menu', MeliChatWebhookController::class
 
 // Shopify Webhook
 Route::post('/shopify/webhook', [ShopifyWebhookController::class, 'handle']);
+
+// Amazon Webhook
+Route::post('/amazon/webhook', [AmazonWebhookController::class, 'handle']);

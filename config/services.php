@@ -36,10 +36,11 @@ return [
         'client_id' => env('MELI_CLIENT_ID', env('MELI_APP_ID')),
         'client_secret' => env('MELI_CLIENT_SECRET'),
         /** Debe coincidir con la Redirect URI en Dev Center; si falta, se arma con APP_URL. */
-        'redirect_uri' => env('MELI_REDIRECT_URI') ?: rtrim((string) env('APP_URL', ''), '/') . '/auth/meli/callback',
+        'redirect_uri' => env('MELI_REDIRECT_URI') ?: rtrim((string) env('APP_URL', ''), '/').'/auth/meli/callback',
 
         /**
          * URL de autorización OAuth (por país). México: https://auth.mercadolibre.com.mx/authorization
+         *
          * @see https://developers.mercadolibre.com.mx/es_ar/autenticacion-y-autorizacion
          */
         'authorization_url' => env('MELI_AUTHORIZATION_URL', 'https://auth.mercadolibre.com.mx/authorization'),
@@ -65,6 +66,7 @@ return [
         /**
          * Llantas en ML: si el stock local es exactamente este valor, la sync pausa la publicación (PUT status=paused).
          * 0 = desactivado (solo actualiza cantidad/precio como antes).
+         *
          * @see https://developers.mercadolibre.com.mx/es_ar/descripcion-de-la-publicaciones
          */
         'pause_llantas_when_stock_equals' => max(0, (int) env('MELI_PAUSE_LLANTAS_WHEN_STOCK_EQUALS', 1)),
@@ -128,6 +130,19 @@ return [
             'bot_user_oauth_token' => env('SLACK_BOT_USER_OAUTH_TOKEN'),
             'channel' => env('SLACK_BOT_USER_DEFAULT_CHANNEL'),
         ],
+    ],
+
+    'amazon' => [
+        'lwa_client_id' => env('AMAZON_SP_API_CLIENT_ID'),
+        'lwa_client_secret' => env('AMAZON_SP_API_CLIENT_SECRET'),
+        'lwa_refresh_token' => env('AMAZON_SP_API_REFRESH_TOKEN'),
+        'aws_access_key_id' => env('AMAZON_AWS_ACCESS_KEY_ID'),
+        'aws_secret_access_key' => env('AMAZON_AWS_SECRET_ACCESS_KEY'),
+        'aws_region' => env('AMAZON_AWS_REGION', 'us-east-1'),
+        'role_arn' => env('AMAZON_ROLE_ARN'),
+        'seller_id' => env('AMAZON_SELLER_ID'),
+        'marketplace_id' => env('AMAZON_MARKETPLACE_ID', 'A1AM78C64UM0Y8'),
+        'endpoint' => env('AMAZON_SP_API_ENDPOINT', 'https://sellingpartnerapi-na.amazon.com'),
     ],
 
 ];
