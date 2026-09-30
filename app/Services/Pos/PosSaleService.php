@@ -6,6 +6,7 @@ use App\Exceptions\PosInsufficientStockException;
 use App\Models\InventoryLocation;
 use App\Models\InventoryMovement;
 use App\Models\InventoryProduct;
+use App\Models\InventoryReservation;
 use App\Models\PosSale;
 use App\Models\PosSaleItem;
 use App\Models\User;
@@ -81,19 +82,44 @@ class PosSaleService
             ? InventoryLocation::find($locationId)
             : $this->getDefaultLocation();
 
-        return $products->map(function (InventoryProduct $product) use ($location) {
+        // Batch pre-fetch stock for simple products to eradicate N+1 queries
+        $simpleProductIds = $products->where('product_type', InventoryProduct::SIMPLE)->pluck('id')->all();
+
+        $physicalStocks = [];
+        $reservedStocks = [];
+
+        if (! empty($simpleProductIds)) {
+            $movementQuery = InventoryMovement::query()
+                ->whereIn('inventory_product_id', $simpleProductIds);
+            if ($location) {
+                $movementQuery->where('inventory_location_id', $location->id);
+            }
+            $physicalStocks = $movementQuery->groupBy('inventory_product_id')
+                ->selectRaw('inventory_product_id, SUM(quantity) as total')
+                ->pluck('total', 'inventory_product_id')
+                ->all();
+
+            $resQuery = InventoryReservation::query()
+                ->whereIn('inventory_product_id', $simpleProductIds)
+                ->where('status', InventoryReservation::ACTIVE);
+            if ($location) {
+                $resQuery->where('inventory_location_id', $location->id);
+            }
+            $reservedStocks = $resQuery->groupBy('inventory_product_id')
+                ->selectRaw('inventory_product_id, SUM(quantity) as total')
+                ->pluck('total', 'inventory_product_id')
+                ->all();
+        }
+
+        return $products->map(function (InventoryProduct $product) use ($physicalStocks, $reservedStocks) {
             if ($product->isKit()) {
                 $physical = $this->kitStockService->physicalStock($product);
                 $available = $this->kitStockService->availableStock($product);
                 $reserved = max(0, $physical - $available);
-            } elseif ($location) {
-                $physical = $this->stockService->physicalStockByLocation($product, $location);
-                $reserved = $this->stockService->reservedStockByLocation($product, $location);
-                $available = $this->stockService->availableStockByLocation($product, $location);
             } else {
-                $physical = $this->stockService->physicalStock($product);
-                $reserved = $this->stockService->reservedStock($product);
-                $available = $this->stockService->availableStock($product);
+                $physical = (int) ($physicalStocks[$product->id] ?? 0);
+                $reserved = (int) ($reservedStocks[$product->id] ?? 0);
+                $available = max(0, $physical - $reserved);
             }
 
             return [
