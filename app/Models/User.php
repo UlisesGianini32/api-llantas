@@ -2,8 +2,8 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 use Illuminate\Support\Str;
@@ -18,7 +18,16 @@ class User extends Authenticatable
 
     public const ROLE_OPERATIONS = 'operations';
 
-    public const ROLES = [self::ROLE_ADMIN, self::ROLE_OPERATIONS];
+    public const ROLE_POS = 'pos';
+
+    public const ROLE_WAREHOUSE = 'warehouse';
+
+    public const ROLES = [
+        self::ROLE_ADMIN,
+        self::ROLE_OPERATIONS,
+        self::ROLE_POS,
+        self::ROLE_WAREHOUSE,
+    ];
 
     protected $fillable = [
         'name',
@@ -43,10 +52,12 @@ class User extends Authenticatable
     protected function casts(): array
     {
         return [
-            'email_verified_at'   => 'datetime',
-            'password'            => 'hashed',
-            'expires_at'          => 'datetime',
-            'official_store_id'   => 'integer', // ✅ NUEVO
+            'email_verified_at' => 'datetime',
+            'password' => 'hashed',
+            'expires_at' => 'datetime',
+            'official_store_id' => 'integer', // ✅ NUEVO
+            'access_token' => \App\Casts\SafeEncryptedString::class,
+            'refresh_token' => \App\Casts\SafeEncryptedString::class,
         ];
     }
 
@@ -59,8 +70,12 @@ class User extends Authenticatable
             ->implode('');
     }
 
-    public function hasRole(string $role): bool
+    public function hasRole(string|array $role): bool
     {
+        if (is_array($role)) {
+            return in_array($this->role, $role, true);
+        }
+
         return $this->role === $role;
     }
 
@@ -72,6 +87,16 @@ class User extends Authenticatable
     public function isOperations(): bool
     {
         return $this->hasRole(self::ROLE_OPERATIONS);
+    }
+
+    public function isPos(): bool
+    {
+        return $this->hasRole(self::ROLE_POS);
+    }
+
+    public function isWarehouse(): bool
+    {
+        return $this->hasRole(self::ROLE_WAREHOUSE);
     }
 
     /** @return HasMany<MeliAccount, User> */

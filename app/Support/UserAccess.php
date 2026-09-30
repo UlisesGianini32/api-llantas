@@ -8,12 +8,43 @@ use Illuminate\Support\Str;
 final class UserAccess
 {
     /** @var list<string> */
+    private const COMMON_ACCOUNT_PATTERNS = [
+        'dashboard',
+        'dashboard.*',
+        'profile.edit',
+        'profile.update',
+        'user-password.edit',
+        'user-password.update',
+        'appearance.edit',
+        'two-factor.*',
+    ];
+
+    /** @var list<string> */
+    private const POS_ROUTE_PATTERNS = [
+        ...self::COMMON_ACCOUNT_PATTERNS,
+        'pos.*',
+        'qz.*',
+    ];
+
+    /** @var list<string> */
+    private const WAREHOUSE_ROUTE_PATTERNS = [
+        ...self::COMMON_ACCOUNT_PATTERNS,
+        'inventory.products.*',
+        'inventory.locations.*',
+        'inventory.movements.*',
+        'inventory.reservations.*',
+        'inventory.kits.*',
+        'purchasing.orders.index',
+        'purchasing.orders.show',
+        'purchasing.orders.receive',
+    ];
+
+    /** @var list<string> */
     private const OPERATIONS_ROUTE_PATTERNS = [
+        ...self::COMMON_ACCOUNT_PATTERNS,
         'pos.*',
         'restock.*',
         'purchasing.*',
-        'dashboard',
-        'dashboard.*',
         'meli.sync-manual',
         'meli.questions.*',
         'meli.messaging.*',
@@ -24,12 +55,6 @@ final class UserAccess
         'ams.*',
         'qz.*',
         'settings.index',
-        'profile.edit',
-        'profile.update',
-        'user-password.edit',
-        'user-password.update',
-        'appearance.edit',
-        'two-factor.*',
         'inventory.kits.index',
         'inventory.kits.show',
         'inventory.kits.reservations.show',
@@ -45,10 +70,22 @@ final class UserAccess
             return true;
         }
 
-        if (! $user->isOperations() || blank($routeName)) {
+        if (blank($routeName)) {
             return false;
         }
 
-        return Str::is(self::OPERATIONS_ROUTE_PATTERNS, $routeName);
+        if ($user->isOperations()) {
+            return Str::is(self::OPERATIONS_ROUTE_PATTERNS, $routeName);
+        }
+
+        if ($user->isPos()) {
+            return Str::is(self::POS_ROUTE_PATTERNS, $routeName);
+        }
+
+        if ($user->isWarehouse()) {
+            return Str::is(self::WAREHOUSE_ROUTE_PATTERNS, $routeName);
+        }
+
+        return false;
     }
 }

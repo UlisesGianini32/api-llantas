@@ -7,16 +7,18 @@ use App\Http\Controllers\ShopifyWebhookController;
 use App\Http\Controllers\TelegramWebhookController;
 use Illuminate\Support\Facades\Route;
 
-Route::post('/telegram/webhook', [TelegramWebhookController::class, 'handle']);
+Route::middleware('throttle:120,1')->group(function () {
+    Route::post('/telegram/webhook', [TelegramWebhookController::class, 'handle']);
 
-// MeliWebhook
-Route::post('/meli/webhook', [MeliWebhookController::class, 'handle']);
+    // MeliWebhook
+    Route::post('/meli/webhook', [MeliWebhookController::class, 'handle']);
 
-// Mensajeria
-Route::post('/webhooks/mercadolibre/chat-menu', MeliChatWebhookController::class);
+    // Mensajeria
+    Route::post('/webhooks/mercadolibre/chat-menu', MeliChatWebhookController::class);
 
-// Shopify Webhook
-Route::post('/shopify/webhook', [ShopifyWebhookController::class, 'handle']);
+    // Shopify Webhook
+    Route::post('/shopify/webhook', [ShopifyWebhookController::class, 'handle']);
 
-// Amazon Webhook
-Route::post('/amazon/webhook', [AmazonWebhookController::class, 'handle']);
+    // Amazon Webhook
+    Route::post('/amazon/webhook', [AmazonWebhookController::class, 'handle']);
+});

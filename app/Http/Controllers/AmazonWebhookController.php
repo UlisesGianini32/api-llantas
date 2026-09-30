@@ -15,6 +15,23 @@ class AmazonWebhookController extends Controller
 
     public function handle(Request $request): JsonResponse
     {
+        $secret = (string) config('services.amazon.webhook_secret', env('AMAZON_WEBHOOK_SECRET', ''));
+        if ($secret !== '') {
+            $incomingHeader = (string) (
+                $request->header('X-Amazon-Webhook-Secret')
+                ?? $request->header('X-Webhook-Secret')
+                ?? $request->bearerToken()
+                ?? ''
+            );
+            if (! hash_equals($secret, $incomingHeader)) {
+                Log::warning('Amazon Webhook: secreto de autorización inválido o ausente', [
+                    'ip' => $request->ip(),
+                ]);
+
+                return response()->json(['error' => 'No autorizado. Secreto de webhook inválido.'], 401);
+            }
+        }
+
         $payload = $request->json()->all();
 
         // Si viene envuelto en un sobre de AWS SNS

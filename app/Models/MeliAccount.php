@@ -34,6 +34,8 @@ class MeliAccount extends Model
             'expires_at' => 'datetime',
             'is_default' => 'boolean',
             'official_store_id' => 'integer',
+            'access_token' => \App\Casts\SafeEncryptedString::class,
+            'refresh_token' => \App\Casts\SafeEncryptedString::class,
         ];
     }
 
