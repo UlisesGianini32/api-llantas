@@ -40,6 +40,7 @@ use App\Http\Controllers\MeliPublishController;
 use App\Http\Controllers\MeliQuestionController;
 use App\Http\Controllers\MeliRepublishController;
 use App\Http\Controllers\MeliSecondaryPublicationController;
+use App\Http\Controllers\Pos\PosController;
 use App\Http\Controllers\PriceRulesController;
 use App\Http\Controllers\ProductoCompuestoController;
 use App\Http\Controllers\ProductoController;
@@ -119,6 +120,17 @@ Route::middleware(['auth', 'role'])->group(function () {
 
     Route::get('/producto/export/shopify/tobeauty', [ProductoController::class, 'exportShopifyTobeauty'])
         ->name('producto.export.shopify.tobeauty');
+
+    // PUNTO DE VENTA (POS / MOSTRADOR)
+    Route::prefix('pos')->name('pos.')->group(function () {
+        Route::get('/', [PosController::class, 'index'])->name('index');
+        Route::get('/search', [PosController::class, 'search'])->name('search');
+        Route::post('/sales', [PosController::class, 'store'])->name('sales.store');
+        Route::get('/sales/{posSale}', [PosController::class, 'show'])
+            ->whereNumber('posSale')->name('sales.show');
+        Route::post('/sales/{posSale}/cancel', [PosController::class, 'cancel'])
+            ->whereNumber('posSale')->name('sales.cancel');
+    });
 
     // ALMACÉN: catálogo maestro independiente de llantas y Syscom.
     Route::prefix('almacen/productos')->name('inventory.products.')->group(function () {
