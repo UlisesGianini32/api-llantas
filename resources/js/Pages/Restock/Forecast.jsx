@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Head, router } from '@inertiajs/react'
+import { Head, Link, router } from '@inertiajs/react'
 import AppShell from '@/Components/layout/AppShell'
 
 export default function RestockForecast({
@@ -187,6 +187,12 @@ export default function RestockForecast({
                         </div>
                     </div>
 
+                    <Link
+                        href={`/compras/ordenes/crear${selectedBrand ? `?brand=${encodeURIComponent(selectedBrand)}` : ''}`}
+                        className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-4 py-2.5 text-xs font-bold text-white shadow hover:bg-indigo-700 transition"
+                    >
+                        <span>📦</span> Generar Orden de Compra {selectedBrand ? `(${selectedBrand})` : ''}
+                    </Link>
                     <a
                         href={getExportUrl()}
                         download

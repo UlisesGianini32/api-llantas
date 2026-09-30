@@ -11,6 +11,7 @@ final class UserAccess
     private const OPERATIONS_ROUTE_PATTERNS = [
         'pos.*',
         'restock.*',
+        'purchasing.*',
         'dashboard',
         'dashboard.*',
         'meli.sync-manual',

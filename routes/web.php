@@ -46,6 +46,7 @@ use App\Http\Controllers\PriceRulesController;
 use App\Http\Controllers\ProductoCompuestoController;
 use App\Http\Controllers\ProductoController;
 use App\Http\Controllers\ProductoSyncController;
+use App\Http\Controllers\Purchasing\PurchaseOrderController;
 use App\Http\Controllers\QzTrayController;
 use App\Http\Controllers\Restock\RestockForecastController;
 use App\Http\Controllers\Settings\ChannelSettingsController;
@@ -156,6 +157,23 @@ Route::middleware(['auth', 'role'])->group(function () {
         Route::get('/pronostico', [RestockForecastController::class, 'index'])->name('forecast.index');
         Route::post('/configuraciones', [RestockForecastController::class, 'saveConfiguration'])->name('configurations.save');
         Route::get('/exportar', [RestockForecastController::class, 'export'])->name('forecast.export');
+    });
+
+    // ÓRDENES DE COMPRA Y RECEPCIÓN DE ALMACÉN (Ticket 20)
+    Route::prefix('compras/ordenes')->name('purchasing.orders.')->group(function () {
+        Route::get('/', [PurchaseOrderController::class, 'index'])->name('index');
+        Route::get('/crear', [PurchaseOrderController::class, 'create'])->name('create');
+        Route::post('/', [PurchaseOrderController::class, 'store'])->name('store');
+        Route::get('/{purchaseOrder}', [PurchaseOrderController::class, 'show'])
+            ->whereNumber('purchaseOrder')->name('show');
+        Route::post('/{purchaseOrder}/ordenar', [PurchaseOrderController::class, 'order'])
+            ->whereNumber('purchaseOrder')->name('order');
+        Route::post('/{purchaseOrder}/recibir', [PurchaseOrderController::class, 'receive'])
+            ->whereNumber('purchaseOrder')->name('receive');
+        Route::post('/{purchaseOrder}/recepcionar', [PurchaseOrderController::class, 'receive'])
+            ->whereNumber('purchaseOrder');
+        Route::post('/{purchaseOrder}/cancelar', [PurchaseOrderController::class, 'cancel'])
+            ->whereNumber('purchaseOrder')->name('cancel');
     });
 
     // ALMACÉN: catálogo maestro independiente de llantas y Syscom.

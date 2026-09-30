@@ -201,6 +201,13 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                         Pronóstico de Compras
                     </NavItem>
                     <NavItem
+                        href="/compras/ordenes"
+                        active={currentPath.startsWith('/compras/ordenes')}
+                        onNavigate={onNavigate}
+                    >
+                        Órdenes de Compra
+                    </NavItem>
+                    <NavItem
                         href="/almacen/canales/mercado-libre/importar"
                         active={currentPath.startsWith('/almacen/canales/mercado-libre/importar')}
                         onNavigate={onNavigate}
@@ -408,6 +415,12 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
 </NavItem>}
 {!isAdmin && <NavItem href="/almacen/canales/mercado-libre/stock" active={currentPath.startsWith('/almacen/canales/mercado-libre/stock')} onNavigate={onNavigate}>
     Stock ML
+</NavItem>}
+{!isAdmin && <NavItem href="/reabastecimiento/pronostico" active={currentPath.startsWith('/reabastecimiento')} onNavigate={onNavigate}>
+    Pronóstico de Compras
+</NavItem>}
+{!isAdmin && <NavItem href="/compras/ordenes" active={currentPath.startsWith('/compras/ordenes')} onNavigate={onNavigate}>
+    Órdenes de Compra
 </NavItem>}
                 </div>
             </div>
