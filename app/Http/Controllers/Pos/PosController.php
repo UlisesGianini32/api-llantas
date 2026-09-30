@@ -6,7 +6,9 @@ use App\Exceptions\PosInsufficientStockException;
 use App\Http\Controllers\Controller;
 use App\Models\InventoryLocation;
 use App\Models\PosSale;
+use App\Services\Pos\PosReceiptService;
 use App\Services\Pos\PosSaleService;
+use App\Services\Pos\PosShiftService;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
@@ -18,7 +20,9 @@ use Throwable;
 class PosController extends Controller
 {
     public function __construct(
-        private readonly PosSaleService $posSaleService
+        private readonly PosSaleService $posSaleService,
+        private readonly PosShiftService $posShiftService,
+        private readonly PosReceiptService $posReceiptService
     ) {}
 
     public function index(Request $request): Response
@@ -43,11 +47,16 @@ class PosController extends Controller
             ->limit(20)
             ->get();
 
+        $currentShift = $this->posShiftService->getActiveShift($request->user(), $defaultLocation->id);
+        $shiftSummary = $currentShift ? $this->posShiftService->calculateShiftSummary($currentShift) : null;
+
         return Inertia::render('Pos/Index', [
             'locations' => $locations,
             'defaultLocationId' => $defaultLocation->id,
             'initialProducts' => $initialProducts,
             'recentSales' => $recentSales,
+            'currentShift' => $currentShift ? $currentShift->load(['location', 'cashier']) : null,
+            'shiftSummary' => $shiftSummary,
         ]);
     }
 
@@ -84,12 +93,15 @@ class PosController extends Controller
 
         try {
             $sale = $this->posSaleService->createSale($validated, $request->user());
+            $paperType = $request->input('paper_type', '80mm');
+            $receipt = $this->posReceiptService->formatSaleReceipt($sale, $paperType, true);
 
             if ($request->wantsJson()) {
                 return response()->json([
                     'ok' => true,
                     'message' => "Venta {$sale->sale_number} completada correctamente.",
                     'sale' => $sale,
+                    'receipt' => $receipt,
                 ]);
             }
 
@@ -115,6 +127,18 @@ class PosController extends Controller
 
             return back()->with('error', 'Error al procesar la venta: '.$e->getMessage());
         }
+    }
+
+    public function receipt(Request $request, PosSale $posSale): JsonResponse
+    {
+        $paperType = $request->input('paper_type', '80mm');
+        $kickDrawer = $request->boolean('kick_drawer', false);
+        $receipt = $this->posReceiptService->formatSaleReceipt($posSale, $paperType, $kickDrawer);
+
+        return response()->json([
+            'ok' => true,
+            'receipt' => $receipt,
+        ]);
     }
 
     public function show(PosSale $posSale): JsonResponse

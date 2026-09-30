@@ -58,6 +58,7 @@ class PosSaleTest extends TestCase
         }
         (require database_path('migrations/2026_09_26_000001_add_remote_user_product_id_to_inventory_channel_links.php'))->up();
         (require database_path('migrations/2026_09_30_000001_create_pos_sales_tables.php'))->up();
+        (require database_path('migrations/2026_09_30_000002_create_pos_shifts_tables.php'))->up();
 
         $this->cashier = User::forceCreate([
             'name' => 'Cajero Mostrador',

@@ -19,7 +19,8 @@ class PosSaleService
 {
     public function __construct(
         private readonly InventoryStockService $stockService,
-        private readonly InventoryKitStockService $kitStockService
+        private readonly InventoryKitStockService $kitStockService,
+        private readonly PosShiftService $shiftService
     ) {}
 
     public function getDefaultLocation(): InventoryLocation
@@ -217,6 +218,9 @@ class PosSaleService
                 $changeDue = $amountTendered - $total;
             }
 
+            // Buscar turno activo del cajero en esta ubicación
+            $activeShift = $this->shiftService->getActiveShift($cashier, $location->id);
+
             // Generar folio de venta único para la fecha
             $saleNumber = $this->generateSaleNumber();
 
@@ -225,6 +229,7 @@ class PosSaleService
                 'sale_number' => $saleNumber,
                 'user_id' => $cashier->id,
                 'inventory_location_id' => $location->id,
+                'pos_shift_id' => $activeShift?->id,
                 'customer_name' => trim((string) ($data['customer_name'] ?? 'Público en general')) ?: 'Público en general',
                 'customer_phone' => ! empty($data['customer_phone']) ? trim((string) $data['customer_phone']) : null,
                 'customer_type' => $customerType,

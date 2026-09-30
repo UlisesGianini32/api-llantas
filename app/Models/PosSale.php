@@ -28,6 +28,7 @@ class PosSale extends Model
         'sale_number',
         'user_id',
         'inventory_location_id',
+        'pos_shift_id',
         'customer_name',
         'customer_phone',
         'customer_type',
@@ -66,6 +67,11 @@ class PosSale extends Model
     public function location(): BelongsTo
     {
         return $this->belongsTo(InventoryLocation::class, 'inventory_location_id');
+    }
+
+    public function shift(): BelongsTo
+    {
+        return $this->belongsTo(PosShift::class, 'pos_shift_id');
     }
 
     public function items(): HasMany

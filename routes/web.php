@@ -41,6 +41,7 @@ use App\Http\Controllers\MeliQuestionController;
 use App\Http\Controllers\MeliRepublishController;
 use App\Http\Controllers\MeliSecondaryPublicationController;
 use App\Http\Controllers\Pos\PosController;
+use App\Http\Controllers\Pos\PosShiftController;
 use App\Http\Controllers\PriceRulesController;
 use App\Http\Controllers\ProductoCompuestoController;
 use App\Http\Controllers\ProductoController;
@@ -128,8 +129,25 @@ Route::middleware(['auth', 'role'])->group(function () {
         Route::post('/sales', [PosController::class, 'store'])->name('sales.store');
         Route::get('/sales/{posSale}', [PosController::class, 'show'])
             ->whereNumber('posSale')->name('sales.show');
+        Route::get('/sales/{posSale}/receipt', [PosController::class, 'receipt'])
+            ->whereNumber('posSale')->name('sales.receipt');
         Route::post('/sales/{posSale}/cancel', [PosController::class, 'cancel'])
             ->whereNumber('posSale')->name('sales.cancel');
+
+        // Turnos y Caja (Shifts & Drawer)
+        Route::prefix('shifts')->name('shifts.')->group(function () {
+            Route::get('/current', [PosShiftController::class, 'current'])->name('current');
+            Route::post('/open', [PosShiftController::class, 'open'])->name('open');
+            Route::post('/{posShift}/movement', [PosShiftController::class, 'movement'])
+                ->whereNumber('posShift')->name('movement');
+            Route::get('/{posShift}/summary', [PosShiftController::class, 'summary'])
+                ->whereNumber('posShift')->name('summary');
+            Route::post('/{posShift}/close', [PosShiftController::class, 'close'])
+                ->whereNumber('posShift')->name('close');
+            Route::get('/{posShift}/receipt', [PosShiftController::class, 'receipt'])
+                ->whereNumber('posShift')->name('receipt');
+        });
+        Route::post('/drawer/open', [PosShiftController::class, 'drawer'])->name('drawer.open');
     });
 
     // ALMACÉN: catálogo maestro independiente de llantas y Syscom.
