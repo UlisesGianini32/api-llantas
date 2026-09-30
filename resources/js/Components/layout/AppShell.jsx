@@ -194,6 +194,13 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                         Enlaces de canales
                     </NavItem>
                     <NavItem
+                        href="/reabastecimiento/pronostico"
+                        active={currentPath.startsWith('/reabastecimiento')}
+                        onNavigate={onNavigate}
+                    >
+                        Pronóstico de Compras
+                    </NavItem>
+                    <NavItem
                         href="/almacen/canales/mercado-libre/importar"
                         active={currentPath.startsWith('/almacen/canales/mercado-libre/importar')}
                         onNavigate={onNavigate}

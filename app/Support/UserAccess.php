@@ -10,6 +10,7 @@ final class UserAccess
     /** @var list<string> */
     private const OPERATIONS_ROUTE_PATTERNS = [
         'pos.*',
+        'restock.*',
         'dashboard',
         'dashboard.*',
         'meli.sync-manual',

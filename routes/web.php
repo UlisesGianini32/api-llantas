@@ -47,6 +47,7 @@ use App\Http\Controllers\ProductoCompuestoController;
 use App\Http\Controllers\ProductoController;
 use App\Http\Controllers\ProductoSyncController;
 use App\Http\Controllers\QzTrayController;
+use App\Http\Controllers\Restock\RestockForecastController;
 use App\Http\Controllers\Settings\ChannelSettingsController;
 use App\Http\Controllers\Settings\PasswordController;
 use App\Http\Controllers\Settings\ProfileController;
@@ -148,6 +149,13 @@ Route::middleware(['auth', 'role'])->group(function () {
                 ->whereNumber('posShift')->name('receipt');
         });
         Route::post('/drawer/open', [PosShiftController::class, 'drawer'])->name('drawer.open');
+    });
+
+    // REABASTECIMIENTO INTELIGENTE Y PRONÓSTICO DE COMPRAS (Ticket 19)
+    Route::prefix('reabastecimiento')->name('restock.')->group(function () {
+        Route::get('/pronostico', [RestockForecastController::class, 'index'])->name('forecast.index');
+        Route::post('/configuraciones', [RestockForecastController::class, 'saveConfiguration'])->name('configurations.save');
+        Route::get('/exportar', [RestockForecastController::class, 'export'])->name('forecast.export');
     });
 
     // ALMACÉN: catálogo maestro independiente de llantas y Syscom.

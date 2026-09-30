@@ -20,8 +20,13 @@ class InventoryProduct extends Model
         'product_type',
         'barcode',
         'name',
+        'brand',
+        'supplier',
         'description',
         'cost',
+        'min_stock',
+        'lead_time_days',
+        'restock_cadence_days',
         'price_mercado_libre',
         'price_amazon',
         'price_stylist',
@@ -34,6 +39,9 @@ class InventoryProduct extends Model
     {
         return [
             'cost' => 'decimal:2',
+            'min_stock' => 'integer',
+            'lead_time_days' => 'integer',
+            'restock_cadence_days' => 'integer',
             'price_mercado_libre' => 'decimal:2',
             'price_amazon' => 'decimal:2',
             'price_stylist' => 'decimal:2',
