@@ -1,6 +1,7 @@
 import { Head, Link, useForm, usePage } from '@inertiajs/react'
 import SettingsLayout from '@/Components/settings/SettingsLayout'
 import SettingsCard from '@/Components/settings/SettingsCard'
+import ChannelCards from '@/Components/settings/ChannelCards'
 
 export default function Profile() {
     const { auth } = usePage().props
@@ -22,13 +23,6 @@ export default function Profile() {
         e.preventDefault()
         patch('/settings/profile')
     }
-
-    const meliAccounts = user?.meli_accounts ?? []
-
-    const hasMeliLinked =
-        meliAccounts.length > 0 ||
-        user?.meli_linked === true ||
-        (user?.meli_id != null && String(user.meli_id).trim() !== '')
 
     return (
         <>
@@ -94,108 +88,7 @@ export default function Profile() {
                     </form>
                 </SettingsCard>
 
-                <SettingsCard
-                    title="Cuenta de Mercado Libre"
-                    description="Puedes vincular varias tiendas al mismo perfil (misma app de MeLi). La marcada como principal es la que usan sincronización y jobs por defecto."
-                >
-                    <div className="space-y-4">
-                        <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 dark:border-neutral-800 dark:bg-neutral-950">
-                            <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                                <div>
-                                    <p className="text-sm font-semibold text-slate-900 dark:text-white">
-                                        Estado de la conexión
-                                    </p>
-
-                                    <p className="mt-1 text-sm text-slate-600 dark:text-slate-300">
-                                        {hasMeliLinked
-                                            ? 'Una o más cuentas de Mercado Libre están vinculadas.'
-                                            : 'No tienes una cuenta de Mercado Libre vinculada.'}
-                                    </p>
-                                </div>
-
-                                <span
-                                    className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold ${
-                                        hasMeliLinked
-                                            ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300'
-                                            : 'bg-amber-100 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300'
-                                    }`}
-                                >
-                                    {hasMeliLinked ? 'Vinculada' : 'Sin vincular'}
-                                </span>
-                            </div>
-                        </div>
-
-                        {meliAccounts.length > 0 && (
-                            <ul className="space-y-3">
-                                {meliAccounts.map((acc) => (
-                                    <li
-                                        key={acc.id}
-                                        className="flex flex-col gap-3 rounded-xl border border-slate-200 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-900 md:flex-row md:items-center md:justify-between"
-                                    >
-                                        <div>
-                                            <p className="text-xs font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400">
-                                                ID Mercado Libre (user_id)
-                                            </p>
-                                            <p className="mt-1 font-mono text-sm font-semibold text-slate-900 dark:text-white">
-                                                {acc.meli_user_id}
-                                                {acc.is_default && (
-                                                    <span className="ml-2 inline-flex rounded-full bg-indigo-100 px-2 py-0.5 text-xs font-semibold text-indigo-800 dark:bg-indigo-500/20 dark:text-indigo-200">
-                                                        Principal
-                                                    </span>
-                                                )}
-                                            </p>
-                                            {acc.nickname && (
-                                                <p className="mt-1 text-sm text-slate-600 dark:text-slate-300">
-                                                    {acc.nickname}
-                                                </p>
-                                            )}
-                                        </div>
-                                        <div className="flex flex-wrap gap-2">
-                                            <a
-                                                href={`/auth/meli?account=${acc.id}`}
-                                                className="inline-flex items-center justify-center rounded-xl bg-sky-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-sky-700"
-                                            >
-                                                Reautorizar
-                                            </a>
-                                            <Link
-                                                href={`/auth/meli/unlink/${acc.id}`}
-                                                method="delete"
-                                                as="button"
-                                                className="inline-flex items-center justify-center rounded-xl border border-red-300 bg-white px-4 py-2 text-sm font-semibold text-red-600 transition hover:bg-red-50 dark:border-red-800 dark:bg-neutral-950 dark:text-red-400 dark:hover:bg-red-500/10"
-                                            >
-                                                Desvincular
-                                            </Link>
-                                        </div>
-                                    </li>
-                                ))}
-                            </ul>
-                        )}
-
-                        <div className="flex flex-col gap-3 md:flex-row md:flex-wrap">
-                            {!hasMeliLinked ? (
-                                <a
-                                    href="/auth/meli"
-                                    className="inline-flex items-center justify-center rounded-xl bg-sky-600 px-5 py-3 text-sm font-semibold text-white transition hover:bg-sky-700"
-                                >
-                                    Vincular Mercado Libre
-                                </a>
-                            ) : (
-                                <>
-                                    <a
-                                        href="/auth/meli?additional=1"
-                                        className="inline-flex items-center justify-center rounded-xl bg-sky-600 px-5 py-3 text-sm font-semibold text-white transition hover:bg-sky-700"
-                                    >
-                                        Vincular otra cuenta
-                                    </a>
-                                    <p className="text-sm text-slate-500 dark:text-slate-400 md:self-center">
-                                        Inicia sesión en Mercado Libre con el usuario de la otra tienda cuando el
-                                        navegador te lo pida.
-                                    </p>
-                                </>
-                            )}
-                        </div>
-                    </div>
-                </SettingsCard>
+                <ChannelCards />
 
                 <SettingsCard
                     title="Zona peligrosa"

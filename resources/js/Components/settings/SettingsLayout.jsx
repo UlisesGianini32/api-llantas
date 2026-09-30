@@ -52,6 +52,13 @@ export default function SettingsLayout({
                                 </SettingsNavLink>
 
                                 <SettingsNavLink
+                                    href="/settings/channels"
+                                    active={current === 'channels'}
+                                >
+                                    Canales de venta
+                                </SettingsNavLink>
+
+                                <SettingsNavLink
                                     href="/settings/password"
                                     active={current === 'password'}
                                 >

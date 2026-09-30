@@ -45,6 +45,7 @@ use App\Http\Controllers\ProductoCompuestoController;
 use App\Http\Controllers\ProductoController;
 use App\Http\Controllers\ProductoSyncController;
 use App\Http\Controllers\QzTrayController;
+use App\Http\Controllers\Settings\ChannelSettingsController;
 use App\Http\Controllers\Settings\PasswordController;
 use App\Http\Controllers\Settings\ProfileController;
 use App\Http\Controllers\SyscomMeliController;
@@ -59,6 +60,8 @@ use Laravel\Fortify\Features;
 // CALLBACK (fuera de auth)
 Route::get('/auth/meli/callback', [AuthController::class, 'handleMeliCallback'])
     ->name('meli.callback');
+Route::get('/auth/shopify/callback', [ChannelSettingsController::class, 'handleShopifyCallback'])
+    ->name('shopify.callback');
 
 Route::middleware(['auth', 'role'])->group(function () {
     // SISTEMA
@@ -617,6 +620,17 @@ Route::middleware(['auth', 'role'])->group(function () {
 
     Route::patch('settings/profile', [ProfileController::class, 'update'])
         ->name('profile.update');
+
+    Route::get('settings/channels', [ChannelSettingsController::class, 'index'])
+        ->name('channels.index');
+    Route::post('settings/channels/shopify/test', [ChannelSettingsController::class, 'testShopify'])
+        ->name('channels.shopify.test');
+    Route::post('settings/channels/amazon/test', [ChannelSettingsController::class, 'testAmazon'])
+        ->name('channels.amazon.test');
+    Route::post('settings/channels/save', [ChannelSettingsController::class, 'save'])
+        ->name('channels.save');
+    Route::get('/auth/shopify', [ChannelSettingsController::class, 'redirectToShopify'])
+        ->name('shopify.redirect');
 
     Route::get('settings/password', function () {
         return inertia('Settings/Password');
