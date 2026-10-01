@@ -157,6 +157,8 @@ Route::middleware(['auth', 'role'])->group(function () {
         Route::get('/pronostico', [RestockForecastController::class, 'index'])->name('forecast.index');
         Route::post('/configuraciones', [RestockForecastController::class, 'saveConfiguration'])->name('configurations.save');
         Route::get('/exportar', [RestockForecastController::class, 'export'])->name('forecast.export');
+        Route::post('/productos/{product}/marca', [RestockForecastController::class, 'updateProductBrand'])
+            ->whereNumber('product')->name('products.brand');
     });
 
     // ÓRDENES DE COMPRA Y RECEPCIÓN DE ALMACÉN (Ticket 20)

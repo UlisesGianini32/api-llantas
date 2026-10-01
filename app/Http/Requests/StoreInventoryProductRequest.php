@@ -20,6 +20,8 @@ class StoreInventoryProductRequest extends FormRequest
             'product_type' => ['sometimes', 'string', Rule::in(InventoryProduct::TYPES)],
             'barcode' => ['nullable', 'string', 'max:100', Rule::unique('inventory_products', 'barcode')],
             'name' => ['required', 'string', 'max:255'],
+            'brand' => ['nullable', 'string', 'max:100'],
+            'supplier' => ['nullable', 'string', 'max:100'],
             'description' => ['nullable', 'string'],
             'cost' => ['nullable', 'numeric', 'min:0'],
             'price_mercado_libre' => ['nullable', 'numeric', 'min:0'],

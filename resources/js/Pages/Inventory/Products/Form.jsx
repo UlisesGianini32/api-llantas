@@ -16,6 +16,8 @@ export default function InventoryProductForm({ mode, product, locations = [] }) 
         product_type: product?.product_type || 'SIMPLE',
         barcode: product?.barcode || '',
         name: product?.name || '',
+        brand: product?.brand || '',
+        supplier: product?.supplier || '',
         description: product?.description || '',
         cost: product?.cost ?? '',
         price_mercado_libre: product?.price_mercado_libre ?? '',
@@ -45,6 +47,8 @@ export default function InventoryProductForm({ mode, product, locations = [] }) 
                 <form onSubmit={submit} className="space-y-6 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm dark:border-neutral-800 dark:bg-neutral-900">
                     <div className="grid gap-5 sm:grid-cols-2">
                         <label className="sm:col-span-2"><span className="mb-1 block text-sm font-semibold">Nombre *</span><input value={data.name} onChange={(e) => setData('name', e.target.value)} className="w-full rounded-xl border border-slate-300 px-4 py-2.5 dark:border-neutral-700 dark:bg-neutral-950 dark:text-white" />{fieldError('name')}</label>
+                        <label><span className="mb-1 block text-sm font-semibold">Marca</span><input value={data.brand} onChange={(e) => setData('brand', e.target.value)} placeholder="Ej. BUNEE, JOICO, MICHELIN..." className="w-full rounded-xl border border-slate-300 px-4 py-2.5 dark:border-neutral-700 dark:bg-neutral-950 dark:text-white" />{fieldError('brand')}</label>
+                        <label><span className="mb-1 block text-sm font-semibold">Proveedor / Fabricante</span><input value={data.supplier} onChange={(e) => setData('supplier', e.target.value)} placeholder="Distribuidor o fabricante" className="w-full rounded-xl border border-slate-300 px-4 py-2.5 dark:border-neutral-700 dark:bg-neutral-950 dark:text-white" />{fieldError('supplier')}</label>
                         <label><span className="mb-1 block text-sm font-semibold">SKU *</span><input value={data.sku} onChange={(e) => setData('sku', e.target.value)} className="w-full rounded-xl border border-slate-300 px-4 py-2.5 font-mono dark:border-neutral-700 dark:bg-neutral-950 dark:text-white" />{fieldError('sku')}</label>
                         <label><span className="mb-1 block text-sm font-semibold">Código de barras</span><input value={data.barcode} onChange={(e) => setData('barcode', e.target.value)} inputMode="numeric" className="w-full rounded-xl border border-slate-300 px-4 py-2.5 font-mono dark:border-neutral-700 dark:bg-neutral-950 dark:text-white" />{fieldError('barcode')}</label>
                         <label><span className="mb-1 block text-sm font-semibold">Tipo</span><select value={data.product_type} onChange={(e) => setData('product_type', e.target.value)} className="w-full rounded-xl border border-slate-300 px-4 py-2.5 dark:border-neutral-700 dark:bg-neutral-950 dark:text-white"><option value="SIMPLE">Simple</option><option value="KIT">Kit</option></select>{fieldError('product_type')}</label>

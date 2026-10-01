@@ -136,4 +136,30 @@ class RestockForecastController extends Controller
             'Content-Type' => 'text/csv; charset=UTF-8',
         ]);
     }
+
+    public function updateProductBrand(Request $request, \App\Models\InventoryProduct $product): JsonResponse|RedirectResponse
+    {
+        $validated = $request->validate([
+            'brand' => ['required', 'string', 'max:100'],
+            'supplier' => ['nullable', 'string', 'max:100'],
+        ]);
+
+        $brand = mb_strtoupper(trim($validated['brand']));
+        $supplier = filled($validated['supplier'] ?? null) ? trim($validated['supplier']) : ($product->supplier ?: $brand);
+
+        $product->update([
+            'brand' => $brand,
+            'supplier' => $supplier,
+        ]);
+
+        if ($request->wantsJson()) {
+            return response()->json([
+                'ok' => true,
+                'message' => "Marca de {$product->sku} actualizada a {$brand}.",
+                'product' => $product,
+            ]);
+        }
+
+        return back()->with('success', "Marca de {$product->sku} actualizada a {$brand}.");
+    }
 }

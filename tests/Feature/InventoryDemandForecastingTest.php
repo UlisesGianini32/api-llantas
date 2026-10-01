@@ -285,4 +285,59 @@ class InventoryDemandForecastingTest extends TestCase
         $this->assertStringContainsString('Elegance', $content);
         $this->assertStringContainsString('Sugerencia de Compra', $content);
     }
+
+    public function test_update_product_brand_endpoint(): void
+    {
+        $product = InventoryProduct::forceCreate([
+            'sku' => 'BUNEE-HAIR-01',
+            'name' => 'BUNEE Black Hair Concealer Cream',
+            'brand' => null,
+            'supplier' => null,
+            'product_type' => 'SIMPLE',
+            'cost' => 150.00,
+            'is_active' => true,
+        ]);
+
+        $response = $this->actingAs($this->admin)->postJson(route('restock.products.brand', $product), [
+            'brand' => 'bunee',
+            'supplier' => 'Distribuidora Capilar',
+        ]);
+
+        $response->assertOk()
+            ->assertJsonPath('ok', true);
+
+        $product->refresh();
+        $this->assertEquals('BUNEE', $product->brand);
+        $this->assertEquals('Distribuidora Capilar', $product->supplier);
+    }
+
+    public function test_inventory_backfill_brands_command(): void
+    {
+        $p1 = InventoryProduct::forceCreate([
+            'sku' => 'BUNEE-FIBERS-01',
+            'name' => 'BUNEE Hair Building Fibers 27.5g',
+            'brand' => null,
+            'product_type' => 'SIMPLE',
+            'cost' => 120.00,
+            'is_active' => true,
+        ]);
+
+        $p2 = InventoryProduct::forceCreate([
+            'sku' => 'JOICO-DEFY-01',
+            'name' => 'JOICO Defy Damage Protective Shield',
+            'brand' => null,
+            'product_type' => 'SIMPLE',
+            'cost' => 300.00,
+            'is_active' => true,
+        ]);
+
+        $this->artisan('inventory:backfill-brands')
+            ->assertSuccessful();
+
+        $p1->refresh();
+        $p2->refresh();
+
+        $this->assertEquals('BUNEE', $p1->brand);
+        $this->assertEquals('JOICO', $p2->brand);
+    }
 }

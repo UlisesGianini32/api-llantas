@@ -26,6 +26,57 @@ export default function RestockForecast({
     const [configNotes, setConfigNotes] = useState('')
     const [savingConfig, setSavingConfig] = useState(false)
 
+    // Modal state for product brand & supplier assignment
+    const [brandModalOpen, setBrandModalOpen] = useState(false)
+    const [brandModalProduct, setBrandModalProduct] = useState(null)
+    const [brandModalBrand, setBrandModalBrand] = useState('')
+    const [brandModalSupplier, setBrandModalSupplier] = useState('')
+    const [savingProductBrand, setSavingProductBrand] = useState(false)
+
+    const guessBrand = (name) => {
+        if (!name) return ''
+        const firstWord = name.trim().split(/\s+/)[0] || ''
+        const clean = firstWord.replace(/[^a-zA-Z0-9]/g, '').toUpperCase()
+        const ignoreList = ['KIT', 'SET', 'PACK', 'PAR', 'JUEGO', 'LLANTA', 'CREMA', 'SHAMPOO', 'TINTE']
+        if (clean.length >= 3 && !ignoreList.includes(clean)) {
+            return clean
+        }
+        return ''
+    }
+
+    const openBrandModal = (item) => {
+        setBrandModalProduct(item)
+        const guessed = guessBrand(item.name)
+        const initialBrand = item.brand && item.brand !== 'Sin marca' ? item.brand : guessed
+        setBrandModalBrand(initialBrand)
+        setBrandModalSupplier(item.supplier && item.supplier !== 'Sin proveedor' ? item.supplier : initialBrand)
+        setBrandModalOpen(true)
+    }
+
+    const handleSaveProductBrand = (e) => {
+        e.preventDefault()
+        if (!brandModalProduct || !brandModalBrand.trim()) return
+
+        setSavingProductBrand(true)
+        router.post(
+            `/reabastecimiento/productos/${brandModalProduct.product_id}/marca`,
+            {
+                brand: brandModalBrand,
+                supplier: brandModalSupplier,
+            },
+            {
+                preserveScroll: true,
+                onSuccess: () => {
+                    setBrandModalOpen(false)
+                    setSavingProductBrand(false)
+                },
+                onError: () => {
+                    setSavingProductBrand(false)
+                },
+            }
+        )
+    }
+
     const applyFilter = (newFilters) => {
         const query = {
             brand: selectedBrand,
@@ -505,9 +556,19 @@ export default function RestockForecast({
                                         </td>
 
                                         <td className="p-3.5">
-                                            <span className="font-semibold text-slate-800 dark:text-slate-200 block">
-                                                {item.brand}
-                                            </span>
+                                            <div className="flex items-center gap-1.5">
+                                                <span className={`font-semibold block ${item.brand === 'Sin marca' ? 'text-amber-600 dark:text-amber-400' : 'text-slate-800 dark:text-slate-200'}`}>
+                                                    {item.brand}
+                                                </span>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => openBrandModal(item)}
+                                                    className="rounded p-0.5 text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400"
+                                                    title="Editar marca y proveedor"
+                                                >
+                                                    ✏️
+                                                </button>
+                                            </div>
                                             <span className="text-[11px] text-slate-400">
                                                 {item.supplier}
                                             </span>
@@ -577,7 +638,7 @@ export default function RestockForecast({
                                         </td>
 
                                         <td className="p-3.5 text-center">
-                                            {item.brand && item.brand !== 'Sin marca' && (
+                                            {item.brand && item.brand !== 'Sin marca' ? (
                                                 <button
                                                     type="button"
                                                     onClick={() => openConfigModal(item.brand)}
@@ -585,6 +646,15 @@ export default function RestockForecast({
                                                     title="Configurar cadencia para esta marca"
                                                 >
                                                     ⚙️ Cadencia
+                                                </button>
+                                            ) : (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => openBrandModal(item)}
+                                                    className="rounded-lg bg-amber-50 border border-amber-200 px-2 py-1 text-[11px] font-bold text-amber-700 hover:bg-amber-100 dark:bg-amber-950/40 dark:border-amber-800 dark:text-amber-300"
+                                                    title="Asignar marca a este producto"
+                                                >
+                                                    🏷️ Asignar
                                                 </button>
                                             )}
                                         </td>
@@ -743,6 +813,94 @@ export default function RestockForecast({
                                     className="rounded-xl bg-indigo-600 px-4 py-2 font-bold text-white shadow hover:bg-indigo-700 disabled:opacity-40"
                                 >
                                     {savingConfig ? 'Guardando...' : 'Guardar Configuración'}
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+
+            {/* MODAL: PRODUCT BRAND ASSIGNMENT */}
+            {brandModalOpen && brandModalProduct && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+                    <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl dark:bg-neutral-900 max-h-[90vh] overflow-y-auto">
+                        <div className="flex items-center justify-between border-b pb-3 dark:border-neutral-800">
+                            <div>
+                                <h3 className="text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                                    <span>🏷️</span> Asignar Marca / Proveedor
+                                </h3>
+                                <p className="text-xs text-slate-500 dark:text-slate-400 truncate max-w-xs mt-0.5">
+                                    SKU: <span className="font-mono font-bold text-slate-700 dark:text-slate-300">{brandModalProduct.sku}</span>
+                                </p>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => setBrandModalOpen(false)}
+                                className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+                            >
+                                ✕
+                            </button>
+                        </div>
+
+                        <form onSubmit={handleSaveProductBrand} className="mt-4 space-y-4 text-xs">
+                            <div className="rounded-xl bg-slate-50 dark:bg-neutral-950 p-3 border border-slate-200 dark:border-neutral-800">
+                                <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider block">Producto:</span>
+                                <p className="font-semibold text-slate-800 dark:text-slate-200 mt-0.5 text-xs line-clamp-2">
+                                    {brandModalProduct.name}
+                                </p>
+                            </div>
+
+                            <div>
+                                <label className="block font-bold text-slate-700 dark:text-slate-300">
+                                    Marca del Producto *
+                                </label>
+                                <input
+                                    type="text"
+                                    required
+                                    value={brandModalBrand}
+                                    onChange={(e) => setBrandModalBrand(e.target.value)}
+                                    placeholder="ej. BUNEE, JOICO, MICHELIN..."
+                                    className="mt-1 w-full rounded-xl border border-slate-300 p-2.5 font-bold uppercase dark:border-neutral-700 dark:bg-neutral-950 dark:text-white focus:ring-2 focus:ring-indigo-500"
+                                />
+                                {guessBrand(brandModalProduct.name) && brandModalBrand !== guessBrand(brandModalProduct.name) && (
+                                    <button
+                                        type="button"
+                                        onClick={() => setBrandModalBrand(guessBrand(brandModalProduct.name))}
+                                        className="mt-1 text-[11px] text-indigo-600 hover:underline font-semibold"
+                                    >
+                                        💡 Sugerencia detectada en título: <b>{guessBrand(brandModalProduct.name)}</b>
+                                    </button>
+                                )}
+                            </div>
+
+                            <div>
+                                <label className="block font-bold text-slate-700 dark:text-slate-300">
+                                    Proveedor / Distribuidor Habitual
+                                </label>
+                                <input
+                                    type="text"
+                                    value={brandModalSupplier}
+                                    onChange={(e) => setBrandModalSupplier(e.target.value)}
+                                    placeholder="ej. Distribuidora Central, Fabricante..."
+                                    className="mt-1 w-full rounded-xl border border-slate-300 p-2.5 dark:border-neutral-700 dark:bg-neutral-950 dark:text-white focus:ring-2 focus:ring-indigo-500"
+                                />
+                                <span className="text-[10px] text-slate-400">Opcional. Si lo dejas vacío o igual a la marca, se asociará al proveedor principal.</span>
+                            </div>
+
+                            <div className="flex justify-end gap-2 pt-3 border-t dark:border-neutral-800">
+                                <button
+                                    type="button"
+                                    onClick={() => setBrandModalOpen(false)}
+                                    className="rounded-xl border px-3 py-2 font-semibold text-slate-600 hover:bg-slate-50 dark:border-neutral-700 dark:text-slate-300"
+                                >
+                                    Cancelar
+                                </button>
+                                <button
+                                    type="submit"
+                                    disabled={savingProductBrand || !brandModalBrand.trim()}
+                                    className="rounded-xl bg-indigo-600 px-4 py-2 font-bold text-white shadow hover:bg-indigo-700 disabled:opacity-40"
+                                >
+                                    {savingProductBrand ? 'Guardando...' : 'Asignar y Guardar'}
                                 </button>
                             </div>
                         </form>
