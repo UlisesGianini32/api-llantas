@@ -67,6 +67,18 @@ class InventoryMeliCheckFullCommand extends Command
 
             $uniqueMlms = $accountLinks->pluck('external_listing_id')->filter()->unique()->values();
 
+            // Primero precargar desde la base de datos local (MeliPublication) si existe
+            if (\Illuminate\Support\Facades\Schema::hasTable('meli_publications')) {
+                $cachedPubs = \App\Models\MeliPublication::query()
+                    ->whereIn('mlm', $uniqueMlms)
+                    ->get(['mlm', 'raw', 'status']);
+                foreach ($cachedPubs as $pub) {
+                    if (is_array($pub->raw) && filled($pub->raw['id'] ?? null)) {
+                        $itemsInfo[(string) $pub->raw['id']] = $pub->raw;
+                    }
+                }
+            }
+
             // Consultar en lotes de hasta 20 publicaciones por petición multiget
             foreach ($uniqueMlms->chunk(20) as $chunk) {
                 $idsParam = $chunk->implode(',');
@@ -74,7 +86,11 @@ class InventoryMeliCheckFullCommand extends Command
                     $response = $api->request(
                         $account,
                         'get',
-                        "/items?ids={$idsParam}&attributes=id,title,status,sub_status,shipping,user_product_id"
+                        '/items',
+                        [
+                            'ids' => $idsParam,
+                            'attributes' => 'id,title,status,sub_status,shipping,user_product_id',
+                        ]
                     );
 
                     $results = (array) $response->json();
@@ -92,7 +108,23 @@ class InventoryMeliCheckFullCommand extends Command
                         }
                     }
                 } catch (Throwable $e) {
-                    $this->warn("Error al consultar lote de items [{$idsParam}]: {$e->getMessage()}");
+                    // Fallback: si falla multiget, consultar individualmente los items del lote
+                    foreach ($chunk as $singleMlm) {
+                        if (isset($itemsInfo[(string) $singleMlm]['shipping'])) {
+                            continue;
+                        }
+                        try {
+                            $singleResp = $api->request($account, 'get', '/items/'.rawurlencode((string) $singleMlm));
+                            if ($singleResp->successful() && is_array($singleResp->json())) {
+                                $body = $singleResp->json();
+                                if (filled($body['id'] ?? null)) {
+                                    $itemsInfo[(string) $body['id']] = $body;
+                                }
+                            }
+                        } catch (Throwable $singleErr) {
+                            // Ignorar error individual si ya no se pudo obtener
+                        }
+                    }
                 }
             }
         }
