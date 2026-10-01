@@ -1,4 +1,5 @@
 import AppShell from '@/Components/layout/AppShell'
+import CameraBarcodeScanner from '@/Components/CameraBarcodeScanner'
 import { movementTypeLabel } from '@/lib/inventoryPresentation'
 import { Head, Link, router } from '@inertiajs/react'
 import { useState, useRef, useEffect, useMemo } from 'react'
@@ -11,8 +12,8 @@ export default function InventoryMovementForm({ products = [], locations = [], t
     const [reference, setReference] = useState('')
     const [generalNotes, setGeneralNotes] = useState('')
 
-    // 2. Lista de productos capturados en lote (varios a la vez)
-    // Array of { product_id, name, sku, barcode, brand, quantity, notes }
+    // 2. Lista de productos capturados en lote
+    // Array of { product_id, name, sku, barcode, brand, quantity, location_id, location_code, is_primary, notes }
     const [items, setItems] = useState([])
 
     // 3. Estado de búsqueda y escáner
@@ -21,16 +22,52 @@ export default function InventoryMovementForm({ products = [], locations = [], t
     const [isDropdownOpen, setIsDropdownOpen] = useState(false)
     const [scannerFeedback, setScannerFeedback] = useState(null) // { type: 'success' | 'error', message: string }
 
+    // 4. Modal de Cámara del Celular
+    const [isCameraOpen, setIsCameraOpen] = useState(false)
+
+    // 5. Mini Pantalla / Modal de Cantidad al Escanear
+    const [promptQuantityOnScan, setPromptQuantityOnScan] = useState(() => {
+        try {
+            return localStorage.getItem('inv_prompt_qty') !== 'false'
+        } catch {
+            return true
+        }
+    })
+    const [isQuantityModalOpen, setIsQuantityModalOpen] = useState(false)
+    const [modalProduct, setModalProduct] = useState(null)
+    const [modalQuantity, setModalQuantity] = useState(1)
+    const [modalLocationId, setModalLocationId] = useState('')
+    const [modalNotes, setModalNotes] = useState('')
+
     const [submitting, setSubmitting] = useState(false)
     const [errors, setErrors] = useState({})
 
     const barcodeInputRef = useRef(null)
     const searchDropdownRef = useRef(null)
+    const modalQuantityInputRef = useRef(null)
+
+    // Guardar preferencia de promptQuantityOnScan
+    const togglePromptQuantity = (val) => {
+        setPromptQuantityOnScan(val)
+        try {
+            localStorage.setItem('inv_prompt_qty', String(val))
+        } catch {}
+    }
 
     // Enfocar automáticamente el lector de código de barras al cargar
     useEffect(() => {
         barcodeInputRef.current?.focus()
     }, [])
+
+    // Enfocar y preseleccionar la cantidad al abrir el modal de cantidad
+    useEffect(() => {
+        if (isQuantityModalOpen) {
+            setTimeout(() => {
+                modalQuantityInputRef.current?.focus()
+                modalQuantityInputRef.current?.select()
+            }, 60)
+        }
+    }, [isQuantityModalOpen])
 
     // Cerrar dropdown al hacer click fuera
     useEffect(() => {
@@ -42,6 +79,17 @@ export default function InventoryMovementForm({ products = [], locations = [], t
         document.addEventListener('mousedown', handleClickOutside)
         return () => document.removeEventListener('mousedown', handleClickOutside)
     }, [])
+
+    // Manejo de tecla Escape para cerrar modal de cantidad
+    useEffect(() => {
+        const handleKeyDown = (e) => {
+            if (e.key === 'Escape' && isQuantityModalOpen) {
+                closeQuantityModal()
+            }
+        }
+        window.addEventListener('keydown', handleKeyDown)
+        return () => window.removeEventListener('keydown', handleKeyDown)
+    }, [isQuantityModalOpen])
 
     // Sonido sutil de confirmación para pistola lectora
     const playBeep = (freq = 880, duration = 0.08) => {
@@ -83,17 +131,69 @@ export default function InventoryMovementForm({ products = [], locations = [], t
         }).slice(0, 30)
     }, [searchQuery, products])
 
-    // Agregar producto a la lista (o sumar cantidad si ya existe)
-    const addProductToItems = (product, qtyToAdd = 1) => {
+    // Abrir mini pantalla de cantidad
+    const openQuantityModal = (product) => {
+        if (!product) return
+        setModalProduct(product)
+        setModalQuantity(1)
+
+        // Usar ubicación asignada al producto automáticamente, o respaldo
+        const assignedLoc = product.primary_location_id
+            ? String(product.primary_location_id)
+            : (locationId ? String(locationId) : '')
+        setModalLocationId(assignedLoc)
+        setModalNotes('')
+        setIsQuantityModalOpen(true)
+        playBeep(750, 0.06)
+    }
+
+    const closeQuantityModal = () => {
+        setIsQuantityModalOpen(false)
+        setModalProduct(null)
+        setTimeout(() => {
+            barcodeInputRef.current?.focus()
+        }, 50)
+    }
+
+    // Confirmar desde el modal de cantidad
+    const handleConfirmQuantityModal = (e) => {
+        e?.preventDefault()
+        if (!modalProduct) return
+
+        const qty = parseInt(modalQuantity, 10)
+        if (isNaN(qty) || qty < 1) {
+            window.alert('La cantidad debe ser mayor a 0.')
+            return
+        }
+
+        addProductToItems(modalProduct, qty, modalLocationId, modalNotes)
+        closeQuantityModal()
+    }
+
+    // Agregar producto a la lista (o sumar cantidad si ya existe en esa misma ubicación)
+    const addProductToItems = (product, qtyToAdd = 1, specificLocationId = null, notes = '') => {
         if (!product) return
 
+        // 1. Determinar ubicación: prioridad a la específica seleccionada, luego asignada al producto, luego respaldo general
+        const finalLocId = specificLocationId
+            ? String(specificLocationId)
+            : (product.primary_location_id ? String(product.primary_location_id) : (locationId ? String(locationId) : ''))
+
+        const locObj = locations.find((l) => String(l.id) === String(finalLocId))
+        const locCode = locObj ? locObj.code : (product.primary_location?.code || 'General')
+        const isPrimary = Boolean(product.primary_location_id && String(product.primary_location_id) === String(finalLocId))
+
         setItems((prev) => {
-            const existingIndex = prev.findIndex((item) => item.product_id === product.id)
+            // Si ya existe el mismo producto en la misma ubicación, sumamos cantidad
+            const existingIndex = prev.findIndex(
+                (item) => item.product_id === product.id && String(item.location_id || '') === String(finalLocId || '')
+            )
             if (existingIndex >= 0) {
                 const updated = [...prev]
                 updated[existingIndex] = {
                     ...updated[existingIndex],
                     quantity: updated[existingIndex].quantity + qtyToAdd,
+                    notes: notes ? (updated[existingIndex].notes ? `${updated[existingIndex].notes} | ${notes}` : notes) : updated[existingIndex].notes,
                 }
                 return updated
             }
@@ -106,7 +206,10 @@ export default function InventoryMovementForm({ products = [], locations = [], t
                     barcode: product.barcode || '',
                     brand: product.brand || '',
                     quantity: qtyToAdd,
-                    notes: '',
+                    location_id: finalLocId ? parseInt(finalLocId, 10) : null,
+                    location_code: locCode,
+                    is_primary_location: isPrimary,
+                    notes: notes || '',
                 },
             ]
         })
@@ -114,9 +217,20 @@ export default function InventoryMovementForm({ products = [], locations = [], t
         playBeep(920, 0.08)
         setScannerFeedback({
             type: 'success',
-            message: `✓ Agregado: ${product.name} (${product.sku})`,
+            message: `✓ Agregado: ${product.name} (${qtyToAdd} pza${qtyToAdd === 1 ? '' : 's'} en ${locCode})`,
         })
-        setTimeout(() => setScannerFeedback(null), 3000)
+        setTimeout(() => setScannerFeedback(null), 3500)
+    }
+
+    // Búsqueda común para pistola y cámara
+    const findProductByCode = (rawCode) => {
+        const code = (rawCode || '').trim().toLowerCase()
+        if (!code) return null
+        return products.find((p) => {
+            const b = (p.barcode || '').trim().toLowerCase()
+            const s = (p.sku || '').trim().toLowerCase()
+            return b === code || s === code || String(p.id) === code
+        })
     }
 
     // Manejo de lectura de pistola de código de barras (tecla Enter automática)
@@ -126,18 +240,16 @@ export default function InventoryMovementForm({ products = [], locations = [], t
             const code = barcodeInput.trim()
             if (!code) return
 
-            // Búsqueda por coincidencia exacta con barcode o SKU
-            const matched = products.find((p) => {
-                const b = (p.barcode || '').trim().toLowerCase()
-                const s = (p.sku || '').trim().toLowerCase()
-                const target = code.toLowerCase()
-                return b === target || s === target || String(p.id) === target
-            })
+            const matched = findProductByCode(code)
 
             if (matched) {
-                addProductToItems(matched, 1)
                 setBarcodeInput('')
-                barcodeInputRef.current?.focus()
+                if (promptQuantityOnScan) {
+                    openQuantityModal(matched)
+                } else {
+                    addProductToItems(matched, 1)
+                    barcodeInputRef.current?.focus()
+                }
             } else {
                 playBeep(330, 0.15) // tono grave de error
                 setScannerFeedback({
@@ -149,13 +261,49 @@ export default function InventoryMovementForm({ products = [], locations = [], t
         }
     }
 
-    // Actualizar cantidad de un item
+    // Manejo de lectura desde la Cámara del Celular
+    const handleCameraScan = (code) => {
+        const matched = findProductByCode(code)
+        if (matched) {
+            setIsCameraOpen(false)
+            if (promptQuantityOnScan) {
+                openQuantityModal(matched)
+            } else {
+                addProductToItems(matched, 1)
+                barcodeInputRef.current?.focus()
+            }
+        } else {
+            playBeep(330, 0.15)
+            setScannerFeedback({
+                type: 'error',
+                message: `❌ Código de barras no encontrado en catálogo: "${code}"`,
+            })
+            setTimeout(() => setScannerFeedback(null), 4000)
+        }
+    }
+
+    // Actualizar cantidad de un item en la tabla
     const updateQuantity = (index, newQty) => {
         const parsed = parseInt(newQty, 10)
         const qty = isNaN(parsed) || parsed < 1 ? 1 : parsed
         setItems((prev) => {
             const updated = [...prev]
             updated[index].quantity = qty
+            return updated
+        })
+    }
+
+    // Actualizar ubicación de un item en la tabla
+    const updateItemLocation = (index, newLocId) => {
+        const locObj = locations.find((l) => String(l.id) === String(newLocId))
+        setItems((prev) => {
+            const updated = [...prev]
+            const product = products.find((p) => p.id === updated[index].product_id)
+            updated[index].location_id = newLocId ? parseInt(newLocId, 10) : null
+            updated[index].location_code = locObj ? locObj.code : 'Sin ubicación'
+            updated[index].is_primary_location = Boolean(
+                product?.primary_location_id && String(product.primary_location_id) === String(newLocId)
+            )
             return updated
         })
     }
@@ -191,27 +339,32 @@ export default function InventoryMovementForm({ products = [], locations = [], t
         e.preventDefault()
         setErrors({})
 
-        if (!locationId) {
-            setErrors({ inventory_location_id: 'Debes seleccionar una ubicación de almacén.' })
-            return
-        }
-
         if (items.length === 0) {
             setErrors({ items: 'Debes agregar al menos un producto a la lista usando el escáner o el buscador.' })
             return
         }
 
+        // Verificar que cada item tenga una ubicación (propia, asignada o de respaldo)
+        const missingLocItem = items.find((item) => !item.location_id && !locationId)
+        if (missingLocItem) {
+            setErrors({
+                inventory_location_id: `El producto "${missingLocItem.name}" no tiene ubicación. Selecciona una ubicación en la tabla o en la configuración general.`,
+            })
+            return
+        }
+
         setSubmitting(true)
 
-        // Se envía payload con los items y la fecha actual automática
+        // Se envía payload con los items y la ubicación por ítem
         const payload = {
             type,
-            inventory_location_id: parseInt(locationId, 10),
+            inventory_location_id: locationId ? parseInt(locationId, 10) : null,
             reference: reference.trim() || null,
             notes: generalNotes.trim() || null,
-            occurred_at: new Date().toISOString(), // Fecha automática de hoy
+            occurred_at: new Date().toISOString(),
             items: items.map((item) => ({
                 inventory_product_id: item.product_id,
+                inventory_location_id: item.location_id ? parseInt(item.location_id, 10) : null,
                 quantity: parseInt(item.quantity, 10),
                 notes: item.notes?.trim() || null,
             })),
@@ -252,7 +405,7 @@ export default function InventoryMovementForm({ products = [], locations = [], t
                             Registrar movimiento de inventario
                         </h1>
                         <p className="mt-1 text-sm text-slate-500 dark:text-neutral-400">
-                            Captura rápida por lote o individual con soporte para escáner de código de barras.
+                            Captura rápida por lote o individual con soporte para escáner físico y cámara de celular.
                         </p>
                     </div>
 
@@ -265,15 +418,20 @@ export default function InventoryMovementForm({ products = [], locations = [], t
                 </div>
 
                 <form onSubmit={handleSubmit} className="space-y-6">
-                    {/* SECCIÓN 1: TIPO PRIMERO Y UBICACIÓN */}
+                    {/* SECCIÓN 1: TIPO PRIMERO Y UBICACIÓN DE RESPALDO */}
                     <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6 dark:border-neutral-800 dark:bg-neutral-900">
                         <div className="mb-4 flex items-center gap-2 border-b border-slate-100 pb-3 dark:border-neutral-800">
                             <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-indigo-100 text-xs font-bold text-indigo-700 dark:bg-indigo-900/50 dark:text-indigo-300">
                                 1
                             </span>
-                            <h2 className="text-base font-semibold text-slate-900 dark:text-white">
-                                Configuración del Movimiento
-                            </h2>
+                            <div>
+                                <h2 className="text-base font-semibold text-slate-900 dark:text-white">
+                                    Configuración del Movimiento
+                                </h2>
+                                <p className="text-xs text-slate-500 dark:text-neutral-400">
+                                    Los productos usarán automáticamente la ubicación que tengan asignada en su catálogo (ej. E5-1).
+                                </p>
+                            </div>
                         </div>
 
                         <div className="grid gap-5 sm:grid-cols-2">
@@ -309,10 +467,10 @@ export default function InventoryMovementForm({ products = [], locations = [], t
                                 {errors.type && <p className="mt-1.5 text-xs text-rose-600 font-medium">{errors.type}</p>}
                             </div>
 
-                            {/* UBICACIÓN */}
+                            {/* UBICACIÓN DE RESPALDO */}
                             <div>
                                 <label className="block text-sm font-semibold text-slate-900 dark:text-slate-100">
-                                    Ubicación de almacén <span className="text-rose-500">*</span>
+                                    Ubicación general / Respaldo
                                 </label>
                                 <div className="mt-1.5">
                                     <select
@@ -320,7 +478,7 @@ export default function InventoryMovementForm({ products = [], locations = [], t
                                         onChange={(e) => setLocationId(e.target.value)}
                                         className="w-full rounded-xl border border-slate-300 bg-white px-4 py-2.5 font-medium text-slate-900 shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 dark:border-neutral-700 dark:bg-neutral-950 dark:text-white"
                                     >
-                                        <option value="">Selecciona ubicación física</option>
+                                        <option value="">(Ubicación automática de cada producto)</option>
                                         {locations.map((loc) => (
                                             <option key={loc.id} value={loc.id}>
                                                 {loc.code} {loc.name ? `— ${loc.name}` : ''}
@@ -328,6 +486,9 @@ export default function InventoryMovementForm({ products = [], locations = [], t
                                         ))}
                                     </select>
                                 </div>
+                                <p className="mt-1.5 text-[11px] text-slate-500 dark:text-neutral-400">
+                                    💡 Se aplicará como respaldo únicamente si algún producto escaneado no tiene ubicación asignada.
+                                </p>
                                 {errors.inventory_location_id && (
                                     <p className="mt-1.5 text-xs text-rose-600 font-medium">{errors.inventory_location_id}</p>
                                 )}
@@ -364,9 +525,9 @@ export default function InventoryMovementForm({ products = [], locations = [], t
                         </div>
                     </div>
 
-                    {/* SECCIÓN 2: BÚSQUEDA Y ESCÁNER DE PRODUCTOS */}
+                    {/* SECCIÓN 2: CAPTURA DE PRODUCTOS (PISTOLA / CÁMARA MÓVIL / BUSCADOR) */}
                     <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6 dark:border-neutral-800 dark:bg-neutral-900">
-                        <div className="mb-4 flex items-center justify-between border-b border-slate-100 pb-3 dark:border-neutral-800">
+                        <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between border-b border-slate-100 pb-3 dark:border-neutral-800">
                             <div className="flex items-center gap-2">
                                 <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-indigo-100 text-xs font-bold text-indigo-700 dark:bg-indigo-900/50 dark:text-indigo-300">
                                     2
@@ -375,9 +536,17 @@ export default function InventoryMovementForm({ products = [], locations = [], t
                                     Captura de Productos
                                 </h2>
                             </div>
-                            <span className="text-xs text-slate-500 dark:text-neutral-400">
-                                Escanea con pistola o busca por nombre/SKU
-                            </span>
+
+                            {/* Switch: Preguntar cantidad al escanear */}
+                            <label className="flex items-center gap-2 cursor-pointer select-none text-xs font-semibold text-slate-700 dark:text-slate-300">
+                                <input
+                                    type="checkbox"
+                                    checked={promptQuantityOnScan}
+                                    onChange={(e) => togglePromptQuantity(e.target.checked)}
+                                    className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 dark:border-neutral-700"
+                                />
+                                <span>Mostrar mini pantalla para poner cantidad al escanear</span>
+                            </label>
                         </div>
 
                         {/* FEEDBACK DEL ESCÁNER */}
@@ -403,15 +572,29 @@ export default function InventoryMovementForm({ products = [], locations = [], t
                         <div className="grid gap-5 lg:grid-cols-12">
                             {/* 1. LECTOR DE CÓDIGO DE BARRAS / PISTOLA SCANNER */}
                             <div className="lg:col-span-6">
-                                <label className="flex items-center gap-2 text-sm font-semibold text-slate-900 dark:text-slate-100">
-                                    <svg className="h-4 w-4 text-indigo-600 dark:text-indigo-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                        <path d="M3 5v14M8 5v14M12 5v14M17 5v14M21 5v14" />
-                                    </svg>
-                                    Lector de Código de Barras / Pistola
-                                    <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">
-                                        Rápido
-                                    </span>
-                                </label>
+                                <div className="flex items-center justify-between">
+                                    <label className="flex items-center gap-2 text-sm font-semibold text-slate-900 dark:text-slate-100">
+                                        <svg className="h-4 w-4 text-indigo-600 dark:text-indigo-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                            <path d="M3 5v14M8 5v14M12 5v14M17 5v14M21 5v14" />
+                                        </svg>
+                                        Lector de Código / Pistola
+                                        <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">
+                                            USB / BT
+                                        </span>
+                                    </label>
+
+                                    {/* BOTÓN CÁMARA CELULAR */}
+                                    <button
+                                        type="button"
+                                        onClick={() => setIsCameraOpen(true)}
+                                        className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-xs font-bold text-indigo-700 shadow-sm transition hover:bg-indigo-100 active:scale-95 dark:border-indigo-800 dark:bg-indigo-950/60 dark:text-indigo-300 dark:hover:bg-indigo-900"
+                                        title="Abrir cámara del celular para escanear"
+                                    >
+                                        <span>📷</span>
+                                        <span>Cámara Móvil</span>
+                                    </button>
+                                </div>
+
                                 <div className="mt-1.5 relative">
                                     <input
                                         ref={barcodeInputRef}
@@ -429,7 +612,9 @@ export default function InventoryMovementForm({ products = [], locations = [], t
                                     </div>
                                 </div>
                                 <p className="mt-1 text-xs text-slate-500 dark:text-neutral-400">
-                                    Al disparar con la pistola, se agrega o incrementa automáticamente (+1).
+                                    {promptQuantityOnScan
+                                        ? 'Al disparar con la pistola, se abrirá la mini pantalla para poner la cantidad y ubicación.'
+                                        : 'Modo continuo activo: cada lectura suma 1 pza automáticamente.'}
                                 </p>
                             </div>
 
@@ -482,10 +667,14 @@ export default function InventoryMovementForm({ products = [], locations = [], t
                                                         key={p.id}
                                                         type="button"
                                                         onClick={() => {
-                                                            addProductToItems(p, 1)
                                                             setSearchQuery('')
                                                             setIsDropdownOpen(false)
-                                                            barcodeInputRef.current?.focus()
+                                                            if (promptQuantityOnScan) {
+                                                                openQuantityModal(p)
+                                                            } else {
+                                                                addProductToItems(p, 1)
+                                                                barcodeInputRef.current?.focus()
+                                                            }
                                                         }}
                                                         className="flex w-full items-center justify-between p-3 text-left transition hover:bg-indigo-50 dark:hover:bg-neutral-800/80"
                                                     >
@@ -497,12 +686,12 @@ export default function InventoryMovementForm({ products = [], locations = [], t
                                                                 <span className="font-mono bg-slate-100 px-1.5 py-0.5 rounded text-slate-700 dark:bg-neutral-800 dark:text-neutral-300">
                                                                     {p.sku}
                                                                 </span>
-                                                                {p.brand && <span>{p.brand}</span>}
-                                                                {p.barcode && (
-                                                                    <span className="font-mono text-slate-400 dark:text-neutral-500">
-                                                                        Barcode: {p.barcode}
+                                                                {p.primary_location?.code && (
+                                                                    <span className="rounded bg-emerald-50 px-1.5 py-0.5 font-semibold text-emerald-700 border border-emerald-200 dark:bg-emerald-950/60 dark:text-emerald-300 dark:border-emerald-800">
+                                                                        📍 {p.primary_location.code}
                                                                     </span>
                                                                 )}
+                                                                {p.brand && <span>{p.brand}</span>}
                                                             </div>
                                                         </div>
                                                         <span className="shrink-0 rounded-lg bg-indigo-600 px-2.5 py-1 text-xs font-semibold text-white">
@@ -518,7 +707,7 @@ export default function InventoryMovementForm({ products = [], locations = [], t
                         </div>
                     </div>
 
-                    {/* SECCIÓN 3: TABLA DE PRODUCTOS A REGISTRAR (VARIOS A LA VEZ) */}
+                    {/* SECCIÓN 3: TABLA DE PRODUCTOS A REGISTRAR */}
                     <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6 dark:border-neutral-800 dark:bg-neutral-900">
                         <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between border-b border-slate-100 pb-3 dark:border-neutral-800">
                             <div className="flex items-center gap-2">
@@ -563,7 +752,7 @@ export default function InventoryMovementForm({ products = [], locations = [], t
                                     No hay productos en la lista
                                 </h3>
                                 <p className="mt-1 text-xs text-slate-500 max-w-sm dark:text-neutral-400">
-                                    Usa la pistola de código de barras o el buscador desplegable arriba para añadir varios productos a la vez.
+                                    Usa la pistola de código de barras, la cámara de tu celular o el buscador arriba para añadir los productos.
                                 </p>
                             </div>
                         ) : (
@@ -572,14 +761,15 @@ export default function InventoryMovementForm({ products = [], locations = [], t
                                     <thead>
                                         <tr className="border-b border-slate-200 text-xs font-semibold text-slate-500 dark:border-neutral-800 dark:text-neutral-400">
                                             <th className="pb-3 pl-1">Producto</th>
+                                            <th className="pb-3 w-44">Ubicación</th>
                                             <th className="pb-3 text-center w-36">Cantidad</th>
-                                            <th className="pb-3 w-48">Nota / Detalle</th>
-                                            <th className="pb-3 text-right pr-1 w-16">Quitar</th>
+                                            <th className="pb-3 w-40">Nota / Detalle</th>
+                                            <th className="pb-3 text-right pr-1 w-12">Quitar</th>
                                         </tr>
                                     </thead>
                                     <tbody className="divide-y divide-slate-100 dark:divide-neutral-800/80">
                                         {items.map((item, idx) => (
-                                            <tr key={item.product_id} className="group hover:bg-slate-50/70 dark:hover:bg-neutral-800/40">
+                                            <tr key={`${item.product_id}-${item.location_id || idx}`} className="group hover:bg-slate-50/70 dark:hover:bg-neutral-800/40">
                                                 <td className="py-3 pl-1 pr-3">
                                                     <div className="font-semibold text-slate-900 dark:text-white">
                                                         {item.name}
@@ -594,6 +784,33 @@ export default function InventoryMovementForm({ products = [], locations = [], t
                                                             </span>
                                                         )}
                                                         {item.brand && <span>{item.brand}</span>}
+                                                    </div>
+                                                </td>
+
+                                                {/* Selector de Ubicación por Producto */}
+                                                <td className="py-3 px-2">
+                                                    <div className="space-y-1">
+                                                        <select
+                                                            value={item.location_id ? String(item.location_id) : ''}
+                                                            onChange={(e) => updateItemLocation(idx, e.target.value)}
+                                                            className={`w-full rounded-lg border px-2 py-1 text-xs font-semibold ${
+                                                                item.is_primary_location
+                                                                    ? 'border-emerald-300 bg-emerald-50/70 text-emerald-900 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300'
+                                                                    : 'border-slate-300 bg-white text-slate-800 dark:border-neutral-700 dark:bg-neutral-950 dark:text-white'
+                                                            }`}
+                                                        >
+                                                            <option value="">Selecciona ubicación</option>
+                                                            {locations.map((loc) => (
+                                                                <option key={loc.id} value={loc.id}>
+                                                                    {loc.code} {loc.name ? `(${loc.name})` : ''}
+                                                                </option>
+                                                            ))}
+                                                        </select>
+                                                        {item.is_primary_location && (
+                                                            <span className="inline-block text-[10px] font-bold text-emerald-600 dark:text-emerald-400">
+                                                                ✓ Ubicación asignada
+                                                            </span>
+                                                        )}
                                                     </div>
                                                 </td>
 
@@ -659,6 +876,7 @@ export default function InventoryMovementForm({ products = [], locations = [], t
                                             <td className="pt-3.5 pl-1">
                                                 Total acumulado en este registro:
                                             </td>
+                                            <td></td>
                                             <td className="pt-3.5 text-center text-base text-indigo-600 dark:text-indigo-400">
                                                 {totalPieces} piezas
                                             </td>
@@ -713,6 +931,175 @@ export default function InventoryMovementForm({ products = [], locations = [], t
                     </div>
                 </form>
             </div>
+
+            {/* MINI PANTALLA / MODAL DE CANTIDAD AL ESCANEAR */}
+            {isQuantityModalOpen && modalProduct && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
+                    <div className="w-full max-w-md overflow-hidden rounded-3xl bg-white shadow-2xl dark:bg-neutral-900 border border-slate-200 dark:border-neutral-800 animate-in fade-in zoom-in-95 duration-150">
+                        {/* Header del Modal */}
+                        <div className="border-b border-slate-100 bg-slate-50/70 p-5 dark:border-neutral-800 dark:bg-neutral-950">
+                            <div className="flex items-start justify-between">
+                                <div className="space-y-1 pr-3">
+                                    <span className="inline-flex items-center gap-1 rounded-full bg-indigo-100 px-2.5 py-0.5 text-[11px] font-bold text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">
+                                        📦 Producto detectado
+                                    </span>
+                                    <h3 className="text-base font-bold text-slate-900 dark:text-white leading-snug">
+                                        {modalProduct.name}
+                                    </h3>
+                                    <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-neutral-400">
+                                        <span className="font-mono font-bold text-slate-700 dark:text-slate-300">
+                                            SKU: {modalProduct.sku}
+                                        </span>
+                                        {modalProduct.barcode && (
+                                            <span className="font-mono">
+                                                Cód: {modalProduct.barcode}
+                                            </span>
+                                        )}
+                                        {modalProduct.brand && (
+                                            <span className="rounded bg-slate-200 px-1.5 py-0.2 text-[10px] font-bold uppercase dark:bg-neutral-800">
+                                                {modalProduct.brand}
+                                            </span>
+                                        )}
+                                    </div>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={closeQuantityModal}
+                                    className="rounded-xl p-1.5 text-slate-400 hover:bg-slate-200 hover:text-slate-700 dark:hover:bg-neutral-800 dark:hover:text-white"
+                                    title="Cerrar (Esc)"
+                                >
+                                    ✕
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* Formulario de Cantidad y Ubicación */}
+                        <form onSubmit={handleConfirmQuantityModal} className="p-5 space-y-4">
+                            {/* UBICACIÓN ASIGNADA AUTOMÁTICA */}
+                            <div className="rounded-xl bg-slate-50 p-3.5 border border-slate-200 dark:bg-neutral-950 dark:border-neutral-800">
+                                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                                    📍 Ubicación de Almacén:
+                                </label>
+                                <select
+                                    value={modalLocationId}
+                                    onChange={(e) => setModalLocationId(e.target.value)}
+                                    className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-900 shadow-sm focus:border-indigo-500 focus:outline-none dark:border-neutral-700 dark:bg-neutral-900 dark:text-white"
+                                >
+                                    <option value="">Selecciona ubicación</option>
+                                    {locations.map((loc) => (
+                                        <option key={loc.id} value={loc.id}>
+                                            {loc.code} {loc.name ? `— ${loc.name}` : ''}
+                                            {modalProduct.primary_location_id === loc.id ? ' ★ (Asignada en catálogo)' : ''}
+                                        </option>
+                                    ))}
+                                </select>
+                                {modalProduct.primary_location_id && String(modalProduct.primary_location_id) === String(modalLocationId) ? (
+                                    <p className="mt-1 text-[11px] font-bold text-emerald-600 dark:text-emerald-400 flex items-center gap-1">
+                                        <span>✓</span> Ubicación predeterminada del producto (utilizada automáticamente).
+                                    </p>
+                                ) : (
+                                    <p className="mt-1 text-[11px] text-amber-600 dark:text-amber-400">
+                                        ⚠️ Ubicación personalizada para este lote.
+                                    </p>
+                                )}
+                            </div>
+
+                            {/* ENTRADA GIGANTE DE CANTIDAD */}
+                            <div>
+                                <label className="block text-center text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-400 mb-2">
+                                    {isPositiveType ? 'Cantidad a ingresar al almacén' : 'Cantidad a retirar / mover'}
+                                </label>
+                                <div className="flex items-center justify-center gap-3">
+                                    <button
+                                        type="button"
+                                        onClick={() => setModalQuantity((prev) => Math.max(1, (parseInt(prev, 10) || 1) - 1))}
+                                        className="flex h-12 w-12 items-center justify-center rounded-2xl border border-slate-300 bg-slate-100 text-xl font-bold text-slate-700 shadow-sm transition hover:bg-slate-200 active:scale-95 dark:border-neutral-700 dark:bg-neutral-800 dark:text-white"
+                                    >
+                                        -
+                                    </button>
+                                    <input
+                                        ref={modalQuantityInputRef}
+                                        type="number"
+                                        min="1"
+                                        required
+                                        value={modalQuantity}
+                                        onChange={(e) => setModalQuantity(e.target.value)}
+                                        className="h-16 w-32 rounded-2xl border-2 border-indigo-500 bg-white text-center font-mono text-3xl font-extrabold text-slate-900 shadow-lg focus:border-indigo-600 focus:outline-none focus:ring-4 focus:ring-indigo-500/20 dark:border-indigo-500 dark:bg-neutral-950 dark:text-white"
+                                    />
+                                    <button
+                                        type="button"
+                                        onClick={() => setModalQuantity((prev) => (parseInt(prev, 10) || 0) + 1)}
+                                        className="flex h-12 w-12 items-center justify-center rounded-2xl border border-slate-300 bg-slate-100 text-xl font-bold text-slate-700 shadow-sm transition hover:bg-slate-200 active:scale-95 dark:border-neutral-700 dark:bg-neutral-800 dark:text-white"
+                                    >
+                                        +
+                                    </button>
+                                </div>
+
+                                {/* Botones de incremento rápido */}
+                                <div className="mt-3 flex flex-wrap items-center justify-center gap-1.5">
+                                    {[1, 5, 10, 12, 24, 48, 100].map((step) => (
+                                        <button
+                                            key={step}
+                                            type="button"
+                                            onClick={() => setModalQuantity((prev) => (parseInt(prev, 10) || 0) + step)}
+                                            className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-xs font-bold text-slate-700 hover:bg-indigo-50 hover:border-indigo-300 hover:text-indigo-600 active:scale-95 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-300"
+                                        >
+                                            +{step}
+                                        </button>
+                                    ))}
+                                    <button
+                                        type="button"
+                                        onClick={() => setModalQuantity(1)}
+                                        className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-xs font-semibold text-slate-500 hover:bg-slate-100 dark:border-neutral-700 dark:bg-neutral-800"
+                                    >
+                                        =1
+                                    </button>
+                                </div>
+                            </div>
+
+                            {/* Notas opcionales del ítem */}
+                            <div>
+                                <label className="block text-xs font-medium text-slate-600 dark:text-neutral-400 mb-1">
+                                    Nota o detalle opcional para este producto:
+                                </label>
+                                <input
+                                    type="text"
+                                    value={modalNotes}
+                                    onChange={(e) => setModalNotes(e.target.value)}
+                                    placeholder="Ej: Lote 2026, Caja abierta..."
+                                    className="w-full rounded-xl border border-slate-300 px-3 py-1.5 text-xs text-slate-900 placeholder:text-slate-400 focus:border-indigo-500 focus:outline-none dark:border-neutral-700 dark:bg-neutral-950 dark:text-white"
+                                />
+                            </div>
+
+                            {/* Botones de acción */}
+                            <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-slate-100 dark:border-neutral-800">
+                                <button
+                                    type="button"
+                                    onClick={closeQuantityModal}
+                                    className="rounded-xl border border-slate-300 px-4 py-2.5 text-xs font-semibold text-slate-700 hover:bg-slate-100 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-300"
+                                >
+                                    Cancelar (Esc)
+                                </button>
+                                <button
+                                    type="submit"
+                                    className="flex-1 rounded-xl bg-indigo-600 px-5 py-2.5 text-xs font-bold text-white shadow-md hover:bg-indigo-700 focus:ring-4 focus:ring-indigo-500/20 active:scale-98 transition flex items-center justify-center gap-1.5"
+                                >
+                                    <span>✓ Agregar a la lista</span>
+                                    <span className="opacity-70 text-[10px]">(Enter)</span>
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+
+            {/* MODAL DE CÁMARA PARA CELULAR */}
+            <CameraBarcodeScanner
+                isOpen={isCameraOpen}
+                onScan={handleCameraScan}
+                onClose={() => setIsCameraOpen(false)}
+                title="Escanear Producto con Cámara"
+            />
         </AppShell>
     )
 }

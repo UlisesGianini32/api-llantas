@@ -400,6 +400,73 @@ class InventoryMovementsTest extends TestCase
         $this->assertFalse(Schema::hasColumn('inventory_movements', 'llanta_id'));
     }
 
+    public function test_batch_movement_uses_item_specific_and_product_primary_locations(): void
+    {
+        $admin = $this->admin();
+        $loc1 = InventoryLocation::create(['code' => 'E5-1', 'name' => 'Estante 5 Nivel 1']);
+        $loc2 = InventoryLocation::create(['code' => 'E5-2', 'name' => 'Estante 5 Nivel 2']);
+        $loc3 = InventoryLocation::create(['code' => 'B1-1', 'name' => 'Bodega Principal']);
+
+        $product1 = InventoryProduct::create([
+            'name' => 'ALEA Mascarilla Coloreados 400ml',
+            'sku' => 'ALEA-MASC-01',
+            'barcode' => '8420282021623',
+            'primary_location_id' => $loc1->id,
+            'is_active' => true,
+            'product_type' => InventoryProduct::SIMPLE,
+        ]);
+
+        $product2 = InventoryProduct::create([
+            'name' => 'ALEA Conditioner Coloreados 500ml',
+            'sku' => 'ALEA-COND-01',
+            'barcode' => '8420282021616',
+            'primary_location_id' => $loc2->id,
+            'is_active' => true,
+            'product_type' => InventoryProduct::SIMPLE,
+        ]);
+
+        // Enviar movimiento sin especificar ubicación global; cada producto usa su ubicación asignada,
+        // o la ubicación específica que se le asignó en el ítem.
+        $this->actingAs($admin)
+            ->post(route('inventory.movements.store'), [
+                'type' => InventoryMovement::RECEIPT,
+                'reference' => 'REM-AUTO-LOC-2026',
+                'items' => [
+                    [
+                        // Sin inventory_location_id: debe usar automáticamente $loc1->id
+                        'inventory_product_id' => $product1->id,
+                        'quantity' => 12,
+                        'notes' => 'Ubicación automática E5-1',
+                    ],
+                    [
+                        // Con inventory_location_id específico para override: debe usar $loc3->id
+                        'inventory_product_id' => $product2->id,
+                        'inventory_location_id' => $loc3->id,
+                        'quantity' => 24,
+                        'notes' => 'Reubicado a Bodega',
+                    ],
+                ],
+            ])
+            ->assertRedirect(route('inventory.movements.index'))
+            ->assertSessionHas('success');
+
+        // Verificar que producto 1 quedó en E5-1
+        $this->assertDatabaseHas('inventory_movements', [
+            'inventory_product_id' => $product1->id,
+            'inventory_location_id' => $loc1->id,
+            'type' => InventoryMovement::RECEIPT,
+            'quantity' => 12,
+        ]);
+
+        // Verificar que producto 2 quedó en B1-1
+        $this->assertDatabaseHas('inventory_movements', [
+            'inventory_product_id' => $product2->id,
+            'inventory_location_id' => $loc3->id,
+            'type' => InventoryMovement::RECEIPT,
+            'quantity' => 24,
+        ]);
+    }
+
     /** @return array{0: InventoryProduct, 1: InventoryLocation} */
     private function productAndLocation(
         string $sku = 'SKU-MOVEMENT',

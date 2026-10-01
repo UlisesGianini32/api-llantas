@@ -16,7 +16,7 @@ class StoreInventoryMovementRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'inventory_location_id' => ['required', 'integer', 'exists:inventory_locations,id'],
+            'inventory_location_id' => ['nullable', 'integer', 'exists:inventory_locations,id'],
             'type' => [
                 'required',
                 'string',
@@ -40,10 +40,43 @@ class StoreInventoryMovementRequest extends FormRequest
             // Modo lote (múltiples productos a la vez)
             'items' => ['required_without:inventory_product_id', 'nullable', 'array', 'min:1'],
             'items.*.inventory_product_id' => ['required_with:items', 'integer', 'exists:inventory_products,id'],
+            'items.*.inventory_location_id' => ['nullable', 'integer', 'exists:inventory_locations,id'],
             'items.*.quantity' => ['required_with:items', 'integer', 'min:1'],
             'items.*.notes' => ['nullable', 'string', 'max:500'],
             'items.*.external_key' => ['nullable', 'string', 'max:191'],
         ];
+    }
+
+    public function withValidator($validator): void
+    {
+        $validator->after(function ($validator): void {
+            $globalLoc = $this->input('inventory_location_id');
+            $items = $this->input('items');
+
+            if (! empty($items) && is_array($items)) {
+                foreach ($items as $idx => $item) {
+                    $itemLoc = $item['inventory_location_id'] ?? null;
+                    if (empty($itemLoc) && empty($globalLoc)) {
+                        $prod = \App\Models\InventoryProduct::find($item['inventory_product_id'] ?? null);
+                        if (! $prod || ! $prod->primary_location_id) {
+                            $name = $prod?->name ?: 'Item #'.($idx + 1);
+                            $validator->errors()->add(
+                                "items.{$idx}.inventory_location_id",
+                                "El producto '{$name}' no tiene ubicación asignada. Selecciona una ubicación para este producto o una ubicación general."
+                            );
+                        }
+                    }
+                }
+            } elseif ($this->filled('inventory_product_id') && empty($globalLoc)) {
+                $prod = \App\Models\InventoryProduct::find($this->input('inventory_product_id'));
+                if (! $prod || ! $prod->primary_location_id) {
+                    $validator->errors()->add(
+                        'inventory_location_id',
+                        'Debes seleccionar una ubicación de almacén o el producto debe tener una asignada.'
+                    );
+                }
+            }
+        });
     }
 
     public function messages(): array

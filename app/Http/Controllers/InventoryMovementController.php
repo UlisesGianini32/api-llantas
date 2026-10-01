@@ -58,10 +58,11 @@ class InventoryMovementController extends Controller
     {
         return Inertia::render('Inventory/Movements/Form', [
             'products' => InventoryProduct::query()
+                ->with('primaryLocation:id,code,name')
                 ->where('is_active', true)
                 ->where('product_type', InventoryProduct::SIMPLE)
                 ->orderBy('name')
-                ->get(['id', 'name', 'sku', 'barcode', 'brand']),
+                ->get(['id', 'name', 'sku', 'barcode', 'brand', 'primary_location_id']),
             'locations' => InventoryLocation::query()
                 ->where('is_active', true)
                 ->orderByRaw('sort_order IS NULL')
@@ -93,9 +94,22 @@ class InventoryMovementController extends Controller
                             ? "{$baseNotes} | {$itemNotes}"
                             : ($itemNotes !== '' ? $itemNotes : ($baseNotes !== '' ? $baseNotes : null));
 
+                        $locationId = ! empty($item['inventory_location_id'])
+                            ? (int) $item['inventory_location_id']
+                            : (! empty($validated['inventory_location_id']) ? (int) $validated['inventory_location_id'] : null);
+
+                        if (! $locationId) {
+                            $product = InventoryProduct::find($item['inventory_product_id']);
+                            $locationId = $product?->primary_location_id;
+                        }
+
+                        if (! $locationId) {
+                            throw new InvalidArgumentException("El producto ID {$item['inventory_product_id']} no tiene ubicación asignada ni se indicó una general.");
+                        }
+
                         $movements->recordManual([
                             'inventory_product_id' => (int) $item['inventory_product_id'],
-                            'inventory_location_id' => (int) $validated['inventory_location_id'],
+                            'inventory_location_id' => $locationId,
                             'type' => (string) $validated['type'],
                             'quantity' => (int) $item['quantity'],
                             'reference_type' => $validated['reference_type'] ?? null,
@@ -108,6 +122,7 @@ class InventoryMovementController extends Controller
                         ], $user);
                         $recorded++;
                     }
+
                     return $recorded;
                 });
 
@@ -115,6 +130,15 @@ class InventoryMovementController extends Controller
                     ->with('success', "Se registraron {$count} movimientos correctamente.");
             }
 
+            $locationId = ! empty($validated['inventory_location_id'])
+                ? (int) $validated['inventory_location_id']
+                : InventoryProduct::find($validated['inventory_product_id'])?->primary_location_id;
+
+            if (! $locationId) {
+                throw new InvalidArgumentException('Debes seleccionar una ubicación de almacén o el producto debe tener una asignada.');
+            }
+
+            $validated['inventory_location_id'] = $locationId;
             $movements->recordManual($validated, $user);
         } catch (InventoryInsufficientStockException|InvalidArgumentException $exception) {
             return back()
