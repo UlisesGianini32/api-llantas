@@ -12,10 +12,15 @@ use App\Models\MeliFullStock;
 use App\Models\User;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use InvalidArgumentException;
 
 class MeliFullShipmentService
 {
+    public function __construct(
+        private readonly ?InventoryStockService $stockService = null
+    ) {}
+
     /**
      * Generate unique sequential shipment code, e.g., FULL-ENV-2026-0001
      */
@@ -40,7 +45,7 @@ class MeliFullShipmentService
     }
 
     /**
-     * Create shipment with standardized 30-unit boxes
+     * Create shipment with standardized 30 kg boxes and multi-box per bulto support
      */
     public function createShipment(array $data, ?User $user = null): MeliFullShipment
     {
@@ -70,6 +75,9 @@ class MeliFullShipmentService
                 $boxesData = [
                     [
                         'box_number' => 1,
+                        'bulto_number' => 1,
+                        'boxes_in_bulto' => 1,
+                        'capacity_kg' => 30.00,
                         'capacity' => 30,
                         'dimensions' => '40x30x30',
                         'weight_kg' => 0,
@@ -80,14 +88,21 @@ class MeliFullShipmentService
 
             foreach ($boxesData as $boxIndex => $boxData) {
                 $boxNumber = (int) ($boxData['box_number'] ?? ($boxIndex + 1));
-                $capacity = (int) ($boxData['capacity'] ?? 30);
-                $boxCode = "CAJA-{$boxNumber}-" . substr($shipment->shipment_code, -4);
+                $bultoNumber = (int) ($boxData['bulto_number'] ?? ($boxData['box_number'] ?? ($boxIndex + 1)));
+                $boxesInBulto = max(1, (int) ($boxData['boxes_in_bulto'] ?? 1));
+                $capacityKg = (float) ($boxData['capacity_kg'] ?? ($boxesInBulto * 30.00));
+                $capacityUnits = (int) ($boxData['capacity'] ?? ($boxesInBulto * 30));
+                
+                $boxCode = ($boxesInBulto > 1 ? "BULTO-{$bultoNumber}-(" . $boxesInBulto . "CAJAS)-" : "CAJA-{$boxNumber}-") . substr($shipment->shipment_code, -4);
 
                 $box = MeliFullShipmentBox::create([
                     'meli_full_shipment_id' => $shipment->id,
                     'box_number' => $boxNumber,
+                    'bulto_number' => $bultoNumber,
+                    'boxes_in_bulto' => $boxesInBulto,
                     'box_code' => $boxCode,
-                    'capacity' => $capacity,
+                    'capacity' => $capacityUnits,
+                    'capacity_kg' => $capacityKg,
                     'dimensions' => $boxData['dimensions'] ?? '40x30x30',
                     'weight_kg' => (float) ($boxData['weight_kg'] ?? 0),
                     'status' => MeliFullShipmentBox::STATUS_PACKING,
@@ -106,6 +121,12 @@ class MeliFullShipmentService
                     $sku = $itemData['sku'] ?? $product?->sku ?? 'SIN-SKU';
                     $productName = $itemData['product_name'] ?? $product?->name ?? 'Producto';
 
+                    $unitWeight = isset($itemData['unit_weight_kg']) && (float) $itemData['unit_weight_kg'] > 0
+                        ? (float) $itemData['unit_weight_kg']
+                        : (float) ($product?->weight_kg ?: 1.000);
+
+                    $totalWeight = round($qty * $unitWeight, 3);
+
                     MeliFullShipmentItem::create([
                         'meli_full_shipment_id' => $shipment->id,
                         'meli_full_shipment_box_id' => $box->id,
@@ -115,6 +136,8 @@ class MeliFullShipmentService
                         'mlm' => $itemData['mlm'] ?? null,
                         'variation_id' => $itemData['variation_id'] ?? null,
                         'quantity_sent' => $qty,
+                        'unit_weight_kg' => $unitWeight,
+                        'total_weight_kg' => $totalWeight,
                         'notes' => $itemData['notes'] ?? null,
                     ]);
                 }
@@ -159,14 +182,21 @@ class MeliFullShipmentService
 
                 foreach ($data['boxes'] as $boxIndex => $boxData) {
                     $boxNumber = (int) ($boxData['box_number'] ?? ($boxIndex + 1));
-                    $capacity = (int) ($boxData['capacity'] ?? 30);
-                    $boxCode = "CAJA-{$boxNumber}-" . substr($shipment->shipment_code, -4);
+                    $bultoNumber = (int) ($boxData['bulto_number'] ?? ($boxData['box_number'] ?? ($boxIndex + 1)));
+                    $boxesInBulto = max(1, (int) ($boxData['boxes_in_bulto'] ?? 1));
+                    $capacityKg = (float) ($boxData['capacity_kg'] ?? ($boxesInBulto * 30.00));
+                    $capacityUnits = (int) ($boxData['capacity'] ?? ($boxesInBulto * 30));
+                    
+                    $boxCode = ($boxesInBulto > 1 ? "BULTO-{$bultoNumber}-(" . $boxesInBulto . "CAJAS)-" : "CAJA-{$boxNumber}-") . substr($shipment->shipment_code, -4);
 
                     $box = MeliFullShipmentBox::create([
                         'meli_full_shipment_id' => $shipment->id,
                         'box_number' => $boxNumber,
+                        'bulto_number' => $bultoNumber,
+                        'boxes_in_bulto' => $boxesInBulto,
                         'box_code' => $boxCode,
-                        'capacity' => $capacity,
+                        'capacity' => $capacityUnits,
+                        'capacity_kg' => $capacityKg,
                         'dimensions' => $boxData['dimensions'] ?? '40x30x30',
                         'weight_kg' => (float) ($boxData['weight_kg'] ?? 0),
                         'status' => MeliFullShipmentBox::STATUS_PACKING,
@@ -182,15 +212,26 @@ class MeliFullShipmentService
                         $productId = ! empty($itemData['inventory_product_id']) ? (int) $itemData['inventory_product_id'] : null;
                         $product = $productId ? InventoryProduct::find($productId) : null;
 
+                        $sku = $itemData['sku'] ?? $product?->sku ?? 'SIN-SKU';
+                        $productName = $itemData['product_name'] ?? $product?->name ?? 'Producto';
+
+                        $unitWeight = isset($itemData['unit_weight_kg']) && (float) $itemData['unit_weight_kg'] > 0
+                            ? (float) $itemData['unit_weight_kg']
+                            : (float) ($product?->weight_kg ?: 1.000);
+
+                        $totalWeight = round($qty * $unitWeight, 3);
+
                         MeliFullShipmentItem::create([
                             'meli_full_shipment_id' => $shipment->id,
                             'meli_full_shipment_box_id' => $box->id,
                             'inventory_product_id' => $productId,
-                            'sku' => $itemData['sku'] ?? $product?->sku ?? 'SIN-SKU',
-                            'product_name' => $itemData['product_name'] ?? $product?->name ?? 'Producto',
+                            'sku' => $sku,
+                            'product_name' => $productName,
                             'mlm' => $itemData['mlm'] ?? null,
                             'variation_id' => $itemData['variation_id'] ?? null,
                             'quantity_sent' => $qty,
+                            'unit_weight_kg' => $unitWeight,
+                            'total_weight_kg' => $totalWeight,
                             'notes' => $itemData['notes'] ?? null,
                         ]);
                     }
@@ -398,36 +439,40 @@ class MeliFullShipmentService
             ->whereIn('status', [MeliFullShipment::STATUS_IN_TRANSIT, MeliFullShipment::STATUS_PACKED])
             ->sum('total_units');
 
+        $inTransitWeight = (float) MeliFullShipment::query()
+            ->whereIn('status', [MeliFullShipment::STATUS_IN_TRANSIT, MeliFullShipment::STATUS_PACKED])
+            ->sum('total_weight_kg');
+
         // 2. En Bodega MeLi (Disponible para venta)
-        $inWarehouseAvailableUnits = (int) MeliFullStock::query()->sum('full_available_quantity');
+        $inWarehouseAvailableUnits = 0;
+        if (Schema::hasTable('meli_full_stocks')) {
+            $inWarehouseAvailableUnits = (int) MeliFullStock::query()->sum('full_available_quantity');
+        }
 
         // 3. Dañado (Transporte o Bodega MeLi)
         $damagedShipmentUnits = (int) MeliFullShipmentItem::query()->sum('quantity_damaged');
         
-        // Sumar piezas dañadas registradas en not_available_detail de MeliFullStock
         $damagedStockUnits = 0;
         $underReviewStockUnits = 0;
 
-        $stocksWithDetail = MeliFullStock::query()
-            ->whereNotNull('not_available_detail')
-            ->select(['not_available_detail', 'publication_status'])
-            ->get();
+        if (Schema::hasTable('meli_full_stocks')) {
+            $stocksWithDetail = MeliFullStock::query()
+                ->whereNotNull('not_available_detail')
+                ->select(['not_available_detail', 'publication_status'])
+                ->get();
 
-        foreach ($stocksWithDetail as $st) {
-            $details = is_array($st->not_available_detail) ? $st->not_available_detail : [];
-            foreach ($details as $d) {
-                $statusName = strtolower(trim((string) ($d['status'] ?? '')));
-                $qty = (int) ($d['quantity'] ?? 0);
+            foreach ($stocksWithDetail as $st) {
+                $details = is_array($st->not_available_detail) ? $st->not_available_detail : [];
+                foreach ($details as $d) {
+                    $statusName = strtolower(trim((string) ($d['status'] ?? '')));
+                    $qty = (int) ($d['quantity'] ?? 0);
 
-                if (str_contains($statusName, 'damage') || str_contains($statusName, 'daña')) {
-                    $damagedStockUnits += $qty;
-                } elseif (str_contains($statusName, 'review') || str_contains($statusName, 'revis') || str_contains($statusName, 'fiscal') || str_contains($statusName, 'audit')) {
-                    $underReviewStockUnits += $qty;
+                    if (str_contains($statusName, 'damage') || str_contains($statusName, 'daña')) {
+                        $damagedStockUnits += $qty;
+                    } elseif (str_contains($statusName, 'review') || str_contains($statusName, 'revis') || str_contains($statusName, 'fiscal') || str_contains($statusName, 'audit')) {
+                        $underReviewStockUnits += $qty;
+                    }
                 }
-            }
-
-            if (in_array(strtolower((string) $st->publication_status), ['under_review', 'paused', 'inactive'], true)) {
-                // Publicación con posibles observaciones
             }
         }
 
@@ -445,6 +490,7 @@ class MeliFullShipmentService
             'in_transit' => [
                 'shipments_count' => $inTransitShipments,
                 'units' => $inTransitUnits,
+                'weight_kg' => $inTransitWeight,
             ],
             'in_warehouse' => [
                 'units' => $inWarehouseAvailableUnits,
@@ -461,5 +507,135 @@ class MeliFullShipmentService
                 'total_units' => $totalUnderReviewUnits,
             ],
         ];
+    }
+
+    /**
+     * Recomendar productos para enviar a MeLi FULL basándose en demanda y existencias locales
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    public function getRestockRecommendations(?int $limit = 40): array
+    {
+        $stockSvc = $this->stockService ?? app(InventoryStockService::class);
+
+        $products = InventoryProduct::query()
+            ->where('is_active', true)
+            ->where('product_type', InventoryProduct::SIMPLE)
+            ->get();
+
+        $recommendations = [];
+
+        foreach ($products as $prod) {
+            $localAvailable = $stockSvc->availableStock($prod);
+            if ($localAvailable <= 0) {
+                continue; // Si no hay inventario físico local, no podemos enviarlo
+            }
+
+            $sku = strtoupper(trim((string) $prod->sku));
+            $barcode = strtoupper(trim((string) $prod->barcode));
+
+            // 1. Stock disponible en bodegas FULL
+            $fullStock = 0;
+            if (Schema::hasTable('meli_full_stocks')) {
+                $fullStock = (int) MeliFullStock::query()
+                    ->where(function ($q) use ($sku, $barcode) {
+                        if ($sku !== '') $q->where('sku', $sku);
+                        if ($barcode !== '') $q->orWhere('sku', $barcode);
+                    })
+                    ->sum('full_available_quantity');
+            }
+
+            // 2. Stock en camino hacia FULL
+            $inTransit = 0;
+            if (Schema::hasTable('meli_full_shipments') && Schema::hasTable('meli_full_shipment_items')) {
+                $inTransit = (int) MeliFullShipmentItem::query()
+                    ->where('inventory_product_id', $prod->id)
+                    ->whereHas('shipment', function ($q) {
+                        $q->whereIn('status', [MeliFullShipment::STATUS_IN_TRANSIT, MeliFullShipment::STATUS_PACKED]);
+                    })
+                    ->sum('quantity_sent');
+            }
+
+            // 3. Ventas por FULL últimos 30 días
+            $salesFull30d = 0;
+            if (Schema::hasTable('meli_orders') && Schema::hasTable('meli_order_items')) {
+                $salesFull30d = (int) DB::table('meli_orders as o')
+                    ->join('meli_order_items as i', 'i.meli_order_id', '=', 'o.id')
+                    ->where(function ($q) use ($sku, $barcode) {
+                        if ($sku !== '') $q->whereRaw('UPPER(TRIM(i.sku)) = ?', [$sku]);
+                        if ($barcode !== '') $q->orWhereRaw('UPPER(TRIM(i.sku)) = ?', [$barcode]);
+                    })
+                    ->whereRaw("LOWER(COALESCE(o.status, '')) NOT IN ('cancelled', 'invalid')")
+                    ->where(function ($q) {
+                        $q->whereRaw("LOWER(COALESCE(o.shipping_logistic_type, '')) = 'fulfillment'")
+                            ->orWhereRaw("LOWER(COALESCE(o.shipping_mode, '')) = 'fulfillment'")
+                            ->orWhereRaw("LOWER(COALESCE(o.shipping_type, '')) = 'fulfillment'");
+                    })
+                    ->where('o.created_at', '>=', Carbon::now()->subDays(30))
+                    ->sum('i.quantity');
+            }
+
+            $unitWeight = (float) ($prod->weight_kg ?: 1.000);
+            $totalMeliStock = $fullStock + $inTransit;
+            
+            // Meta de stock en FULL: 30 días de cobertura o al menos 10 piezas si vende
+            $targetFullStock = $salesFull30d > 0 ? (int) max(10, ceil($salesFull30d * 1.25)) : 0;
+            $need = max(0, $targetFullStock - $totalMeliStock);
+
+            $priority = null;
+            $reason = null;
+            $suggested = 0;
+
+            if ($salesFull30d > 0 && $fullStock === 0) {
+                $priority = 'CRITICAL';
+                $reason = "🔴 Agotado en FULL (Vendió {$salesFull30d} uds en los últimos 30 días)";
+                $suggested = min($localAvailable, max(5, $need ?: $salesFull30d));
+            } elseif ($salesFull30d > 0 && $fullStock <= 5) {
+                $priority = 'HIGH';
+                $reason = "🟡 Por agotarse en FULL ({$fullStock} uds restantes) · Venta: {$salesFull30d} uds/mes";
+                $suggested = min($localAvailable, max(5, $need));
+            } elseif ($salesFull30d > 0 && $need > 0) {
+                $priority = 'MEDIUM';
+                $reason = "Cobertura recomendada ({$targetFullStock} uds) · Venta: {$salesFull30d} uds/mes";
+                $suggested = min($localAvailable, $need);
+            } elseif ($salesFull30d === 0 && $totalMeliStock === 0 && $localAvailable >= 10) {
+                $priority = 'EXPLORE';
+                $reason = "Producto con stock disponible en almacén ({$localAvailable} uds) · Probar presencia en FULL";
+                $suggested = min($localAvailable, 5);
+            }
+
+            if ($priority !== null && $suggested > 0) {
+                $recommendations[] = [
+                    'product_id' => $prod->id,
+                    'sku' => $prod->sku,
+                    'barcode' => $prod->barcode,
+                    'name' => $prod->name,
+                    'brand' => $prod->brand ?: 'Sin marca',
+                    'weight_kg' => $unitWeight,
+                    'available_stock' => $localAvailable,
+                    'local_stock_available' => $localAvailable,
+                    'full_stock_available' => $fullStock,
+                    'full_stock_in_transit' => $inTransit,
+                    'sales_full_30d' => $salesFull30d,
+                    'suggested_quantity' => $suggested,
+                    'suggested_total_weight' => round($suggested * $unitWeight, 2),
+                    'priority' => $priority,
+                    'reason' => $reason,
+                ];
+            }
+        }
+
+        // Ordenar por prioridad
+        $priorityOrder = ['CRITICAL' => 1, 'HIGH' => 2, 'MEDIUM' => 3, 'EXPLORE' => 4];
+        usort($recommendations, function ($a, $b) use ($priorityOrder) {
+            $pA = $priorityOrder[$a['priority']] ?? 99;
+            $pB = $priorityOrder[$b['priority']] ?? 99;
+            if ($pA !== $pB) {
+                return $pA <=> $pB;
+            }
+            return $b['sales_full_30d'] <=> $a['sales_full_30d'];
+        });
+
+        return array_slice($recommendations, 0, $limit);
     }
 }

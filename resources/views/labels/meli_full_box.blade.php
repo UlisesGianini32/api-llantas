@@ -228,7 +228,9 @@
                     </div>
                     <div class="box-title">
                         <div class="box-number-big">CAJA {{ $box->box_number }} DE {{ $shipment->total_boxes ?: $boxes->count() }}</div>
-                        <div class="shipment-code">Folio: {{ $shipment->shipment_code }}</div>
+                        <div class="shipment-code">
+                            BULTO #{{ $box->bulto_number ?: 1 }} · Folio: {{ $shipment->shipment_code }}
+                        </div>
                     </div>
                 </div>
 
@@ -238,7 +240,7 @@
                         <div class="card-val">{{ $shipment->meli_warehouse_code }}</div>
                         <div class="card-sub">{{ $shipment->meli_warehouse_name }}</div>
                         @if($shipment->meli_shipment_id)
-                            <div class="card-sub"><strong>ID MeLi:</strong> {{ $shipment->meli_shipment_id }}</div>
+                            <div class="card-sub"><strong>ID Cita MeLi:</strong> {{ $shipment->meli_shipment_id }}</div>
                         @endif
                     </div>
                     <div class="dest-card">
@@ -247,17 +249,27 @@
                             <span class="carrier-badge">{{ $shipment->envia_carrier ?: 'ENVIA' }}</span>
                             {{ $shipment->envia_tracking_number ?: 'Pendiente' }}
                         </div>
-                        <div class="card-sub">Capacidad estándar: <strong>{{ $box->capacity }} unidades</strong></div>
-                        <div class="card-sub">Dimensiones: {{ $box->dimensions ?: '40x30x30 cm' }} @if($box->weight_kg > 0) | Peso: {{ $box->weight_kg }} kg @endif</div>
+                        <div class="card-sub">
+                            Bulto ENVIA: <strong>#{{ $box->bulto_number ?: 1 }}</strong> 
+                            @if(($box->boxes_in_bulto ?? 1) > 1)
+                                <span style="color: #6366f1; font-weight: bold;">(Contiene {{ $box->boxes_in_bulto }} cajas de 30 kg flejadas)</span>
+                            @endif
+                        </div>
+                        <div class="card-sub">
+                            Peso Real: <strong>{{ number_format($box->weight_kg, 2) }} kg</strong> / Límite: {{ number_format($box->capacity_kg ?: 30, 2) }} kg (30 kg por caja máster)
+                        </div>
+                        <div class="card-sub">Dimensiones: {{ $box->dimensions ?: '40x30x30 cm' }}</div>
                     </div>
                 </div>
 
                 <table class="items-table">
                     <thead>
                         <tr>
-                            <th style="width: 25%;">SKU</th>
-                            <th style="width: 60%;">Descripción del Producto</th>
-                            <th style="width: 15%; text-align: right;">Piezas</th>
+                            <th style="width: 20%;">SKU</th>
+                            <th style="width: 50%;">Descripción del Producto</th>
+                            <th style="width: 10%; text-align: center;">Piezas</th>
+                            <th style="width: 10%; text-align: right;">Peso Unit.</th>
+                            <th style="width: 10%; text-align: right;">Peso Total</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -270,21 +282,31 @@
                                         <span style="font-size: 11px; color: #64748b;">({{ $item->inventoryProduct->brand }})</span>
                                     @endif
                                 </td>
-                                <td class="qty-cell">{{ $item->quantity_sent }}</td>
+                                <td class="qty-cell" style="text-align: center;">{{ $item->quantity_sent }}</td>
+                                <td style="text-align: right; font-family: monospace;">
+                                    {{ number_format($item->unit_weight_kg ?: ($item->inventoryProduct?->weight_kg ?: 1.0), 2) }} kg
+                                </td>
+                                <td style="text-align: right; font-family: monospace; font-weight: 800;">
+                                    {{ number_format($item->total_weight_kg ?: ($item->quantity_sent * ($item->unit_weight_kg ?: 1.0)), 2) }} kg
+                                </td>
                             </tr>
                         @empty
                             <tr>
-                                <td colspan="3" style="text-align: center; color: #94a3b8; padding: 16px;">
+                                <td colspan="5" style="text-align: center; color: #94a3b8; padding: 16px;">
                                     Caja sin productos asignados todavía.
                                 </td>
                             </tr>
                         @endforelse
                         <tr class="summary-row">
                             <td colspan="2" style="text-align: right; padding-right: 12px; font-weight: 800;">
-                                TOTAL EN ESTA CAJA:
+                                TOTAL EN ESTA CAJA / BULTO:
                             </td>
-                            <td class="qty-cell" style="color: #2563eb;">
-                                {{ $box->units_count }} / {{ $box->capacity }} uds
+                            <td class="qty-cell" style="text-align: center; color: #2563eb;">
+                                {{ $box->units_count }} uds
+                            </td>
+                            <td></td>
+                            <td style="text-align: right; font-family: monospace; font-weight: 900; color: #2563eb;">
+                                {{ number_format($box->weight_kg, 2) }} kg
                             </td>
                         </tr>
                     </tbody>

@@ -66,32 +66,36 @@ class MeliFullShipmentController extends Controller
     }
 
     /**
-     * Formulario para armado de cajas de 30 y nuevo envío FULL
+     * Formulario para armado de cajas de 30 kg, bultos y nuevo envío FULL
      */
     public function create(): Response
     {
         $products = InventoryProduct::query()
             ->where('is_active', true)
             ->where('product_type', InventoryProduct::SIMPLE)
-            ->select(['id', 'sku', 'barcode', 'name', 'brand'])
+            ->select(['id', 'sku', 'barcode', 'name', 'brand', 'weight_kg'])
             ->orderBy('brand')
             ->orderBy('name')
             ->get()
             ->map(function ($p) {
                 $p->available_stock = $this->stockService->availableStock($p);
+                $p->weight_kg = (float) ($p->weight_kg ?: 1.000);
                 return $p;
             });
+
+        $recommendations = $this->shipmentService->getRestockRecommendations(50);
 
         return Inertia::render('MeliFullShipments/Create', [
             'nextShipmentCode' => $this->shipmentService->generateShipmentCode(),
             'warehouses' => MeliFullShipment::WAREHOUSES,
             'carriers' => MeliFullShipment::CARRIERS,
             'products' => $products,
+            'recommendations' => $recommendations,
         ]);
     }
 
     /**
-     * Guardar nuevo envío con sus cajas de 30
+     * Guardar nuevo envío con sus cajas de 30 kg y bultos
      */
     public function store(Request $request): RedirectResponse
     {
@@ -106,7 +110,10 @@ class MeliFullShipmentController extends Controller
             'notes' => ['nullable', 'string'],
             'boxes' => ['required', 'array', 'min:1'],
             'boxes.*.box_number' => ['required', 'integer', 'min:1'],
-            'boxes.*.capacity' => ['required', 'integer', 'min:1'],
+            'boxes.*.bulto_number' => ['nullable', 'integer', 'min:1'],
+            'boxes.*.boxes_in_bulto' => ['nullable', 'integer', 'min:1'],
+            'boxes.*.capacity' => ['nullable', 'integer', 'min:1'],
+            'boxes.*.capacity_kg' => ['nullable', 'numeric', 'min:1'],
             'boxes.*.dimensions' => ['nullable', 'string', 'max:50'],
             'boxes.*.weight_kg' => ['nullable', 'numeric', 'min:0'],
             'boxes.*.items' => ['nullable', 'array'],
@@ -114,6 +121,7 @@ class MeliFullShipmentController extends Controller
             'boxes.*.items.*.sku' => ['nullable', 'string', 'max:100'],
             'boxes.*.items.*.product_name' => ['nullable', 'string', 'max:255'],
             'boxes.*.items.*.quantity_sent' => ['required', 'integer', 'min:1'],
+            'boxes.*.items.*.unit_weight_kg' => ['nullable', 'numeric', 'min:0'],
         ]);
 
         try {
@@ -137,10 +145,10 @@ class MeliFullShipmentController extends Controller
                 $q->orderBy('box_number');
             },
             'boxes.items' => function ($q) {
-                $q->with('inventoryProduct:id,sku,name,brand');
+                $q->with('inventoryProduct:id,sku,name,brand,weight_kg');
             },
             'items' => function ($q) {
-                $q->with('inventoryProduct:id,sku,name,brand');
+                $q->with('inventoryProduct:id,sku,name,brand,weight_kg');
             },
         ]);
 
@@ -166,20 +174,24 @@ class MeliFullShipmentController extends Controller
         $products = InventoryProduct::query()
             ->where('is_active', true)
             ->where('product_type', InventoryProduct::SIMPLE)
-            ->select(['id', 'sku', 'barcode', 'name', 'brand'])
+            ->select(['id', 'sku', 'barcode', 'name', 'brand', 'weight_kg'])
             ->orderBy('brand')
             ->orderBy('name')
             ->get()
             ->map(function ($p) {
                 $p->available_stock = $this->stockService->availableStock($p);
+                $p->weight_kg = (float) ($p->weight_kg ?: 1.000);
                 return $p;
             });
+
+        $recommendations = $this->shipmentService->getRestockRecommendations(50);
 
         return Inertia::render('MeliFullShipments/Edit', [
             'shipment' => $shipment,
             'warehouses' => MeliFullShipment::WAREHOUSES,
             'carriers' => MeliFullShipment::CARRIERS,
             'products' => $products,
+            'recommendations' => $recommendations,
         ]);
     }
 
@@ -198,7 +210,10 @@ class MeliFullShipmentController extends Controller
             'notes' => ['nullable', 'string'],
             'boxes' => ['nullable', 'array'],
             'boxes.*.box_number' => ['required', 'integer', 'min:1'],
-            'boxes.*.capacity' => ['required', 'integer', 'min:1'],
+            'boxes.*.bulto_number' => ['nullable', 'integer', 'min:1'],
+            'boxes.*.boxes_in_bulto' => ['nullable', 'integer', 'min:1'],
+            'boxes.*.capacity' => ['nullable', 'integer', 'min:1'],
+            'boxes.*.capacity_kg' => ['nullable', 'numeric', 'min:1'],
             'boxes.*.dimensions' => ['nullable', 'string', 'max:50'],
             'boxes.*.weight_kg' => ['nullable', 'numeric', 'min:0'],
             'boxes.*.items' => ['nullable', 'array'],
@@ -206,6 +221,7 @@ class MeliFullShipmentController extends Controller
             'boxes.*.items.*.sku' => ['nullable', 'string', 'max:100'],
             'boxes.*.items.*.product_name' => ['nullable', 'string', 'max:255'],
             'boxes.*.items.*.quantity_sent' => ['required', 'integer', 'min:1'],
+            'boxes.*.items.*.unit_weight_kg' => ['nullable', 'numeric', 'min:0'],
         ]);
 
         try {

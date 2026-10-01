@@ -19,6 +19,8 @@ class MeliFullShipmentItem extends Model
         'mlm',
         'variation_id',
         'quantity_sent',
+        'unit_weight_kg',
+        'total_weight_kg',
         'quantity_received',
         'quantity_damaged',
         'quantity_missing',
@@ -27,6 +29,8 @@ class MeliFullShipmentItem extends Model
 
     protected $casts = [
         'quantity_sent' => 'integer',
+        'unit_weight_kg' => 'decimal:3',
+        'total_weight_kg' => 'decimal:3',
         'quantity_received' => 'integer',
         'quantity_damaged' => 'integer',
         'quantity_missing' => 'integer',

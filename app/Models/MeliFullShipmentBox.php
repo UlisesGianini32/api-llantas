@@ -18,8 +18,11 @@ class MeliFullShipmentBox extends Model
     protected $fillable = [
         'meli_full_shipment_id',
         'box_number',
+        'bulto_number',
+        'boxes_in_bulto',
         'box_code',
         'capacity',
+        'capacity_kg',
         'units_count',
         'weight_kg',
         'dimensions',
@@ -28,7 +31,10 @@ class MeliFullShipmentBox extends Model
 
     protected $casts = [
         'box_number' => 'integer',
+        'bulto_number' => 'integer',
+        'boxes_in_bulto' => 'integer',
         'capacity' => 'integer',
+        'capacity_kg' => 'decimal:2',
         'units_count' => 'integer',
         'weight_kg' => 'decimal:2',
     ];
@@ -46,6 +52,7 @@ class MeliFullShipmentBox extends Model
     public function recalculateUnits(): void
     {
         $this->units_count = (int) $this->items()->sum('quantity_sent');
+        $this->weight_kg = (float) $this->items()->sum('total_weight_kg');
         $this->save();
     }
 }

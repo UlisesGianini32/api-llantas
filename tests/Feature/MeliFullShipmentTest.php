@@ -427,4 +427,146 @@ class MeliFullShipmentTest extends TestCase
         // Verificar que el stock FULL disponible se refleja
         $this->assertEquals(25, $forecast['full_available_stock']);
     }
+
+    public function test_can_create_shipment_with_30kg_boxes_and_multi_box_in_same_bulto(): void
+    {
+        // Asignar peso real a productos
+        $this->product1->update(['weight_kg' => 2.500]);
+        $this->product2->update(['weight_kg' => 1.500]);
+
+        $payload = [
+            'shipment_code' => 'FULL-ENV-2026-0002',
+            'meli_warehouse_code' => 'MXCD01',
+            'meli_warehouse_name' => 'CEDIS Cuautitlán Izcalli I',
+            'envia_carrier' => 'Paquetexpress',
+            'envia_tracking_number' => 'PE-MULTI-001',
+            'boxes' => [
+                // Bulto #1 con 2 cajas de 30 kg flejadas juntas (Capacidad: 60 kg)
+                [
+                    'box_number' => 1,
+                    'bulto_number' => 1,
+                    'boxes_in_bulto' => 2,
+                    'capacity_kg' => 60.00,
+                    'dimensions' => '60x40x40',
+                    'items' => [
+                        [
+                            'inventory_product_id' => $this->product1->id,
+                            'sku' => $this->product1->sku,
+                            'product_name' => $this->product1->name,
+                            'quantity_sent' => 16, // 16 * 2.5kg = 40kg
+                            'unit_weight_kg' => 2.500,
+                        ],
+                        [
+                            'inventory_product_id' => $this->product2->id,
+                            'sku' => $this->product2->sku,
+                            'product_name' => $this->product2->name,
+                            'quantity_sent' => 10, // 10 * 1.5kg = 15kg
+                            'unit_weight_kg' => 1.500,
+                        ],
+                    ],
+                ],
+                // Bulto #2 con 1 caja estándar de 30 kg (Capacidad: 30 kg)
+                [
+                    'box_number' => 2,
+                    'bulto_number' => 2,
+                    'boxes_in_bulto' => 1,
+                    'capacity_kg' => 30.00,
+                    'dimensions' => '40x30x30',
+                    'items' => [
+                        [
+                            'inventory_product_id' => $this->product1->id,
+                            'sku' => $this->product1->sku,
+                            'product_name' => $this->product1->name,
+                            'quantity_sent' => 10, // 10 * 2.5kg = 25kg
+                            'unit_weight_kg' => 2.500,
+                        ],
+                    ],
+                ],
+            ],
+        ];
+
+        $response = $this->actingAs($this->user)->post(route('meli-full-shipments.store'), $payload);
+        $response->assertRedirect();
+
+        // 2 bultos, 3 cajas de 30 kg en total (2 en Bulto 1 + 1 en Bulto 2)
+        // Peso total = 40kg + 15kg + 25kg = 80kg
+        // Total unidades = 16 + 10 + 10 = 36 unidades
+        $this->assertDatabaseHas('meli_full_shipments', [
+            'shipment_code' => 'FULL-ENV-2026-0002',
+            'total_bultos' => 2,
+            'total_boxes' => 3,
+            'total_units' => 36,
+        ]);
+
+        $shipment = MeliFullShipment::where('shipment_code', 'FULL-ENV-2026-0002')->first();
+        $this->assertEquals(80.00, (float) $shipment->total_weight_kg);
+
+        // Verificar Bulto 1 con multi-caja
+        $box1 = $shipment->boxes()->where('box_number', 1)->first();
+        $this->assertEquals(1, $box1->bulto_number);
+        $this->assertEquals(2, $box1->boxes_in_bulto);
+        $this->assertEquals(60.00, (float) $box1->capacity_kg);
+        $this->assertEquals(55.00, (float) $box1->weight_kg);
+
+        // Verificar Bulto 2
+        $box2 = $shipment->boxes()->where('box_number', 2)->first();
+        $this->assertEquals(2, $box2->bulto_number);
+        $this->assertEquals(1, $box2->boxes_in_bulto);
+        $this->assertEquals(30.00, (float) $box2->capacity_kg);
+        $this->assertEquals(25.00, (float) $box2->weight_kg);
+    }
+
+    public function test_service_provides_intelligent_restock_recommendations(): void
+    {
+        $account = \App\Models\MeliAccount::create([
+            'user_id' => $this->user->id,
+            'meli_user_id' => '88776655',
+            'nickname' => 'GianiniStore2',
+            'is_default' => true,
+        ]);
+
+        // Simular ventas en FULL para product1
+        $order = \App\Models\MeliOrder::create([
+            'meli_account_id' => $account->id,
+            'order_id' => 9991112223,
+            'status' => 'paid',
+            'shipping_logistic_type' => 'fulfillment',
+            'created_at' => now()->subDays(2),
+        ]);
+
+        \App\Models\MeliOrderItem::create([
+            'meli_order_id' => $order->id,
+            'item_id' => 'MLM-REC-01',
+            'sku' => $this->product1->sku,
+            'title' => $this->product1->name,
+            'quantity' => 15,
+            'unit_price' => 1850.00,
+            'created_at' => now()->subDays(2),
+        ]);
+
+        // Simular que el stock en CEDIS MeLi está AGOTADO (0 unidades)
+        \App\Models\MeliFullStock::create([
+            'user_id' => $this->user->id,
+            'meli_account_id' => $account->id,
+            'stock_key' => 'MLM-REC-01-DEF',
+            'mlm' => 'MLM-REC-01',
+            'sku' => $this->product1->sku,
+            'title' => $this->product1->name,
+            'full_available_quantity' => 0,
+            'full_not_available_quantity' => 0,
+        ]);
+
+        $service = app(MeliFullShipmentService::class);
+        $recommendations = $service->getRestockRecommendations(20);
+
+        $this->assertNotEmpty($recommendations);
+        $rec1 = collect($recommendations)->firstWhere('sku', $this->product1->sku);
+
+        $this->assertNotNull($rec1);
+        $this->assertEquals('CRITICAL', $rec1['priority']); // Agotado en FULL con ventas
+        $this->assertEquals(15, $rec1['sales_full_30d']);
+        $this->assertEquals(0, $rec1['full_stock_available']);
+        $this->assertGreaterThan(0, $rec1['available_stock']);
+        $this->assertGreaterThan(0, $rec1['suggested_quantity']);
+    }
 }

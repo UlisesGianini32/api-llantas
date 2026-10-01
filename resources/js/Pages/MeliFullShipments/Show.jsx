@@ -305,28 +305,35 @@ export default function MeliFullShipmentsShow({
                         )}
                     </div>
 
-                    {/* BOXES & UNITS */}
+                    {/* BOXES, BULTOS & WEIGHT */}
                     <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm dark:border-neutral-800 dark:bg-neutral-900">
                         <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
-                            📦 Cajas & Unidades Enviadas
+                            📦 Bultos, Cajas & Peso Total
                         </span>
-                        <div className="mt-1 flex items-baseline gap-2 font-mono">
+                        <div className="mt-1 flex flex-wrap items-baseline gap-2 font-mono">
+                            <span className="text-2xl font-black text-slate-900 dark:text-white">
+                                {shipment.total_bultos || (shipment.boxes ? new Set(shipment.boxes.map(b => b.bulto_number || 1)).size : 1)}
+                            </span>
+                            <span className="text-xs text-slate-500 font-sans font-bold">
+                                bultos ENVIA
+                            </span>
+                            <span className="text-slate-300">·</span>
                             <span className="text-2xl font-black text-slate-900 dark:text-white">
                                 {shipment.total_boxes}
                             </span>
                             <span className="text-xs text-slate-500 font-sans font-bold">
-                                {shipment.total_boxes === 1 ? 'caja de 30' : 'cajas de 30'}
+                                cajas (30 kg)
                             </span>
                             <span className="text-slate-300">·</span>
                             <span className="text-2xl font-black text-indigo-600 dark:text-indigo-400">
-                                {shipment.total_units}
+                                {parseFloat(shipment.total_weight_kg || 0).toFixed(2)}
                             </span>
                             <span className="text-xs text-slate-500 font-sans font-bold">
-                                piezas
+                                kg
                             </span>
                         </div>
-                        <p className="mt-1 text-[11px] text-slate-500">
-                            Capacidad estándar: 30 unidades por bulto máster
+                        <p className="mt-1 text-[11px] text-slate-500 font-semibold">
+                            Total piezas: <strong className="text-slate-800 dark:text-slate-200">{shipment.total_units} uds</strong>
                         </p>
                     </div>
 
@@ -382,115 +389,143 @@ export default function MeliFullShipmentsShow({
                     </div>
                 </div>
 
-                {/* BOXES DETAIL (EACH 30-UNIT BOX) */}
+                {/* BOXES DETAIL (EACH 30-KG BOX / BULTO) */}
                 <div className="space-y-4">
                     <div className="flex items-center justify-between">
                         <h2 className="text-base font-black text-slate-900 dark:text-white flex items-center gap-2">
-                            <span>📦</span> Desglose de Cajas de 30 Piezas ({shipment.boxes?.length || 0})
+                            <span>📦</span> Desglose de Cajas de 30 kg y Bultos ({shipment.boxes?.length || 0} bultos / {shipment.total_boxes} cajas)
                         </h2>
                     </div>
 
                     <div className="space-y-4">
-                        {(shipment.boxes || []).map((box) => (
-                            <div
-                                key={box.id}
-                                className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-neutral-800 dark:bg-neutral-900"
-                            >
-                                {/* BOX BAR */}
-                                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between border-b border-slate-100 pb-3 dark:border-neutral-800">
-                                    <div className="flex items-center gap-3">
-                                        <div className="rounded-xl bg-slate-100 p-2 text-lg font-black text-slate-700 dark:bg-neutral-800 dark:text-slate-200">
-                                            📦
-                                        </div>
-                                        <div>
-                                            <div className="flex items-center gap-2">
-                                                <h3 className="text-sm font-black text-slate-900 dark:text-white">
-                                                    CAJA #{box.box_number} DE {shipment.total_boxes}
-                                                </h3>
-                                                <span className="font-mono text-xs text-slate-400">
-                                                    ({box.box_code})
-                                                </span>
-                                                <span
-                                                    className={`rounded-full px-2 py-0.5 text-[10px] font-black ${
-                                                        box.units_count === box.capacity
-                                                            ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
-                                                            : 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
-                                                    }`}
-                                                >
-                                                    {box.units_count} / {box.capacity} unidades
-                                                </span>
+                        {(shipment.boxes || []).map((box) => {
+                            const boxWeight = parseFloat(box.weight_kg) || 0
+                            const boxCapacityKg = parseFloat(box.capacity_kg) || (box.boxes_in_bulto || 1) * 30.00
+                            const isOverWeight = boxWeight > boxCapacityKg
+
+                            return (
+                                <div
+                                    key={box.id}
+                                    className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-neutral-800 dark:bg-neutral-900"
+                                >
+                                    {/* BOX BAR */}
+                                    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between border-b border-slate-100 pb-3 dark:border-neutral-800">
+                                        <div className="flex items-center gap-3">
+                                            <div className="rounded-xl bg-slate-100 p-2 text-lg font-black text-slate-700 dark:bg-neutral-800 dark:text-slate-200">
+                                                📦
                                             </div>
-                                            <p className="text-[11px] text-slate-500">
-                                                Medidas: {box.dimensions || '40x30x30 cm'} {box.weight_kg > 0 && `· Peso: ${box.weight_kg} kg`}
-                                            </p>
+                                            <div>
+                                                <div className="flex flex-wrap items-center gap-2">
+                                                    <h3 className="text-sm font-black text-slate-900 dark:text-white">
+                                                        CAJA #{box.box_number} {box.boxes_in_bulto > 1 ? `(${box.boxes_in_bulto} cajas de 30 kg)` : ''} · BULTO ENVIA #{box.bulto_number || 1}
+                                                    </h3>
+                                                    <span className="font-mono text-xs text-slate-400">
+                                                        ({box.box_code})
+                                                    </span>
+                                                    <span
+                                                        className={`rounded-full px-2 py-0.5 text-[10px] font-black ${
+                                                            isOverWeight
+                                                                ? 'bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300'
+                                                                : 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+                                                        }`}
+                                                    >
+                                                        ⚖️ {boxWeight.toFixed(2)} / {boxCapacityKg.toFixed(2)} kg
+                                                    </span>
+                                                    <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-bold text-slate-600 dark:bg-neutral-800 dark:text-slate-300">
+                                                        {box.units_count} piezas
+                                                    </span>
+                                                </div>
+                                                <p className="text-[11px] text-slate-500 mt-0.5">
+                                                    Medidas: {box.dimensions || '40x30x30 cm'} · Capacidad máx: {boxCapacityKg.toFixed(2)} kg ({box.boxes_in_bulto || 1} caja(s) de 30 kg)
+                                                </p>
+                                            </div>
                                         </div>
+
+                                        <a
+                                            href={`/meli/full/envios/${shipment.id}/cajas/${box.id}/rotulo`}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            className="inline-flex items-center gap-1 rounded-xl border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-100 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-300"
+                                        >
+                                            <span>🏷️</span> Imprimir Rótulo de este Bulto
+                                        </a>
                                     </div>
 
-                                    <a
-                                        href={`/meli/full/envios/${shipment.id}/cajas/${box.id}/rotulo`}
-                                        target="_blank"
-                                        rel="noreferrer"
-                                        className="inline-flex items-center gap-1 rounded-xl border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-100 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-300"
-                                    >
-                                        <span>🏷️</span> Imprimir Rótulo de esta Caja
-                                    </a>
-                                </div>
-
-                                {/* ITEMS IN THIS BOX */}
-                                <div className="mt-3 overflow-x-auto">
-                                    <table className="w-full text-left text-xs">
-                                        <thead className="text-[11px] font-bold uppercase text-slate-400">
-                                            <tr>
-                                                <th className="py-2 pr-3">SKU</th>
-                                                <th className="py-2 pr-3">Producto</th>
-                                                <th className="py-2 pr-3 text-center">Enviadas</th>
-                                                {shipment.received_at && (
-                                                    <>
-                                                        <th className="py-2 pr-3 text-center text-emerald-600 dark:text-emerald-400">Recibidas Bien</th>
-                                                        <th className="py-2 pr-3 text-center text-rose-600 dark:text-rose-400">Dañadas</th>
-                                                        <th className="py-2 pr-3 text-center text-amber-600 dark:text-amber-400">Faltantes</th>
-                                                    </>
-                                                )}
-                                                <th className="py-2 text-right">Notas</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody className="divide-y divide-slate-100 font-medium dark:divide-neutral-800">
-                                            {(box.items || []).map((item) => (
-                                                <tr key={item.id} className="hover:bg-slate-50/50 dark:hover:bg-neutral-950/20">
-                                                    <td className="py-2.5 pr-3 font-mono font-bold text-indigo-600 dark:text-indigo-400">
-                                                        {item.sku}
-                                                    </td>
-                                                    <td className="py-2.5 pr-3 font-semibold text-slate-800 dark:text-slate-200">
-                                                        {item.product_name}
-                                                    </td>
-                                                    <td className="py-2.5 pr-3 text-center font-mono font-extrabold text-slate-900 dark:text-white">
-                                                        {item.quantity_sent}
-                                                    </td>
+                                    {/* ITEMS IN THIS BOX */}
+                                    <div className="mt-3 overflow-x-auto">
+                                        <table className="w-full text-left text-xs">
+                                            <thead className="text-[11px] font-bold uppercase text-slate-400">
+                                                <tr>
+                                                    <th className="py-2 pr-3">SKU</th>
+                                                    <th className="py-2 pr-3">Producto</th>
+                                                    <th className="py-2 pr-3 text-center">Enviadas</th>
+                                                    <th className="py-2 pr-3 text-center">Peso Unit.</th>
+                                                    <th className="py-2 pr-3 text-center">Peso Total</th>
                                                     {shipment.received_at && (
                                                         <>
-                                                            <td className="py-2.5 pr-3 text-center font-mono font-bold text-emerald-600 dark:text-emerald-400">
-                                                                {item.quantity_received}
-                                                            </td>
-                                                            <td className="py-2.5 pr-3 text-center font-mono font-bold text-rose-600 dark:text-rose-400">
-                                                                {item.quantity_damaged}
-                                                            </td>
-                                                            <td className="py-2.5 pr-3 text-center font-mono font-bold text-amber-600 dark:text-amber-400">
-                                                                {item.quantity_missing}
-                                                            </td>
+                                                            <th className="py-2 pr-3 text-center text-emerald-600 dark:text-emerald-400">Recibidas Bien</th>
+                                                            <th className="py-2 pr-3 text-center text-rose-600 dark:text-rose-400">Dañadas</th>
+                                                            <th className="py-2 pr-3 text-center text-amber-600 dark:text-amber-400">Faltantes</th>
                                                         </>
                                                     )}
-                                                    <td className="py-2.5 text-right text-slate-400 text-[11px]">
-                                                        {item.notes || '-'}
-                                                    </td>
+                                                    <th className="py-2 text-right">Notas</th>
                                                 </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
+                                            </thead>
+                                            <tbody className="divide-y divide-slate-100 font-medium dark:divide-neutral-800">
+                                                {(box.items || []).map((item) => {
+                                                    const unitW = parseFloat(item.unit_weight_kg) || 1.0
+                                                    const totW = parseFloat(item.total_weight_kg) || (item.quantity_sent * unitW)
+
+                                                    return (
+                                                        <tr key={item.id} className="hover:bg-slate-50/50 dark:hover:bg-neutral-950/20">
+                                                            <td className="py-2.5 pr-3 font-mono font-bold text-indigo-600 dark:text-indigo-400">
+                                                                {item.sku}
+                                                            </td>
+                                                            <td className="py-2.5 pr-3 font-semibold text-slate-800 dark:text-slate-200">
+                                                                {item.product_name}
+                                                                {item.inventoryProduct?.brand && (
+                                                                    <span className="text-[10px] text-slate-400 block">
+                                                                        {item.inventoryProduct.brand}
+                                                                    </span>
+                                                                )}
+                                                            </td>
+                                                            <td className="py-2.5 pr-3 text-center font-mono font-extrabold text-slate-900 dark:text-white">
+                                                                {item.quantity_sent}
+                                                            </td>
+                                                            <td className="py-2.5 pr-3 text-center font-mono text-slate-500">
+                                                                {unitW.toFixed(2)} kg
+                                                            </td>
+                                                            <td className="py-2.5 pr-3 text-center font-mono font-bold text-slate-800 dark:text-slate-200">
+                                                                {totW.toFixed(2)} kg
+                                                            </td>
+                                                            {shipment.received_at && (
+                                                                <>
+                                                                    <td className="py-2.5 pr-3 text-center font-mono font-bold text-emerald-600 dark:text-emerald-400">
+                                                                        {item.quantity_received}
+                                                                    </td>
+                                                                    <td className="py-2.5 pr-3 text-center font-mono font-bold text-rose-600 dark:text-rose-400">
+                                                                        {item.quantity_damaged}
+                                                                    </td>
+                                                                    <td className="py-2.5 pr-3 text-center font-mono font-bold text-amber-600 dark:text-amber-400">
+                                                                        {item.quantity_missing}
+                                                                    </td>
+                                                                </>
+                                                            )}
+                                                            <td className="py-2.5 text-right text-slate-400 text-[11px]">
+                                                                {item.notes || '-'}
+                                                            </td>
+                                                        </tr>
+                                                    )
+                                                })}
+                                            </tbody>
+                                        </table>
+                                    </div>
                                 </div>
-                            </div>
-                        ))}
+                            )
+                        })}
                     </div>
                 </div>
+
 
                 {/* MODAL: DISPATCH CONFIRMATION */}
                 {dispatchModalOpen && (

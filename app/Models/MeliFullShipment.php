@@ -55,7 +55,9 @@ class MeliFullShipment extends Model
         'envia_tracking_url',
         'envia_cost',
         'total_boxes',
+        'total_bultos',
         'total_units',
+        'total_weight_kg',
         'total_units_received',
         'total_units_damaged',
         'total_units_missing',
@@ -68,7 +70,9 @@ class MeliFullShipment extends Model
     protected $casts = [
         'envia_cost' => 'decimal:2',
         'total_boxes' => 'integer',
+        'total_bultos' => 'integer',
         'total_units' => 'integer',
+        'total_weight_kg' => 'decimal:2',
         'total_units_received' => 'integer',
         'total_units_damaged' => 'integer',
         'total_units_missing' => 'integer',
@@ -94,8 +98,11 @@ class MeliFullShipment extends Model
 
     public function recalculateTotals(): void
     {
-        $this->total_boxes = $this->boxes()->count();
+        $boxes = $this->boxes()->get();
+        $this->total_bultos = $boxes->pluck('bulto_number')->unique()->count() ?: 1;
+        $this->total_boxes = (int) $boxes->sum(fn ($b) => max(1, (int) $b->boxes_in_bulto));
         $this->total_units = (int) $this->items()->sum('quantity_sent');
+        $this->total_weight_kg = (float) $this->items()->sum('total_weight_kg');
         $this->total_units_received = (int) $this->items()->sum('quantity_received');
         $this->total_units_damaged = (int) $this->items()->sum('quantity_damaged');
         $this->total_units_missing = (int) $this->items()->sum('quantity_missing');

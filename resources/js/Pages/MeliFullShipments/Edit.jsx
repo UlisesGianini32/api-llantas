@@ -2,36 +2,57 @@ import { useState, useMemo } from 'react'
 import { Head, Link, router } from '@inertiajs/react'
 import AppShell from '@/Components/layout/AppShell'
 
-export default function MeliFullShipmentsCreate({
-    nextShipmentCode = 'FULL-ENV-2026-0001',
+export default function MeliFullShipmentsEdit({
+    shipment = {},
     warehouses = {},
     carriers = [],
     products = [],
     recommendations = [],
 }) {
     // Form Header State
-    const [shipmentCode, setShipmentCode] = useState(nextShipmentCode)
-    const [warehouseCode, setWarehouseCode] = useState('MXCD01')
-    const [warehouseName, setWarehouseName] = useState(warehouses['MXCD01'] || '')
-    const [meliShipmentId, setMeliShipmentId] = useState('')
-    const [carrier, setCarrier] = useState('Paquetexpress')
-    const [trackingNumber, setTrackingNumber] = useState('')
-    const [enviaCost, setEnviaCost] = useState('')
-    const [notes, setNotes] = useState('')
+    const [shipmentCode, setShipmentCode] = useState(shipment.shipment_code || '')
+    const [warehouseCode, setWarehouseCode] = useState(shipment.meli_warehouse_code || 'MXCD01')
+    const [warehouseName, setWarehouseName] = useState(shipment.meli_warehouse_name || warehouses['MXCD01'] || '')
+    const [meliShipmentId, setMeliShipmentId] = useState(shipment.meli_shipment_id || '')
+    const [carrier, setCarrier] = useState(shipment.envia_carrier || 'Paquetexpress')
+    const [trackingNumber, setTrackingNumber] = useState(shipment.envia_tracking_number || '')
+    const [enviaCost, setEnviaCost] = useState(shipment.envia_cost ? shipment.envia_cost.toString() : '')
+    const [notes, setNotes] = useState(shipment.notes || '')
 
-    // Boxes / Bultos State (Each box has capacity_kg, boxes_in_bulto, bulto_number)
-    const [boxes, setBoxes] = useState([
-        {
-            id: 1,
-            box_number: 1,
-            bulto_number: 1,
-            boxes_in_bulto: 1, // 1 caja de 30 kg por defecto
-            capacity_kg: 30.00,
-            dimensions: '40x30x30',
-            weight_kg: 0,
-            items: [],
-        },
-    ])
+    // Boxes / Bultos State
+    const [boxes, setBoxes] = useState(
+        (shipment.boxes && shipment.boxes.length > 0)
+            ? shipment.boxes.map((b, idx) => ({
+                  id: b.id || idx + 1,
+                  box_number: b.box_number || idx + 1,
+                  bulto_number: b.bulto_number || 1,
+                  boxes_in_bulto: b.boxes_in_bulto || 1,
+                  capacity_kg: parseFloat(b.capacity_kg) || (b.boxes_in_bulto || 1) * 30.00,
+                  dimensions: b.dimensions || '40x30x30',
+                  weight_kg: parseFloat(b.weight_kg) || 0,
+                  items: (b.items || []).map((it) => ({
+                      inventory_product_id: it.inventory_product_id,
+                      sku: it.sku,
+                      product_name: it.product_name,
+                      brand: it.inventoryProduct?.brand || '',
+                      quantity_sent: it.quantity_sent,
+                      unit_weight_kg: parseFloat(it.unit_weight_kg) || 1.0,
+                      total_weight_kg: parseFloat(it.total_weight_kg) || it.quantity_sent * (parseFloat(it.unit_weight_kg) || 1.0),
+                  })),
+              }))
+            : [
+                  {
+                      id: 1,
+                      box_number: 1,
+                      bulto_number: 1,
+                      boxes_in_bulto: 1,
+                      capacity_kg: 30.00,
+                      dimensions: '40x30x30',
+                      weight_kg: 0,
+                      items: [],
+                  },
+              ]
+    )
 
     // Product search query & active box
     const [productSearch, setProductSearch] = useState('')
@@ -41,9 +62,9 @@ export default function MeliFullShipmentsCreate({
     const [activeBoxIndex, setActiveBoxIndex] = useState(0)
 
     // Recommendations filter & search
-    const [recFilter, setRecFilter] = useState('ALL') // ALL, CRITICAL, HIGH, IN_STOCK
+    const [recFilter, setRecFilter] = useState('ALL')
     const [recSearch, setRecSearch] = useState('')
-    const [showRecs, setShowRecs] = useState(true)
+    const [showRecs, setShowRecs] = useState(false)
 
     const [submitting, setSubmitting] = useState(false)
     const [errors, setErrors] = useState({})
@@ -110,7 +131,7 @@ export default function MeliFullShipmentsCreate({
             {
                 id: Date.now(),
                 box_number: nextNum,
-                bulto_number: maxBulto + 1, // Nuevo bulto por defecto
+                bulto_number: maxBulto + 1,
                 boxes_in_bulto: 1,
                 capacity_kg: 30.00,
                 dimensions: '40x30x30',
@@ -121,7 +142,7 @@ export default function MeliFullShipmentsCreate({
         setActiveBoxIndex(boxes.length)
     }
 
-    // Update box configuration (boxes_in_bulto, bulto_number, dimensions)
+    // Update box configuration
     const updateBoxConfig = (boxIndex, field, value) => {
         const newBoxes = [...boxes]
         const box = { ...newBoxes[boxIndex] }
@@ -129,7 +150,6 @@ export default function MeliFullShipmentsCreate({
         if (field === 'boxes_in_bulto') {
             const count = Math.max(1, parseInt(value, 10) || 1)
             box.boxes_in_bulto = count
-            // Capacity defaults to 30 kg per box in the bulto
             box.capacity_kg = count * 30.00
         } else if (field === 'bulto_number') {
             box.bulto_number = Math.max(1, parseInt(value, 10) || 1)
@@ -181,9 +201,10 @@ export default function MeliFullShipmentsCreate({
         const q = parseInt(qty, 10)
         if (isNaN(q) || q <= 0) return
 
-        const unitW = customWeight !== null && !isNaN(parseFloat(customWeight))
-            ? parseFloat(customWeight)
-            : parseFloat(product.weight_kg) || 1.0
+        const unitW =
+            customWeight !== null && !isNaN(parseFloat(customWeight))
+                ? parseFloat(customWeight)
+                : parseFloat(product.weight_kg) || 1.0
 
         const newBoxes = [...boxes]
         const targetBox = newBoxes[boxIndex]
@@ -191,19 +212,17 @@ export default function MeliFullShipmentsCreate({
         const addedWeight = q * unitW
         const totalProjectedWeight = currentWeight + addedWeight
 
-        // Warning if weight limit (boxes_in_bulto * 30 kg) will be exceeded
         if (totalProjectedWeight > targetBox.capacity_kg) {
             const excess = (totalProjectedWeight - targetBox.capacity_kg).toFixed(2)
             const proceed = confirm(
                 `⚠️ ALERTA DE PESO ME LI FULL:\n\n` +
-                `La capacidad máxima permitida para esta caja/bulto es de ${targetBox.capacity_kg.toFixed(2)} kg (${targetBox.boxes_in_bulto} caja(s) de 30 kg).\n` +
-                `Con este producto el peso alcanzará ${totalProjectedWeight.toFixed(2)} kg (excede por ${excess} kg).\n\n` +
-                `¿Deseas agregarlo de todas formas? Puedes aumentar las "Cajas de 30 kg en este bulto" o ajustar la cantidad.`
+                    `La capacidad máxima permitida para esta caja/bulto es de ${targetBox.capacity_kg.toFixed(2)} kg (${targetBox.boxes_in_bulto} caja(s) de 30 kg).\n` +
+                    `Con este producto el peso alcanzará ${totalProjectedWeight.toFixed(2)} kg (excede por ${excess} kg).\n\n` +
+                    `¿Deseas agregarlo de todas formas? Puedes aumentar las "Cajas de 30 kg en este bulto" o ajustar la cantidad.`
             )
             if (!proceed) return
         }
 
-        // Check if item already exists in this box
         const existingIdx = targetBox.items.findIndex(
             (it) => it.inventory_product_id === product.id || it.sku === product.sku
         )
@@ -296,10 +315,9 @@ export default function MeliFullShipmentsCreate({
         setSubmitting(true)
         setErrors({})
 
-        router.post(
-            '/meli/full/envios',
+        router.put(
+            `/meli/full/envios/${shipment.id}`,
             {
-                shipment_code: shipmentCode,
                 meli_warehouse_code: warehouseCode,
                 meli_warehouse_name: warehouseName,
                 meli_shipment_id: meliShipmentId,
@@ -311,7 +329,7 @@ export default function MeliFullShipmentsCreate({
                     box_number: b.box_number,
                     bulto_number: b.bulto_number || 1,
                     boxes_in_bulto: b.boxes_in_bulto || 1,
-                    capacity: 30, // compatibilidad
+                    capacity: 30,
                     capacity_kg: b.capacity_kg || (b.boxes_in_bulto || 1) * 30.00,
                     dimensions: b.dimensions || '40x30x30',
                     weight_kg: calculateBoxWeight(b),
@@ -335,7 +353,7 @@ export default function MeliFullShipmentsCreate({
 
     return (
         <AppShell>
-            <Head title="Crear Envío FULL - Cajas de 30 kg" />
+            <Head title={`Editar Envío ${shipment.shipment_code} - Cajas de 30 kg`} />
 
             <div className="space-y-6 p-4 sm:p-6 lg:p-8">
                 {/* BREADCRUMB & HEADER */}
@@ -345,8 +363,12 @@ export default function MeliFullShipmentsCreate({
                             Envíos FULL
                         </Link>
                         <span>/</span>
+                        <Link href={`/meli/full/envios/${shipment.id}`} className="hover:underline">
+                            {shipment.shipment_code}
+                        </Link>
+                        <span>/</span>
                         <span className="font-bold text-slate-800 dark:text-slate-200">
-                            Nuevo Envío (Cajas de 30 kg / Bultos)
+                            Editar Envío
                         </span>
                     </div>
 
@@ -357,20 +379,20 @@ export default function MeliFullShipmentsCreate({
                                     ⚡ ME LI FULL
                                 </span>
                                 <span className="rounded-lg bg-indigo-100 px-2 py-0.5 text-xs font-bold text-indigo-800 dark:bg-indigo-950 dark:text-indigo-300">
-                                    ⚖️ Regla Máx: 30 kg por caja máster
+                                    ⚖️ Regla: Máx 30 kg por caja
                                 </span>
                             </div>
                             <h1 className="mt-1 text-2xl font-black text-slate-900 dark:text-white">
-                                Armar Envío a Mercado Libre FULL
+                                Editar Envío: {shipment.shipment_code}
                             </h1>
                             <p className="text-xs text-slate-500 dark:text-slate-400">
-                                Control de peso en kilos (límite 30 kg por caja), agrupación multi-caja en el mismo bulto ENVIA y recomendaciones inteligentes de reabastecimiento.
+                                Ajusta productos, pesos, cajas y bultos antes de registrar la salida física del almacén con ENVIA.
                             </p>
                         </div>
 
                         <div className="flex items-center gap-3">
                             <Link
-                                href="/meli/full/envios"
+                                href={`/meli/full/envios/${shipment.id}`}
                                 className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-200"
                             >
                                 Cancelar
@@ -381,7 +403,7 @@ export default function MeliFullShipmentsCreate({
                                 disabled={submitting || totalUnitsCount <= 0}
                                 className="rounded-xl bg-indigo-600 px-5 py-2 text-xs font-bold text-white shadow-sm hover:bg-indigo-700 disabled:opacity-50"
                             >
-                                {submitting ? 'Guardando Envío...' : '💾 Guardar Envío'}
+                                {submitting ? 'Guardando Cambios...' : '💾 Actualizar Envío'}
                             </button>
                         </div>
                     </div>
@@ -414,9 +436,8 @@ export default function MeliFullShipmentsCreate({
                             <input
                                 type="text"
                                 value={shipmentCode}
-                                onChange={(e) => setShipmentCode(e.target.value)}
-                                className="w-full rounded-xl border border-slate-300 bg-slate-50 px-3 py-2 font-mono text-xs font-bold text-slate-900 dark:border-neutral-700 dark:bg-neutral-800 dark:text-white"
-                                required
+                                disabled
+                                className="w-full rounded-xl border border-slate-300 bg-slate-100 px-3 py-2 font-mono text-xs font-bold text-slate-500 cursor-not-allowed dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-400"
                             />
                         </div>
 
@@ -506,7 +527,7 @@ export default function MeliFullShipmentsCreate({
                             </label>
                             <input
                                 type="text"
-                                placeholder="Instrucciones para bodega, horario de recolección ENVIA..."
+                                placeholder="Instrucciones para bodega..."
                                 value={notes}
                                 onChange={(e) => setNotes(e.target.value)}
                                 className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs text-slate-900 dark:border-neutral-700 dark:bg-neutral-800 dark:text-white"
@@ -515,7 +536,7 @@ export default function MeliFullShipmentsCreate({
                     </div>
                 </div>
 
-                {/* 2. RECOMENDACIONES INTELIGENTES DE REABASTECIMIENTO FULL */}
+                {/* 2. RECOMENDACIONES DE REABASTECIMIENTO FULL */}
                 <div className="rounded-2xl border-2 border-amber-300 bg-gradient-to-br from-amber-50/70 via-white to-amber-50/40 p-5 shadow-sm dark:border-amber-900/60 dark:from-neutral-900 dark:via-neutral-900 dark:to-amber-950/20">
                     <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                         <div>
@@ -529,7 +550,7 @@ export default function MeliFullShipmentsCreate({
                                 </span>
                             </div>
                             <p className="text-xs text-slate-600 dark:text-slate-400 mt-0.5">
-                                Productos con alta demanda o stock agotándose en MeLi CEDIS, cruzados con tu inventario disponible en el almacén local.
+                                Productos recomendados por alta demanda o stock por agotarse en MeLi CEDIS.
                             </p>
                         </div>
 
@@ -546,7 +567,6 @@ export default function MeliFullShipmentsCreate({
 
                     {showRecs && (
                         <div className="mt-4 space-y-3">
-                            {/* FILTERS & SEARCH FOR RECOMMENDATIONS */}
                             <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                                 <div className="flex flex-wrap items-center gap-1.5">
                                     <button
@@ -554,8 +574,8 @@ export default function MeliFullShipmentsCreate({
                                         onClick={() => setRecFilter('ALL')}
                                         className={`rounded-lg px-2.5 py-1 text-xs font-bold transition ${
                                             recFilter === 'ALL'
-                                                ? 'bg-slate-900 text-white dark:bg-white dark:text-slate-900'
-                                                : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200 dark:bg-neutral-800 dark:border-neutral-700 dark:text-slate-300'
+                                                ? 'bg-slate-900 text-white'
+                                                : 'bg-white text-slate-600 border border-slate-200'
                                         }`}
                                     >
                                         Todos ({recommendations.length})
@@ -566,10 +586,10 @@ export default function MeliFullShipmentsCreate({
                                         className={`rounded-lg px-2.5 py-1 text-xs font-bold transition ${
                                             recFilter === 'CRITICAL'
                                                 ? 'bg-rose-600 text-white'
-                                                : 'bg-white text-rose-700 hover:bg-rose-50 border border-rose-200 dark:bg-neutral-800 dark:border-rose-900 dark:text-rose-400'
+                                                : 'bg-white text-rose-700 border border-rose-200'
                                         }`}
                                     >
-                                        🚨 Urgentes / Agotados en FULL
+                                        🚨 Urgentes
                                     </button>
                                     <button
                                         type="button"
@@ -577,21 +597,10 @@ export default function MeliFullShipmentsCreate({
                                         className={`rounded-lg px-2.5 py-1 text-xs font-bold transition ${
                                             recFilter === 'HIGH'
                                                 ? 'bg-amber-600 text-white'
-                                                : 'bg-white text-amber-700 hover:bg-amber-50 border border-amber-200 dark:bg-neutral-800 dark:border-amber-900 dark:text-amber-400'
+                                                : 'bg-white text-amber-700 border border-amber-200'
                                         }`}
                                     >
-                                        🔥 Alta Rotación (Poco Stock MeLi)
-                                    </button>
-                                    <button
-                                        type="button"
-                                        onClick={() => setRecFilter('IN_STOCK')}
-                                        className={`rounded-lg px-2.5 py-1 text-xs font-bold transition ${
-                                            recFilter === 'IN_STOCK'
-                                                ? 'bg-emerald-600 text-white'
-                                                : 'bg-white text-emerald-700 hover:bg-emerald-50 border border-emerald-200 dark:bg-neutral-800 dark:border-emerald-900 dark:text-emerald-400'
-                                        }`}
-                                    >
-                                        📦 Con Stock en Almacén Local
+                                        🔥 Alta Rotación
                                     </button>
                                 </div>
 
@@ -601,21 +610,20 @@ export default function MeliFullShipmentsCreate({
                                         placeholder="Filtrar por SKU o producto..."
                                         value={recSearch}
                                         onChange={(e) => setRecSearch(e.target.value)}
-                                        className="w-full rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-xs text-slate-800 placeholder-slate-400 dark:border-neutral-700 dark:bg-neutral-800 dark:text-white"
+                                        className="w-full rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-xs text-slate-800 dark:border-neutral-700 dark:bg-neutral-800 dark:text-white"
                                     />
                                 </div>
                             </div>
 
-                            {/* RECOMMENDATIONS TABLE / CARDS */}
                             <div className="max-h-72 overflow-y-auto rounded-xl border border-slate-200 bg-white dark:border-neutral-800 dark:bg-neutral-900">
                                 <table className="w-full text-left text-xs">
-                                    <thead className="sticky top-0 bg-slate-100 border-b border-slate-200 text-[11px] font-bold uppercase text-slate-600 dark:border-neutral-800 dark:bg-neutral-950 dark:text-slate-300">
+                                    <thead className="sticky top-0 bg-slate-100 border-b border-slate-200 text-[11px] font-bold uppercase text-slate-600 dark:border-neutral-800 dark:bg-neutral-950">
                                         <tr>
                                             <th className="p-2.5">Prioridad & SKU</th>
                                             <th className="p-2.5">Producto</th>
                                             <th className="p-2.5 text-center">Ventas 30d FULL</th>
                                             <th className="p-2.5 text-center">Stock MeLi CEDIS</th>
-                                            <th className="p-2.5 text-center">Stock Almacén Local</th>
+                                            <th className="p-2.5 text-center">Stock Local</th>
                                             <th className="p-2.5 text-center">Peso Unit.</th>
                                             <th className="p-2.5 text-center">Sugerido</th>
                                             <th className="p-2.5 text-center">Acción</th>
@@ -635,19 +643,16 @@ export default function MeliFullShipmentsCreate({
                                                 const canAdd = (rec.available_stock || 0) > 0
 
                                                 return (
-                                                    <tr
-                                                        key={rIdx}
-                                                        className="hover:bg-amber-50/40 dark:hover:bg-neutral-800/50 transition"
-                                                    >
+                                                    <tr key={rIdx} className="hover:bg-amber-50/40">
                                                         <td className="p-2.5">
                                                             <div className="flex items-center gap-1.5">
                                                                 <span
                                                                     className={`rounded px-1.5 py-0.5 text-[9px] font-black uppercase ${
                                                                         isCritical
-                                                                            ? 'bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300'
+                                                                            ? 'bg-rose-100 text-rose-800'
                                                                             : isHigh
-                                                                            ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
-                                                                            : 'bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300'
+                                                                            ? 'bg-amber-100 text-amber-800'
+                                                                            : 'bg-blue-100 text-blue-800'
                                                                     }`}
                                                                 >
                                                                     {isCritical ? '🚨 Agotado' : isHigh ? '🔥 Alto' : 'Normal'}
@@ -661,45 +666,27 @@ export default function MeliFullShipmentsCreate({
                                                             <span className="font-semibold text-slate-800 dark:text-slate-200">
                                                                 {rec.name}
                                                             </span>
-                                                            {rec.brand && (
-                                                                <span className="text-[10px] text-slate-400 block">
-                                                                    {rec.brand}
-                                                                </span>
-                                                            )}
                                                         </td>
-                                                        <td className="p-2.5 text-center font-mono font-bold text-indigo-600 dark:text-indigo-400">
+                                                        <td className="p-2.5 text-center font-mono font-bold text-indigo-600">
                                                             {rec.sales_full_30d || 0} uds
                                                         </td>
                                                         <td className="p-2.5 text-center font-mono font-bold">
                                                             {rec.full_stock_available <= 0 ? (
-                                                                <span className="text-rose-600 dark:text-rose-400">
-                                                                    0 (¡Agotado!)
-                                                                </span>
+                                                                <span className="text-rose-600">0 (¡Agotado!)</span>
                                                             ) : (
-                                                                <span className="text-amber-600 dark:text-amber-400">
-                                                                    {rec.full_stock_available} uds
-                                                                </span>
+                                                                <span className="text-amber-600">{rec.full_stock_available} uds</span>
                                                             )}
                                                         </td>
                                                         <td className="p-2.5 text-center font-mono font-bold">
-                                                            <span
-                                                                className={
-                                                                    canAdd
-                                                                        ? 'text-emerald-600 dark:text-emerald-400'
-                                                                        : 'text-slate-400'
-                                                                }
-                                                            >
+                                                            <span className={canAdd ? 'text-emerald-600' : 'text-slate-400'}>
                                                                 {rec.available_stock || 0} disponibles
                                                             </span>
                                                         </td>
                                                         <td className="p-2.5 text-center font-mono text-slate-500">
                                                             {(parseFloat(rec.weight_kg) || 1.0).toFixed(2)} kg
                                                         </td>
-                                                        <td className="p-2.5 text-center font-mono font-extrabold text-indigo-700 dark:text-indigo-300">
-                                                            {rec.suggested_quantity} uds{' '}
-                                                            <span className="text-[10px] text-slate-400 font-normal">
-                                                                (~{rec.estimated_weight_kg || (rec.suggested_quantity * (rec.weight_kg || 1)).toFixed(1)} kg)
-                                                            </span>
+                                                        <td className="p-2.5 text-center font-mono font-extrabold text-indigo-700">
+                                                            {rec.suggested_quantity} uds
                                                         </td>
                                                         <td className="p-2.5 text-center">
                                                             <button
@@ -707,9 +694,8 @@ export default function MeliFullShipmentsCreate({
                                                                 disabled={!canAdd}
                                                                 onClick={() => addRecommendationToActiveBox(rec)}
                                                                 className="rounded-lg bg-indigo-600 px-2.5 py-1 text-[11px] font-bold text-white shadow-sm hover:bg-indigo-700 disabled:opacity-40"
-                                                                title={`Agregar ${rec.suggested_quantity} uds a la Caja #${boxes[activeBoxIndex]?.box_number}`}
                                                             >
-                                                                ➕ Agregar a Caja #{boxes[activeBoxIndex]?.box_number}
+                                                                ➕ Agregar
                                                             </button>
                                                         </td>
                                                     </tr>
@@ -723,7 +709,7 @@ export default function MeliFullShipmentsCreate({
                     )}
                 </div>
 
-                {/* 3. BOXES & BULTOS BUILDER (30 KG LIMIT & MULTI-BOX IN SAME BULTO) */}
+                {/* 3. BOXES & BULTOS BUILDER */}
                 <div className="space-y-4">
                     <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                         <div>
@@ -737,7 +723,7 @@ export default function MeliFullShipmentsCreate({
                                 </span>
                             </div>
                             <p className="text-xs text-slate-500">
-                                Cada caja estándar tiene un peso máximo de <strong>30.00 kg</strong> para Fulfillment MeLi. Puedes mandar más de una caja de 30 kg en el mismo bulto de paquetería (flejadas o emplayadas).
+                                Cada caja tiene límite de <strong>30.00 kg</strong>. Puedes mandar más de 1 caja de 30 kg en el mismo bulto de paquetería.
                             </p>
                         </div>
 
@@ -824,7 +810,7 @@ export default function MeliFullShipmentsCreate({
                                                     )}
                                                 </h3>
                                                 <p className="text-xs text-slate-500">
-                                                    Capacidad de peso configurada: <strong>{maxWeight.toFixed(2)} kg</strong> ({activeBox.boxes_in_bulto} caja(s) × 30 kg máx c/u)
+                                                    Capacidad de peso: <strong>{maxWeight.toFixed(2)} kg</strong> ({activeBox.boxes_in_bulto} caja(s) × 30 kg máx c/u)
                                                 </p>
                                             </div>
                                         </div>
@@ -834,7 +820,6 @@ export default function MeliFullShipmentsCreate({
                                                 type="button"
                                                 onClick={() => duplicateBox(activeBoxIndex)}
                                                 className="rounded-xl border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-100 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-300"
-                                                title="Duplicar esta caja/bulto con los mismos productos"
                                             >
                                                 📋 Duplicar
                                             </button>
@@ -844,7 +829,6 @@ export default function MeliFullShipmentsCreate({
                                                     type="button"
                                                     onClick={() => removeBox(activeBoxIndex)}
                                                     className="rounded-xl border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-xs font-bold text-rose-700 hover:bg-rose-100 dark:border-rose-900 dark:bg-rose-950/40 dark:text-rose-300"
-                                                    title="Eliminar este bulto"
                                                 >
                                                     🗑️ Eliminar
                                                 </button>
@@ -955,7 +939,6 @@ export default function MeliFullShipmentsCreate({
                                     </span>
 
                                     <div className="grid grid-cols-1 gap-3 sm:grid-cols-12 items-end">
-                                        {/* Product Search & Dropdown */}
                                         <div className="sm:col-span-5">
                                             <label className="block text-[11px] font-bold text-slate-500 mb-1">
                                                 Buscar en Almacén Local:
@@ -968,7 +951,6 @@ export default function MeliFullShipmentsCreate({
                                                 className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-medium dark:border-neutral-700 dark:bg-neutral-900 dark:text-white"
                                             />
 
-                                            {/* Quick Dropdown Options */}
                                             {filteredProducts.length > 0 && (
                                                 <div className="mt-1 max-h-48 overflow-y-auto rounded-xl border border-slate-200 bg-white p-1 shadow-lg dark:border-neutral-800 dark:bg-neutral-900">
                                                     {filteredProducts.map((p) => (
@@ -981,21 +963,21 @@ export default function MeliFullShipmentsCreate({
                                                             }}
                                                             className={`cursor-pointer rounded-lg px-2.5 py-1.5 text-xs transition flex items-center justify-between ${
                                                                 selectedProduct?.id === p.id
-                                                                    ? 'bg-indigo-50 font-bold text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300'
-                                                                    : 'hover:bg-slate-50 text-slate-800 dark:text-slate-200 dark:hover:bg-neutral-800'
+                                                                    ? 'bg-indigo-50 font-bold text-indigo-700'
+                                                                    : 'hover:bg-slate-50 text-slate-800'
                                                             }`}
                                                         >
                                                             <div>
-                                                                <span className="font-mono font-bold mr-2 text-indigo-600 dark:text-indigo-400">
+                                                                <span className="font-mono font-bold mr-2 text-indigo-600">
                                                                     {p.sku}
                                                                 </span>
                                                                 <span>{p.name}</span>
                                                             </div>
                                                             <div className="flex items-center gap-2">
-                                                                <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-bold text-slate-600 dark:bg-neutral-800 dark:text-slate-300">
+                                                                <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-bold text-slate-600">
                                                                     {(parseFloat(p.weight_kg) || 1.0).toFixed(2)} kg
                                                                 </span>
-                                                                <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] font-bold text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">
+                                                                <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] font-bold text-emerald-700">
                                                                     Stock: {p.available_stock ?? 0}
                                                                 </span>
                                                             </div>
@@ -1005,7 +987,6 @@ export default function MeliFullShipmentsCreate({
                                             )}
                                         </div>
 
-                                        {/* Quantity */}
                                         <div className="sm:col-span-3">
                                             <label className="block text-[11px] font-bold text-slate-500 mb-1">
                                                 Piezas a empacar:
@@ -1020,7 +1001,6 @@ export default function MeliFullShipmentsCreate({
                                             />
                                         </div>
 
-                                        {/* Unit Weight */}
                                         <div className="sm:col-span-2">
                                             <label className="block text-[11px] font-bold text-slate-500 mb-1">
                                                 Peso Unit. (kg):
@@ -1035,7 +1015,6 @@ export default function MeliFullShipmentsCreate({
                                             />
                                         </div>
 
-                                        {/* Add Button */}
                                         <div className="sm:col-span-2">
                                             <button
                                                 type="button"
@@ -1070,7 +1049,7 @@ export default function MeliFullShipmentsCreate({
                                             {activeBox.items.length === 0 ? (
                                                 <tr>
                                                     <td colSpan={6} className="py-8 text-center text-slate-400">
-                                                        Esta caja está vacía. Selecciona un producto recomendado arriba o búscalo en el almacén.
+                                                        Esta caja está vacía. Selecciona un producto para empacar.
                                                     </td>
                                                 </tr>
                                             ) : (
@@ -1078,17 +1057,12 @@ export default function MeliFullShipmentsCreate({
                                                     const subtotalW = (item.quantity_sent || 0) * (parseFloat(item.unit_weight_kg) || 0)
 
                                                     return (
-                                                        <tr key={itemIdx} className="hover:bg-slate-50/50 dark:hover:bg-neutral-950/30">
-                                                            <td className="p-3 font-mono font-bold text-indigo-600 dark:text-indigo-400">
+                                                        <tr key={itemIdx} className="hover:bg-slate-50/50">
+                                                            <td className="p-3 font-mono font-bold text-indigo-600">
                                                                 {item.sku}
                                                             </td>
                                                             <td className="p-3 font-semibold text-slate-800 dark:text-slate-200">
                                                                 {item.product_name}
-                                                                {item.brand && (
-                                                                    <span className="text-[10px] text-slate-400 block">
-                                                                        {item.brand}
-                                                                    </span>
-                                                                )}
                                                             </td>
                                                             <td className="p-3 text-center">
                                                                 <input
@@ -1096,7 +1070,7 @@ export default function MeliFullShipmentsCreate({
                                                                     min="1"
                                                                     value={item.quantity_sent}
                                                                     onChange={(e) => updateItemQty(activeBoxIndex, itemIdx, e.target.value)}
-                                                                    className="w-20 rounded-lg border border-slate-300 bg-white px-2 py-1 text-center font-mono text-xs font-bold text-slate-900 dark:border-neutral-700 dark:bg-neutral-800 dark:text-white"
+                                                                    className="w-20 rounded-lg border border-slate-300 bg-white px-2 py-1 text-center font-mono text-xs font-bold"
                                                                 />
                                                             </td>
                                                             <td className="p-3 text-center">
@@ -1107,19 +1081,19 @@ export default function MeliFullShipmentsCreate({
                                                                         min="0.01"
                                                                         value={item.unit_weight_kg}
                                                                         onChange={(e) => updateItemUnitWeight(activeBoxIndex, itemIdx, e.target.value)}
-                                                                        className="w-16 rounded-lg border border-slate-300 bg-white px-1.5 py-1 text-center font-mono text-xs text-slate-900 dark:border-neutral-700 dark:bg-neutral-800 dark:text-white"
+                                                                        className="w-16 rounded-lg border border-slate-300 bg-white px-1.5 py-1 text-center font-mono text-xs"
                                                                     />
                                                                     <span className="text-[10px] text-slate-400">kg</span>
                                                                 </div>
                                                             </td>
-                                                            <td className="p-3 text-center font-mono font-bold text-slate-900 dark:text-white">
+                                                            <td className="p-3 text-center font-mono font-bold">
                                                                 {subtotalW.toFixed(2)} kg
                                                             </td>
                                                             <td className="p-3 text-center">
                                                                 <button
                                                                     type="button"
                                                                     onClick={() => removeItemFromBox(activeBoxIndex, itemIdx)}
-                                                                    className="text-xs font-bold text-rose-600 hover:underline dark:text-rose-400"
+                                                                    className="text-xs font-bold text-rose-600 hover:underline"
                                                                 >
                                                                     Quitar
                                                                 </button>
@@ -1130,16 +1104,16 @@ export default function MeliFullShipmentsCreate({
                                             )}
                                         </tbody>
                                         {activeBox.items.length > 0 && (
-                                            <tfoot className="border-t border-slate-200 bg-slate-50/80 font-bold dark:border-neutral-800 dark:bg-neutral-950">
+                                            <tfoot className="border-t border-slate-200 bg-slate-50 font-bold">
                                                 <tr>
                                                     <td colSpan={2} className="p-3 text-right">
                                                         Total en Caja #{activeBox.box_number}:
                                                     </td>
-                                                    <td className="p-3 text-center font-mono text-sm text-slate-900 dark:text-white">
+                                                    <td className="p-3 text-center font-mono text-sm">
                                                         {currentUnits} piezas
                                                     </td>
                                                     <td></td>
-                                                    <td className="p-3 text-center font-mono text-sm text-indigo-700 dark:text-indigo-300">
+                                                    <td className="p-3 text-center font-mono text-sm text-indigo-700">
                                                         {currentWeight.toFixed(2)} / {maxWeight.toFixed(2)} kg
                                                     </td>
                                                     <td></td>
@@ -1197,15 +1171,12 @@ export default function MeliFullShipmentsCreate({
                                     </span>
                                 </div>
                             </div>
-                            <p className="mt-1 text-[11px] text-slate-600 dark:text-slate-400">
-                                ℹ️ Al despachar con tu guía ENVIA, el sistema descontará automáticamente las piezas del almacén local físico mediante movimientos <strong>TRANSFER_OUT</strong>.
-                            </p>
                         </div>
 
                         <div className="flex items-center gap-3">
                             <Link
-                                href="/meli/full/envios"
-                                className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-50 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-200"
+                                href={`/meli/full/envios/${shipment.id}`}
+                                className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-50"
                             >
                                 Cancelar
                             </Link>
@@ -1215,7 +1186,7 @@ export default function MeliFullShipmentsCreate({
                                 disabled={submitting || totalUnitsCount <= 0}
                                 className="rounded-xl bg-indigo-600 px-6 py-2.5 text-xs font-bold text-white shadow-md hover:bg-indigo-700 disabled:opacity-40"
                             >
-                                {submitting ? 'Guardando Envío...' : '💾 Guardar y Finalizar Envío'}
+                                {submitting ? 'Guardando Cambios...' : '💾 Actualizar Envío'}
                             </button>
                         </div>
                     </div>

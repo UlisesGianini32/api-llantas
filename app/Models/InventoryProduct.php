@@ -31,6 +31,7 @@ class InventoryProduct extends Model
         'price_amazon',
         'price_stylist',
         'price_public',
+        'weight_kg',
         'is_active',
         'primary_location_id',
     ];
@@ -46,6 +47,7 @@ class InventoryProduct extends Model
             'price_amazon' => 'decimal:2',
             'price_stylist' => 'decimal:2',
             'price_public' => 'decimal:2',
+            'weight_kg' => 'decimal:3',
             'is_active' => 'boolean',
             'primary_location_id' => 'integer',
         ];
