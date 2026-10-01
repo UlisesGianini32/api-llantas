@@ -10,6 +10,7 @@ use App\Models\InventoryProduct;
 use App\Services\InventoryMovementService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Inertia\Inertia;
 use Inertia\Response;
 use InvalidArgumentException;
@@ -60,7 +61,7 @@ class InventoryMovementController extends Controller
                 ->where('is_active', true)
                 ->where('product_type', InventoryProduct::SIMPLE)
                 ->orderBy('name')
-                ->get(['id', 'name', 'sku']),
+                ->get(['id', 'name', 'sku', 'barcode', 'brand']),
             'locations' => InventoryLocation::query()
                 ->where('is_active', true)
                 ->orderByRaw('sort_order IS NULL')
@@ -78,8 +79,43 @@ class InventoryMovementController extends Controller
         StoreInventoryMovementRequest $request,
         InventoryMovementService $movements,
     ): RedirectResponse {
+        $validated = $request->validated();
+        $user = $request->user();
+
         try {
-            $movements->recordManual($request->validated(), $request->user());
+            if (! empty($validated['items'])) {
+                $count = DB::transaction(function () use ($validated, $user, $movements) {
+                    $recorded = 0;
+                    foreach ($validated['items'] as $item) {
+                        $itemNotes = trim((string) ($item['notes'] ?? ''));
+                        $baseNotes = trim((string) ($validated['notes'] ?? ''));
+                        $combinedNotes = $baseNotes !== '' && $itemNotes !== ''
+                            ? "{$baseNotes} | {$itemNotes}"
+                            : ($itemNotes !== '' ? $itemNotes : ($baseNotes !== '' ? $baseNotes : null));
+
+                        $movements->recordManual([
+                            'inventory_product_id' => (int) $item['inventory_product_id'],
+                            'inventory_location_id' => (int) $validated['inventory_location_id'],
+                            'type' => (string) $validated['type'],
+                            'quantity' => (int) $item['quantity'],
+                            'reference_type' => $validated['reference_type'] ?? null,
+                            'reference_id' => $validated['reference_id'] ?? null,
+                            'reference' => $validated['reference'] ?? null,
+                            'notes' => $combinedNotes,
+                            'metadata' => $validated['metadata'] ?? null,
+                            'occurred_at' => $validated['occurred_at'] ?? now(),
+                            'external_key' => $item['external_key'] ?? null,
+                        ], $user);
+                        $recorded++;
+                    }
+                    return $recorded;
+                });
+
+                return redirect()->route('inventory.movements.index')
+                    ->with('success', "Se registraron {$count} movimientos correctamente.");
+            }
+
+            $movements->recordManual($validated, $user);
         } catch (InventoryInsufficientStockException|InvalidArgumentException $exception) {
             return back()
                 ->withInput()

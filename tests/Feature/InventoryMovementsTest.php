@@ -119,6 +119,77 @@ class InventoryMovementsTest extends TestCase
         ]);
     }
 
+    public function test_admin_can_register_batch_movements_for_multiple_products(): void
+    {
+        $admin = $this->admin();
+        [$product1, $location] = $this->productAndLocation();
+        $product2 = InventoryProduct::create([
+            'name' => 'Segundo Producto Test',
+            'sku' => 'SKU-TEST-002',
+            'barcode' => '7501234567891',
+            'is_active' => true,
+            'product_type' => InventoryProduct::SIMPLE,
+        ]);
+
+        $this->actingAs($admin)
+            ->post(route('inventory.movements.store'), [
+                'inventory_location_id' => $location->id,
+                'type' => InventoryMovement::RECEIPT,
+                'reference' => 'REM-LOTE-2026',
+                'notes' => 'Entrada de mercancía en lote',
+                'items' => [
+                    [
+                        'inventory_product_id' => $product1->id,
+                        'quantity' => 15,
+                        'notes' => 'Caja 1',
+                    ],
+                    [
+                        'inventory_product_id' => $product2->id,
+                        'quantity' => 25,
+                        'notes' => 'Caja 2',
+                    ],
+                ],
+            ])
+            ->assertRedirect(route('inventory.movements.index'))
+            ->assertSessionHas('success', 'Se registraron 2 movimientos correctamente.');
+
+        $this->assertDatabaseHas('inventory_movements', [
+            'inventory_product_id' => $product1->id,
+            'inventory_location_id' => $location->id,
+            'type' => InventoryMovement::RECEIPT,
+            'quantity' => 15,
+            'reference' => 'REM-LOTE-2026',
+            'notes' => 'Entrada de mercancía en lote | Caja 1',
+        ]);
+
+        $this->assertDatabaseHas('inventory_movements', [
+            'inventory_product_id' => $product2->id,
+            'inventory_location_id' => $location->id,
+            'type' => InventoryMovement::RECEIPT,
+            'quantity' => 25,
+            'reference' => 'REM-LOTE-2026',
+            'notes' => 'Entrada de mercancía en lote | Caja 2',
+        ]);
+    }
+
+    public function test_movement_sets_occurred_at_automatically_when_omitted(): void
+    {
+        $admin = $this->admin();
+        [$product, $location] = $this->productAndLocation();
+
+        $this->actingAs($admin)
+            ->post(route('inventory.movements.store'), [
+                'inventory_product_id' => $product->id,
+                'inventory_location_id' => $location->id,
+                'type' => InventoryMovement::INITIAL,
+                'quantity' => 5,
+            ])
+            ->assertRedirect(route('inventory.movements.index'));
+
+        $movement = InventoryMovement::latest('id')->first();
+        $this->assertNotNull($movement->occurred_at);
+    }
+
     public function test_receipt_increases_stock_and_damage_adjustment_out_and_sale_decrease_it(): void
     {
         $service = app(InventoryMovementService::class);
