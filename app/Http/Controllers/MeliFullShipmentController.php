@@ -73,13 +73,14 @@ class MeliFullShipmentController extends Controller
         $products = InventoryProduct::query()
             ->where('is_active', true)
             ->where('product_type', InventoryProduct::SIMPLE)
-            ->select(['id', 'sku', 'barcode', 'name', 'brand', 'weight_kg'])
+            ->select(['id', 'sku', 'barcode', 'name', 'brand', 'weight_kg', 'requires_meli_labeling'])
             ->orderBy('brand')
             ->orderBy('name')
             ->get()
             ->map(function ($p) {
                 $p->available_stock = $this->stockService->availableStock($p);
                 $p->weight_kg = (float) ($p->weight_kg ?: 1.000);
+                $p->requires_meli_labeling = (bool) $p->requires_meli_labeling;
                 return $p;
             });
 
@@ -121,6 +122,7 @@ class MeliFullShipmentController extends Controller
             'boxes.*.items.*.sku' => ['nullable', 'string', 'max:100'],
             'boxes.*.items.*.product_name' => ['nullable', 'string', 'max:255'],
             'boxes.*.items.*.quantity_sent' => ['required', 'integer', 'min:1'],
+            'boxes.*.items.*.requires_labeling' => ['nullable', 'boolean'],
             'boxes.*.items.*.unit_weight_kg' => ['nullable', 'numeric', 'min:0'],
         ]);
 
@@ -174,13 +176,14 @@ class MeliFullShipmentController extends Controller
         $products = InventoryProduct::query()
             ->where('is_active', true)
             ->where('product_type', InventoryProduct::SIMPLE)
-            ->select(['id', 'sku', 'barcode', 'name', 'brand', 'weight_kg'])
+            ->select(['id', 'sku', 'barcode', 'name', 'brand', 'weight_kg', 'requires_meli_labeling'])
             ->orderBy('brand')
             ->orderBy('name')
             ->get()
             ->map(function ($p) {
                 $p->available_stock = $this->stockService->availableStock($p);
                 $p->weight_kg = (float) ($p->weight_kg ?: 1.000);
+                $p->requires_meli_labeling = (bool) $p->requires_meli_labeling;
                 return $p;
             });
 
@@ -221,6 +224,7 @@ class MeliFullShipmentController extends Controller
             'boxes.*.items.*.sku' => ['nullable', 'string', 'max:100'],
             'boxes.*.items.*.product_name' => ['nullable', 'string', 'max:255'],
             'boxes.*.items.*.quantity_sent' => ['required', 'integer', 'min:1'],
+            'boxes.*.items.*.requires_labeling' => ['nullable', 'boolean'],
             'boxes.*.items.*.unit_weight_kg' => ['nullable', 'numeric', 'min:0'],
         ]);
 
@@ -294,7 +298,7 @@ class MeliFullShipmentController extends Controller
     }
 
     /**
-     * Vista de impresión de rótulos de caja de 30
+     * Vista de impresión de rótulos de caja de 30 kg / bultos máster MeLi
      */
     public function printLabels(MeliFullShipment $shipment, ?MeliFullShipmentBox $box = null): \Illuminate\View\View
     {
@@ -304,6 +308,20 @@ class MeliFullShipmentController extends Controller
         return view('labels.meli_full_box', [
             'shipment' => $shipment,
             'boxes' => $boxes,
+        ]);
+    }
+
+    /**
+     * Vista de impresión de etiquetas térmicas individuales de producto para MeLi FULL
+     */
+    public function printProductLabels(MeliFullShipment $shipment): \Illuminate\View\View
+    {
+        $shipment->load(['items.inventoryProduct']);
+        $items = $shipment->items->where('requires_labeling', true);
+
+        return view('labels.meli_full_product', [
+            'shipment' => $shipment,
+            'items' => $items,
         ]);
     }
 }

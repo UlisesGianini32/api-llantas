@@ -569,4 +569,54 @@ class MeliFullShipmentTest extends TestCase
         $this->assertGreaterThan(0, $rec1['available_stock']);
         $this->assertGreaterThan(0, $rec1['suggested_quantity']);
     }
+
+    public function test_can_manage_product_labeling_and_print_thermal_labels(): void
+    {
+        $payload = [
+            'shipment_code' => 'FULL-ENV-2026-0003',
+            'meli_warehouse_code' => 'MXCD01',
+            'boxes' => [
+                [
+                    'box_number' => 1,
+                    'bulto_number' => 1,
+                    'boxes_in_bulto' => 1,
+                    'capacity_kg' => 30.00,
+                    'items' => [
+                        // Producto 1 REQUIERE etiquetado individual
+                        [
+                            'inventory_product_id' => $this->product1->id,
+                            'sku' => $this->product1->sku,
+                            'product_name' => $this->product1->name,
+                            'quantity_sent' => 12,
+                            'requires_labeling' => true,
+                            'unit_weight_kg' => 1.5,
+                        ],
+                        // Producto 2 NO requiere etiquetado (ya tiene código de fábrica)
+                        [
+                            'inventory_product_id' => $this->product2->id,
+                            'sku' => $this->product2->sku,
+                            'product_name' => $this->product2->name,
+                            'quantity_sent' => 8,
+                            'requires_labeling' => false,
+                            'unit_weight_kg' => 1.2,
+                        ],
+                    ],
+                ],
+            ],
+        ];
+
+        $response = $this->actingAs($this->user)->post(route('meli-full-shipments.store'), $payload);
+        $response->assertRedirect();
+
+        $shipment = MeliFullShipment::where('shipment_code', 'FULL-ENV-2026-0003')->first();
+        $this->assertNotNull($shipment);
+        $this->assertEquals(20, $shipment->total_units);
+        $this->assertEquals(12, $shipment->total_labeled_units);
+
+        // Verificar que la vista de etiquetas de producto renderiza las 12 etiquetas
+        $labelResponse = $this->actingAs($this->user)->get(route('meli-full-shipments.product-labels', $shipment->id));
+        $labelResponse->assertStatus(200);
+        $labelResponse->assertSee($this->product1->sku);
+        $labelResponse->assertSee('Etiquetas de Producto para Mercado Libre FULL');
+    }
 }

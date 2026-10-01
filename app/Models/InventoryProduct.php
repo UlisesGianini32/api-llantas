@@ -32,6 +32,7 @@ class InventoryProduct extends Model
         'price_stylist',
         'price_public',
         'weight_kg',
+        'requires_meli_labeling',
         'is_active',
         'primary_location_id',
     ];
@@ -48,6 +49,7 @@ class InventoryProduct extends Model
             'price_stylist' => 'decimal:2',
             'price_public' => 'decimal:2',
             'weight_kg' => 'decimal:3',
+            'requires_meli_labeling' => 'boolean',
             'is_active' => 'boolean',
             'primary_location_id' => 'integer',
         ];

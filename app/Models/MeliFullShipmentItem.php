@@ -19,6 +19,7 @@ class MeliFullShipmentItem extends Model
         'mlm',
         'variation_id',
         'quantity_sent',
+        'requires_labeling',
         'unit_weight_kg',
         'total_weight_kg',
         'quantity_received',
@@ -29,6 +30,7 @@ class MeliFullShipmentItem extends Model
 
     protected $casts = [
         'quantity_sent' => 'integer',
+        'requires_labeling' => 'boolean',
         'unit_weight_kg' => 'decimal:3',
         'total_weight_kg' => 'decimal:3',
         'quantity_received' => 'integer',

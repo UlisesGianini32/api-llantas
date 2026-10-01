@@ -338,6 +338,7 @@ export default function MeliFullShipmentsEdit({
                         sku: it.sku,
                         product_name: it.product_name,
                         quantity_sent: it.quantity_sent,
+                        requires_labeling: Boolean(it.requires_labeling),
                         unit_weight_kg: parseFloat(it.unit_weight_kg) || 1.0,
                     })),
                 })),

@@ -212,7 +212,16 @@ export default function MeliFullShipmentsShow({
                                 rel="noreferrer"
                                 className="inline-flex items-center gap-1.5 rounded-xl border border-slate-300 bg-white px-3.5 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-200"
                             >
-                                <span>🖨️</span> Imprimir Rótulos de Cajas
+                                <span>📦</span> Imprimir Rótulos de Cajas MeLi
+                            </a>
+
+                            <a
+                                href={`/meli/full/envios/${shipment.id}/etiquetas-productos`}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="inline-flex items-center gap-1.5 rounded-xl border border-indigo-200 bg-indigo-50 px-3.5 py-2 text-xs font-bold text-indigo-700 hover:bg-indigo-100 dark:border-indigo-900 dark:bg-indigo-950 dark:text-indigo-300"
+                            >
+                                <span>🏷️</span> Imprimir Stickers de Producto
                             </a>
 
                             {/* DISPATCH ACTION (TRANSFER_OUT) */}
@@ -482,7 +491,14 @@ export default function MeliFullShipmentsShow({
                                                                 {item.sku}
                                                             </td>
                                                             <td className="py-2.5 pr-3 font-semibold text-slate-800 dark:text-slate-200">
-                                                                {item.product_name}
+                                                                <div className="flex items-center gap-1.5">
+                                                                    <span>{item.product_name}</span>
+                                                                    {item.requires_labeling && (
+                                                                        <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-[9px] font-black text-indigo-800 dark:bg-indigo-950 dark:text-indigo-300">
+                                                                            🏷️ Sticker MeLi
+                                                                        </span>
+                                                                    )}
+                                                                </div>
                                                                 {item.inventoryProduct?.brand && (
                                                                     <span className="text-[10px] text-slate-400 block">
                                                                         {item.inventoryProduct.brand}

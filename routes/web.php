@@ -537,6 +537,7 @@ Route::middleware(['auth', 'role'])->group(function () {
     Route::post('/meli/full/envios/{shipment}/recibir', [MeliFullShipmentController::class, 'receive'])->name('meli-full-shipments.receive');
     Route::get('/meli/full/envios/{shipment}/rotulos', [MeliFullShipmentController::class, 'printLabels'])->name('meli-full-shipments.labels');
     Route::get('/meli/full/envios/{shipment}/cajas/{box}/rotulo', [MeliFullShipmentController::class, 'printLabels'])->name('meli-full-shipments.box-label');
+    Route::get('/meli/full/envios/{shipment}/etiquetas-productos', [MeliFullShipmentController::class, 'printProductLabels'])->name('meli-full-shipments.product-labels');
 
     Route::post('/ml/publications/{pub}/refresh', [MeliRepublishController::class, 'refreshPublication'])
         ->name('ml.publications.refresh');

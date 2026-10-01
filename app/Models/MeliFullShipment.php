@@ -57,6 +57,7 @@ class MeliFullShipment extends Model
         'total_boxes',
         'total_bultos',
         'total_units',
+        'total_labeled_units',
         'total_weight_kg',
         'total_units_received',
         'total_units_damaged',
@@ -72,6 +73,7 @@ class MeliFullShipment extends Model
         'total_boxes' => 'integer',
         'total_bultos' => 'integer',
         'total_units' => 'integer',
+        'total_labeled_units' => 'integer',
         'total_weight_kg' => 'decimal:2',
         'total_units_received' => 'integer',
         'total_units_damaged' => 'integer',
@@ -102,6 +104,7 @@ class MeliFullShipment extends Model
         $this->total_bultos = $boxes->pluck('bulto_number')->unique()->count() ?: 1;
         $this->total_boxes = (int) $boxes->sum(fn ($b) => max(1, (int) $b->boxes_in_bulto));
         $this->total_units = (int) $this->items()->sum('quantity_sent');
+        $this->total_labeled_units = (int) $this->items()->where('requires_labeling', true)->sum('quantity_sent');
         $this->total_weight_kg = (float) $this->items()->sum('total_weight_kg');
         $this->total_units_received = (int) $this->items()->sum('quantity_received');
         $this->total_units_damaged = (int) $this->items()->sum('quantity_damaged');
