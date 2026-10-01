@@ -371,6 +371,19 @@ export default function RestockForecast({
                             </span>
                         </div>
                     </div>
+
+                    {/* FULL DEMAND INTEGRATED */}
+                    <div className="rounded-2xl border border-amber-300 bg-amber-50/70 p-4 shadow-sm dark:border-amber-900/60 dark:bg-amber-950/20">
+                        <span className="text-[11px] font-bold uppercase tracking-wider text-amber-700 dark:text-amber-400 flex items-center gap-1">
+                            <span>⚡</span> Ventas FULL (30d)
+                        </span>
+                        <div className="mt-1 flex items-baseline gap-1">
+                            <span className="font-mono text-2xl font-black text-amber-800 dark:text-amber-200">
+                                {summary.total_sales_full_30d?.toLocaleString() || 0}
+                            </span>
+                            <span className="text-xs text-amber-600 dark:text-amber-400">piezas</span>
+                        </div>
+                    </div>
                 </div>
 
                 {/* CADENCE PRESET TABS (INCLUDING 90-120 DAYS) */}
@@ -579,10 +592,18 @@ export default function RestockForecast({
                                         </td>
 
                                         <td className="p-3.5 text-center">
-                                            <span className="font-mono text-sm font-bold text-slate-900 dark:text-white block">
-                                                {item.available_stock}
-                                            </span>
-                                            <span className="text-[10px] text-slate-400">
+                                            <div className="flex items-center justify-center gap-1.5">
+                                                <span className="font-mono text-sm font-bold text-slate-900 dark:text-white">
+                                                    {item.available_stock} <span className="text-[10px] text-slate-400 font-normal">local</span>
+                                                </span>
+                                                {((item.full_available_stock ?? 0) > 0 || (item.full_in_transit_stock ?? 0) > 0) && (
+                                                    <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-extrabold text-amber-800 dark:bg-amber-950/80 dark:text-amber-300" title={`Bodega MeLi FULL: ${item.full_available_stock ?? 0} | En Tránsito: ${item.full_in_transit_stock ?? 0}`}>
+                                                        ⚡ FULL: {item.full_available_stock ?? 0}
+                                                        {(item.full_in_transit_stock ?? 0) > 0 && ` (+${item.full_in_transit_stock} tr)`}
+                                                    </span>
+                                                )}
+                                            </div>
+                                            <span className="text-[10px] text-slate-400 block mt-0.5">
                                                 Físico: {item.physical_stock} | Res: {item.reserved_stock}
                                             </span>
                                         </td>
@@ -591,9 +612,14 @@ export default function RestockForecast({
                                             <span className="font-mono font-bold text-slate-800 dark:text-slate-200 block">
                                                 {item.expected_daily_demand}
                                             </span>
-                                            <span className="text-[10px] text-slate-400">
-                                                30d: {item.sales_30d} | Estac: {item.seasonal_factor}x
+                                            <span className="text-[10px] text-slate-500 block">
+                                                30d Total: <strong className="font-mono text-indigo-600 dark:text-indigo-400">{item.sales_30d}</strong>
                                             </span>
+                                            {((item.sales_full_30d ?? 0) > 0 || (item.sales_local_30d ?? 0) > 0) && (
+                                                <span className="text-[9px] text-slate-400 block">
+                                                    Local: {item.sales_local_30d ?? 0} | FULL: <strong className="text-amber-600 dark:text-amber-400">{item.sales_full_30d ?? 0}</strong>
+                                                </span>
+                                            )}
                                         </td>
 
                                         <td className="p-3.5 text-center">

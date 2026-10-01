@@ -208,6 +208,13 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                         Órdenes de Compra
                     </NavItem>
                     <NavItem
+                        href="/meli/full/envios"
+                        active={currentPath.startsWith('/meli/full/envios')}
+                        onNavigate={onNavigate}
+                    >
+                        Envíos FULL (Cajas 30)
+                    </NavItem>
+                    <NavItem
                         href="/almacen/canales/mercado-libre/importar"
                         active={currentPath.startsWith('/almacen/canales/mercado-libre/importar')}
                         onNavigate={onNavigate}
@@ -360,10 +367,18 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
 
                     <NavItem
                         href="/meli/full"
-                        active={currentPath.startsWith('/meli/full')}
+                        active={currentPath === '/meli/full'}
                         onNavigate={onNavigate}
                     >
                         Inventario FULL
+                    </NavItem>
+
+                    <NavItem
+                        href="/meli/full/envios"
+                        active={currentPath.startsWith('/meli/full/envios')}
+                        onNavigate={onNavigate}
+                    >
+                        📦 Envíos FULL (Cajas 30)
                     </NavItem>
                 </div>
             </div>

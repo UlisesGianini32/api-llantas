@@ -8,6 +8,10 @@ return new class extends Migration
 {
     public function up(): void
     {
+        if (! Schema::hasTable('syscom_meli_category_audits')) {
+            return;
+        }
+
         if (
             ! Schema::hasColumn(
                 'syscom_meli_category_audits',

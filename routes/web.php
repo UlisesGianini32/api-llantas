@@ -20,6 +20,7 @@ use App\Http\Controllers\MeliClaimController;
 use App\Http\Controllers\MeliClaimMessageController;
 use App\Http\Controllers\MeliClaimResolutionController;
 use App\Http\Controllers\MeliCompareController;
+use App\Http\Controllers\MeliFullShipmentController;
 use App\Http\Controllers\MeliFullStockController;
 use App\Http\Controllers\MeliLabelController;
 use App\Http\Controllers\MeliMessagingController;
@@ -523,6 +524,19 @@ Route::middleware(['auth', 'role'])->group(function () {
     Route::post('/meli/full/{mlm}/sync', [MeliFullStockController::class, 'syncOne'])
         ->where('mlm', '[A-Za-z0-9]+')
         ->name('meli.full.sync-one');
+
+    // ENVÍOS MERCADO LIBRE FULL (Cajas de 30 y Guías ENVIA)
+    Route::get('/meli/full/envios', [MeliFullShipmentController::class, 'index'])->name('meli-full-shipments.index');
+    Route::get('/meli/full/envios/crear', [MeliFullShipmentController::class, 'create'])->name('meli-full-shipments.create');
+    Route::post('/meli/full/envios', [MeliFullShipmentController::class, 'store'])->name('meli-full-shipments.store');
+    Route::get('/meli/full/envios/{shipment}', [MeliFullShipmentController::class, 'show'])->name('meli-full-shipments.show');
+    Route::get('/meli/full/envios/{shipment}/editar', [MeliFullShipmentController::class, 'edit'])->name('meli-full-shipments.edit');
+    Route::put('/meli/full/envios/{shipment}', [MeliFullShipmentController::class, 'update'])->name('meli-full-shipments.update');
+    Route::post('/meli/full/envios/{shipment}/despachar', [MeliFullShipmentController::class, 'dispatch'])->name('meli-full-shipments.dispatch');
+    Route::post('/meli/full/envios/{shipment}/revertir', [MeliFullShipmentController::class, 'revert'])->name('meli-full-shipments.revert');
+    Route::post('/meli/full/envios/{shipment}/recibir', [MeliFullShipmentController::class, 'receive'])->name('meli-full-shipments.receive');
+    Route::get('/meli/full/envios/{shipment}/rotulos', [MeliFullShipmentController::class, 'printLabels'])->name('meli-full-shipments.labels');
+    Route::get('/meli/full/envios/{shipment}/cajas/{box}/rotulo', [MeliFullShipmentController::class, 'printLabels'])->name('meli-full-shipments.box-label');
 
     Route::post('/ml/publications/{pub}/refresh', [MeliRepublishController::class, 'refreshPublication'])
         ->name('ml.publications.refresh');

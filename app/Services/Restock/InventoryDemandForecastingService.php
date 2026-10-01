@@ -3,10 +3,15 @@
 namespace App\Services\Restock;
 
 use App\Models\BrandRestockConfiguration;
+use App\Models\InventoryChannelLink;
 use App\Models\InventoryMovement;
 use App\Models\InventoryProduct;
+use App\Models\MeliFullShipment;
+use App\Models\MeliFullShipmentItem;
+use App\Models\MeliFullStock;
 use App\Services\InventoryStockService;
 use Carbon\Carbon;
+use Illuminate\Support\Facades\DB;
 
 class InventoryDemandForecastingService
 {
@@ -30,11 +35,16 @@ class InventoryDemandForecastingService
     {
         $now = isset($options['as_of']) ? Carbon::parse($options['as_of']) : Carbon::now();
 
-        // 1. Obtener salidas históricas del ledger (Mercado Libre, Shopify, Amazon, POS Mostrador)
-        $sales30d = $this->getProductSalesInWindow($product->id, $now->copy()->subDays(30), $now);
-        $sales60d = $this->getProductSalesInWindow($product->id, $now->copy()->subDays(60), $now);
-        $sales90d = $this->getProductSalesInWindow($product->id, $now->copy()->subDays(90), $now);
-        $sales180d = $this->getProductSalesInWindow($product->id, $now->copy()->subDays(180), $now);
+        // 1. Obtener salidas históricas combinando Ledger local (POS/mostrador/salidas) + Ventas FULL Mercado Libre
+        $sales30dBreakdown = $this->getProductSalesBreakdownInWindow($product, $now->copy()->subDays(30), $now);
+        $sales60dBreakdown = $this->getProductSalesBreakdownInWindow($product, $now->copy()->subDays(60), $now);
+        $sales90dBreakdown = $this->getProductSalesBreakdownInWindow($product, $now->copy()->subDays(90), $now);
+        $sales180dBreakdown = $this->getProductSalesBreakdownInWindow($product, $now->copy()->subDays(180), $now);
+
+        $sales30d = $sales30dBreakdown['total'];
+        $sales60d = $sales60dBreakdown['total'];
+        $sales90d = $sales90dBreakdown['total'];
+        $sales180d = $sales180dBreakdown['total'];
 
         $dailyRate30d = $sales30d / 30;
         $dailyRate90d = $sales90d / 90;
@@ -44,7 +54,7 @@ class InventoryDemandForecastingService
         $baseDailyVelocity = ($dailyRate30d * 0.50) + ($dailyRate90d * 0.30) + ($dailyRate180d * 0.20);
 
         // 2. Factor de estacionalidad (mes del año anterior vs promedio del año anterior)
-        $seasonalFactor = $this->calculateSeasonalFactor($product->id, $now);
+        $seasonalFactor = $this->calculateSeasonalFactor($product, $now);
 
         // Demanda diaria proyectada
         $expectedDailyDemand = round($baseDailyVelocity * $seasonalFactor, 4);
@@ -74,10 +84,38 @@ class InventoryDemandForecastingService
             ?? $brandConfig?->safety_stock_days
             ?? ($targetCoverageDays >= 90 ? 20 : 5));
 
-        // 4. Existencias actuales
+        // 4. Existencias actuales en Almacén Local
         $physicalStock = $this->stockService->physicalStock($product);
         $reservedStock = $this->stockService->reservedStock($product);
         $availableStock = max(0, $physicalStock - $reservedStock);
+
+        // 4.1. Existencias en Mercado Libre FULL y en tránsito
+        $sku = strtoupper(trim((string) $product->sku));
+        $barcode = strtoupper(trim((string) $product->barcode));
+
+        $fullStockAvailable = 0;
+        if (\Illuminate\Support\Facades\Schema::hasTable('meli_full_stocks')) {
+            $fullStockAvailable = (int) MeliFullStock::query()
+                ->where(function ($q) use ($sku, $barcode) {
+                    if ($sku !== '') {
+                        $q->where('sku', $sku);
+                    }
+                    if ($barcode !== '') {
+                        $q->orWhere('sku', $barcode);
+                    }
+                })
+                ->sum('full_available_quantity');
+        }
+
+        $fullStockInTransit = 0;
+        if (\Illuminate\Support\Facades\Schema::hasTable('meli_full_shipments') && \Illuminate\Support\Facades\Schema::hasTable('meli_full_shipment_items')) {
+            $fullStockInTransit = (int) MeliFullShipmentItem::query()
+                ->where('inventory_product_id', $product->id)
+                ->whereHas('shipment', function ($q) {
+                    $q->whereIn('status', [MeliFullShipment::STATUS_IN_TRANSIT, MeliFullShipment::STATUS_PACKED]);
+                })
+                ->sum('quantity_sent');
+        }
 
         // 5. Cálculos de stock objetivo y reorden
         // Stock de seguridad = demanda durante días de colchón (o min_stock manual)
@@ -99,7 +137,7 @@ class InventoryDemandForecastingService
             $suggestedQuantity = max(0, $targetStockUnits - $availableStock);
         }
 
-        // Días de inventario restante
+        // Días de inventario restante (local)
         $daysOfStockRemaining = 999;
         if ($expectedDailyDemand > 0) {
             $daysOfStockRemaining = round($availableStock / $expectedDailyDemand, 1);
@@ -132,8 +170,10 @@ class InventoryDemandForecastingService
             'product_type' => $product->product_type,
             'is_kit' => $product->isKit(),
 
-            // Ventas históricas
+            // Ventas históricas desglosadas
             'sales_30d' => $sales30d,
+            'sales_local_30d' => $sales30dBreakdown['local'],
+            'sales_full_30d' => $sales30dBreakdown['full'],
             'sales_60d' => $sales60d,
             'sales_90d' => $sales90d,
             'sales_180d' => $sales180d,
@@ -147,10 +187,13 @@ class InventoryDemandForecastingService
             'target_coverage_days' => $targetCoverageDays,
             'safety_stock_days' => $safetyStockDays,
 
-            // Existencias
+            // Existencias locales y FULL
             'physical_stock' => $physicalStock,
             'reserved_stock' => $reservedStock,
             'available_stock' => $availableStock,
+            'full_available_stock' => $fullStockAvailable,
+            'full_in_transit_stock' => $fullStockInTransit,
+            'total_combined_stock' => $availableStock + $fullStockAvailable,
             'days_of_stock_remaining' => $daysOfStockRemaining,
 
             // Metas y sugerencias
@@ -200,6 +243,8 @@ class InventoryDemandForecastingService
         $overstockCount = 0;
         $totalSuggestedUnits = 0;
         $totalEstimatedInvestment = 0.0;
+        $totalSalesFull30d = 0;
+        $totalSalesLocal30d = 0;
 
         $targetPreset = $filters['cadence_preset'] ?? null;
         $overrideCoverage = ! empty($filters['coverage_days']) ? (int) $filters['coverage_days'] : null;
@@ -233,6 +278,8 @@ class InventoryDemandForecastingService
 
             $totalSuggestedUnits += $forecast['suggested_quantity'];
             $totalEstimatedInvestment += $forecast['estimated_investment'];
+            $totalSalesFull30d += $forecast['sales_full_30d'];
+            $totalSalesLocal30d += $forecast['sales_local_30d'];
         }
 
         // Obtener marcas únicas y configuraciones
@@ -255,6 +302,8 @@ class InventoryDemandForecastingService
                 'overstock_count' => $overstockCount,
                 'total_suggested_units' => $totalSuggestedUnits,
                 'total_estimated_investment' => round($totalEstimatedInvestment, 2),
+                'total_sales_full_30d' => $totalSalesFull30d,
+                'total_sales_local_30d' => $totalSalesLocal30d,
             ],
             'items' => $items,
             'brands' => $brands,
@@ -290,21 +339,80 @@ class InventoryDemandForecastingService
         );
     }
 
-    private function getProductSalesInWindow(int $productId, Carbon $from, Carbon $to): int
+    /**
+     * Obtener ventas desglosadas (Local POS + Mercado Libre FULL) en ventana de tiempo
+     *
+     * @return array{local: int, full: int, total: int}
+     */
+    public function getProductSalesBreakdownInWindow(InventoryProduct $product, Carbon $from, Carbon $to): array
     {
-        $sum = (int) InventoryMovement::query()
-            ->where('inventory_product_id', $productId)
+        // 1. Ventas en almacén físico local (mostrador POS, salidas)
+        $localSales = (int) abs(InventoryMovement::query()
+            ->where('inventory_product_id', $product->id)
             ->where(function ($q) {
                 $q->where('type', InventoryMovement::SALE)
                     ->orWhere('quantity', '<', 0);
             })
             ->whereBetween('occurred_at', [$from, $to])
-            ->sum('quantity');
+            ->sum('quantity'));
 
-        return abs($sum);
+        // 2. Ventas despachadas directamente por Mercado Libre FULL
+        $sku = strtoupper(trim((string) $product->sku));
+        $barcode = strtoupper(trim((string) $product->barcode));
+
+        $fullSales = 0;
+        if (\Illuminate\Support\Facades\Schema::hasTable('meli_orders') && \Illuminate\Support\Facades\Schema::hasTable('meli_order_items')) {
+            $linkedMlms = [];
+            if (\Illuminate\Support\Facades\Schema::hasTable('inventory_channel_links')) {
+                $linkedMlms = InventoryChannelLink::query()
+                    ->where('channel', InventoryChannelLink::MERCADO_LIBRE)
+                    ->where('inventory_product_id', $product->id)
+                    ->pluck('external_product_id')
+                    ->filter()
+                    ->all();
+            }
+
+            if (! empty($linkedMlms) || $sku !== '' || $barcode !== '') {
+                $fullQuery = DB::table('meli_orders as o')
+                    ->join('meli_order_items as i', 'i.meli_order_id', '=', 'o.id')
+                    ->where(function ($q) use ($linkedMlms, $sku, $barcode) {
+                        $hasCondition = false;
+                        if (! empty($linkedMlms)) {
+                            $q->whereIn('i.item_id', $linkedMlms);
+                            $hasCondition = true;
+                        }
+                        if ($sku !== '') {
+                            if ($hasCondition) {
+                                $q->orWhereRaw('UPPER(TRIM(i.sku)) = ?', [$sku]);
+                            } else {
+                                $q->whereRaw('UPPER(TRIM(i.sku)) = ?', [$sku]);
+                                $hasCondition = true;
+                            }
+                        }
+                        if ($barcode !== '') {
+                            $q->orWhereRaw('UPPER(TRIM(i.sku)) = ?', [$barcode]);
+                        }
+                    })
+                    ->whereRaw("LOWER(COALESCE(o.status, '')) NOT IN ('cancelled', 'invalid')")
+                    ->where(function ($q) {
+                        $q->whereRaw("LOWER(COALESCE(o.shipping_logistic_type, '')) = 'fulfillment'")
+                            ->orWhereRaw("LOWER(COALESCE(o.shipping_mode, '')) = 'fulfillment'")
+                            ->orWhereRaw("LOWER(COALESCE(o.shipping_type, '')) = 'fulfillment'");
+                    })
+                    ->whereBetween('o.created_at', [$from, $to]);
+
+                $fullSales = (int) $fullQuery->sum('i.quantity');
+            }
+        }
+
+        return [
+            'local' => $localSales,
+            'full'  => $fullSales,
+            'total' => $localSales + $fullSales,
+        ];
     }
 
-    private function calculateSeasonalFactor(int $productId, Carbon $now): float
+    private function calculateSeasonalFactor(InventoryProduct $product, Carbon $now): float
     {
         $lyMonthStart = $now->copy()->subYear()->startOfMonth();
         $lyMonthEnd = $now->copy()->subYear()->endOfMonth();
@@ -312,8 +420,8 @@ class InventoryDemandForecastingService
         $lyYearStart = $now->copy()->subYear()->startOfYear();
         $lyYearEnd = $now->copy()->subYear()->endOfYear();
 
-        $salesSameMonthLastYear = $this->getProductSalesInWindow($productId, $lyMonthStart, $lyMonthEnd);
-        $salesFullLastYear = $this->getProductSalesInWindow($productId, $lyYearStart, $lyYearEnd);
+        $salesSameMonthLastYear = $this->getProductSalesBreakdownInWindow($product, $lyMonthStart, $lyMonthEnd)['total'];
+        $salesFullLastYear = $this->getProductSalesBreakdownInWindow($product, $lyYearStart, $lyYearEnd)['total'];
 
         if ($salesFullLastYear <= 0 || $salesSameMonthLastYear <= 0) {
             return 1.0;
