@@ -291,9 +291,11 @@ class InventoryMeliOrderReservationService
             if ($directReservation) {
                 $reference = 'ML orden '.$order->order_id.' línea '.($item->remote_line_key ?: $item->id);
                 $locationId = $directReservation->inventory_location_id ?? $this->resolveLocationForProduct($directReservation->product ?? $directReservation->inventory_product_id);
+                $lineKey = $item->remote_line_key ?: (string) $item->id;
                 $this->reservations->fulfill($directReservation, [
                     'inventory_location_id' => $locationId,
                     'reference' => $reference,
+                    'external_key' => "meli-order:{$order->order_id}:line:{$lineKey}:fulfill",
                     'notes' => 'Cumplimiento automático por envío (Estado: '.($order->shipping_status ?? 'shipped').')',
                 ]);
 
@@ -316,9 +318,11 @@ class InventoryMeliOrderReservationService
                 $locationId = $this->resolveLocationForProduct($reservation->product ?? $reservation->inventory_product_id);
             }
 
+            $lineKey = $item->remote_line_key ?: (string) $item->id;
             $this->reservations->fulfill($reservation, [
                 'inventory_location_id' => $locationId,
                 'reference' => $reference,
+                'external_key' => "meli-order:{$order->order_id}:line:{$lineKey}:fulfill",
                 'notes' => 'Cumplimiento automático por envío (Estado: '.($order->shipping_status ?? 'shipped').')',
             ]);
         }
