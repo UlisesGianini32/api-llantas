@@ -3,6 +3,7 @@
 namespace App\Console\Commands;
 
 use App\Models\InventoryChannelOrderAllocation;
+use App\Models\InventoryKitReservation;
 use App\Models\InventoryReservation;
 use App\Models\MeliOrder;
 use App\Services\InventoryMeliOrderReservationService;
@@ -15,6 +16,7 @@ class InventoryMeliFulfillShippedOrdersCommand extends Command
         {--account= : Filtra por ID de cuenta MeLi}
         {--order= : Filtra por ID remoto de orden (ej. 2000018746705782)}
         {--dry-run : Muestra qué reservas se cumplirían sin aplicar los cambios}
+        {--force : Fuerza el cumplimiento de la orden especificada aunque MeLi aún no marque shipped}
         {--limit=200 : Límite de órdenes a procesar}';
 
     protected $description = 'Cumple automáticamente las reservas de órdenes de Mercado Libre cuyos paquetes ya han sido despachados o entregados';
@@ -22,6 +24,7 @@ class InventoryMeliFulfillShippedOrdersCommand extends Command
     public function handle(InventoryMeliOrderReservationService $service): int
     {
         $isDryRun = (bool) $this->option('dry-run');
+        $force = (bool) $this->option('force');
         $accountFilter = $this->option('account');
         $orderFilter = $this->option('order');
         $limit = (int) $this->option('limit');
@@ -33,7 +36,7 @@ class InventoryMeliFulfillShippedOrdersCommand extends Command
         // Buscar órdenes que tienen paquetes enviados/entregados y que tienen reservas o asignaciones activas
         $shippedStatuses = ['shipped', 'delivered', 'in_transit'];
 
-        // Encontrar órdenes con asignaciones o reservas activas
+        // Encontrar órdenes con asignaciones activas
         $activeOrderIds = InventoryChannelOrderAllocation::query()
             ->where('channel', 'mercado_libre')
             ->where('status', 'ACTIVE')
@@ -42,8 +45,17 @@ class InventoryMeliFulfillShippedOrdersCommand extends Command
             ->values()
             ->all();
 
-        // También incluir órdenes vinculadas a reservas activas con source_type = 'meli_order'
+        // Órdenes vinculadas a reservas simples activas con source_type = 'meli_order'
         $activeSourceOrderIds = InventoryReservation::query()
+            ->active()
+            ->where('source_type', 'meli_order')
+            ->pluck('source_id')
+            ->unique()
+            ->values()
+            ->all();
+
+        // Órdenes vinculadas a reservas de KIT activas con source_type = 'meli_order'
+        $activeKitSourceOrderIds = InventoryKitReservation::query()
             ->active()
             ->where('source_type', 'meli_order')
             ->pluck('source_id')
@@ -53,20 +65,34 @@ class InventoryMeliFulfillShippedOrdersCommand extends Command
 
         $query = MeliOrder::query()
             ->with('items')
-            ->where(function ($q) use ($shippedStatuses) {
-                $q->whereIn('shipping_status', $shippedStatuses);
-                if (DB::connection()->getDriverName() === 'mysql') {
-                    $q->orWhereRaw("LOWER(JSON_UNQUOTE(JSON_EXTRACT(shipping_raw, '$.status'))) IN ('shipped', 'delivered', 'in_transit')")
-                      ->orWhereRaw("LOWER(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.shipping.status'))) IN ('shipped', 'delivered', 'in_transit')");
-                }
+            ->when(! $force, function ($q) use ($shippedStatuses) {
+                $q->where(function ($nested) use ($shippedStatuses) {
+                    $nested->whereIn('shipping_status', $shippedStatuses);
+                    if (DB::connection()->getDriverName() === 'mysql') {
+                        $nested->orWhereRaw("LOWER(JSON_UNQUOTE(JSON_EXTRACT(shipping_raw, '$.status'))) IN ('shipped', 'delivered', 'in_transit')")
+                               ->orWhereRaw("LOWER(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.shipping.status'))) IN ('shipped', 'delivered', 'in_transit')");
+                    }
+                });
             })
-            ->where(function ($q) use ($activeOrderIds, $activeSourceOrderIds) {
-                if (! empty($activeOrderIds)) {
-                    $q->whereIn('order_id', $activeOrderIds);
-                }
-                if (! empty($activeSourceOrderIds)) {
-                    $q->orWhereIn('id', $activeSourceOrderIds);
-                }
+            ->when(empty($orderFilter), function ($q) use ($activeOrderIds, $activeSourceOrderIds, $activeKitSourceOrderIds) {
+                $q->where(function ($nested) use ($activeOrderIds, $activeSourceOrderIds, $activeKitSourceOrderIds) {
+                    $hasAny = false;
+                    if (! empty($activeOrderIds)) {
+                        $nested->whereIn('order_id', $activeOrderIds);
+                        $hasAny = true;
+                    }
+                    if (! empty($activeSourceOrderIds)) {
+                        $hasAny ? $nested->orWhereIn('id', $activeSourceOrderIds) : $nested->whereIn('id', $activeSourceOrderIds);
+                        $hasAny = true;
+                    }
+                    if (! empty($activeKitSourceOrderIds)) {
+                        $hasAny ? $nested->orWhereIn('id', $activeKitSourceOrderIds) : $nested->whereIn('id', $activeKitSourceOrderIds);
+                        $hasAny = true;
+                    }
+                    if (! $hasAny) {
+                        $nested->whereRaw('0 = 1');
+                    }
+                });
             })
             ->when(filled($accountFilter), fn ($q) => $q->where('meli_account_id', (string) $accountFilter))
             ->when(filled($orderFilter), fn ($q) => $q->where('order_id', trim((string) $orderFilter)))
@@ -77,6 +103,7 @@ class InventoryMeliFulfillShippedOrdersCommand extends Command
 
         if ($orders->isEmpty()) {
             $this->info('No se encontraron órdenes con paquetes despachados y reservas activas pendientes.');
+
             return self::SUCCESS;
         }
 
@@ -88,7 +115,12 @@ class InventoryMeliFulfillShippedOrdersCommand extends Command
         foreach ($orders as $order) {
             // Asegurar que si shipping_status no estaba en la columna pero sí en el raw, se actualice
             $effectiveShipping = $order->shipping_status;
-            if (! in_array($effectiveShipping, $shippedStatuses, true)) {
+            if ($force) {
+                $effectiveShipping = 'shipped';
+                if (! $isDryRun && $order->shipping_status !== 'shipped') {
+                    $order->update(['shipping_status' => 'shipped']);
+                }
+            } elseif (! in_array($effectiveShipping, $shippedStatuses, true)) {
                 $rawStatus = data_get($order->shipping_raw, 'status') ?? data_get($order->raw, 'shipping.status');
                 if (in_array(strtolower(trim((string) $rawStatus)), $shippedStatuses, true)) {
                     $effectiveShipping = strtolower(trim((string) $rawStatus));
@@ -144,7 +176,7 @@ class InventoryMeliFulfillShippedOrdersCommand extends Command
 
         if ($isDryRun) {
             $this->info("Simulación terminada. {$totalFulfilled} reserva(s) calificarían para cumplirse.");
-            $this->comment("Para aplicar los cambios, ejecuta el comando sin la opción --dry-run.");
+            $this->comment('Para aplicar los cambios, ejecuta el comando sin la opción --dry-run.');
         } else {
             $this->info("Proceso terminado. Se cumplieron {$totalFulfilled} reserva(s) exitosamente y se registraron sus salidas en Movimientos.");
         }

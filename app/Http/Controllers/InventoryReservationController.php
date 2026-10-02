@@ -4,10 +4,13 @@ namespace App\Http\Controllers;
 
 use App\Exceptions\InventoryInsufficientStockException;
 use App\Http\Requests\StoreInventoryReservationRequest;
+use App\Models\InventoryKitReservation;
 use App\Models\InventoryLocation;
 use App\Models\InventoryProduct;
 use App\Models\InventoryReservation;
+use App\Services\InventoryKitService;
 use App\Services\InventoryReservationService;
+use App\Support\InventoryActorPresenter;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
@@ -45,6 +48,12 @@ class InventoryReservationController extends Controller
             ->orderByDesc('id')
             ->paginate(25)
             ->withQueryString();
+
+        $reservations->through(function (InventoryReservation $reservation): InventoryReservation {
+            $reservation->creator_name = InventoryActorPresenter::labelForReservation($reservation);
+
+            return $reservation;
+        });
 
         return Inertia::render('Inventory/Reservations/Index', [
             'reservations' => $reservations,
@@ -93,6 +102,8 @@ class InventoryReservationController extends Controller
             'createdBy:id,name',
         ]);
 
+        $inventoryReservation->creator_name = InventoryActorPresenter::labelForReservation($inventoryReservation);
+
         return Inertia::render('Inventory/Reservations/Show', [
             'reservation' => $inventoryReservation,
         ]);
@@ -102,8 +113,15 @@ class InventoryReservationController extends Controller
         Request $request,
         InventoryReservation $inventoryReservation,
         InventoryReservationService $reservations,
+        InventoryKitService $kits,
     ): RedirectResponse {
         abort_unless($request->user()?->isAdmin(), 403);
+
+        if ($inventoryReservation->source_type === InventoryKitReservation::SOURCE_TYPE && $inventoryReservation->source_id) {
+            $kits->release($inventoryReservation->source_id);
+
+            return back()->with('success', 'Reserva del kit liberada correctamente.');
+        }
 
         return $this->transition($inventoryReservation, $reservations, 'release');
     }
@@ -112,8 +130,15 @@ class InventoryReservationController extends Controller
         Request $request,
         InventoryReservation $inventoryReservation,
         InventoryReservationService $reservations,
+        InventoryKitService $kits,
     ): RedirectResponse {
         abort_unless($request->user()?->isAdmin(), 403);
+
+        if ($inventoryReservation->source_type === InventoryKitReservation::SOURCE_TYPE && $inventoryReservation->source_id) {
+            $kits->cancel($inventoryReservation->source_id);
+
+            return back()->with('success', 'Reserva del kit cancelada correctamente.');
+        }
 
         return $this->transition($inventoryReservation, $reservations, 'cancel');
     }
@@ -132,15 +157,23 @@ class InventoryReservationController extends Controller
         Request $request,
         InventoryReservation $inventoryReservation,
         InventoryReservationService $reservations,
+        InventoryKitService $kits,
     ): RedirectResponse {
         abort_unless($request->user()?->isAdmin(), 403);
 
         try {
-            $reservations->fulfill($inventoryReservation, [
-                'inventory_location_id' => $request->input('inventory_location_id'),
-                'reference' => $request->input('reference'),
-                'notes' => $request->input('notes'),
-            ], $request->user());
+            if ($inventoryReservation->source_type === InventoryKitReservation::SOURCE_TYPE && $inventoryReservation->source_id) {
+                $kits->fulfill($inventoryReservation->source_id, [
+                    'reference' => $request->input('reference') ?: $inventoryReservation->reference,
+                    'notes' => $request->input('notes'),
+                ], $request->user());
+            } else {
+                $reservations->fulfill($inventoryReservation, [
+                    'inventory_location_id' => $request->input('inventory_location_id'),
+                    'reference' => $request->input('reference'),
+                    'notes' => $request->input('notes'),
+                ], $request->user());
+            }
         } catch (InventoryInsufficientStockException|InvalidArgumentException $exception) {
             return back()->withErrors(['reservation' => $exception->getMessage()]);
         }

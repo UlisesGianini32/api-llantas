@@ -161,7 +161,36 @@ class InventoryMeliOrderReservationService
                 ? InventoryChannelOrderAllocation::query()->where('identity_hash', $this->identity($order, $item)['hash'])->first() : null;
             $result['allocation_id'] = $allocation?->id;
             $result['reservation_id'] = $allocation?->reservation_id;
-            $result['action'] = ($allocation && $allocation->status === 'ACTIVE') ? self::FULFILL : 'FULFILL_NOTHING_TO_DO';
+            if ($allocation && $allocation->status === 'ACTIVE') {
+                $result['action'] = self::FULFILL;
+
+                return $result;
+            }
+
+            $directKit = InventoryKitReservation::query()->active()
+                ->where('source_type', 'meli_order')
+                ->where('source_id', $order->id)
+                ->first();
+            if ($directKit) {
+                $result['action'] = self::FULFILL;
+                $result['reservation_id'] = $directKit->id;
+
+                return $result;
+            }
+
+            $directReservation = InventoryReservation::query()->active()
+                ->where('source_type', 'meli_order')
+                ->where('source_id', $order->id)
+                ->first();
+            if ($directReservation) {
+                $result['action'] = self::FULFILL;
+                $result['reservation_id'] = $directReservation->id;
+
+                return $result;
+            }
+
+            $result['action'] = 'FULFILL_NOTHING_TO_DO';
+
             return $result;
         }
         $query = InventoryChannelLink::query()->with('product')
@@ -239,6 +268,38 @@ class InventoryMeliOrderReservationService
     {
         $reservation = $this->currentReservation($allocation, true);
         if (! $reservation || $reservation->status !== 'ACTIVE') {
+            $directKit = InventoryKitReservation::query()->active()
+                ->where('source_type', 'meli_order')
+                ->where('source_id', $order->id)
+                ->lockForUpdate()
+                ->first();
+            if ($directKit) {
+                $reference = 'ML orden '.$order->order_id.' línea '.($item->remote_line_key ?: $item->id);
+                $this->kits->fulfill($directKit, [
+                    'reference' => $reference,
+                    'notes' => 'Cumplimiento automático por envío (Estado: '.($order->shipping_status ?? 'shipped').')',
+                ]);
+
+                return;
+            }
+
+            $directReservation = InventoryReservation::query()->active()
+                ->where('source_type', 'meli_order')
+                ->where('source_id', $order->id)
+                ->lockForUpdate()
+                ->first();
+            if ($directReservation) {
+                $reference = 'ML orden '.$order->order_id.' línea '.($item->remote_line_key ?: $item->id);
+                $locationId = $directReservation->inventory_location_id ?? $this->resolveLocationForProduct($directReservation->product ?? $directReservation->inventory_product_id);
+                $this->reservations->fulfill($directReservation, [
+                    'inventory_location_id' => $locationId,
+                    'reference' => $reference,
+                    'notes' => 'Cumplimiento automático por envío (Estado: '.($order->shipping_status ?? 'shipped').')',
+                ]);
+
+                return;
+            }
+
             return;
         }
 

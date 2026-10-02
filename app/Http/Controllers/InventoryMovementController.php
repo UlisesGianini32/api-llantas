@@ -8,6 +8,7 @@ use App\Models\InventoryLocation;
 use App\Models\InventoryMovement;
 use App\Models\InventoryProduct;
 use App\Services\InventoryMovementService;
+use App\Support\InventoryActorPresenter;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -46,6 +47,12 @@ class InventoryMovementController extends Controller
             ->orderByDesc('id')
             ->paginate(25)
             ->withQueryString();
+
+        $movements->through(function (InventoryMovement $movement): InventoryMovement {
+            $movement->creator_name = InventoryActorPresenter::labelForMovement($movement);
+
+            return $movement;
+        });
 
         return Inertia::render('Inventory/Movements/Index', [
             'movements' => $movements,

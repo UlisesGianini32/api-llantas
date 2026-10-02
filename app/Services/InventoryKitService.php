@@ -104,10 +104,10 @@ class InventoryKitService
                         'reference' => $parent->reference,
                         'external_key' => $childKey,
                         'expires_at' => $parent->expires_at,
-                        'metadata' => [
+                        'metadata' => array_merge($parent->metadata ?? [], [
                             'kit_product_id' => $kit->getKey(),
                             'kit_quantity' => $quantity,
-                        ],
+                        ]),
                     ], $user);
                 }
             }
@@ -159,10 +159,10 @@ class InventoryKitService
                     'reference_id' => $locked->getKey(),
                     'reference' => $movementData['reference'] ?? $locked->reference,
                     'notes' => $movementData['notes'] ?? null,
-                    'metadata' => [
+                    'metadata' => array_merge($locked->metadata ?? [], [
                         'kit_product_id' => $locked->kit_product_id,
                         'kit_quantity' => $locked->quantity,
-                    ],
+                    ]),
                     'allow_kit_child' => true,
                     'external_key' => "kit-reservation:{$locked->getKey()}:child:{$child->getKey()}:fulfill",
                 ], $user);

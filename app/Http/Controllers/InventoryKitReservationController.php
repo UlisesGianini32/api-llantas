@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\InventoryKitReservation;
 use App\Services\InventoryKitService;
+use App\Support\InventoryActorPresenter;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
@@ -20,6 +21,8 @@ class InventoryKitReservationController extends Controller
             'componentReservations.product:id,name,sku',
             'componentReservations.location:id,code,name',
         ]);
+
+        $inventoryKitReservation->creator_name = InventoryActorPresenter::labelForKitReservation($inventoryKitReservation);
 
         return Inertia::render('Inventory/Kits/ReservationShow', ['reservation' => $inventoryKitReservation]);
     }
