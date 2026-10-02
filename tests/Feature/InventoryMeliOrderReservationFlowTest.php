@@ -63,6 +63,7 @@ class InventoryMeliOrderReservationFlowTest extends TestCase
         Schema::create('meli_orders', function (Blueprint $table): void {
             $table->id(); $table->unsignedBigInteger('meli_account_id')->nullable();
             $table->unsignedBigInteger('order_id'); $table->string('status')->nullable();
+            $table->string('shipping_status')->nullable();
             $table->json('raw')->nullable(); $table->timestamps();
         });
         Schema::create('meli_order_items', function (Blueprint $table): void {
@@ -724,6 +725,81 @@ class InventoryMeliOrderReservationFlowTest extends TestCase
         );
 
         $this->assertSame(1, InventoryReservation::active()->sum('quantity'));
+    }
+
+    public function test_shipped_shipping_status_fulfills_reservation_automatically_and_records_physical_outbound(): void
+    {
+        [$product, $location] = $this->stockedProduct('SKU-AUTO-FULFILL', 10);
+        $this->link($product, 1, 'MLM999999999', null, true);
+        $order = $this->order(1, 4001, 'paid', [
+            ['item_id' => 'MLM999999999', 'key' => 'line-1', 'qty' => 2],
+        ]);
+
+        // 1. Al crearse la orden pagada, se reserva
+        $service = app(InventoryMeliOrderReservationService::class);
+        $service->apply($order);
+
+        $this->assertSame(1, InventoryReservation::active()->count());
+        $this->assertSame(8, app(InventoryStockService::class)->availableStock($product));
+        $this->assertSame(10, app(InventoryStockService::class)->physicalStock($product));
+
+        // 2. Cuando la orden pasa a shipped (en camino con paquetería), se cumple la reserva
+        $order->update(['shipping_status' => 'shipped']);
+        $service->apply($order->fresh(['items']));
+
+        // Ya no hay reservas activas
+        $this->assertSame(0, InventoryReservation::active()->count());
+        $reservation = InventoryReservation::first();
+        $this->assertSame(InventoryReservation::FULFILLED, $reservation->status);
+        $this->assertNotNull($reservation->fulfilled_at);
+
+        // Se descontó el stock físico mediante un movimiento de SALIDA por Venta
+        $this->assertSame(8, app(InventoryStockService::class)->physicalStock($product));
+        $this->assertSame(8, app(InventoryStockService::class)->availableStock($product));
+
+        $this->assertDatabaseHas('inventory_movements', [
+            'inventory_product_id' => $product->id,
+            'type' => InventoryMovement::SALE,
+            'quantity' => -2,
+        ]);
+    }
+
+    public function test_shipped_shipping_status_fulfills_kit_components_automatically(): void
+    {
+        [$c1, $loc1] = $this->stockedProduct('COMP-AUTO-1', 10);
+        [$c2, $loc2] = $this->stockedProduct('COMP-AUTO-2', 10);
+
+        $kit = InventoryProduct::create([
+            'sku' => 'KIT-AUTO-FULFILL',
+            'name' => 'Kit Auto Fulfill',
+            'product_type' => InventoryProduct::KIT,
+            'is_active' => true,
+        ]);
+        InventoryKitComponent::create(['kit_product_id' => $kit->id, 'component_product_id' => $c1->id, 'quantity' => 1]);
+        InventoryKitComponent::create(['kit_product_id' => $kit->id, 'component_product_id' => $c2->id, 'quantity' => 2]);
+
+        $this->link($kit, 1, 'MLM888888888', null, true);
+        $order = $this->order(1, 4002, 'paid', [
+            ['item_id' => 'MLM888888888', 'key' => 'line-kit', 'qty' => 1],
+        ]);
+
+        $service = app(InventoryMeliOrderReservationService::class);
+        $service->apply($order);
+
+        $this->assertSame(2, InventoryReservation::active()->count());
+        $this->assertSame(1, InventoryKitReservation::active()->count());
+
+        // El paquete pasa a shipped
+        $order->update(['shipping_status' => 'shipped']);
+        $service->apply($order->fresh(['items']));
+
+        $this->assertSame(0, InventoryReservation::active()->count());
+        $this->assertSame(0, InventoryKitReservation::active()->count());
+        $this->assertSame(InventoryKitReservation::FULFILLED, InventoryKitReservation::first()->status);
+
+        // Se descuentan físicamente los componentes
+        $this->assertSame(9, app(InventoryStockService::class)->physicalStock($c1));
+        $this->assertSame(8, app(InventoryStockService::class)->physicalStock($c2));
     }
     private function stockedProduct(string $sku, int $quantity): array
     {

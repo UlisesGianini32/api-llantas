@@ -6,6 +6,8 @@ use App\Exceptions\InventoryInsufficientStockException;
 use App\Models\InventoryChannelLink;
 use App\Models\InventoryChannelOrderAllocation;
 use App\Models\InventoryKitReservation;
+use App\Models\InventoryLocation;
+use App\Models\InventoryProduct;
 use App\Models\InventoryReservation;
 use App\Models\MeliOrder;
 use App\Models\MeliOrderItem;
@@ -16,6 +18,7 @@ class InventoryMeliOrderReservationService
 {
     public const RESERVE = 'RESERVE';
     public const RELEASE = 'RELEASE';
+    public const FULFILL = 'FULFILL';
 
     public function __construct(
         private readonly InventoryMeliOrderReservationPolicy $policy,
@@ -49,8 +52,8 @@ class InventoryMeliOrderReservationService
         if (! Schema::hasTable('inventory_channel_order_allocations')) {
             return $inspection;
         }
-        if (in_array($inspection['action'], ['UNMATCHED', 'AMBIGUOUS', 'LEGACY_LINE_IDENTITY_UNKNOWN', 'IGNORED_STATUS', 'SKIPPED_ORDER_RESERVATION_DISABLED', 'SKIPPED_INACTIVE_LINK', 'SKIPPED_INACTIVE_PRODUCT', 'REMOTE_USER_PRODUCT_CONFLICT', 'RELEASE_NOTHING_TO_DO'], true)) {
-            if (! in_array($inspection['action'], ['RELEASE_NOTHING_TO_DO', 'IGNORED_STATUS'], true)) {
+        if (in_array($inspection['action'], ['UNMATCHED', 'AMBIGUOUS', 'LEGACY_LINE_IDENTITY_UNKNOWN', 'IGNORED_STATUS', 'SKIPPED_ORDER_RESERVATION_DISABLED', 'SKIPPED_INACTIVE_LINK', 'SKIPPED_INACTIVE_PRODUCT', 'REMOTE_USER_PRODUCT_CONFLICT', 'RELEASE_NOTHING_TO_DO', 'FULFILL_NOTHING_TO_DO'], true)) {
+            if (! in_array($inspection['action'], ['RELEASE_NOTHING_TO_DO', 'FULFILL_NOTHING_TO_DO', 'IGNORED_STATUS'], true)) {
                 $this->saveDiagnostic($order, $item, $identity, $inspection);
             }
             return $inspection;
@@ -73,6 +76,12 @@ class InventoryMeliOrderReservationService
                 if ($action === self::RELEASE) {
                     $this->releaseCurrent($allocation);
                     $allocation->forceFill(['status' => 'RELEASED', 'quantity' => 0, 'diagnostic_code' => null, 'diagnostic_metadata' => null])->save();
+                    return $inspection + ['applied' => true];
+                }
+
+                if ($action === self::FULFILL) {
+                    $this->fulfillCurrent($allocation, $order, $item);
+                    $allocation->forceFill(['status' => 'FULFILLED', 'quantity' => 0, 'diagnostic_code' => null, 'diagnostic_metadata' => null])->save();
                     return $inspection + ['applied' => true];
                 }
 
@@ -135,7 +144,7 @@ class InventoryMeliOrderReservationService
             $result['action'] = 'UNMATCHED';
             return $result;
         }
-        $category = $this->policy->classify($order->status);
+        $category = $this->policy->classify($order->status, $order->shipping_status);
         if ($category === InventoryMeliOrderReservationPolicy::IGNORE) {
             $result['action'] = 'IGNORED_STATUS'; return $result;
         }
@@ -145,6 +154,14 @@ class InventoryMeliOrderReservationService
             $result['allocation_id'] = $allocation?->id;
             $result['reservation_id'] = $allocation?->reservation_id;
             $result['action'] = $allocation?->status === 'ACTIVE' ? self::RELEASE : 'RELEASE_NOTHING_TO_DO';
+            return $result;
+        }
+        if ($category === InventoryMeliOrderReservationPolicy::FULFILL) {
+            $allocation = Schema::hasTable('inventory_channel_order_allocations')
+                ? InventoryChannelOrderAllocation::query()->where('identity_hash', $this->identity($order, $item)['hash'])->first() : null;
+            $result['allocation_id'] = $allocation?->id;
+            $result['reservation_id'] = $allocation?->reservation_id;
+            $result['action'] = ($allocation && $allocation->status === 'ACTIVE') ? self::FULFILL : 'FULFILL_NOTHING_TO_DO';
             return $result;
         }
         $query = InventoryChannelLink::query()->with('product')
@@ -216,6 +233,62 @@ class InventoryMeliOrderReservationService
         if (! $reservation || $reservation->status !== 'ACTIVE') return;
         if ($allocation->reservation_kind === 'KIT') $this->kits->release($reservation);
         else $this->reservations->release($reservation);
+    }
+
+    private function fulfillCurrent(InventoryChannelOrderAllocation $allocation, MeliOrder $order, MeliOrderItem $item): void
+    {
+        $reservation = $this->currentReservation($allocation, true);
+        if (! $reservation || $reservation->status !== 'ACTIVE') {
+            return;
+        }
+
+        $reference = 'ML orden '.$order->order_id.' línea '.($item->remote_line_key ?: $item->id);
+
+        if ($allocation->reservation_kind === 'KIT') {
+            $this->kits->fulfill($reservation, [
+                'reference' => $reference,
+                'notes' => 'Cumplimiento automático por envío (Estado: '.($order->shipping_status ?? 'shipped').')',
+            ]);
+        } else {
+            $locationId = $reservation->inventory_location_id;
+            if ($locationId === null) {
+                $locationId = $this->resolveLocationForProduct($reservation->product ?? $reservation->inventory_product_id);
+            }
+
+            $this->reservations->fulfill($reservation, [
+                'inventory_location_id' => $locationId,
+                'reference' => $reference,
+                'notes' => 'Cumplimiento automático por envío (Estado: '.($order->shipping_status ?? 'shipped').')',
+            ]);
+        }
+    }
+
+    private function resolveLocationForProduct(InventoryProduct|int $product): int
+    {
+        $prod = $product instanceof InventoryProduct ? $product : InventoryProduct::find($product);
+        if ($prod?->primary_location_id) {
+            return (int) $prod->primary_location_id;
+        }
+
+        $locationWithStock = DB::table('inventory_movements')
+            ->select('inventory_location_id')
+            ->selectRaw('SUM(quantity) as stock')
+            ->where('inventory_product_id', $prod?->id)
+            ->groupBy('inventory_location_id')
+            ->having('stock', '>', 0)
+            ->orderByDesc('stock')
+            ->value('inventory_location_id');
+
+        if ($locationWithStock) {
+            return (int) $locationWithStock;
+        }
+
+        return (int) (InventoryLocation::query()
+            ->where('is_active', true)
+            ->orderByRaw('sort_order IS NULL')
+            ->orderBy('sort_order')
+            ->orderBy('id')
+            ->value('id') ?? 1);
     }
 
     private function saveDiagnostic(MeliOrder $order, MeliOrderItem $item, array $identity, array $diagnostic): void

@@ -227,6 +227,7 @@ class MeliOrderDeliveryTest extends TestCase
         Bus::assertNothingDispatched();
 
         config()->set('inventory.meli_order_reservations.automatic', true);
+        config()->set('inventory.meli_order_reservations.automatic_after', '2000-01-01T00:00:00+00:00');
         $syncOn = app(MeliOrderSyncService::class)->syncDay($this->apiUser($enabledAccount), now()->toDateString());
         $this->assertSame(1, $syncOn['orders'], json_encode($syncOn));
 
