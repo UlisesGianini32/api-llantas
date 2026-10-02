@@ -15,8 +15,11 @@ return [
 
     'strict_day_filter' => env('AMS_COLECTA_STRICT_DAY_FILTER', true),
 
-    /** Antes de listar “Procesar”, consultar MeLi por cada shipping_id del lote (evita ver 32 “listos” si ya van en camino). */
-    'refresh_shipments_on_procesar' => filter_var(env('AMS_COLECTA_REFRESH_SHIPMENTS_ON_PROCESAR', true), FILTER_VALIDATE_BOOL),
+    /** Zona horaria para Hermosillo / Sonora (UTC-7 sin horario de verano) */
+    'business_timezone' => env('AMS_COLECTA_TIMEZONE', 'America/Hermosillo'),
+
+    /** Antes de listar “Procesar”, consultar MeLi por cada shipping_id del lote (por defecto false para carga instantánea). */
+    'refresh_shipments_on_procesar' => filter_var(env('AMS_COLECTA_REFRESH_SHIPMENTS_ON_PROCESAR', false), FILTER_VALIDATE_BOOL),
 
     /** Tope de llamadas a /shipments por carga de página (evita timeouts). */
     'refresh_shipments_max_ids' => (int) env('AMS_COLECTA_REFRESH_SHIPMENTS_MAX', 300),
@@ -25,7 +28,7 @@ return [
     'refresh_shipments_delay_micros' => (int) env('AMS_COLECTA_REFRESH_SHIPMENTS_DELAY_US', 80000),
 
     /**
-     * Ventana horaria en zona AMS_COLECTA_TIMEZONE (America/Mexico_City por defecto).
+     * Ventana horaria en zona AMS_COLECTA_TIMEZONE (America/Hermosillo por defecto).
      * Inicio = (día anterior al elegido) a esta hora; fin = día elegido a esta hora.
      */
     'window' => [

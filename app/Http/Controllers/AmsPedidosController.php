@@ -189,7 +189,7 @@ class AmsPedidosController extends Controller
 
     public function procesarManana(Request $request, MeliOrderSyncService $meliSync): Response
     {
-        $fechaSeleccionada = now()->addDay()->toDateString();
+        $fechaSeleccionada = Carbon::now($this->colectaBusinessTimezone())->addDay()->toDateString();
 
         $this->maybeRefreshProcesarShipments($request, $fechaSeleccionada, 'colecta', $meliSync);
 
@@ -390,7 +390,8 @@ class AmsPedidosController extends Controller
             return;
         }
 
-        if (!config('ams_colecta.refresh_shipments_on_procesar', true)) {
+        $shouldRefresh = $request->boolean('refrescar') || (bool) config('ams_colecta.refresh_shipments_on_procesar', false);
+        if (!$shouldRefresh) {
             return;
         }
 
@@ -609,28 +610,29 @@ class AmsPedidosController extends Controller
     protected function resolveFecha(Request $request, bool $defaultTomorrow = false): string
     {
         $fecha = $request->input('fecha');
+        $tz = $this->colectaBusinessTimezone();
 
         try {
             if ($fecha) {
-                return Carbon::parse($fecha)->toDateString();
+                return Carbon::parse($fecha, $tz)->toDateString();
             }
 
             return $defaultTomorrow
-                ? now()->addDay()->toDateString()
-                : now()->toDateString();
+                ? Carbon::now($tz)->addDay()->toDateString()
+                : Carbon::now($tz)->toDateString();
         } catch (\Throwable $e) {
             return $defaultTomorrow
-                ? now()->addDay()->toDateString()
-                : now()->toDateString();
+                ? Carbon::now($tz)->addDay()->toDateString()
+                : Carbon::now($tz)->toDateString();
         }
     }
 
     /**
-     * Zona horaria para ventanas de colecta MeLi (México). Ajustá con AMS_COLECTA_TIMEZONE en .env si operás otro estado.
+     * Zona horaria para Hermosillo / Sonora (UTC-7 sin horario de verano). Ajustá con AMS_COLECTA_TIMEZONE en .env si es necesario.
      */
     protected function colectaBusinessTimezone(): string
     {
-        return env('AMS_COLECTA_TIMEZONE', 'America/Mexico_City');
+        return (string) config('ams_colecta.business_timezone', env('AMS_COLECTA_TIMEZONE', 'America/Hermosillo'));
     }
 
     /**
@@ -865,6 +867,7 @@ class AmsPedidosController extends Controller
             'formAction' => $formAction,
             'orden' => $orden,
             'alcance' => $alcance,
+            'openIssuesCount' => \App\Models\AmsProductIssue::where('status', \App\Models\AmsProductIssue::STATUS_PENDING)->count(),
         ]);
     }
 
@@ -1134,7 +1137,7 @@ class AmsPedidosController extends Controller
                 'fecha_pedido' => $row->fecha_pedido,
                 'shipping_id' => isset($row->shipping_id) ? (string) $row->shipping_id : '',
                 'fecha_pedido_formateada' => $row->fecha_pedido
-                    ? Carbon::parse($row->fecha_pedido)->format('d/m/Y H:i')
+                    ? Carbon::parse($row->fecha_pedido, 'UTC')->timezone($this->colectaBusinessTimezone())->format('d/m/Y H:i')
                     : null,
                 'ams_tipo' => $amsTipo,
                 'order_status' => (string) ($row->order_status ?? ''),
@@ -1238,8 +1241,20 @@ class AmsPedidosController extends Controller
 
     protected function pedidosToInertiaArray(Collection $pedidosAgrupados, bool $incluirMarca = false): array
     {
+        $allItemIds = $pedidosAgrupados->flatMap(function ($p) {
+            return collect($p->items ?? [])->pluck('item_id');
+        })->filter()->map(fn ($id) => (string) $id)->unique()->values()->all();
+
+        $openIssues = $allItemIds !== []
+            ? \App\Models\AmsProductIssue::query()
+                ->whereIn('item_id', $allItemIds)
+                ->where('status', \App\Models\AmsProductIssue::STATUS_PENDING)
+                ->get()
+                ->keyBy('item_id')
+            : collect();
+
         return $pedidosAgrupados
-            ->map(function ($p) use ($incluirMarca) {
+            ->map(function ($p) use ($incluirMarca, $openIssues) {
                 $row = [
                     'group_key' => $p->group_key,
                     'id_local' => (int) ($p->id_local ?? 0),
@@ -1272,15 +1287,22 @@ class AmsPedidosController extends Controller
                     'total_piezas' => $p->total_piezas,
                     'total_pedido' => (float) $p->total_pedido,
                     'items' => collect($p->items)
-                        ->map(function ($i) use ($incluirMarca) {
+                        ->map(function ($i) use ($incluirMarca, $openIssues) {
+                            $itemIdStr = (string) ($i->item_id ?? '');
+                            $issue = $openIssues->get($itemIdStr);
+
                             $item = [
-                                'item_id' => (string) ($i->item_id ?? ''),
+                                'item_id' => $itemIdStr,
                                 'titulo' => $i->titulo,
                                 'imagen' => $i->imagen,
                                 'cantidad' => (int) $i->cantidad,
                                 'sku' => (string) ($i->sku ?? ''),
                                 'precio_unitario' => (float) $i->precio_unitario,
                                 'total_linea' => (float) $i->total_linea,
+                                'has_open_issue' => $issue !== null,
+                                'open_issue_type' => $issue?->issue_type,
+                                'open_issue_label' => $issue?->issue_type_label,
+                                'open_issue_id' => $issue?->id,
                             ];
                             if ($incluirMarca && isset($i->ams_marca_label)) {
                                 $item['ams_marca_label'] = (string) $i->ams_marca_label;

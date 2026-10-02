@@ -33,6 +33,7 @@ const sections = [
         { key: 'ams_process', label: 'AMS Procesar', href: '/ams/pedidos-procesar' },
         { key: 'ams_secondary', label: 'AMS Secundaria', href: '/ams/pedidos-secundaria' },
         { key: 'ams_tomorrow', label: 'AMS Mañana', href: '/ams/pedidos-manana' },
+        { key: 'ams_incidencias', label: 'Incidencias de Productos', href: '/ams/incidencias' },
         { key: 'inventory_channels', label: 'Enlaces de canales', href: '/almacen/canales' },
         { key: 'inventory_meli_stock', label: 'Stock ML', href: '/almacen/canales/mercado-libre/stock' },
     ] },

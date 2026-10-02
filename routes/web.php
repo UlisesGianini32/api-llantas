@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\AmsPedidosController;
+use App\Http\Controllers\AmsProductIssueController;
 use App\Http\Controllers\AmsSecondaryOrdersController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\DashboardController;
@@ -319,6 +320,14 @@ Route::middleware(['auth', 'role'])->group(function () {
         ->name('ams.pedidos.delivery_details.request');
     Route::get('/ams/pedidos-procesar', [AmsPedidosController::class, 'procesar'])->name('ams.pedidos.procesar');
     Route::get('/ams/pedidos-manana', [AmsPedidosController::class, 'procesarManana'])->name('ams.pedidos.manana');
+
+    // INCIDENCIAS DE PRODUCTOS AMS
+    Route::get('/ams/incidencias', [AmsProductIssueController::class, 'index'])->name('ams.incidencias.index');
+    Route::post('/ams/incidencias', [AmsProductIssueController::class, 'store'])->name('ams.incidencias.store');
+    Route::put('/ams/incidencias/{issue}', [AmsProductIssueController::class, 'update'])->whereNumber('issue')->name('ams.incidencias.update');
+    Route::post('/ams/incidencias/{issue}/resolve', [AmsProductIssueController::class, 'resolve'])->whereNumber('issue')->name('ams.incidencias.resolve');
+    Route::post('/ams/incidencias/{issue}/reopen', [AmsProductIssueController::class, 'reopen'])->whereNumber('issue')->name('ams.incidencias.reopen');
+    Route::delete('/ams/incidencias/{issue}', [AmsProductIssueController::class, 'destroy'])->whereNumber('issue')->name('ams.incidencias.destroy');
 
     Route::get(
         '/ams/pedidos/shipping-label/{shippingId}/print',

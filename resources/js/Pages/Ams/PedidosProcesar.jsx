@@ -1,7 +1,8 @@
 import AppShell from '@/Components/layout/AppShell'
 import { esAndroid, prepararBinarioParaRawBt } from '@/lib/rawBtPng'
 import { useRef, useState } from 'react'
-import { router } from '@inertiajs/react'
+import { Link, router } from '@inertiajs/react'
+import axios from 'axios'
 import qz from 'qz-tray'
 
 import { configureQzSecurity } from '@/lib/qzSecurity'
@@ -135,6 +136,162 @@ function etiquetaTermicaRawUrl(pedido, labelBaseUrl) {
     return `${base}/${encodeURIComponent(shippingId)}/zpl-raw`
 }
 
+function ModalReportarIncidencia({ item, pedido, onClose, onReported }) {
+    const [issueType, setIssueType] = useState('imagen_incorrecta')
+    const [notes, setNotes] = useState('')
+    const [saving, setSaving] = useState(false)
+    const [error, setError] = useState(null)
+
+    const issueOptions = [
+        { value: 'sin_imagen', label: 'Sin imagen', desc: 'No tiene foto o la imagen no carga', icon: '🖼️❌' },
+        { value: 'imagen_incorrecta', label: 'Imagen incorrecta', desc: 'La foto no corresponde al producto real', icon: '🖼️⚠️' },
+        { value: 'sku_incorrecto', label: 'SKU incorrecto / N/A', desc: 'El SKU dice N/A o no coincide con el almacén', icon: '🏷️' },
+        { value: 'titulo_incorrecto', label: 'Título incorrecto', desc: 'El nombre está mal, incompleto o confuso', icon: '✏️' },
+        { value: 'otro', label: 'Otro problema', desc: 'Cualquier otro detalle a corregir', icon: '⚠️' },
+    ]
+
+    const handleSubmit = async (e) => {
+        e.preventDefault()
+        setSaving(true)
+        setError(null)
+        try {
+            await axios.post('/ams/incidencias', {
+                item_id: item.item_id,
+                sku: item.sku,
+                title: item.titulo,
+                current_image_url: item.imagen,
+                order_id: pedido?.order_id,
+                shipping_id: pedido?.shipping_id,
+                issue_type: issueType,
+                notes: notes.trim(),
+            })
+
+            const selectedOpt = issueOptions.find((o) => o.value === issueType)
+            onReported(item.item_id, selectedOpt?.label || 'Reportada')
+            onClose()
+        } catch (err) {
+            console.error('Error al reportar:', err)
+            setError(err.response?.data?.message || 'Error al enviar reporte.')
+        } finally {
+            setSaving(false)
+        }
+    }
+
+    return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm">
+            <div className="w-full max-w-lg rounded-2xl border border-slate-700 bg-[#00153b] p-6 shadow-2xl text-white">
+                <div className="flex items-start justify-between border-b border-slate-700 pb-3">
+                    <div>
+                        <h2 className="text-lg font-bold flex items-center gap-2">
+                            <span>🚩 Reportar problema con este producto</span>
+                        </h2>
+                        <p className="mt-0.5 text-xs text-slate-300">
+                            Se enviará al módulo de incidencias para que el equipo lo corrija.
+                        </p>
+                    </div>
+                    <button
+                        type="button"
+                        onClick={onClose}
+                        className="rounded-lg p-1 text-slate-400 hover:bg-slate-700 hover:text-white"
+                    >
+                        ✕
+                    </button>
+                </div>
+
+                {error ? (
+                    <div className="mt-3 rounded-lg border border-rose-500/50 bg-rose-950/60 p-2.5 text-xs text-rose-200">
+                        {error}
+                    </div>
+                ) : null}
+
+                <div className="mt-3 flex items-center gap-3 rounded-xl border border-slate-700 bg-slate-800/60 p-3">
+                    <div className="h-14 w-14 shrink-0 rounded-lg border border-slate-600 bg-white p-0.5 flex items-center justify-center overflow-hidden">
+                        {item.imagen ? (
+                            <img src={item.imagen} alt="" className="h-full w-full object-contain" />
+                        ) : (
+                            <span className="text-[10px] text-slate-500 text-center font-bold">Sin foto</span>
+                        )}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                            <span className="font-mono text-xs font-bold text-sky-400">{item.item_id}</span>
+                            <span className="text-[11px] text-slate-400">
+                                SKU: <strong className="text-white">{item.sku || 'N/A'}</strong>
+                            </span>
+                        </div>
+                        <p className="truncate text-xs font-semibold text-slate-200 mt-0.5">{item.titulo}</p>
+                    </div>
+                </div>
+
+                <form onSubmit={handleSubmit} className="mt-4 space-y-4">
+                    <div>
+                        <label className="block text-xs font-bold uppercase tracking-wider text-slate-300 mb-2">
+                            Selecciona el problema:
+                        </label>
+                        <div className="space-y-1.5">
+                            {issueOptions.map((opt) => (
+                                <label
+                                    key={opt.value}
+                                    className={`flex items-center gap-3 rounded-xl border p-2.5 cursor-pointer transition ${
+                                        issueType === opt.value
+                                            ? 'border-amber-400 bg-amber-500/20'
+                                            : 'border-slate-700 bg-slate-800/40 hover:bg-slate-800'
+                                    }`}
+                                >
+                                    <input
+                                        type="radio"
+                                        name="issue_type"
+                                        value={opt.value}
+                                        checked={issueType === opt.value}
+                                        onChange={(e) => setIssueType(e.target.value)}
+                                        className="h-4 w-4 text-amber-500 border-slate-500 bg-slate-900 focus:ring-amber-400"
+                                    />
+                                    <span className="text-lg">{opt.icon}</span>
+                                    <div className="flex-1">
+                                        <div className="text-xs font-bold text-white">{opt.label}</div>
+                                        <div className="text-[11px] text-slate-400">{opt.desc}</div>
+                                    </div>
+                                </label>
+                            ))}
+                        </div>
+                    </div>
+
+                    <div>
+                        <label className="block text-xs font-bold uppercase tracking-wider text-slate-300 mb-1">
+                            Detalle o nota (opcional):
+                        </label>
+                        <textarea
+                            rows={2}
+                            value={notes}
+                            onChange={(e) => setNotes(e.target.value)}
+                            placeholder="Ej: La imagen muestra un bote verde pero es amarillo, o el SKU real es XYZ..."
+                            className="w-full rounded-lg border border-slate-600 bg-slate-900 p-2.5 text-xs text-white placeholder-slate-500 outline-none focus:border-amber-400 resize-none"
+                        />
+                    </div>
+
+                    <div className="flex justify-end gap-2 pt-2 border-t border-slate-700">
+                        <button
+                            type="button"
+                            onClick={onClose}
+                            disabled={saving}
+                            className="rounded-lg border border-slate-600 bg-slate-800 px-3.5 py-1.5 text-xs text-slate-300 hover:bg-slate-700"
+                        >
+                            Cancelar
+                        </button>
+                        <button
+                            type="submit"
+                            disabled={saving}
+                            className="rounded-lg border border-amber-500/60 bg-amber-600 px-4 py-1.5 text-xs font-bold text-slate-950 transition hover:bg-amber-500 disabled:opacity-50"
+                        >
+                            {saving ? 'Guardando...' : 'Enviar Reporte'}
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    )
+}
+
 export default function PedidosProcesar({
     pedidos = [],
     fechaSeleccionada = '',
@@ -150,6 +307,7 @@ export default function PedidosProcesar({
     meliAccounts = [],
     selectedMeliAccountId = null,
     selectedMeliAccountLabel = '',
+    openIssuesCount = 0,
 }) {
     const android = esAndroid()
     const rawBtPreparingRef = useRef(false)
@@ -163,6 +321,38 @@ export default function PedidosProcesar({
             return ''
         }
     })
+    const [localReportedItems, setLocalReportedItems] = useState({})
+    const [reportingItemContext, setReportingItemContext] = useState(null)
+    const [refrescandoMeli, setRefrescandoMeli] = useState(false)
+
+    const onRefrescarMeli = () => {
+        setRefrescandoMeli(true)
+        router.get(
+            formAction,
+            {
+                fecha: fechaSeleccionada,
+                orden,
+                alcance,
+                account_id: selectedMeliAccountId || undefined,
+                refrescar: 1,
+            },
+            {
+                preserveScroll: true,
+                onFinish: () => setRefrescandoMeli(false),
+            }
+        )
+    }
+
+    const openReportModal = (item, pedido) => {
+        setReportingItemContext({ item, pedido })
+    }
+
+    const handleItemReported = (itemId, label) => {
+        setLocalReportedItems((prev) => ({
+            ...prev,
+            [itemId]: { label },
+        }))
+    }
 
     const connectQz = async () => {
         configureQzSecurity()
@@ -732,6 +922,31 @@ export default function PedidosProcesar({
                                         Ver pedidos
                                     </button>
                                 </div>
+                                <div>
+                                    <button
+                                        type="button"
+                                        onClick={onRefrescarMeli}
+                                        disabled={refrescandoMeli}
+                                        className="rounded-lg border border-sky-500/60 bg-sky-700/20 px-4 py-2 text-sm font-semibold text-sky-100 transition hover:bg-sky-700/35 disabled:opacity-50"
+                                        title="Consulta el estado actual de los envíos en tiempo real con la API de Mercado Libre"
+                                    >
+                                        {refrescandoMeli ? 'Refrescando...' : '🔄 Refrescar envíos ML'}
+                                    </button>
+                                </div>
+                                <div>
+                                    <Link
+                                        href="/ams/incidencias"
+                                        className="rounded-lg border border-amber-500/60 bg-amber-600/20 px-4 py-2 text-sm font-bold text-amber-200 transition hover:bg-amber-600/35 flex items-center gap-1.5"
+                                        title="Módulo para revisar y corregir fotos, SKUs o títulos reportados"
+                                    >
+                                        <span>⚠️ Incidencias</span>
+                                        {openIssuesCount > 0 ? (
+                                            <span className="rounded-full bg-amber-500 px-2 py-0.5 text-xs font-black text-slate-950">
+                                                {openIssuesCount}
+                                            </span>
+                                        ) : null}
+                                    </Link>
+                                </div>
                             </form>
 
                             <div className="flex w-full flex-col gap-2 md:max-w-[280px]">
@@ -992,15 +1207,38 @@ export default function PedidosProcesar({
                                                             )}
                                                         </div>
                                                         <div className="min-w-0">
-                                                            <div className="mb-3 flex flex-wrap items-center gap-2">
-                                                                <h3 className="text-lg font-semibold leading-tight text-white">
-                                                                    {item.titulo}
-                                                                </h3>
-                                                                {orden === 'marca' && item.ams_marca_label ? (
-                                                                    <span className="rounded border border-slate-500 bg-slate-900/80 px-2 py-0.5 text-xs text-slate-300">
-                                                                        {item.ams_marca_label}
-                                                                    </span>
-                                                                ) : null}
+                                                            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                                                                <div className="flex flex-wrap items-center gap-2">
+                                                                    <h3 className="text-lg font-semibold leading-tight text-white">
+                                                                        {item.titulo}
+                                                                    </h3>
+                                                                    {orden === 'marca' && item.ams_marca_label ? (
+                                                                        <span className="rounded border border-slate-500 bg-slate-900/80 px-2 py-0.5 text-xs text-slate-300">
+                                                                            {item.ams_marca_label}
+                                                                        </span>
+                                                                    ) : null}
+                                                                </div>
+
+                                                                <div>
+                                                                    {item.has_open_issue || localReportedItems[item.item_id] ? (
+                                                                        <Link
+                                                                            href={`/ams/incidencias?search=${encodeURIComponent(item.item_id)}`}
+                                                                            className="rounded-lg border border-amber-500/60 bg-amber-950/70 px-2.5 py-1 text-xs font-semibold text-amber-200 transition hover:bg-amber-900/70 flex items-center gap-1"
+                                                                            title="Ver o editar esta incidencia en el módulo de incidencias"
+                                                                        >
+                                                                            <span>⚠️ Incidencia: {localReportedItems[item.item_id]?.label || item.open_issue_label || 'Reportada'}</span>
+                                                                        </Link>
+                                                                    ) : (
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={() => openReportModal(item, pedido)}
+                                                                            className="rounded-lg border border-slate-600 bg-slate-800/90 px-2.5 py-1 text-xs font-medium text-slate-300 transition hover:border-amber-500/60 hover:bg-amber-950/40 hover:text-amber-200 flex items-center gap-1"
+                                                                            title="Reportar problema de foto rota/incorrecta, SKU erróneo o título mal"
+                                                                        >
+                                                                            <span>🚩 Reportar problema</span>
+                                                                        </button>
+                                                                    )}
+                                                                </div>
                                                             </div>
                                                             <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                                                                 <div className="rounded-xl border border-slate-400 bg-[#1b2a41] px-4 py-3">
@@ -1037,6 +1275,15 @@ export default function PedidosProcesar({
                     </div>
                 </div>
             </section>
+
+            {reportingItemContext ? (
+                <ModalReportarIncidencia
+                    item={reportingItemContext.item}
+                    pedido={reportingItemContext.pedido}
+                    onClose={() => setReportingItemContext(null)}
+                    onReported={handleItemReported}
+                />
+            ) : null}
         </AppShell>
     )
 }

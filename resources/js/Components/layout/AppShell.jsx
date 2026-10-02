@@ -414,6 +414,14 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
 >
     AMS Mañana
 </NavItem>
+
+<NavItem
+    href="/ams/incidencias"
+    active={currentPath.startsWith('/ams/incidencias')}
+    onNavigate={onNavigate}
+>
+    ⚠️ Incidencias de Productos
+</NavItem>
 {!isAdmin && <NavItem
     href="/almacen/canales"
     active={currentPath.startsWith('/almacen/canales')}
