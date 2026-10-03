@@ -32,7 +32,7 @@ class AmsProductIssueController extends Controller
                 'reportedBy:id,name,email',
                 'resolvedBy:id,name,email',
                 'product:id,name,ml,sku,thumbnail,price',
-                'publication:id,mlm,title,sku,permalink,raw',
+                'publication:id,mlm,sku,permalink,raw',
             ]);
 
         if ($status === 'pending') {
