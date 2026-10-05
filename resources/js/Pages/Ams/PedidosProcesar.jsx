@@ -1240,60 +1240,158 @@ export default function PedidosProcesar({
                                                                     )}
                                                                 </div>
                                                             </div>
-                                                            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                                                                <div className="rounded-xl border border-slate-400 bg-[#1b2a41] px-4 py-3">
-                                                                    <div className="text-xs uppercase tracking-wide text-slate-300">
-                                                                        Piezas
+                                                            {item.is_kit && item.kit_components && item.kit_components.length > 0 ? (
+                                                                <div className="space-y-3">
+                                                                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                                                                        <div className="rounded-xl border border-slate-400 bg-[#1b2a41] px-4 py-3">
+                                                                            <div className="text-xs uppercase tracking-wide text-slate-300">
+                                                                                Piezas del Kit (Paquetes)
+                                                                            </div>
+                                                                            <div className="mt-1 text-3xl font-semibold text-white">
+                                                                                {item.cantidad}
+                                                                            </div>
+                                                                        </div>
+                                                                        <div className="rounded-xl border border-indigo-500/60 bg-indigo-950/40 px-4 py-3">
+                                                                            <div className="flex items-center justify-between text-xs uppercase tracking-wide text-indigo-300">
+                                                                                <span>SKU del Kit</span>
+                                                                                <span className="rounded bg-indigo-800/80 px-2 py-0.5 text-[10px] font-bold text-indigo-100">
+                                                                                    📦 KIT ({item.kit_components.length} componentes)
+                                                                                </span>
+                                                                            </div>
+                                                                            <div className="mt-1 break-all text-2xl font-semibold text-white">
+                                                                                {item.sku || 'N/A'}
+                                                                            </div>
+                                                                        </div>
                                                                     </div>
-                                                                    <div className="mt-1 text-3xl font-semibold text-white">
-                                                                        {item.cantidad}
-                                                                    </div>
-                                                                </div>
-                                                                <div className="rounded-xl border border-slate-400 bg-[#1b2a41] px-4 py-3">
-                                                                    <div className="text-xs uppercase tracking-wide text-slate-300">
-                                                                        SKU
-                                                                    </div>
-                                                                    <div className="mt-1 break-all text-2xl font-semibold text-white">
-                                                                        {item.sku || 'N/A'}
-                                                                    </div>
-                                                                </div>
-                                                                <div className="rounded-xl border border-emerald-500/60 bg-[#0d2822] px-4 py-3">
-                                                                    <div className="flex items-center justify-between text-xs uppercase tracking-wide text-emerald-300">
-                                                                        <span>📍 Picking (Principal)</span>
-                                                                        {item.primary_location_aisle ? (
-                                                                            <span className="rounded bg-emerald-800/80 px-1.5 py-0.5 text-[10px] font-bold text-emerald-100">
-                                                                                Pasillo {item.primary_location_aisle}
+
+                                                                    <div className="rounded-xl border border-indigo-500/40 bg-indigo-950/20 p-3 sm:p-4">
+                                                                        <div className="mb-2.5 flex items-center justify-between border-b border-indigo-500/30 pb-2">
+                                                                            <span className="text-xs font-bold uppercase tracking-wider text-indigo-300">
+                                                                                📍 Ubicaciones de los componentes para surtir
                                                                             </span>
+                                                                            <span className="text-xs text-slate-400">
+                                                                                Multiplicado por {item.cantidad} {item.cantidad === 1 ? 'kit' : 'kits'}
+                                                                            </span>
+                                                                        </div>
+                                                                        <div className="space-y-2">
+                                                                            {item.kit_components.map((kc, idx) => {
+                                                                                const totalCompQty = (kc.quantity || 1) * (item.cantidad || 1);
+                                                                                return (
+                                                                                    <div
+                                                                                        key={idx}
+                                                                                        className="flex flex-col gap-2 rounded-lg border border-slate-700 bg-slate-900/80 p-2.5 transition hover:border-slate-600 sm:flex-row sm:items-center sm:justify-between"
+                                                                                    >
+                                                                                        <div className="min-w-0 flex-1">
+                                                                                            <div className="flex flex-wrap items-center gap-2">
+                                                                                                <span className="rounded border border-slate-600 bg-slate-800 px-2 py-0.5 font-mono text-sm font-bold text-white">
+                                                                                                    {kc.sku || 'SIN SKU'}
+                                                                                                </span>
+                                                                                                <span className="truncate text-sm text-slate-200">
+                                                                                                    {kc.name || 'Componente'}
+                                                                                                </span>
+                                                                                            </div>
+                                                                                            <div className="mt-1 text-xs text-slate-400">
+                                                                                                Requiere <span className="font-semibold text-amber-300">{kc.quantity} pz</span> por kit &rarr;{' '}
+                                                                                                <span className="rounded border border-indigo-500/40 bg-indigo-900/60 px-1.5 py-0.5 text-xs font-bold text-white">
+                                                                                                    Surtir {totalCompQty} pz{totalCompQty === 1 ? '' : 's'}
+                                                                                                </span>
+                                                                                            </div>
+                                                                                        </div>
+                                                                                        <div className="flex shrink-0 items-center gap-2">
+                                                                                            <div className="min-w-[130px] rounded-lg border border-emerald-500/60 bg-[#0d2822] px-3 py-1.5">
+                                                                                                <div className="flex items-center justify-between text-[10px] font-bold uppercase text-emerald-300">
+                                                                                                    <span>📍 Picking</span>
+                                                                                                    {kc.primary_location_aisle ? (
+                                                                                                        <span className="rounded bg-emerald-800/80 px-1 text-emerald-100">
+                                                                                                            P. {kc.primary_location_aisle}
+                                                                                                        </span>
+                                                                                                    ) : null}
+                                                                                                </div>
+                                                                                                <div className="text-base font-bold text-emerald-100">
+                                                                                                    {kc.primary_location_code || <span className="text-xs font-normal text-slate-400">Sin asignar</span>}
+                                                                                                </div>
+                                                                                            </div>
+                                                                                            <div className={`min-w-[130px] rounded-lg border px-3 py-1.5 ${kc.secondary_location_code ? 'border-amber-500/60 bg-[#2b1d10]' : 'border-slate-700 bg-slate-800/40'}`}>
+                                                                                                <div className="flex items-center justify-between text-[10px] font-bold uppercase text-amber-300">
+                                                                                                    <span>📦 Reserva</span>
+                                                                                                    {kc.secondary_location_aisle ? (
+                                                                                                        <span className="rounded bg-amber-800/80 px-1 text-amber-100">
+                                                                                                            P. {kc.secondary_location_aisle}
+                                                                                                        </span>
+                                                                                                    ) : null}
+                                                                                                </div>
+                                                                                                <div className="text-base font-bold text-amber-100">
+                                                                                                    {kc.secondary_location_code || <span className="text-xs font-normal text-slate-400">Sin reserva</span>}
+                                                                                                </div>
+                                                                                                {kc.reserve_notes ? (
+                                                                                                    <div className="max-w-[120px] truncate text-[10px] text-amber-200/80" title={kc.reserve_notes}>
+                                                                                                        {kc.reserve_notes}
+                                                                                                    </div>
+                                                                                                ) : null}
+                                                                                            </div>
+                                                                                        </div>
+                                                                                    </div>
+                                                                                );
+                                                                            })}
+                                                                        </div>
+                                                                    </div>
+                                                                </div>
+                                                            ) : (
+                                                                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                                                                    <div className="rounded-xl border border-slate-400 bg-[#1b2a41] px-4 py-3">
+                                                                        <div className="text-xs uppercase tracking-wide text-slate-300">
+                                                                            Piezas
+                                                                        </div>
+                                                                        <div className="mt-1 text-3xl font-semibold text-white">
+                                                                            {item.cantidad}
+                                                                        </div>
+                                                                    </div>
+                                                                    <div className="rounded-xl border border-slate-400 bg-[#1b2a41] px-4 py-3">
+                                                                        <div className="text-xs uppercase tracking-wide text-slate-300">
+                                                                            SKU
+                                                                        </div>
+                                                                        <div className="mt-1 break-all text-2xl font-semibold text-white">
+                                                                            {item.sku || 'N/A'}
+                                                                        </div>
+                                                                    </div>
+                                                                    <div className="rounded-xl border border-emerald-500/60 bg-[#0d2822] px-4 py-3">
+                                                                        <div className="flex items-center justify-between text-xs uppercase tracking-wide text-emerald-300">
+                                                                            <span>📍 Picking (Principal)</span>
+                                                                            {item.primary_location_aisle ? (
+                                                                                <span className="rounded bg-emerald-800/80 px-1.5 py-0.5 text-[10px] font-bold text-emerald-100">
+                                                                                    Pasillo {item.primary_location_aisle}
+                                                                                </span>
+                                                                            ) : null}
+                                                                        </div>
+                                                                        <div className="mt-1 text-2xl font-bold text-emerald-100">
+                                                                            {item.primary_location_code || <span className="text-base font-normal text-slate-400">Sin asignar</span>}
+                                                                        </div>
+                                                                        {item.primary_location_name ? (
+                                                                            <div className="mt-0.5 truncate text-xs text-emerald-300/80" title={item.primary_location_name}>
+                                                                                {item.primary_location_name}
+                                                                            </div>
                                                                         ) : null}
                                                                     </div>
-                                                                    <div className="mt-1 text-2xl font-bold text-emerald-100">
-                                                                        {item.primary_location_code || <span className="text-base font-normal text-slate-400">Sin asignar</span>}
-                                                                    </div>
-                                                                    {item.primary_location_name ? (
-                                                                        <div className="mt-0.5 truncate text-xs text-emerald-300/80" title={item.primary_location_name}>
-                                                                            {item.primary_location_name}
+                                                                    <div className={`rounded-xl border px-4 py-3 ${item.secondary_location_code ? 'border-amber-500/60 bg-[#2b1d10]' : 'border-slate-600/50 bg-slate-800/40'}`}>
+                                                                        <div className="flex items-center justify-between text-xs uppercase tracking-wide text-amber-300">
+                                                                            <span>📦 Reserva (Pulmón)</span>
+                                                                            {item.secondary_location_aisle ? (
+                                                                                <span className="rounded bg-amber-800/80 px-1.5 py-0.5 text-[10px] font-bold text-amber-100">
+                                                                                    Pasillo {item.secondary_location_aisle}
+                                                                                </span>
+                                                                            ) : null}
                                                                         </div>
-                                                                    ) : null}
-                                                                </div>
-                                                                <div className={`rounded-xl border px-4 py-3 ${item.secondary_location_code ? 'border-amber-500/60 bg-[#2b1d10]' : 'border-slate-600/50 bg-slate-800/40'}`}>
-                                                                    <div className="flex items-center justify-between text-xs uppercase tracking-wide text-amber-300">
-                                                                        <span>📦 Reserva (Pulmón)</span>
-                                                                        {item.secondary_location_aisle ? (
-                                                                            <span className="rounded bg-amber-800/80 px-1.5 py-0.5 text-[10px] font-bold text-amber-100">
-                                                                                Pasillo {item.secondary_location_aisle}
-                                                                            </span>
+                                                                        <div className="mt-1 text-2xl font-bold text-amber-100">
+                                                                            {item.secondary_location_code || <span className="text-base font-normal text-slate-400">Sin reserva</span>}
+                                                                        </div>
+                                                                        {item.reserve_notes || item.secondary_location_name ? (
+                                                                            <div className="mt-0.5 break-words text-xs font-medium text-amber-200/90">
+                                                                                {item.reserve_notes || item.secondary_location_name}
+                                                                            </div>
                                                                         ) : null}
                                                                     </div>
-                                                                    <div className="mt-1 text-2xl font-bold text-amber-100">
-                                                                        {item.secondary_location_code || <span className="text-base font-normal text-slate-400">Sin reserva</span>}
-                                                                    </div>
-                                                                    {item.reserve_notes || item.secondary_location_name ? (
-                                                                        <div className="mt-0.5 break-words text-xs font-medium text-amber-200/90">
-                                                                            {item.reserve_notes || item.secondary_location_name}
-                                                                        </div>
-                                                                    ) : null}
                                                                 </div>
-                                                            </div>
+                                                            )}
                                                         </div>
                                                     </div>
                                                 </div>

@@ -50,15 +50,19 @@ class InventoryKitController extends Controller
     public function edit(InventoryProduct $inventoryKit): Response
     {
         abort_unless($inventoryKit->isKit(), 404);
-        $inventoryKit->load('kitComponents.component:id,name,sku,product_type');
+        $inventoryKit->load([
+            'kitComponents.component.primaryLocation:id,code,name,amazon_aisle',
+            'kitComponents.component.secondaryLocation:id,code,name,amazon_aisle',
+        ]);
 
         return Inertia::render('Inventory/Kits/Form', [
             'kit' => $inventoryKit,
             'products' => InventoryProduct::query()
                 ->where('is_active', true)
                 ->where('product_type', InventoryProduct::SIMPLE)
+                ->with(['primaryLocation:id,code,name,amazon_aisle', 'secondaryLocation:id,code,name,amazon_aisle'])
                 ->orderBy('name')
-                ->get(['id', 'name', 'sku']),
+                ->get(['id', 'name', 'sku', 'primary_location_id', 'secondary_location_id', 'reserve_notes']),
         ]);
     }
 

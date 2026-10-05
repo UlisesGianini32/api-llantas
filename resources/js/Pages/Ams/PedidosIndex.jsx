@@ -219,12 +219,62 @@ export default function PedidosIndex({
                                                 </div>
                                                 <div>
                                                     <h3 className="text-xl font-semibold leading-tight text-white sm:text-2xl">{item.titulo}</h3>
-                                                    <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-4">
-                                                        <div className="rounded-xl border border-slate-400 px-4 py-3"><div className="text-xs uppercase tracking-wide text-slate-300">Item ID / SKU</div><div className="mt-1 break-all text-base text-white">{item.sku || item.item_id || 'N/A'}</div></div>
-                                                        <div className="rounded-xl border border-slate-400 px-4 py-3"><div className="text-xs uppercase tracking-wide text-slate-300">Cantidad</div><div className="mt-1 text-lg font-bold text-white">{item.cantidad} pzas</div></div>
-                                                        <div className="rounded-xl border border-emerald-500/60 bg-[#0d2822] px-4 py-3"><div className="text-xs uppercase tracking-wide text-emerald-300">📍 Picking</div><div className="mt-1 text-lg font-bold text-emerald-100">{item.primary_location_code || 'Sin asignar'}</div>{item.primary_location_name ? <div className="text-xs text-emerald-300/80 truncate">{item.primary_location_name}</div> : null}</div>
-                                                        <div className={`rounded-xl border px-4 py-3 ${item.secondary_location_code ? 'border-amber-500/60 bg-[#2b1d10]' : 'border-slate-500/40 bg-slate-800/30'}`}><div className="text-xs uppercase tracking-wide text-amber-300">📦 Reserva</div><div className="mt-1 text-lg font-bold text-amber-100">{item.secondary_location_code || 'Sin reserva'}</div>{item.reserve_notes ? <div className="text-xs text-amber-200/90 break-words">{item.reserve_notes}</div> : null}</div>
-                                                    </div>
+                                                    {item.is_kit && item.kit_components && item.kit_components.length > 0 ? (
+                                                        <div className="mt-4 space-y-3">
+                                                            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                                                                <div className="rounded-xl border border-slate-400 px-4 py-3">
+                                                                    <div className="text-xs uppercase tracking-wide text-slate-300">Item ID / SKU</div>
+                                                                    <div className="mt-1 break-all text-base text-white">{item.sku || item.item_id || 'N/A'}</div>
+                                                                </div>
+                                                                <div className="rounded-xl border border-indigo-500/60 bg-indigo-950/40 px-4 py-3">
+                                                                    <div className="flex items-center justify-between text-xs uppercase tracking-wide text-indigo-300">
+                                                                        <span>Cantidad de Kits</span>
+                                                                        <span className="rounded bg-indigo-800/80 px-2 py-0.5 text-[10px] font-bold text-indigo-100">
+                                                                            📦 KIT ({item.kit_components.length} componentes)
+                                                                        </span>
+                                                                    </div>
+                                                                    <div className="mt-1 text-lg font-bold text-white">{item.cantidad} pzas / kits</div>
+                                                                </div>
+                                                            </div>
+
+                                                            <div className="rounded-xl border border-indigo-500/40 bg-indigo-950/20 p-3">
+                                                                <div className="mb-2 flex items-center justify-between border-b border-indigo-500/30 pb-1.5 text-xs text-indigo-300 font-semibold">
+                                                                    <span>📍 Ubicaciones de los componentes para surtir</span>
+                                                                    <span className="text-slate-400 font-normal">Multiplicado por {item.cantidad} kit(s)</span>
+                                                                </div>
+                                                                <div className="space-y-2">
+                                                                    {item.kit_components.map((kc, idx) => (
+                                                                        <div key={idx} className="flex flex-col gap-2 rounded-lg border border-slate-700 bg-slate-900/80 p-2 sm:flex-row sm:items-center sm:justify-between text-xs">
+                                                                            <div className="min-w-0">
+                                                                                <span className="font-mono font-bold text-white bg-slate-800 px-1.5 py-0.5 rounded mr-2 border border-slate-600">{kc.sku || 'N/A'}</span>
+                                                                                <span className="text-slate-300">{kc.name}</span>
+                                                                                <div className="mt-0.5 text-slate-400">
+                                                                                    {kc.quantity} pz por kit &rarr; <strong className="text-amber-300 font-bold">{kc.quantity * item.cantidad} pzs a surtir</strong>
+                                                                                </div>
+                                                                            </div>
+                                                                            <div className="flex shrink-0 items-center gap-2">
+                                                                                <div className="rounded border border-emerald-500/60 bg-[#0d2822] px-2.5 py-1 text-right">
+                                                                                    <div className="text-[10px] text-emerald-300 uppercase font-bold">📍 Picking</div>
+                                                                                    <div className="font-bold text-emerald-100 text-sm">{kc.primary_location_code || 'Sin asignar'}</div>
+                                                                                </div>
+                                                                                <div className={`rounded border px-2.5 py-1 text-right ${kc.secondary_location_code ? 'border-amber-500/60 bg-[#2b1d10]' : 'border-slate-700 bg-slate-800/40'}`}>
+                                                                                    <div className="text-[10px] text-amber-300 uppercase font-bold">📦 Reserva</div>
+                                                                                    <div className="font-bold text-amber-100 text-sm">{kc.secondary_location_code || 'Sin reserva'}</div>
+                                                                                </div>
+                                                                            </div>
+                                                                        </div>
+                                                                    ))}
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    ) : (
+                                                        <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-4">
+                                                            <div className="rounded-xl border border-slate-400 px-4 py-3"><div className="text-xs uppercase tracking-wide text-slate-300">Item ID / SKU</div><div className="mt-1 break-all text-base text-white">{item.sku || item.item_id || 'N/A'}</div></div>
+                                                            <div className="rounded-xl border border-slate-400 px-4 py-3"><div className="text-xs uppercase tracking-wide text-slate-300">Cantidad</div><div className="mt-1 text-lg font-bold text-white">{item.cantidad} pzas</div></div>
+                                                            <div className="rounded-xl border border-emerald-500/60 bg-[#0d2822] px-4 py-3"><div className="text-xs uppercase tracking-wide text-emerald-300">📍 Picking</div><div className="mt-1 text-lg font-bold text-emerald-100">{item.primary_location_code || 'Sin asignar'}</div>{item.primary_location_name ? <div className="text-xs text-emerald-300/80 truncate">{item.primary_location_name}</div> : null}</div>
+                                                            <div className={`rounded-xl border px-4 py-3 ${item.secondary_location_code ? 'border-amber-500/60 bg-[#2b1d10]' : 'border-slate-500/40 bg-slate-800/30'}`}><div className="text-xs uppercase tracking-wide text-amber-300">📦 Reserva</div><div className="mt-1 text-lg font-bold text-amber-100">{item.secondary_location_code || 'Sin reserva'}</div>{item.reserve_notes ? <div className="text-xs text-amber-200/90 break-words">{item.reserve_notes}</div> : null}</div>
+                                                        </div>
+                                                    )}
                                                 </div>
                                             </div>
                                         </div>

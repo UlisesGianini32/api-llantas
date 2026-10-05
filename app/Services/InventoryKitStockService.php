@@ -38,10 +38,19 @@ class InventoryKitStockService
         $kit = $this->kit($kit);
         $components = $kit->relationLoaded('kitComponents')
             ? $kit->kitComponents
-            : $kit->kitComponents()->with('component')->get();
+            : $kit->kitComponents()->with([
+                'component.primaryLocation:id,code,name,amazon_aisle',
+                'component.secondaryLocation:id,code,name,amazon_aisle',
+            ])->get();
 
         return $components->map(function (InventoryKitComponent $component): array {
             $product = $component->component;
+            if ($product && ! $product->relationLoaded('primaryLocation')) {
+                $product->load([
+                    'primaryLocation:id,code,name,amazon_aisle',
+                    'secondaryLocation:id,code,name,amazon_aisle',
+                ]);
+            }
             $physical = $this->stock->physicalStock($product);
             $available = $this->stock->availableStock($product);
 

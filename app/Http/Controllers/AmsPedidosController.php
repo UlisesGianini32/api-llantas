@@ -1259,7 +1259,12 @@ class AmsPedidosController extends Controller
 
         $inventoryBySku = $allSkus !== []
             ? \App\Models\InventoryProduct::query()
-                ->with(['primaryLocation:id,code,name,amazon_aisle', 'secondaryLocation:id,code,name,amazon_aisle'])
+                ->with([
+                    'primaryLocation:id,code,name,amazon_aisle',
+                    'secondaryLocation:id,code,name,amazon_aisle',
+                    'kitComponents.component.primaryLocation:id,code,name,amazon_aisle',
+                    'kitComponents.component.secondaryLocation:id,code,name,amazon_aisle',
+                ])
                 ->whereIn('sku', $allSkus)
                 ->get()
                 ->keyBy(fn ($p) => mb_strtoupper(trim($p->sku)))
@@ -1267,7 +1272,12 @@ class AmsPedidosController extends Controller
 
         $inventoryByMlm = $allItemIds !== []
             ? \App\Models\InventoryChannelLink::query()
-                ->with(['product.primaryLocation:id,code,name,amazon_aisle', 'product.secondaryLocation:id,code,name,amazon_aisle'])
+                ->with([
+                    'product.primaryLocation:id,code,name,amazon_aisle',
+                    'product.secondaryLocation:id,code,name,amazon_aisle',
+                    'product.kitComponents.component.primaryLocation:id,code,name,amazon_aisle',
+                    'product.kitComponents.component.secondaryLocation:id,code,name,amazon_aisle',
+                ])
                 ->where('channel', 'mercado_libre')
                 ->whereIn('external_listing_id', $allItemIds)
                 ->get()
@@ -1322,6 +1332,24 @@ class AmsPedidosController extends Controller
                                 $invProduct = $inventoryByMlm->get($itemIdStr)?->product;
                             }
 
+                            $isKit = (bool) ($invProduct?->isKit());
+                            $kitComponents = $isKit ? $invProduct->kitComponents->map(function ($kc) {
+                                $comp = $kc->component;
+
+                                return [
+                                    'name' => $comp?->name,
+                                    'sku' => $comp?->sku,
+                                    'quantity' => (int) $kc->quantity,
+                                    'primary_location_code' => $comp?->primaryLocation?->code,
+                                    'primary_location_name' => $comp?->primaryLocation?->name,
+                                    'primary_location_aisle' => $comp?->primaryLocation?->amazon_aisle,
+                                    'secondary_location_code' => $comp?->secondaryLocation?->code,
+                                    'secondary_location_name' => $comp?->secondaryLocation?->name,
+                                    'secondary_location_aisle' => $comp?->secondaryLocation?->amazon_aisle,
+                                    'reserve_notes' => $comp?->reserve_notes,
+                                ];
+                            })->values()->all() : [];
+
                             $primaryLoc = $invProduct?->primaryLocation;
                             $secondaryLoc = $invProduct?->secondaryLocation;
 
@@ -1337,6 +1365,8 @@ class AmsPedidosController extends Controller
                                 'open_issue_type' => $issue?->issue_type,
                                 'open_issue_label' => $issue?->issue_type_label,
                                 'open_issue_id' => $issue?->id,
+                                'is_kit' => $isKit,
+                                'kit_components' => $kitComponents,
                                 'primary_location_code' => $primaryLoc?->code,
                                 'primary_location_name' => $primaryLoc?->name,
                                 'primary_location_aisle' => $primaryLoc?->amazon_aisle,

@@ -77,7 +77,14 @@ class InventoryProductController extends Controller
 
     public function store(StoreInventoryProductRequest $request): RedirectResponse
     {
-        InventoryProduct::create([...$request->validated(), 'product_type' => $request->validated('product_type', InventoryProduct::SIMPLE)]);
+        $data = $request->validated();
+        $type = $data['product_type'] ?? InventoryProduct::SIMPLE;
+        if ($type === InventoryProduct::KIT) {
+            $data['primary_location_id'] = null;
+            $data['secondary_location_id'] = null;
+            $data['reserve_notes'] = null;
+        }
+        InventoryProduct::create([...$data, 'product_type' => $type]);
 
         return redirect()->route('inventory.products.index')->with('success', 'Producto creado correctamente.');
     }
@@ -165,6 +172,13 @@ class InventoryProductController extends Controller
 
     public function edit(InventoryProduct $inventoryProduct): Response
     {
+        $inventoryProduct->load([
+            'primaryLocation:id,code,name,amazon_aisle,is_active',
+            'secondaryLocation:id,code,name,amazon_aisle,is_active',
+            'kitComponents.component.primaryLocation:id,code,name,amazon_aisle',
+            'kitComponents.component.secondaryLocation:id,code,name,amazon_aisle',
+        ]);
+
         return Inertia::render('Inventory/Products/Form', [
             'mode' => 'edit',
             'product' => $inventoryProduct,
@@ -187,6 +201,11 @@ class InventoryProductController extends Controller
                     return back()->withInput()->withErrors(['product_type' => 'No se puede convertir a producto simple mientras tenga componentes o reservas activas.']);
                 }
             }
+        }
+        if ($targetType === InventoryProduct::KIT) {
+            $data['primary_location_id'] = null;
+            $data['secondary_location_id'] = null;
+            $data['reserve_notes'] = null;
         }
         $inventoryProduct->update($data);
 
