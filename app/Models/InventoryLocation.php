@@ -11,6 +11,7 @@ class InventoryLocation extends Model
     protected $fillable = [
         'code',
         'name',
+        'amazon_aisle',
         'description',
         'is_active',
         'sort_order',
@@ -27,6 +28,11 @@ class InventoryLocation extends Model
     public function products(): HasMany
     {
         return $this->hasMany(InventoryProduct::class, 'primary_location_id');
+    }
+
+    public function secondaryProducts(): HasMany
+    {
+        return $this->hasMany(InventoryProduct::class, 'secondary_location_id');
     }
 
     public function movements(): HasMany

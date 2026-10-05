@@ -35,6 +35,8 @@ class InventoryProduct extends Model
         'requires_meli_labeling',
         'is_active',
         'primary_location_id',
+        'secondary_location_id',
+        'reserve_notes',
     ];
 
     protected function casts(): array
@@ -52,12 +54,19 @@ class InventoryProduct extends Model
             'requires_meli_labeling' => 'boolean',
             'is_active' => 'boolean',
             'primary_location_id' => 'integer',
+            'secondary_location_id' => 'integer',
+            'reserve_notes' => 'string',
         ];
     }
 
     public function primaryLocation(): BelongsTo
     {
         return $this->belongsTo(InventoryLocation::class, 'primary_location_id');
+    }
+
+    public function secondaryLocation(): BelongsTo
+    {
+        return $this->belongsTo(InventoryLocation::class, 'secondary_location_id');
     }
 
     public function movements(): HasMany

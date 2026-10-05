@@ -16,11 +16,12 @@ class InventoryLocationController extends Controller
     {
         $search = trim((string) $request->input('search', ''));
         $locations = InventoryLocation::query()
-            ->withCount('products')
+            ->withCount(['products', 'secondaryProducts'])
             ->when($search !== '', function ($query) use ($search): void {
                 $query->where(function ($nested) use ($search): void {
                     $nested->where('code', 'like', "%{$search}%")
-                        ->orWhere('name', 'like', "%{$search}%");
+                        ->orWhere('name', 'like', "%{$search}%")
+                        ->orWhere('amazon_aisle', 'like', "%{$search}%");
                 });
             })
             ->orderByRaw('sort_order IS NULL')
@@ -54,7 +55,10 @@ class InventoryLocationController extends Controller
     {
         $inventoryLocation->load([
             'products' => fn ($query) => $query
-                ->select(['id', 'primary_location_id', 'name', 'sku', 'barcode', 'is_active'])
+                ->select(['id', 'primary_location_id', 'secondary_location_id', 'name', 'sku', 'barcode', 'is_active'])
+                ->orderBy('name'),
+            'secondaryProducts' => fn ($query) => $query
+                ->select(['id', 'primary_location_id', 'secondary_location_id', 'reserve_notes', 'name', 'sku', 'barcode', 'is_active'])
                 ->orderBy('name'),
         ]);
 

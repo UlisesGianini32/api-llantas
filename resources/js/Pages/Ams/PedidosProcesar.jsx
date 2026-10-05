@@ -1240,7 +1240,7 @@ export default function PedidosProcesar({
                                                                     )}
                                                                 </div>
                                                             </div>
-                                                            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                                                            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
                                                                 <div className="rounded-xl border border-slate-400 bg-[#1b2a41] px-4 py-3">
                                                                     <div className="text-xs uppercase tracking-wide text-slate-300">
                                                                         Piezas
@@ -1253,9 +1253,45 @@ export default function PedidosProcesar({
                                                                     <div className="text-xs uppercase tracking-wide text-slate-300">
                                                                         SKU
                                                                     </div>
-                                                                    <div className="mt-1 break-all text-3xl font-semibold text-white">
+                                                                    <div className="mt-1 break-all text-2xl font-semibold text-white">
                                                                         {item.sku || 'N/A'}
                                                                     </div>
+                                                                </div>
+                                                                <div className="rounded-xl border border-emerald-500/60 bg-[#0d2822] px-4 py-3">
+                                                                    <div className="flex items-center justify-between text-xs uppercase tracking-wide text-emerald-300">
+                                                                        <span>📍 Picking (Principal)</span>
+                                                                        {item.primary_location_aisle ? (
+                                                                            <span className="rounded bg-emerald-800/80 px-1.5 py-0.5 text-[10px] font-bold text-emerald-100">
+                                                                                Pasillo {item.primary_location_aisle}
+                                                                            </span>
+                                                                        ) : null}
+                                                                    </div>
+                                                                    <div className="mt-1 text-2xl font-bold text-emerald-100">
+                                                                        {item.primary_location_code || <span className="text-base font-normal text-slate-400">Sin asignar</span>}
+                                                                    </div>
+                                                                    {item.primary_location_name ? (
+                                                                        <div className="mt-0.5 truncate text-xs text-emerald-300/80" title={item.primary_location_name}>
+                                                                            {item.primary_location_name}
+                                                                        </div>
+                                                                    ) : null}
+                                                                </div>
+                                                                <div className={`rounded-xl border px-4 py-3 ${item.secondary_location_code ? 'border-amber-500/60 bg-[#2b1d10]' : 'border-slate-600/50 bg-slate-800/40'}`}>
+                                                                    <div className="flex items-center justify-between text-xs uppercase tracking-wide text-amber-300">
+                                                                        <span>📦 Reserva (Pulmón)</span>
+                                                                        {item.secondary_location_aisle ? (
+                                                                            <span className="rounded bg-amber-800/80 px-1.5 py-0.5 text-[10px] font-bold text-amber-100">
+                                                                                Pasillo {item.secondary_location_aisle}
+                                                                            </span>
+                                                                        ) : null}
+                                                                    </div>
+                                                                    <div className="mt-1 text-2xl font-bold text-amber-100">
+                                                                        {item.secondary_location_code || <span className="text-base font-normal text-slate-400">Sin reserva</span>}
+                                                                    </div>
+                                                                    {item.reserve_notes || item.secondary_location_name ? (
+                                                                        <div className="mt-0.5 break-words text-xs font-medium text-amber-200/90">
+                                                                            {item.reserve_notes || item.secondary_location_name}
+                                                                        </div>
+                                                                    ) : null}
                                                                 </div>
                                                             </div>
                                                         </div>

@@ -20,7 +20,7 @@ class InventoryProductController extends Controller
     {
         $search = trim((string) $request->input('search', ''));
         $products = InventoryProduct::query()
-            ->with(['primaryLocation:id,code,name,is_active', 'kitComponents.component:id,name,sku'])
+            ->with(['primaryLocation:id,code,name,amazon_aisle,is_active', 'secondaryLocation:id,code,name,amazon_aisle,is_active', 'kitComponents.component:id,name,sku'])
             ->withSum('movements as physical_stock', 'quantity')
             ->withSum([
                 'reservations as reserved_stock' => fn ($query) => $query
@@ -31,8 +31,14 @@ class InventoryProductController extends Controller
                     $nested->where('name', 'like', "%{$search}%")
                         ->orWhere('sku', 'like', "%{$search}%")
                         ->orWhere('barcode', 'like', "%{$search}%")
+                        ->orWhere('reserve_notes', 'like', "%{$search}%")
                         ->orWhereHas('primaryLocation', function ($location) use ($search): void {
-                            $location->where('code', 'like', "%{$search}%");
+                            $location->where('code', 'like', "%{$search}%")
+                                ->orWhere('name', 'like', "%{$search}%");
+                        })
+                        ->orWhereHas('secondaryLocation', function ($location) use ($search): void {
+                            $location->where('code', 'like', "%{$search}%")
+                                ->orWhere('name', 'like', "%{$search}%");
                         });
                 });
             })
@@ -82,7 +88,8 @@ class InventoryProductController extends Controller
         InventoryKitStockService $kitStock,
     ): Response {
         $inventoryProduct->load([
-            'primaryLocation:id,code,name,is_active',
+            'primaryLocation:id,code,name,amazon_aisle,is_active',
+            'secondaryLocation:id,code,name,amazon_aisle,is_active',
             'kitComponents.component:id,name,sku,product_type',
             'channelLinks',
         ]);
@@ -196,18 +203,22 @@ class InventoryProductController extends Controller
     /** @return \Illuminate\Database\Eloquent\Collection<int, InventoryLocation> */
     private function locationOptions(?InventoryProduct $product = null)
     {
-        $currentId = $product?->primary_location_id;
+        $currentPrimaryId = $product?->primary_location_id;
+        $currentSecondaryId = $product?->secondary_location_id;
 
         return InventoryLocation::query()
-            ->where(function ($query) use ($currentId): void {
+            ->where(function ($query) use ($currentPrimaryId, $currentSecondaryId): void {
                 $query->where('is_active', true);
-                if ($currentId) {
-                    $query->orWhere('id', $currentId);
+                if ($currentPrimaryId) {
+                    $query->orWhere('id', $currentPrimaryId);
+                }
+                if ($currentSecondaryId) {
+                    $query->orWhere('id', $currentSecondaryId);
                 }
             })
             ->orderByRaw('sort_order IS NULL')
             ->orderBy('sort_order')
             ->orderBy('code')
-            ->get(['id', 'code', 'name', 'is_active']);
+            ->get(['id', 'code', 'name', 'amazon_aisle', 'is_active']);
     }
 }

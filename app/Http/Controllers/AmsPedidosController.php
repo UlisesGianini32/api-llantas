@@ -1245,6 +1245,10 @@ class AmsPedidosController extends Controller
             return collect($p->items ?? [])->pluck('item_id');
         })->filter()->map(fn ($id) => (string) $id)->unique()->values()->all();
 
+        $allSkus = $pedidosAgrupados->flatMap(function ($p) {
+            return collect($p->items ?? [])->pluck('sku');
+        })->filter()->map(fn ($s) => trim((string) $s))->filter(fn ($s) => $s !== '' && mb_strtoupper($s) !== 'N/A')->unique()->values()->all();
+
         $openIssues = $allItemIds !== []
             ? \App\Models\AmsProductIssue::query()
                 ->whereIn('item_id', $allItemIds)
@@ -1253,8 +1257,25 @@ class AmsPedidosController extends Controller
                 ->keyBy('item_id')
             : collect();
 
+        $inventoryBySku = $allSkus !== []
+            ? \App\Models\InventoryProduct::query()
+                ->with(['primaryLocation:id,code,name,amazon_aisle', 'secondaryLocation:id,code,name,amazon_aisle'])
+                ->whereIn('sku', $allSkus)
+                ->get()
+                ->keyBy(fn ($p) => mb_strtoupper(trim($p->sku)))
+            : collect();
+
+        $inventoryByMlm = $allItemIds !== []
+            ? \App\Models\InventoryChannelLink::query()
+                ->with(['product.primaryLocation:id,code,name,amazon_aisle', 'product.secondaryLocation:id,code,name,amazon_aisle'])
+                ->where('channel', 'mercado_libre')
+                ->whereIn('external_listing_id', $allItemIds)
+                ->get()
+                ->keyBy('external_listing_id')
+            : collect();
+
         return $pedidosAgrupados
-            ->map(function ($p) use ($incluirMarca, $openIssues) {
+            ->map(function ($p) use ($incluirMarca, $openIssues, $inventoryBySku, $inventoryByMlm) {
                 $row = [
                     'group_key' => $p->group_key,
                     'id_local' => (int) ($p->id_local ?? 0),
@@ -1287,9 +1308,22 @@ class AmsPedidosController extends Controller
                     'total_piezas' => $p->total_piezas,
                     'total_pedido' => (float) $p->total_pedido,
                     'items' => collect($p->items)
-                        ->map(function ($i) use ($incluirMarca, $openIssues) {
+                        ->map(function ($i) use ($incluirMarca, $openIssues, $inventoryBySku, $inventoryByMlm) {
                             $itemIdStr = (string) ($i->item_id ?? '');
+                            $skuNormalized = mb_strtoupper(trim((string) ($i->sku ?? '')));
                             $issue = $openIssues->get($itemIdStr);
+
+                            /** @var \App\Models\InventoryProduct|null $invProduct */
+                            $invProduct = ($skuNormalized !== '' && $skuNormalized !== 'N/A')
+                                ? $inventoryBySku->get($skuNormalized)
+                                : null;
+
+                            if (! $invProduct && $itemIdStr !== '') {
+                                $invProduct = $inventoryByMlm->get($itemIdStr)?->product;
+                            }
+
+                            $primaryLoc = $invProduct?->primaryLocation;
+                            $secondaryLoc = $invProduct?->secondaryLocation;
 
                             $item = [
                                 'item_id' => $itemIdStr,
@@ -1303,6 +1337,13 @@ class AmsPedidosController extends Controller
                                 'open_issue_type' => $issue?->issue_type,
                                 'open_issue_label' => $issue?->issue_type_label,
                                 'open_issue_id' => $issue?->id,
+                                'primary_location_code' => $primaryLoc?->code,
+                                'primary_location_name' => $primaryLoc?->name,
+                                'primary_location_aisle' => $primaryLoc?->amazon_aisle,
+                                'secondary_location_code' => $secondaryLoc?->code,
+                                'secondary_location_name' => $secondaryLoc?->name,
+                                'secondary_location_aisle' => $secondaryLoc?->amazon_aisle,
+                                'reserve_notes' => $invProduct?->reserve_notes,
                             ];
                             if ($incluirMarca && isset($i->ams_marca_label)) {
                                 $item['ams_marca_label'] = (string) $i->ams_marca_label;

@@ -33,6 +33,8 @@ class UpdateInventoryProductRequest extends FormRequest
             'price_public' => ['nullable', 'numeric', 'min:0'],
             'is_active' => ['sometimes', 'boolean'],
             'primary_location_id' => ['nullable', 'integer', 'exists:inventory_locations,id'],
+            'secondary_location_id' => ['nullable', 'integer', 'exists:inventory_locations,id'],
+            'reserve_notes' => ['nullable', 'string', 'max:500'],
         ];
     }
 
