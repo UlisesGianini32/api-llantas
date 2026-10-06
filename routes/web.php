@@ -259,11 +259,18 @@ Route::middleware(['auth', 'role'])->group(function () {
         Route::get('/', [InventoryChannelLinkController::class, 'index'])->name('index');
         Route::get('/crear', [InventoryChannelLinkController::class, 'create'])->name('create');
         Route::post('/', [InventoryChannelLinkController::class, 'store'])->name('store');
-        Route::get('/mercado-libre/importar', [InventoryChannelLinkController::class, 'meliImport'])->name('mercado-libre.import');
-        Route::post('/mercado-libre/importar', [InventoryChannelLinkController::class, 'applyMeliImport'])->name('mercado-libre.apply');
+        Route::get('/importar', [InventoryChannelLinkController::class, 'import'])->name('import');
+        Route::post('/importar', [InventoryChannelLinkController::class, 'applyImport'])->name('import.apply');
+        Route::get('/mercado-libre/importar', [InventoryChannelLinkController::class, 'import'])->name('mercado-libre.import');
+        Route::post('/mercado-libre/importar', [InventoryChannelLinkController::class, 'applyImport'])->name('mercado-libre.apply');
+        Route::get('/buscar-productos', [InventoryChannelLinkController::class, 'searchProducts'])->name('search-products');
         Route::get('/mercado-libre/buscar-productos', [InventoryChannelLinkController::class, 'searchProducts'])->name('mercado-libre.search-products');
+        Route::post('/vincular-manual', [InventoryChannelLinkController::class, 'linkManual'])->name('link-manual');
         Route::post('/mercado-libre/vincular-manual', [InventoryChannelLinkController::class, 'linkManual'])->name('mercado-libre.link-manual');
+        Route::post('/vincular-seleccionados', [InventoryChannelLinkController::class, 'linkSelected'])->name('link-selected');
         Route::post('/mercado-libre/vincular-seleccionados', [InventoryChannelLinkController::class, 'linkSelected'])->name('mercado-libre.link-selected');
+        Route::post('/amazon/cargar-reporte', [InventoryChannelLinkController::class, 'uploadAmazonReport'])->name('amazon.upload-report');
+        Route::post('/amazon/limpiar-reporte', [InventoryChannelLinkController::class, 'clearAmazonReport'])->name('amazon.clear-report');
         Route::get('/mercado-libre/stock', [InventoryChannelLinkController::class, 'stock'])->name('mercado-libre.stock');
         Route::post('/mercado-libre/stock/sync', [InventoryChannelLinkController::class, 'syncMeliStock'])->name('mercado-libre.stock.sync');
         Route::get('/{inventoryChannelLink}', [InventoryChannelLinkController::class, 'show'])

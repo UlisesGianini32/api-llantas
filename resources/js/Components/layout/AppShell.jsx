@@ -215,11 +215,11 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                         Envíos FULL (Cajas 30)
                     </NavItem>
                     <NavItem
-                        href="/almacen/canales/mercado-libre/importar"
-                        active={currentPath.startsWith('/almacen/canales/mercado-libre/importar')}
+                        href="/almacen/canales/importar"
+                        active={currentPath.startsWith('/almacen/canales/importar') || currentPath.startsWith('/almacen/canales/mercado-libre/importar')}
                         onNavigate={onNavigate}
                     >
-                        Importar vínculos ML
+                        Vincular publicaciones
                     </NavItem>
                     <NavItem href="/almacen/canales/mercado-libre/stock" active={currentPath.startsWith('/almacen/canales/mercado-libre/stock')} onNavigate={onNavigate}>
                         Stock ML
@@ -430,11 +430,11 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
     Enlaces de canales
 </NavItem>}
 {!isAdmin && <NavItem
-    href="/almacen/canales/mercado-libre/importar"
-    active={currentPath.startsWith('/almacen/canales/mercado-libre/importar')}
+    href="/almacen/canales/importar"
+    active={currentPath.startsWith('/almacen/canales/importar') || currentPath.startsWith('/almacen/canales/mercado-libre/importar')}
     onNavigate={onNavigate}
 >
-    Importar vínculos ML
+    Vincular publicaciones
 </NavItem>}
 {!isAdmin && <NavItem href="/almacen/canales/mercado-libre/stock" active={currentPath.startsWith('/almacen/canales/mercado-libre/stock')} onNavigate={onNavigate}>
     Stock ML
