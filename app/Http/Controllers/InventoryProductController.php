@@ -97,7 +97,8 @@ class InventoryProductController extends Controller
         $inventoryProduct->load([
             'primaryLocation:id,code,name,amazon_aisle,is_active',
             'secondaryLocation:id,code,name,amazon_aisle,is_active',
-            'kitComponents.component:id,name,sku,product_type',
+            'kitComponents.component.primaryLocation:id,code,name,amazon_aisle',
+            'kitComponents.component.secondaryLocation:id,code,name,amazon_aisle',
             'channelLinks',
         ]);
         $movements = $inventoryProduct->movements()

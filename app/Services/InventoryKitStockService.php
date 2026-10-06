@@ -36,31 +36,54 @@ class InventoryKitStockService
     public function componentSummary(InventoryProduct|int $kit): array
     {
         $kit = $this->kit($kit);
-        $components = $kit->relationLoaded('kitComponents')
-            ? $kit->kitComponents
-            : $kit->kitComponents()->with([
-                'component.primaryLocation:id,code,name,amazon_aisle',
-                'component.secondaryLocation:id,code,name,amazon_aisle',
-            ])->get();
+        $kit->load([
+            'kitComponents' => function ($q) {
+                $q->with([
+                    'component' => function ($cq) {
+                        $cq->with([
+                            'primaryLocation:id,code,name,amazon_aisle',
+                            'secondaryLocation:id,code,name,amazon_aisle',
+                        ]);
+                    },
+                ]);
+            },
+        ]);
+
+        $components = $kit->kitComponents;
 
         return $components->map(function (InventoryKitComponent $component): array {
             $product = $component->component;
-            if ($product && ! $product->relationLoaded('primaryLocation')) {
-                $product->load([
-                    'primaryLocation:id,code,name,amazon_aisle',
-                    'secondaryLocation:id,code,name,amazon_aisle',
-                ]);
+            if ($product) {
+                if (! array_key_exists('primary_location_id', $product->getAttributes())) {
+                    $product->refresh();
+                }
+                if (! $product->relationLoaded('primaryLocation')) {
+                    $product->load([
+                        'primaryLocation:id,code,name,amazon_aisle',
+                        'secondaryLocation:id,code,name,amazon_aisle',
+                    ]);
+                }
             }
             $physical = $this->stock->physicalStock($product);
             $available = $this->stock->availableStock($product);
 
             return [
+                'id' => $component->id,
                 'component' => $product,
                 'quantity' => (int) $component->quantity,
                 'physical_stock' => $physical,
                 'available_stock' => $available,
                 'physical_capacity' => intdiv(max(0, $physical), (int) $component->quantity),
                 'available_capacity' => intdiv(max(0, $available), (int) $component->quantity),
+                'primary_location' => $product?->primaryLocation,
+                'secondary_location' => $product?->secondaryLocation,
+                'primary_location_code' => $product?->primaryLocation?->code,
+                'primary_location_name' => $product?->primaryLocation?->name,
+                'primary_location_aisle' => $product?->primaryLocation?->amazon_aisle,
+                'secondary_location_code' => $product?->secondaryLocation?->code,
+                'secondary_location_name' => $product?->secondaryLocation?->name,
+                'secondary_location_aisle' => $product?->secondaryLocation?->amazon_aisle,
+                'reserve_notes' => $product?->reserve_notes,
             ];
         })->values()->all();
     }

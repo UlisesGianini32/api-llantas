@@ -8,19 +8,42 @@ use App\Models\InventoryProduct;
 use App\Services\InventoryKitService;
 use App\Services\InventoryKitStockService;
 use Illuminate\Http\RedirectResponse;
+use Illuminate\Http\Request;
 use Inertia\Inertia;
 use Inertia\Response;
 use InvalidArgumentException;
 
 class InventoryKitController extends Controller
 {
-    public function index(InventoryKitStockService $stock): Response
+    public function index(Request $request, InventoryKitStockService $stock): Response
     {
-        $kits = InventoryProduct::query()
+        $search = trim((string) $request->input('search', ''));
+        $perPageInput = $request->input('per_page', '50');
+        $perPage = ($perPageInput === 'all' || (int) $perPageInput >= 500) ? 500 : max(10, (int) $perPageInput);
+
+        $query = InventoryProduct::query()
             ->where('product_type', InventoryProduct::KIT)
-            ->with('kitComponents.component:id,name,sku')
-            ->orderBy('name')
-            ->paginate(25);
+            ->with([
+                'kitComponents.component' => function ($q) {
+                    $q->with([
+                        'primaryLocation:id,code,name,amazon_aisle',
+                        'secondaryLocation:id,code,name,amazon_aisle',
+                    ]);
+                },
+            ]);
+
+        if ($search !== '') {
+            $query->where(function ($q) use ($search) {
+                $q->where('name', 'like', "%{$search}%")
+                    ->orWhere('sku', 'like', "%{$search}%")
+                    ->orWhereHas('kitComponents.component', function ($cq) use ($search) {
+                        $cq->where('name', 'like', "%{$search}%")
+                            ->orWhere('sku', 'like', "%{$search}%");
+                    });
+            });
+        }
+
+        $kits = $query->orderBy('name')->paginate($perPage)->withQueryString();
 
         $kitStocks = $stock->stocksForKits($kits->getCollection());
         $kits->getCollection()->each(function (InventoryProduct $kit) use ($kitStocks): void {
@@ -30,13 +53,18 @@ class InventoryKitController extends Controller
             $kit->setAttribute('reserved_stock', max(0, $values['physical_stock'] - $values['available_stock']));
         });
 
-        return Inertia::render('Inventory/Kits/Index', ['kits' => $kits]);
+        return Inertia::render('Inventory/Kits/Index', [
+            'kits' => $kits,
+            'filters' => [
+                'search' => $search,
+                'per_page' => $perPageInput,
+            ],
+        ]);
     }
 
     public function show(InventoryProduct $inventoryKit, InventoryKitStockService $stock): Response
     {
         abort_unless($inventoryKit->isKit(), 404);
-        $inventoryKit->load('kitComponents.component:id,name,sku,product_type');
 
         return Inertia::render('Inventory/Kits/Show', [
             'kit' => $inventoryKit,
