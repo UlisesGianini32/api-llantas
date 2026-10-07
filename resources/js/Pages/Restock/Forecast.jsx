@@ -9,6 +9,7 @@ export default function RestockForecast({
     brands = [],
     brandConfigs = {},
     presets = {},
+    suppliers = [],
 }) {
     const [selectedBrand, setSelectedBrand] = useState(filters.brand || '')
     const [selectedStatus, setSelectedStatus] = useState(filters.status || '')
@@ -764,8 +765,14 @@ export default function RestockForecast({
                                     value={configSupplier}
                                     onChange={(e) => setConfigSupplier(e.target.value)}
                                     placeholder="Nombre del proveedor o distribuidor"
+                                    list="forecast-suppliers-list"
                                     className="mt-1 w-full rounded-xl border border-slate-300 p-2 dark:border-neutral-700 dark:bg-neutral-950 dark:text-white"
                                 />
+                                <datalist id="forecast-suppliers-list">
+                                    {suppliers.map((s) => (
+                                        <option key={s} value={s} />
+                                    ))}
+                                </datalist>
                             </div>
 
                             {/* PARAMETERS GRID */}

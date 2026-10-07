@@ -9,7 +9,7 @@ const fields = [
     ['price_public', 'Precio público'],
 ]
 
-export default function InventoryProductForm({ mode, product, locations = [] }) {
+export default function InventoryProductForm({ mode, product, locations = [], suppliers = [] }) {
     const editing = mode === 'edit'
     const { data, setData, post, put, processing, errors } = useForm({
         sku: product?.sku || '',
@@ -51,7 +51,7 @@ export default function InventoryProductForm({ mode, product, locations = [] }) 
                     <div className="grid gap-5 sm:grid-cols-2">
                         <label className="sm:col-span-2"><span className="mb-1 block text-sm font-semibold">Nombre *</span><input value={data.name} onChange={(e) => setData('name', e.target.value)} className="w-full rounded-xl border border-slate-300 px-4 py-2.5 dark:border-neutral-700 dark:bg-neutral-950 dark:text-white" />{fieldError('name')}</label>
                         <label><span className="mb-1 block text-sm font-semibold">Marca</span><input value={data.brand} onChange={(e) => setData('brand', e.target.value)} placeholder="Ej. BUNEE, JOICO, MICHELIN..." className="w-full rounded-xl border border-slate-300 px-4 py-2.5 dark:border-neutral-700 dark:bg-neutral-950 dark:text-white" />{fieldError('brand')}</label>
-                        <label><span className="mb-1 block text-sm font-semibold">Proveedor / Fabricante</span><input value={data.supplier} onChange={(e) => setData('supplier', e.target.value)} placeholder="Distribuidor o fabricante" className="w-full rounded-xl border border-slate-300 px-4 py-2.5 dark:border-neutral-700 dark:bg-neutral-950 dark:text-white" />{fieldError('supplier')}</label>
+                        <label><span className="mb-1 block text-sm font-semibold">Proveedor / Fabricante</span><input value={data.supplier} onChange={(e) => setData('supplier', e.target.value)} placeholder="Distribuidor o fabricante" list="suppliers-list" className="w-full rounded-xl border border-slate-300 px-4 py-2.5 dark:border-neutral-700 dark:bg-neutral-950 dark:text-white" /><datalist id="suppliers-list">{suppliers.map((s) => <option key={s} value={s} />)}</datalist>{fieldError('supplier')}</label>
                         <label><span className="mb-1 block text-sm font-semibold">SKU *</span><input value={data.sku} onChange={(e) => setData('sku', e.target.value)} className="w-full rounded-xl border border-slate-300 px-4 py-2.5 font-mono dark:border-neutral-700 dark:bg-neutral-950 dark:text-white" />{fieldError('sku')}</label>
                         <label><span className="mb-1 block text-sm font-semibold">Código de barras principal</span><input value={data.barcode} onChange={(e) => setData('barcode', e.target.value)} placeholder="Código de barras 1" className="w-full rounded-xl border border-slate-300 px-4 py-2.5 font-mono dark:border-neutral-700 dark:bg-neutral-950 dark:text-white" />{fieldError('barcode')}</label>
                         <label><span className="mb-1 block text-sm font-semibold">Segundo código de barras (Nueva presentación)</span><input value={data.barcode_secondary} onChange={(e) => setData('barcode_secondary', e.target.value)} placeholder="Código de barras 2 / presentación alterna" className="w-full rounded-xl border border-slate-300 px-4 py-2.5 font-mono dark:border-neutral-700 dark:bg-neutral-950 dark:text-white" />{fieldError('barcode_secondary')}</label>

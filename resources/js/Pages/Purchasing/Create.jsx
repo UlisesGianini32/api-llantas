@@ -13,6 +13,7 @@ function formatCurrency(val) {
 export default function PurchasingCreate({
     locations = [],
     products = [],
+    registeredSuppliers = [],
     prefillSupplier = '',
     prefillBrand = '',
 }) {
@@ -47,6 +48,27 @@ export default function PurchasingCreate({
             return matchesBrand && matchesSearch
         })
     }, [products, productSearch, selectedBrandFilter])
+
+    const handleSupplierSelect = (val) => {
+        setData('supplier_name', val)
+        const match = registeredSuppliers.find((s) => s.name.toLowerCase() === val.toLowerCase().trim())
+        if (match) {
+            const updates = { supplier_name: val }
+            if (match.brands && match.brands.length > 0 && !data.brand) {
+                const primaryBrand = match.brands.find((b) => b.is_primary)?.brand || match.brands[0]?.brand
+                if (primaryBrand) {
+                    updates.brand = primaryBrand
+                    setSelectedBrandFilter(primaryBrand)
+                }
+            }
+            if (match.lead_time_days > 0 && !data.expected_delivery_date) {
+                const date = new Date()
+                date.setDate(date.getDate() + match.lead_time_days)
+                updates.expected_delivery_date = date.toISOString().split('T')[0]
+            }
+            setData((prev) => ({ ...prev, ...updates }))
+        }
+    }
 
     const distinctBrands = useMemo(() => {
         const set = new Set()
@@ -159,10 +181,18 @@ export default function PurchasingCreate({
                                     type="text"
                                     required
                                     value={data.supplier_name}
-                                    onChange={(e) => setData('supplier_name', e.target.value)}
-                                    placeholder="Ej. Michelin México, Continental, Cooper..."
+                                    onChange={(e) => handleSupplierSelect(e.target.value)}
+                                    placeholder="Selecciona o escribe un proveedor..."
+                                    list="registered-suppliers-list"
                                     className="mt-1.5 w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2 text-sm text-slate-800 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-100"
                                 />
+                                <datalist id="registered-suppliers-list">
+                                    {registeredSuppliers.map((s) => (
+                                        <option key={s.id} value={s.name}>
+                                            {s.contact_name ? `${s.contact_name} - ` : ''}{s.lead_time_days ? `${s.lead_time_days}d entrega` : ''}
+                                        </option>
+                                    ))}
+                                </datalist>
                                 {errors.supplier_name && (
                                     <p className="mt-1 text-xs text-rose-500">{errors.supplier_name}</p>
                                 )}

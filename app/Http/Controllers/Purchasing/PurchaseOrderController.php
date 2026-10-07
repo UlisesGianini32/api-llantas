@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\InventoryLocation;
 use App\Models\InventoryProduct;
 use App\Models\PurchaseOrder;
+use App\Models\Supplier;
 use App\Services\Purchasing\PurchaseOrderService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
@@ -85,9 +86,16 @@ class PurchaseOrderController extends Controller
             ->orderBy('name')
             ->get(['id', 'sku', 'name', 'brand', 'supplier', 'cost']);
 
+        $registeredSuppliers = Supplier::query()
+            ->where('is_active', true)
+            ->with('brands')
+            ->orderBy('name')
+            ->get(['id', 'name', 'contact_name', 'phone', 'email', 'lead_time_days', 'credit_days']);
+
         return Inertia::render('Purchasing/Create', [
             'locations' => $locations,
             'products' => $products,
+            'registeredSuppliers' => $registeredSuppliers,
             'prefillSupplier' => $request->input('supplier', ''),
             'prefillBrand' => $request->input('brand', ''),
         ]);

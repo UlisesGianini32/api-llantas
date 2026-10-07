@@ -225,6 +225,7 @@ const ALL_SEARCH_ITEMS = [
     { title: 'Kits y Ensambles', desc: 'Productos agrupados con stock derivado', href: '/almacen/kits', category: 'Inventario', icon: IconPuzzle },
     { title: 'Pronóstico de Compras', desc: 'Sugerencias de reabastecimiento y días de stock', href: '/reabastecimiento/pronostico', category: 'Inventario', icon: IconChart },
     { title: 'Órdenes de Compra', desc: 'Gestión de pedidos a proveedores', href: '/compras/ordenes', category: 'Inventario', icon: IconShoppingBag },
+    { title: 'Proveedores y Marcas', desc: 'Directorio de proveedores y marcas que proveen', href: '/compras/proveedores', category: 'Inventario', icon: IconTruck },
     { title: 'Vincular Publicaciones', desc: 'Vincular catálogo con Mercado Libre, Amazon y Shopify', href: '/almacen/canales/importar', category: 'Inventario', icon: IconTag },
     { title: 'Stock Mercado Libre', desc: 'Monitoreo de existencias publicadas en MeLi', href: '/almacen/canales/mercado-libre/stock', category: 'Inventario', icon: IconMeli },
     { title: 'Comparar ML', desc: 'Comparativa de precios y competidores en ML', href: '/ml/compare', category: 'Inventario', icon: IconMeli },
@@ -656,6 +657,14 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                             onNavigate={onNavigate}
                         >
                             Órdenes de Compra
+                        </NavItem>
+                        <NavItem
+                            href="/compras/proveedores"
+                            icon={IconTruck}
+                            active={currentPath.startsWith('/compras/proveedores') || currentPath.startsWith('/proveedores')}
+                            onNavigate={onNavigate}
+                        >
+                            Proveedores y Marcas
                         </NavItem>
                         <NavItem
                             href="/almacen/canales/importar"

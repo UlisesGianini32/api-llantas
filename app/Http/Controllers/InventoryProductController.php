@@ -7,6 +7,7 @@ use App\Http\Requests\UpdateInventoryProductRequest;
 use App\Models\InventoryLocation;
 use App\Models\InventoryProduct;
 use App\Models\InventoryReservation;
+use App\Models\Supplier;
 use App\Services\InventoryKitStockService;
 use App\Services\InventoryStockService;
 use Illuminate\Http\RedirectResponse;
@@ -73,6 +74,9 @@ class InventoryProductController extends Controller
             'mode' => 'create',
             'product' => null,
             'locations' => $this->locationOptions(),
+            'suppliers' => \Illuminate\Support\Facades\Schema::hasTable('suppliers')
+                ? Supplier::query()->where('is_active', true)->pluck('name')
+                : [],
         ]);
     }
 
@@ -185,6 +189,9 @@ class InventoryProductController extends Controller
             'mode' => 'edit',
             'product' => $inventoryProduct,
             'locations' => $this->locationOptions($inventoryProduct),
+            'suppliers' => \Illuminate\Support\Facades\Schema::hasTable('suppliers')
+                ? Supplier::query()->where('is_active', true)->pluck('name')
+                : [],
         ]);
     }
 

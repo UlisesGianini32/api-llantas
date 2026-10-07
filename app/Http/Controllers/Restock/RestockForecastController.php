@@ -37,6 +37,9 @@ class RestockForecastController extends Controller
             'brands' => $report['brands'],
             'brandConfigs' => $report['brand_configs'],
             'presets' => $report['presets'],
+            'suppliers' => \Illuminate\Support\Facades\Schema::hasTable('suppliers')
+                ? \App\Models\Supplier::where('is_active', true)->pluck('name')
+                : [],
         ]);
     }
 

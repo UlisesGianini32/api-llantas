@@ -50,6 +50,7 @@ use App\Http\Controllers\ProductoCompuestoController;
 use App\Http\Controllers\ProductoController;
 use App\Http\Controllers\ProductoSyncController;
 use App\Http\Controllers\Purchasing\PurchaseOrderController;
+use App\Http\Controllers\Purchasing\SupplierController;
 use App\Http\Controllers\QzTrayController;
 use App\Http\Controllers\Restock\RestockForecastController;
 use App\Http\Controllers\Settings\ChannelSettingsController;
@@ -197,6 +198,22 @@ Route::middleware(['auth', 'role'])->group(function () {
         Route::post('/{purchaseOrder}/cancelar', [PurchaseOrderController::class, 'cancel'])
             ->whereNumber('purchaseOrder')->name('cancel');
     });
+
+    // PROVEEDORES Y MARCAS
+    Route::prefix('compras/proveedores')->name('purchasing.suppliers.')->group(function () {
+        Route::get('/', [SupplierController::class, 'index'])->name('index');
+        Route::post('/', [SupplierController::class, 'store'])->name('store');
+        Route::get('/buscar', [SupplierController::class, 'search'])->name('search');
+        Route::get('/{supplier}', [SupplierController::class, 'show'])
+            ->whereNumber('supplier')->name('show');
+        Route::put('/{supplier}', [SupplierController::class, 'update'])
+            ->whereNumber('supplier')->name('update');
+        Route::patch('/{supplier}/estado', [SupplierController::class, 'toggle'])
+            ->whereNumber('supplier')->name('toggle');
+        Route::delete('/{supplier}', [SupplierController::class, 'destroy'])
+            ->whereNumber('supplier')->name('destroy');
+    });
+    Route::get('/proveedores', fn () => redirect()->route('purchasing.suppliers.index'));
 
     // ALMACÉN: catálogo maestro independiente de llantas y Syscom.
     Route::prefix('almacen/productos')->name('inventory.products.')->group(function () {
