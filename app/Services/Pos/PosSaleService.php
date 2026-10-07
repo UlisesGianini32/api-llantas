@@ -29,30 +29,22 @@ class PosSaleService
     public function getDefaultLocation(): InventoryLocation
     {
         $location = InventoryLocation::query()
-            ->whereIn('code', ['MOSTRADOR', 'SALON', 'TIENDA'])
+            ->whereIn('code', ['MOSTRADOR', 'SALON', 'TIENDA', 'BODEGA', 'ALMACEN'])
             ->first();
 
         if ($location) {
             return $location;
         }
 
-        $active = InventoryLocation::query()
-            ->where('is_active', true)
-            ->orderBy('sort_order')
-            ->orderBy('id')
-            ->first();
-
-        if ($active) {
-            return $active;
-        }
-
-        return InventoryLocation::create([
-            'code' => 'MOSTRADOR',
-            'name' => 'Salón / Mostrador',
-            'description' => 'Ubicación física predeterminada para ventas en mostrador',
-            'is_active' => true,
-            'sort_order' => 1,
-        ]);
+        return InventoryLocation::firstOrCreate(
+            ['code' => 'MOSTRADOR'],
+            [
+                'name' => 'Salón / Mostrador',
+                'description' => 'Ubicación física predeterminada para ventas en mostrador',
+                'is_active' => true,
+                'sort_order' => 1,
+            ]
+        );
     }
 
     /**
@@ -61,67 +53,106 @@ class PosSaleService
     public function searchProducts(string $query, ?int $locationId = null): array
     {
         $query = trim($query);
+        $productsQuery = InventoryProduct::query()
+            ->with(['primaryLocation:id,code,name', 'secondaryLocation:id,code,name'])
+            ->where('is_active', true);
+
         if ($query === '') {
-            $products = InventoryProduct::query()
-                ->where('is_active', true)
+            $products = $productsQuery
                 ->orderBy('name')
-                ->limit(20)
+                ->limit(30)
                 ->get();
         } else {
-            $products = InventoryProduct::query()
-                ->where('is_active', true)
+            $products = $productsQuery
                 ->where(function ($q) use ($query) {
                     $q->where('sku', 'like', "%{$query}%")
                         ->orWhere('barcode', $query)
                         ->orWhere('barcode', 'like', "%{$query}%")
                         ->orWhere('name', 'like', "%{$query}%");
                 })
-                ->limit(25)
+                ->limit(40)
                 ->get();
         }
 
-        $location = $locationId
+        $location = ($locationId && $locationId > 0)
             ? InventoryLocation::find($locationId)
-            : $this->getDefaultLocation();
+            : null;
 
         // Batch pre-fetch stock for simple products to eradicate N+1 queries
         $simpleProductIds = $products->where('product_type', InventoryProduct::SIMPLE)->pluck('id')->all();
 
         $physicalStocks = [];
         $reservedStocks = [];
+        $globalPhysical = [];
+        $globalReserved = [];
 
         if (! empty($simpleProductIds)) {
-            $movementQuery = InventoryMovement::query()
-                ->whereIn('inventory_product_id', $simpleProductIds);
-            if ($location) {
-                $movementQuery->where('inventory_location_id', $location->id);
-            }
-            $physicalStocks = $movementQuery->groupBy('inventory_product_id')
+            // Global physical stock (across all locations)
+            $globalPhysical = InventoryMovement::query()
+                ->whereIn('inventory_product_id', $simpleProductIds)
+                ->groupBy('inventory_product_id')
                 ->selectRaw('inventory_product_id, SUM(quantity) as total')
                 ->pluck('total', 'inventory_product_id')
                 ->all();
 
-            $resQuery = InventoryReservation::query()
+            // Global reserved stock
+            $globalReserved = InventoryReservation::query()
                 ->whereIn('inventory_product_id', $simpleProductIds)
-                ->where('status', InventoryReservation::ACTIVE);
-            if ($location) {
-                $resQuery->where('inventory_location_id', $location->id);
-            }
-            $reservedStocks = $resQuery->groupBy('inventory_product_id')
+                ->where('status', InventoryReservation::ACTIVE)
+                ->groupBy('inventory_product_id')
                 ->selectRaw('inventory_product_id, SUM(quantity) as total')
                 ->pluck('total', 'inventory_product_id')
                 ->all();
+
+            if ($location) {
+                $physicalStocks = InventoryMovement::query()
+                    ->whereIn('inventory_product_id', $simpleProductIds)
+                    ->where('inventory_location_id', $location->id)
+                    ->groupBy('inventory_product_id')
+                    ->selectRaw('inventory_product_id, SUM(quantity) as total')
+                    ->pluck('total', 'inventory_product_id')
+                    ->all();
+
+                $reservedStocks = InventoryReservation::query()
+                    ->whereIn('inventory_product_id', $simpleProductIds)
+                    ->where('status', InventoryReservation::ACTIVE)
+                    ->where('inventory_location_id', $location->id)
+                    ->groupBy('inventory_product_id')
+                    ->selectRaw('inventory_product_id, SUM(quantity) as total')
+                    ->pluck('total', 'inventory_product_id')
+                    ->all();
+            } else {
+                $physicalStocks = $globalPhysical;
+                $reservedStocks = $globalReserved;
+            }
         }
 
-        return $products->map(function (InventoryProduct $product) use ($physicalStocks, $reservedStocks) {
+        return $products->map(function (InventoryProduct $product) use ($physicalStocks, $reservedStocks, $globalPhysical, $globalReserved, $location) {
             if ($product->isKit()) {
                 $physical = $this->kitStockService->physicalStock($product);
                 $available = $this->kitStockService->availableStock($product);
                 $reserved = max(0, $physical - $available);
+                $globalAvailable = $available;
             } else {
                 $physical = (int) ($physicalStocks[$product->id] ?? 0);
                 $reserved = (int) ($reservedStocks[$product->id] ?? 0);
                 $available = max(0, $physical - $reserved);
+
+                $gPhys = (int) ($globalPhysical[$product->id] ?? 0);
+                $gRes = (int) ($globalReserved[$product->id] ?? 0);
+                $globalAvailable = max(0, $gPhys - $gRes);
+            }
+
+            // Fallback inteligente para precio público si no está configurado
+            $publicPrice = (float) ($product->price_public ?? 0);
+            if ($publicPrice <= 0) {
+                $publicPrice = (float) ($product->price_mercado_libre ?: ($product->price_amazon ?: ($product->cost ? round($product->cost * 1.30, 2) : 0)));
+            }
+
+            // Fallback inteligente para precio estilista
+            $stylistPrice = (float) ($product->price_stylist ?? 0);
+            if ($stylistPrice <= 0) {
+                $stylistPrice = $publicPrice > 0 ? $publicPrice : (float) ($product->cost ? round($product->cost * 1.15, 2) : 0);
             }
 
             return [
@@ -129,15 +160,20 @@ class PosSaleService
                 'sku' => $product->sku,
                 'barcode' => $product->barcode,
                 'name' => $product->name,
+                'brand' => $product->brand,
                 'product_type' => $product->product_type,
                 'is_kit' => $product->isKit(),
-                'price_public' => (float) ($product->price_public ?? 0),
-                'price_stylist' => (float) ($product->price_stylist ?? $product->price_public ?? 0),
+                'price_public' => $publicPrice,
+                'price_stylist' => $stylistPrice,
                 'cost' => (float) ($product->cost ?? 0),
                 'physical_stock' => $physical,
                 'reserved_stock' => $reserved,
                 'available_stock' => $available,
+                'global_available_stock' => $globalAvailable,
+                'has_specific_location' => $location !== null,
                 'primary_location_id' => $product->primary_location_id,
+                'primary_location_name' => $product->primaryLocation?->name ?? $product->primaryLocation?->code,
+                'secondary_location_name' => $product->secondaryLocation?->name ?? $product->secondaryLocation?->code,
             ];
         })->all();
     }
@@ -153,10 +189,12 @@ class PosSaleService
         }
 
         return DB::transaction(function () use ($data, $items, $cashier) {
-            $locationId = $data['inventory_location_id'] ?? null;
-            $location = $locationId
+            $locationId = ! empty($data['inventory_location_id']) ? (int) $data['inventory_location_id'] : null;
+            $location = ($locationId && $locationId > 0)
                 ? InventoryLocation::findOrFail($locationId)
-                : $this->getDefaultLocation();
+                : null;
+
+            $saleLocation = $location ?? $this->getDefaultLocation();
 
             $customerType = in_array($data['customer_type'] ?? null, [PosSale::CUSTOMER_PUBLIC, PosSale::CUSTOMER_STYLIST], true)
                 ? $data['customer_type']
@@ -182,15 +220,25 @@ class PosSaleService
                     ? (float) ($product->price_stylist ?? $product->price_public ?? 0)
                     : (float) ($product->price_public ?? 0);
 
+                if ($defaultPrice <= 0) {
+                    $defaultPrice = (float) ($product->price_mercado_libre ?: ($product->price_amazon ?: ($product->cost ? round($product->cost * 1.30, 2) : 0)));
+                }
+
                 $unitPrice = isset($item['unit_price']) ? (float) $item['unit_price'] : $defaultPrice;
                 $itemDiscount = isset($item['discount']) ? max(0, (float) $item['discount']) : 0.0;
                 $itemSubtotal = max(0, ($quantity * $unitPrice) - $itemDiscount);
 
                 // Verificación estricta de stock disponible (Físico - Reservas activas)
                 if ($product->isSimple()) {
-                    $physical = $this->stockService->physicalStockByLocation($product, $location);
-                    $reserved = $this->stockService->reservedStockByLocation($product, $location);
-                    $available = $this->stockService->availableStockByLocation($product, $location);
+                    if ($location) {
+                        $physical = $this->stockService->physicalStockByLocation($product, $location);
+                        $reserved = $this->stockService->reservedStockByLocation($product, $location);
+                        $available = $this->stockService->availableStockByLocation($product, $location);
+                    } else {
+                        $physical = $this->stockService->physicalStock($product);
+                        $reserved = $this->stockService->reservedStock($product);
+                        $available = $this->stockService->availableStock($product);
+                    }
 
                     if ($quantity > $available) {
                         throw new PosInsufficientStockException($product, $quantity, $available, $physical, $reserved);
@@ -201,9 +249,15 @@ class PosSaleService
                         $compProduct = $compRelation->component;
                         $neededUnits = $quantity * (int) $compRelation->quantity;
 
-                        $compPhysical = $this->stockService->physicalStockByLocation($compProduct, $location);
-                        $compReserved = $this->stockService->reservedStockByLocation($compProduct, $location);
-                        $compAvailable = $this->stockService->availableStockByLocation($compProduct, $location);
+                        if ($location) {
+                            $compPhysical = $this->stockService->physicalStockByLocation($compProduct, $location);
+                            $compReserved = $this->stockService->reservedStockByLocation($compProduct, $location);
+                            $compAvailable = $this->stockService->availableStockByLocation($compProduct, $location);
+                        } else {
+                            $compPhysical = $this->stockService->physicalStock($compProduct);
+                            $compReserved = $this->stockService->reservedStock($compProduct);
+                            $compAvailable = $this->stockService->availableStock($compProduct);
+                        }
 
                         if ($neededUnits > $compAvailable) {
                             throw new PosInsufficientStockException(
@@ -296,8 +350,8 @@ class PosSaleService
                     : ($downpayment > 0 ? PosSale::PAYMENT_STATUS_CREDIT_PARTIAL : PosSale::PAYMENT_STATUS_CREDIT_PENDING);
             }
 
-            // Buscar turno activo del cajero en esta ubicación
-            $activeShift = $this->shiftService->getActiveShift($cashier, $location->id);
+            // Buscar turno activo del cajero en esta ubicación o cualquiera
+            $activeShift = $this->shiftService->getActiveShift($cashier, $location?->id);
 
             // Generar folio de venta único para la fecha
             $saleNumber = $this->generateSaleNumber();
@@ -309,7 +363,7 @@ class PosSaleService
             $sale = PosSale::create([
                 'sale_number' => $saleNumber,
                 'user_id' => $cashier->id,
-                'inventory_location_id' => $location->id,
+                'inventory_location_id' => $saleLocation->id,
                 'pos_shift_id' => $activeShift?->id,
                 'customer_id' => $customerId,
                 'customer_name' => $customerFinalName,
@@ -364,9 +418,11 @@ class PosSaleService
                 ]);
 
                 if ($product->isSimple()) {
+                    $itemLocationId = $location?->id ?? ($this->resolveLocationForProductStock($product->id) ?? $saleLocation->id);
+
                     InventoryMovement::create([
                         'inventory_product_id' => $product->id,
-                        'inventory_location_id' => $location->id,
+                        'inventory_location_id' => $itemLocationId,
                         'type' => InventoryMovement::SALE,
                         'quantity' => -$qty,
                         'reference_type' => 'pos_sale',
@@ -381,10 +437,11 @@ class PosSaleService
                     foreach ($components as $compRelation) {
                         $compProduct = $compRelation->component;
                         $neededUnits = $qty * (int) $compRelation->quantity;
+                        $compLocationId = $location?->id ?? ($this->resolveLocationForProductStock($compProduct->id) ?? $saleLocation->id);
 
                         InventoryMovement::create([
                             'inventory_product_id' => $compProduct->id,
-                            'inventory_location_id' => $location->id,
+                            'inventory_location_id' => $compLocationId,
                             'type' => InventoryMovement::SALE,
                             'quantity' => -$neededUnits,
                             'reference_type' => 'pos_sale',
@@ -400,6 +457,24 @@ class PosSaleService
 
             return $sale->load(['items.product', 'cashier', 'location', 'customer', 'payments']);
         });
+    }
+
+    public function resolveLocationForProductStock(int $productId): ?int
+    {
+        $product = InventoryProduct::find($productId);
+        if ($product && $product->primary_location_id) {
+            return $product->primary_location_id;
+        }
+
+        $movement = InventoryMovement::query()
+            ->where('inventory_product_id', $productId)
+            ->whereNotNull('inventory_location_id')
+            ->groupBy('inventory_location_id')
+            ->selectRaw('inventory_location_id, SUM(quantity) as total')
+            ->having('total', '>', 0)
+            ->first();
+
+        return $movement ? (int) $movement->inventory_location_id : null;
     }
 
     public function cancelSale(PosSale $sale, User $user, string $reason): PosSale

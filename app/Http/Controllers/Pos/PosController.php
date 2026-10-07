@@ -38,7 +38,8 @@ class PosController extends Controller
 
         $defaultLocation = $this->posSaleService->getDefaultLocation();
 
-        $initialProducts = $this->posSaleService->searchProducts('', $defaultLocation->id);
+        // Cargar stock global por defecto para que refleje el conteo completo del inventario
+        $initialProducts = $this->posSaleService->searchProducts('', null);
 
         $recentSales = PosSale::query()
             ->with([
@@ -59,12 +60,14 @@ class PosController extends Controller
 
         $creditAlerts = $this->creditService->getCreditPortfolioSummary();
 
-        $currentShift = $this->posShiftService->getActiveShift($request->user(), $defaultLocation->id);
+        // Buscar turno activo del usuario (en mostrador o en cualquier ubicación)
+        $currentShift = $this->posShiftService->getActiveShift($request->user(), null);
         $shiftSummary = $currentShift ? $this->posShiftService->calculateShiftSummary($currentShift) : null;
 
         return Inertia::render('Pos/Index', [
             'locations' => $locations,
-            'defaultLocationId' => $defaultLocation->id,
+            'defaultLocationId' => null,
+            'fallbackLocationId' => $defaultLocation->id,
             'initialProducts' => $initialProducts,
             'recentSales' => $recentSales,
             'customers' => $customers,
@@ -77,7 +80,7 @@ class PosController extends Controller
     public function search(Request $request): JsonResponse
     {
         $query = (string) $request->input('q', '');
-        $locationId = $request->integer('location_id') ?: null;
+        $locationId = $request->filled('location_id') ? (int) $request->input('location_id') : null;
 
         $products = $this->posSaleService->searchProducts($query, $locationId);
 

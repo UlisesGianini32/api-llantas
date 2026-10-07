@@ -185,63 +185,85 @@ export default function CustomersIndex({
                 {/* SUMMARY STATS TILES */}
                 <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
                     {/* TOTAL CUSTOMERS */}
-                    <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm dark:border-neutral-800 dark:bg-neutral-900">
-                        <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                            Total Registrados
-                        </span>
-                        <div className="mt-2 flex items-baseline justify-between">
-                            <span className="text-2xl font-extrabold text-slate-900 dark:text-white">
+                    <div className="rounded-2xl border border-slate-200/90 bg-white p-4 shadow-sm dark:border-neutral-800 dark:bg-neutral-900 flex flex-col justify-between">
+                        <div className="flex items-center justify-between">
+                            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                                Total Registrados
+                            </span>
+                            <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-slate-100 text-sm text-slate-600 dark:bg-neutral-800 dark:text-slate-300">
+                                👥
+                            </span>
+                        </div>
+                        <div className="mt-3 flex items-baseline justify-between">
+                            <span className="text-2xl font-black text-slate-900 dark:text-white">
                                 {summary.total_customers || 0}
                             </span>
-                            <span className="text-xs text-slate-500">Clientes</span>
+                            <span className="text-xs text-slate-500 font-medium">Estilistas / Clientes</span>
                         </div>
                     </div>
 
                     {/* CON CRÉDITO ACTIVO */}
                     <div
                         onClick={() => handleFilterChange('with_credit')}
-                        className="cursor-pointer rounded-2xl border border-blue-200 bg-blue-50/50 p-4 shadow-sm transition hover:shadow-md dark:border-blue-900/50 dark:bg-blue-950/20"
+                        className="cursor-pointer rounded-2xl border border-blue-200 bg-gradient-to-br from-blue-50/70 to-indigo-50/30 p-4 shadow-sm transition hover:shadow-md dark:border-blue-900/50 dark:bg-neutral-900 flex flex-col justify-between"
                     >
-                        <span className="text-[11px] font-bold uppercase tracking-wider text-blue-600 dark:text-blue-400">
-                            🟢 Con Crédito Vigente
-                        </span>
-                        <div className="mt-2 flex items-baseline justify-between">
-                            <span className="text-2xl font-extrabold text-blue-700 dark:text-blue-300">
+                        <div className="flex items-center justify-between">
+                            <span className="text-[11px] font-bold uppercase tracking-wider text-blue-700 dark:text-blue-400">
+                                Crédito Vigente
+                            </span>
+                            <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-blue-100 text-sm text-blue-700 dark:bg-blue-950 dark:text-blue-300">
+                                🟢
+                            </span>
+                        </div>
+                        <div className="mt-3 flex items-baseline justify-between">
+                            <span className="text-2xl font-black text-blue-800 dark:text-blue-300">
                                 {summary.active_with_credit || 0}
                             </span>
-                            <span className="text-xs font-medium text-blue-600">Al corriente</span>
+                            <span className="rounded-full bg-blue-100 px-2 py-0.5 text-[10px] font-bold text-blue-700 dark:bg-blue-950 dark:text-blue-300">
+                                Al corriente
+                            </span>
                         </div>
                     </div>
 
                     {/* CRÉDITOS VENCIDOS */}
                     <div
                         onClick={() => handleFilterChange('overdue')}
-                        className="cursor-pointer rounded-2xl border border-red-200 bg-red-50/60 p-4 shadow-sm transition hover:shadow-md dark:border-red-900/50 dark:bg-red-950/20"
+                        className="cursor-pointer rounded-2xl border border-rose-200 bg-gradient-to-br from-rose-50/70 to-red-50/30 p-4 shadow-sm transition hover:shadow-md dark:border-rose-900/50 dark:bg-neutral-900 flex flex-col justify-between"
                     >
-                        <span className="text-[11px] font-bold uppercase tracking-wider text-red-600 dark:text-red-400">
-                            🔴 Créditos Vencidos
-                        </span>
-                        <div className="mt-2 flex items-baseline justify-between">
-                            <span className="text-2xl font-extrabold text-red-700 dark:text-red-300">
+                        <div className="flex items-center justify-between">
+                            <span className="text-[11px] font-bold uppercase tracking-wider text-rose-700 dark:text-rose-400">
+                                Créditos Vencidos
+                            </span>
+                            <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-rose-100 text-sm text-rose-700 dark:bg-rose-950 dark:text-rose-300">
+                                🔴
+                            </span>
+                        </div>
+                        <div className="mt-3 flex items-baseline justify-between">
+                            <span className="text-2xl font-black text-rose-800 dark:text-rose-300">
                                 {summary.with_overdue_credit || 0}
                             </span>
-                            <span className="rounded-full bg-red-100 px-2 py-0.5 text-[10px] font-bold text-red-800 dark:bg-red-900 dark:text-red-200">
-                                {summary.overdue_sales_count || 0} notas
+                            <span className="rounded-full bg-rose-100 px-2 py-0.5 text-[10px] font-bold text-rose-800 dark:bg-rose-950 dark:text-rose-200 animate-pulse">
+                                {summary.overdue_sales_count || 0} notas con mora
                             </span>
                         </div>
                     </div>
 
                     {/* TOTAL CARTERA POR COBRAR */}
-                    <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm dark:border-neutral-800 dark:bg-neutral-900">
-                        <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                            Total Cartera a Crédito
-                        </span>
-                        <div className="mt-2">
-                            <span className="font-mono text-xl font-extrabold text-indigo-600 dark:text-indigo-400">
+                    <div className="rounded-2xl border border-purple-200 bg-gradient-to-br from-purple-50/60 to-indigo-50/30 p-4 shadow-sm dark:border-purple-900/50 dark:bg-neutral-900 flex flex-col justify-between">
+                        <div className="flex items-center justify-between">
+                            <span className="text-[11px] font-bold uppercase tracking-wider text-purple-700 dark:text-purple-400">
+                                Cartera por Cobrar
+                            </span>
+                            <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-purple-100 text-sm text-purple-700 dark:bg-purple-950 dark:text-purple-300">
+                                💰
+                            </span>
+                        </div>
+                        <div className="mt-3">
+                            <span className="font-mono text-2xl font-black text-purple-900 dark:text-purple-200">
                                 ${Number(summary.total_debt || 0).toLocaleString('es-MX', { minimumFractionDigits: 2 })}
                             </span>
                             {Number(summary.total_overdue_debt || 0) > 0 && (
-                                <p className="mt-0.5 text-[10px] font-semibold text-red-500">
+                                <p className="mt-0.5 text-[10px] font-bold text-rose-600">
                                     Vencido: ${Number(summary.total_overdue_debt || 0).toLocaleString('es-MX', { minimumFractionDigits: 2 })}
                                 </p>
                             )}
@@ -411,8 +433,23 @@ export default function CustomersIndex({
                 {/* CUSTOMERS LIST / TABLE */}
                 <div className="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden dark:border-neutral-800 dark:bg-neutral-900">
                     {customers.data.length === 0 ? (
-                        <div className="py-16 text-center text-sm text-slate-400">
-                            No se encontraron clientes con los filtros aplicados.
+                        <div className="py-20 text-center px-4">
+                            <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-indigo-50 text-3xl text-indigo-600 dark:bg-neutral-800 dark:text-indigo-400 mb-3 shadow-inner">
+                                👥
+                            </div>
+                            <h3 className="text-base font-bold text-slate-800 dark:text-slate-100">
+                                {searchTerm ? 'No se encontraron clientes con esa búsqueda' : 'Aún no tienes clientes o estilistas registrados'}
+                            </h3>
+                            <p className="mt-1.5 text-xs text-slate-500 dark:text-slate-400 max-w-md mx-auto">
+                                Registra estilistas y barberías para fijar límites de crédito, plazos de 7, 15 y 30 días, y generar notas de venta con pagaré formal.
+                            </p>
+                            <button
+                                type="button"
+                                onClick={openCreateModal}
+                                className="mt-4 inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2 text-xs font-bold text-white shadow-md hover:bg-indigo-700 transition"
+                            >
+                                <span>+</span> Registrar Nuevo Cliente / Estilista
+                            </button>
                         </div>
                     ) : (
                         <div className="overflow-x-auto">

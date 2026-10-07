@@ -27,10 +27,11 @@ export default function PosIndex({
     const { auth, flash, errors } = usePage().props
     const cashier = auth?.user
 
-    // State: Selected Location
+    // State: Selected Location ('' = Todo el Almacén / Global)
     const [selectedLocationId, setSelectedLocationId] = useState(
-        defaultLocationId || (locations[0]?.id ?? '')
+        defaultLocationId !== undefined && defaultLocationId !== null ? defaultLocationId : ''
     )
+    const [catalogFilter, setCatalogFilter] = useState('all') // 'all' | 'stock' | 'kits' | 'zero'
 
     // State: Shifts & Drawer
     const [shift, setShift] = useState(currentShift)
@@ -249,6 +250,21 @@ export default function PosIndex({
                 ...item,
                 quantity: newQty,
                 subtotal: (newQty * Number(item.unit_price)) - Number(item.discount || 0),
+            }
+            return updated
+        })
+    }
+
+    // Update unit price on the fly (for custom prices or products with $0)
+    const updateItemPrice = (index, newPrice) => {
+        const p = Math.max(0, Number(newPrice) || 0)
+        setCart((prev) => {
+            const updated = [...prev]
+            const item = updated[index]
+            updated[index] = {
+                ...item,
+                unit_price: p,
+                subtotal: (item.quantity * p) - Number(item.discount || 0),
             }
             return updated
         })
@@ -659,45 +675,48 @@ export default function PosIndex({
                     </div>
 
                     <div className="flex flex-wrap items-center gap-2">
-                        {/* Location picker */}
-                        <div className="flex items-center gap-1.5 rounded-xl border border-slate-300 bg-slate-50 px-3 py-1.5 text-xs dark:border-neutral-700 dark:bg-neutral-800">
-                            <span className="text-slate-400">📍</span>
+                        {/* Location picker (Global Almacén by default) */}
+                        <div className="flex items-center gap-1.5 rounded-xl border border-slate-300 bg-slate-50 px-3 py-1.5 text-xs shadow-sm dark:border-neutral-700 dark:bg-neutral-800">
+                            <span className="text-base">📍</span>
                             <select
                                 value={selectedLocationId}
-                                onChange={(e) => setSelectedLocationId(Number(e.target.value))}
-                                className="bg-transparent font-medium text-slate-800 outline-none dark:text-slate-200"
+                                onChange={(e) => setSelectedLocationId(e.target.value ? Number(e.target.value) : '')}
+                                className="bg-transparent font-bold text-slate-800 outline-none dark:text-slate-200 cursor-pointer"
                             >
+                                <option value="" className="font-bold text-indigo-700 dark:bg-neutral-900 dark:text-indigo-400">
+                                    🏬 Todo el Almacén (Global - Stock total)
+                                </option>
                                 {locations.map((loc) => (
                                     <option key={loc.id} value={loc.id} className="dark:bg-neutral-900">
-                                        {loc.name} ({loc.code})
+                                        📍 {loc.name} ({loc.code})
                                     </option>
                                 ))}
                             </select>
                         </div>
 
                         {/* Customer Pricing Tier Toggle */}
-                        <div className="flex rounded-xl bg-slate-100 p-1 text-xs font-semibold dark:bg-neutral-800">
+                        <div className="flex rounded-xl bg-slate-100 p-1 text-xs font-semibold dark:bg-neutral-800 border border-slate-200 dark:border-neutral-700 shadow-sm">
                             <button
                                 type="button"
                                 onClick={() => handleCustomerTypeChange('public')}
-                                className={`rounded-lg px-3 py-1.5 transition ${
+                                className={`flex items-center gap-1 rounded-lg px-3 py-1.5 transition ${
                                     customerType === 'public'
-                                        ? 'bg-white text-indigo-600 shadow-sm dark:bg-neutral-700 dark:text-indigo-400'
-                                        : 'text-slate-600 dark:text-slate-400'
+                                        ? 'bg-white text-indigo-700 font-bold shadow dark:bg-neutral-700 dark:text-indigo-300'
+                                        : 'text-slate-500 hover:text-slate-800 dark:text-slate-400'
                                 }`}
                             >
-                                Público
+                                <span>👤</span> Público
                             </button>
                             <button
                                 type="button"
                                 onClick={() => handleCustomerTypeChange('stylist')}
-                                className={`rounded-lg px-3 py-1.5 transition ${
+                                className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 transition ${
                                     customerType === 'stylist'
-                                        ? 'bg-white text-indigo-600 shadow-sm dark:bg-neutral-700 dark:text-indigo-400'
-                                        : 'text-slate-600 dark:text-slate-400'
+                                        ? 'bg-purple-600 text-white font-bold shadow'
+                                        : 'text-slate-500 hover:text-purple-600 dark:text-slate-400'
                                 }`}
                             >
-                                Estilista / Mayoreo
+                                <span>💇</span> Estilista / Mayoreo
                             </button>
                         </div>
 
@@ -705,7 +724,7 @@ export default function PosIndex({
                         <button
                             type="button"
                             onClick={() => setSettingsModalOpen(true)}
-                            className="rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-200"
+                            className="rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 shadow-sm hover:bg-slate-50 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-200"
                             title="Configurar impresora térmica"
                         >
                             🖨️ {paperWidth} {qzConnected ? '• QZ' : ''}
@@ -715,7 +734,7 @@ export default function PosIndex({
                         <button
                             type="button"
                             onClick={() => setRecentSalesModalOpen(true)}
-                            className="rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-200"
+                            className="rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 shadow-sm hover:bg-slate-50 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-200"
                         >
                             Ventas ({recentSales.length})
                         </button>
@@ -723,7 +742,7 @@ export default function PosIndex({
                         {/* Clientes & Cartera Button with Alerts */}
                         <Link
                             href="/pos/clientes"
-                            className="flex items-center gap-1.5 rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-200"
+                            className="flex items-center gap-1.5 rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 shadow-sm hover:bg-slate-50 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-200"
                         >
                             <span>👥</span> Clientes
                             {((creditAlerts?.overdue_sales_count || 0) + (creditAlerts?.due_soon_sales_count || 0)) > 0 && (
@@ -810,106 +829,209 @@ export default function PosIndex({
 
                 {/* MAIN GRID: 2 COLUMNS */}
                 <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
-                    {/* LEFT COLUMN: SCANNER & CATALOG (7 COLS) */}
-                    <div className="space-y-4 lg:col-span-7">
-                        {/* BARCODE SCANNER INPUT */}
-                        <div className="rounded-2xl border-2 border-indigo-500/40 bg-white p-3 shadow-sm dark:border-indigo-500/30 dark:bg-neutral-900">
-                            <div className="flex items-center gap-2">
-                                <span className="text-xl">📷</span>
+                    {/* LEFT COLUMN: SCANNER, SEARCH & CATALOG (7 COLS) */}
+                    <div className="space-y-3 lg:col-span-7">
+                        {/* UNIFIED SEARCH & SCANNER INPUT */}
+                        <div className="rounded-2xl border-2 border-indigo-500/40 bg-white p-2.5 shadow-sm dark:border-indigo-500/30 dark:bg-neutral-900">
+                            <div className="flex items-center gap-2.5">
+                                <span className="text-xl pl-1">🔍</span>
                                 <input
                                     ref={barcodeInputRef}
                                     type="text"
-                                    placeholder="Escanear código de barras o ingresar SKU y presionar Enter..."
-                                    value={barcodeInput}
-                                    onChange={(e) => setBarcodeInput(e.target.value)}
+                                    placeholder="Buscar producto por nombre, SKU o escanear código de barras (Enter)..."
+                                    value={barcodeInput || searchQuery}
+                                    onChange={(e) => {
+                                        setBarcodeInput(e.target.value)
+                                        handleSearchChange(e)
+                                    }}
                                     onKeyDown={handleBarcodeKeyDown}
-                                    className="w-full bg-transparent text-sm font-semibold outline-none dark:text-white"
+                                    className="w-full bg-transparent text-sm font-medium outline-none dark:text-white"
                                 />
-                                {barcodeInput && (
+                                {(barcodeInput || searchQuery) && (
                                     <button
                                         type="button"
-                                        onClick={() => setBarcodeInput('')}
-                                        className="text-xs text-slate-400 hover:text-slate-600"
+                                        onClick={() => {
+                                            setBarcodeInput('')
+                                            setSearchQuery('')
+                                            fetchProducts('', selectedLocationId ? Number(selectedLocationId) : null)
+                                        }}
+                                        className="rounded-lg p-1 text-xs text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-neutral-800"
                                     >
                                         ✕
                                     </button>
                                 )}
+                                {searching && <span className="text-xs text-indigo-500 animate-pulse font-semibold">Buscando...</span>}
                             </div>
                         </div>
 
-                        {/* SEARCH INPUT */}
-                        <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm dark:border-neutral-800 dark:bg-neutral-900">
-                            <span className="text-slate-400">🔍</span>
-                            <input
-                                type="text"
-                                placeholder="Buscar producto por nombre, marca o SKU..."
-                                value={searchQuery}
-                                onChange={handleSearchChange}
-                                className="w-full bg-transparent text-sm outline-none dark:text-white"
-                            />
-                            {searching && <span className="text-xs text-slate-400 animate-pulse">Buscando...</span>}
+                        {/* FILTER CHIPS */}
+                        <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                            <div className="flex items-center gap-1.5">
+                                <button
+                                    type="button"
+                                    onClick={() => setCatalogFilter('all')}
+                                    className={`rounded-xl px-3 py-1 font-semibold transition ${
+                                        catalogFilter === 'all'
+                                            ? 'bg-slate-900 text-white dark:bg-white dark:text-slate-900'
+                                            : 'bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-neutral-800 dark:text-slate-300'
+                                    }`}
+                                >
+                                    Todos ({products.length})
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => setCatalogFilter('stock')}
+                                    className={`rounded-xl px-3 py-1 font-semibold transition ${
+                                        catalogFilter === 'stock'
+                                            ? 'bg-emerald-600 text-white'
+                                            : 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:bg-emerald-950/40 dark:text-emerald-300'
+                                    }`}
+                                >
+                                    ✅ Con Stock ({products.filter((p) => p.available_stock > 0 || p.global_available_stock > 0).length})
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => setCatalogFilter('kits')}
+                                    className={`rounded-xl px-3 py-1 font-semibold transition ${
+                                        catalogFilter === 'kits'
+                                            ? 'bg-purple-600 text-white'
+                                            : 'bg-purple-50 text-purple-700 hover:bg-purple-100 dark:bg-purple-950/40 dark:text-purple-300'
+                                    }`}
+                                >
+                                    📦 Kits ({products.filter((p) => p.is_kit).length})
+                                </button>
+                            </div>
+
+                            <span className="text-[11px] text-slate-400 font-medium">
+                                {selectedLocationId ? 'Filtrado por ubicación' : '🌐 Stock global de almacén'}
+                            </span>
                         </div>
 
                         {/* PRODUCT CATALOG GRID */}
-                        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 max-h-[520px] overflow-y-auto pr-1">
+                        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 max-h-[560px] overflow-y-auto pr-1">
                             {products.length === 0 ? (
-                                <div className="col-span-full py-12 text-center text-sm text-slate-400">
-                                    No se encontraron productos disponibles en esta ubicación.
+                                <div className="col-span-full rounded-2xl border border-dashed border-slate-300 p-12 text-center text-sm text-slate-400 dark:border-neutral-800">
+                                    No se encontraron productos disponibles con los criterios de búsqueda.
                                 </div>
                             ) : (
-                                products.map((prod) => {
-                                    const price =
-                                        customerType === 'stylist'
-                                            ? prod.price_stylist
-                                            : prod.price_public
-                                    const isAvailable = prod.available_stock > 0
+                                products
+                                    .filter((prod) => {
+                                        if (catalogFilter === 'stock') {
+                                            return prod.available_stock > 0 || prod.global_available_stock > 0
+                                        }
+                                        if (catalogFilter === 'kits') {
+                                            return prod.is_kit
+                                        }
+                                        return true
+                                    })
+                                    .map((prod) => {
+                                        const price = customerType === 'stylist' ? prod.price_stylist : prod.price_public
+                                        const isAvailable = prod.available_stock > 0 || prod.global_available_stock > 0
+                                        const inCartItem = cart.find((i) => i.product_id === prod.id)
+                                        const inCartQty = inCartItem ? inCartItem.quantity : 0
 
-                                    return (
-                                        <div
-                                            key={prod.id}
-                                            onClick={() => isAvailable && addToCart(prod, 1)}
-                                            className={`group relative flex flex-col justify-between rounded-2xl border p-3 transition shadow-sm select-none ${
-                                                isAvailable
-                                                    ? 'cursor-pointer border-slate-200 bg-white hover:border-indigo-500 hover:shadow-md dark:border-neutral-800 dark:bg-neutral-900'
-                                                    : 'cursor-not-allowed border-slate-100 bg-slate-50 opacity-60 dark:border-neutral-800 dark:bg-neutral-950'
-                                            }`}
-                                        >
-                                            <div>
-                                                <div className="flex items-center justify-between gap-1">
-                                                    <span className="font-mono text-[10px] font-semibold text-slate-400">
-                                                        {prod.sku}
-                                                    </span>
-                                                    {prod.is_kit && (
-                                                        <span className="rounded-md bg-purple-100 px-1.5 py-0.5 text-[10px] font-bold text-purple-700 dark:bg-purple-950 dark:text-purple-300">
-                                                            KIT
+                                        return (
+                                            <div
+                                                key={prod.id}
+                                                onClick={() => addToCart(prod, 1)}
+                                                className={`group relative flex flex-col justify-between rounded-2xl border p-3.5 transition-all duration-150 cursor-pointer select-none shadow-sm ${
+                                                    inCartQty > 0
+                                                        ? 'border-indigo-500 bg-indigo-50/30 shadow-md ring-2 ring-indigo-500/20 dark:bg-indigo-950/20'
+                                                        : 'border-slate-200/90 bg-white hover:-translate-y-0.5 hover:border-indigo-400 hover:shadow-lg dark:border-neutral-800 dark:bg-neutral-900'
+                                                }`}
+                                            >
+                                                <div>
+                                                    <div className="flex items-center justify-between gap-1">
+                                                        <span className="rounded-md bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] font-bold text-slate-600 dark:bg-neutral-800 dark:text-slate-300">
+                                                            {prod.sku}
                                                         </span>
+
+                                                        <div className="flex items-center gap-1">
+                                                            {prod.primary_location_name && (
+                                                                <span className="rounded-md bg-amber-50 px-1.5 py-0.5 text-[9px] font-bold text-amber-700 dark:bg-amber-950/50 dark:text-amber-300">
+                                                                    📍 {prod.primary_location_name}
+                                                                </span>
+                                                            )}
+                                                            {prod.is_kit && (
+                                                                <span className="rounded-md bg-purple-100 px-1.5 py-0.5 text-[10px] font-extrabold text-purple-700 dark:bg-purple-950 dark:text-purple-300">
+                                                                    KIT
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                    </div>
+
+                                                    <h3 className="mt-2 line-clamp-2 text-xs font-semibold leading-snug text-slate-800 dark:text-slate-100 group-hover:text-indigo-600 dark:group-hover:text-indigo-400">
+                                                        {prod.name}
+                                                    </h3>
+                                                </div>
+
+                                                <div className="mt-3 flex items-end justify-between border-t border-slate-100 pt-2.5 dark:border-neutral-800">
+                                                    <div>
+                                                        {/* Stock badge */}
+                                                        <div className="flex items-center gap-1 mb-1">
+                                                            {prod.available_stock > 0 ? (
+                                                                <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-bold text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-300">
+                                                                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                                                                    {prod.available_stock} disp.
+                                                                    {selectedLocationId && prod.global_available_stock > prod.available_stock && (
+                                                                        <span className="text-[9px] text-slate-400 font-normal">
+                                                                            ({prod.global_available_stock} tot)
+                                                                        </span>
+                                                                    )}
+                                                                </span>
+                                                            ) : prod.global_available_stock > 0 ? (
+                                                                <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-bold text-amber-700 dark:bg-amber-950/50 dark:text-amber-300">
+                                                                    0 aquí ({prod.global_available_stock} almacén)
+                                                                </span>
+                                                            ) : (
+                                                                <span className="inline-flex items-center rounded-full bg-rose-50 px-2 py-0.5 text-[10px] font-bold text-rose-600 dark:bg-rose-950/40 dark:text-rose-400">
+                                                                    Sin stock
+                                                                </span>
+                                                            )}
+                                                        </div>
+
+                                                        {/* Price */}
+                                                        <div>
+                                                            {price > 0 ? (
+                                                                <div className="flex items-baseline gap-1.5">
+                                                                    <span className={`font-mono text-base font-extrabold ${
+                                                                        customerType === 'stylist'
+                                                                            ? 'text-purple-700 dark:text-purple-300'
+                                                                            : 'text-slate-900 dark:text-white'
+                                                                    }`}>
+                                                                        ${Number(price).toFixed(2)}
+                                                                    </span>
+                                                                    {customerType === 'stylist' && prod.price_public > price && (
+                                                                        <span className="font-mono text-[10px] text-slate-400 line-through">
+                                                                            ${Number(prod.price_public).toFixed(2)}
+                                                                        </span>
+                                                                    )}
+                                                                </div>
+                                                            ) : (
+                                                                <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-800 dark:bg-amber-900 dark:text-amber-200">
+                                                                    ⚠️ Sin precio
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                    </div>
+
+                                                    {/* Add button / Cart counter */}
+                                                    {inCartQty > 0 ? (
+                                                        <span className="flex h-8 items-center rounded-xl bg-indigo-600 px-2 text-xs font-bold text-white shadow-sm">
+                                                            x{inCartQty}
+                                                        </span>
+                                                    ) : (
+                                                        <button
+                                                            type="button"
+                                                            className="flex h-8 w-8 items-center justify-center rounded-xl bg-slate-100 text-slate-700 shadow-sm transition hover:bg-indigo-600 hover:text-white dark:bg-neutral-800 dark:text-slate-200"
+                                                        >
+                                                            +
+                                                        </button>
                                                     )}
                                                 </div>
-                                                <h3 className="mt-1 line-clamp-2 text-xs font-semibold text-slate-800 dark:text-slate-100">
-                                                    {prod.name}
-                                                </h3>
                                             </div>
-
-                                            <div className="mt-3 flex items-end justify-between border-t border-slate-100 pt-2 dark:border-neutral-800">
-                                                <div>
-                                                    <span className="block text-[10px] text-slate-400">
-                                                        Disp: <strong className={prod.available_stock > 0 ? 'text-emerald-600' : 'text-red-500'}>{prod.available_stock}</strong>
-                                                    </span>
-                                                    <span className="text-sm font-bold text-slate-900 dark:text-white">
-                                                        ${Number(price).toFixed(2)}
-                                                    </span>
-                                                </div>
-                                                <button
-                                                    type="button"
-                                                    disabled={!isAvailable}
-                                                    className="rounded-lg bg-indigo-50 p-1.5 text-xs text-indigo-600 group-hover:bg-indigo-600 group-hover:text-white transition dark:bg-neutral-800 dark:text-indigo-400"
-                                                >
-                                                    +
-                                                </button>
-                                            </div>
-                                        </div>
-                                    )
-                                })
+                                        )
+                                    })
                             )}
                         </div>
                     </div>
@@ -930,7 +1052,7 @@ export default function PosIndex({
                                         <button
                                             type="button"
                                             onClick={() => setCart([])}
-                                            className="text-xs text-red-500 hover:text-red-700"
+                                            className="text-xs text-red-500 hover:text-red-700 font-semibold"
                                         >
                                             Vaciar
                                         </button>
@@ -938,9 +1060,9 @@ export default function PosIndex({
                                 </div>
 
                                 {/* CUSTOMER INFO & SELECTION */}
-                                <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-2.5 dark:border-neutral-800 dark:bg-neutral-950 text-xs">
+                                <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50/70 p-3 dark:border-neutral-800 dark:bg-neutral-950 text-xs">
                                     <div className="flex items-center justify-between pb-1.5">
-                                        <span className="font-bold text-slate-700 dark:text-slate-300 flex items-center gap-1">
+                                        <span className="font-bold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
                                             <span>👤</span> Cliente / Estilista:
                                         </span>
                                         <button
@@ -948,38 +1070,51 @@ export default function PosIndex({
                                             onClick={() => setQuickCustomerModalOpen(true)}
                                             className="text-[11px] font-bold text-indigo-600 hover:underline dark:text-indigo-400"
                                         >
-                                            + Nuevo Cliente
+                                            + Registrar Nuevo
                                         </button>
                                     </div>
 
                                     {selectedCustomer ? (
-                                        <div className="flex items-center justify-between rounded-xl bg-indigo-50 p-2.5 text-indigo-950 dark:bg-indigo-950/40 dark:text-indigo-200 border border-indigo-200 dark:border-indigo-800">
-                                            <div className="min-w-0 flex-1">
-                                                <div className="flex items-center gap-1.5">
-                                                    <p className="font-bold truncate">{selectedCustomer.name}</p>
-                                                    {selectedCustomer.business_name && (
-                                                        <span className="rounded bg-indigo-200 px-1.5 py-0.2 text-[10px] font-semibold text-indigo-800 dark:bg-indigo-900 dark:text-indigo-300">
-                                                            {selectedCustomer.business_name}
+                                        <div className="rounded-xl bg-indigo-50/90 p-3 text-indigo-950 dark:bg-indigo-950/40 dark:text-indigo-200 border border-indigo-200 dark:border-indigo-800">
+                                            <div className="flex items-start justify-between">
+                                                <div className="min-w-0 flex-1">
+                                                    <div className="flex items-center gap-1.5">
+                                                        <span className="h-6 w-6 rounded-full bg-indigo-600 text-white flex items-center justify-center font-bold text-[10px]">
+                                                            {selectedCustomer.name.charAt(0).toUpperCase()}
                                                         </span>
-                                                    )}
+                                                        <p className="font-bold truncate text-sm">{selectedCustomer.name}</p>
+                                                        {selectedCustomer.business_name && (
+                                                            <span className="rounded bg-indigo-200 px-1.5 py-0.2 text-[10px] font-semibold text-indigo-800 dark:bg-indigo-900 dark:text-indigo-300">
+                                                                {selectedCustomer.business_name}
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                    <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-slate-500 dark:text-slate-400">
+                                                        <span>Tel: {selectedCustomer.phone || 'Sin tel'}</span>
+                                                        <span>• Plazo: {creditDays} días</span>
+                                                    </div>
                                                 </div>
-                                                <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px] text-slate-500 dark:text-slate-400">
-                                                    <span>Tel: {selectedCustomer.phone || 'Sin tel'}</span>
-                                                    <span>•</span>
-                                                    <span>Plazo: {creditDays} días</span>
-                                                    {selectedCustomer.credit_limit && (
-                                                        <span>• Límite: ${Number(selectedCustomer.credit_limit).toFixed(2)}</span>
-                                                    )}
-                                                </div>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => handleSelectCustomer(null)}
+                                                    className="ml-2 rounded-lg p-1 text-slate-400 hover:bg-white hover:text-slate-700 dark:hover:bg-neutral-800"
+                                                    title="Quitar cliente seleccionado"
+                                                >
+                                                    ✕
+                                                </button>
                                             </div>
-                                            <button
-                                                type="button"
-                                                onClick={() => handleSelectCustomer(null)}
-                                                className="ml-2 rounded-lg p-1 text-slate-400 hover:bg-white hover:text-slate-700 dark:hover:bg-neutral-800"
-                                                title="Quitar cliente seleccionado"
-                                            >
-                                                ✕
-                                            </button>
+
+                                            {/* Available Credit Meter */}
+                                            {selectedCustomer.credit_limit && (
+                                                <div className="mt-2 pt-2 border-t border-indigo-200/60 dark:border-indigo-800/60">
+                                                    <div className="flex justify-between text-[10px] font-semibold">
+                                                        <span className="text-slate-500">Límite: ${Number(selectedCustomer.credit_limit).toFixed(2)}</span>
+                                                        <span className="text-emerald-700 dark:text-emerald-400">
+                                                            Disponible: ${Math.max(0, Number(selectedCustomer.credit_limit) - Number(selectedCustomer.total_debt || 0)).toFixed(2)}
+                                                        </span>
+                                                    </div>
+                                                </div>
+                                            )}
                                         </div>
                                     ) : (
                                         <div className="space-y-1.5 relative">
@@ -994,7 +1129,7 @@ export default function PosIndex({
                                                         }}
                                                         onFocus={() => setCustomerDropdownOpen(true)}
                                                         placeholder="Nombre del cliente..."
-                                                        className="w-full rounded-lg border border-slate-300 p-1.5 text-xs dark:border-neutral-700 dark:bg-neutral-900 dark:text-white"
+                                                        className="w-full rounded-lg border border-slate-300 p-2 text-xs dark:border-neutral-700 dark:bg-neutral-900 dark:text-white"
                                                     />
                                                 </div>
                                                 <div>
@@ -1003,14 +1138,14 @@ export default function PosIndex({
                                                         value={customerPhone}
                                                         onChange={(e) => setCustomerPhone(e.target.value)}
                                                         placeholder="WhatsApp o celular"
-                                                        className="w-full rounded-lg border border-slate-300 p-1.5 text-xs dark:border-neutral-700 dark:bg-neutral-900 dark:text-white"
+                                                        className="w-full rounded-lg border border-slate-300 p-2 text-xs dark:border-neutral-700 dark:bg-neutral-900 dark:text-white"
                                                     />
                                                 </div>
                                             </div>
 
                                             {/* Dropdown list of existing customers */}
                                             {customerDropdownOpen && customerList.length > 0 && (
-                                                <div className="absolute left-0 right-0 top-full z-20 mt-1 max-h-40 overflow-y-auto rounded-xl border border-slate-200 bg-white p-1 shadow-xl dark:border-neutral-700 dark:bg-neutral-900 divide-y dark:divide-neutral-800 text-xs">
+                                                <div className="absolute left-0 right-0 top-full z-20 mt-1 max-h-48 overflow-y-auto rounded-xl border border-slate-200 bg-white p-1 shadow-xl dark:border-neutral-700 dark:bg-neutral-900 divide-y dark:divide-neutral-800 text-xs">
                                                     <div className="flex items-center justify-between px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">
                                                         <span>Clientes registrados</span>
                                                         <button
@@ -1052,7 +1187,7 @@ export default function PosIndex({
                                 </div>
 
                                 {/* CART ITEMS LIST */}
-                                <div className="mt-4 max-h-[220px] overflow-y-auto space-y-2 pr-1">
+                                <div className="mt-3 max-h-[220px] overflow-y-auto space-y-2 pr-1">
                                     {cart.length === 0 ? (
                                         <div className="py-12 text-center text-xs text-slate-400">
                                             No hay productos en el carrito.<br />Escanea un código de barras o pulsa en el catálogo.
@@ -1061,15 +1196,26 @@ export default function PosIndex({
                                         cart.map((item, index) => (
                                             <div
                                                 key={item.product_id}
-                                                className="flex items-center justify-between gap-2 rounded-xl border border-slate-100 bg-slate-50/60 p-2 text-xs dark:border-neutral-800 dark:bg-neutral-950"
+                                                className="flex items-center justify-between gap-2 rounded-xl border border-slate-100 bg-slate-50/70 p-2.5 text-xs dark:border-neutral-800 dark:bg-neutral-950 shadow-sm"
                                             >
                                                 <div className="min-w-0 flex-1">
                                                     <p className="truncate font-semibold text-slate-800 dark:text-slate-200">
                                                         {item.name}
                                                     </p>
-                                                    <span className="text-[10px] text-slate-400">
-                                                        ${Number(item.unit_price).toFixed(2)} c/u
-                                                    </span>
+                                                    {/* Editable Unit Price on the fly */}
+                                                    <div className="flex items-center gap-1 mt-0.5">
+                                                        <span className="text-[10px] text-slate-400">$</span>
+                                                        <input
+                                                            type="number"
+                                                            step="0.01"
+                                                            min="0"
+                                                            value={item.unit_price}
+                                                            onChange={(e) => updateItemPrice(index, e.target.value)}
+                                                            className="w-16 rounded border border-slate-200 bg-white px-1 py-0.5 text-right font-mono font-bold text-xs text-slate-800 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 dark:border-neutral-700 dark:bg-neutral-900 dark:text-white"
+                                                            title="Clic para editar precio unitario"
+                                                        />
+                                                        <span className="text-[10px] text-slate-400">c/u</span>
+                                                    </div>
                                                 </div>
 
                                                 {/* Quantity Controls */}
@@ -1077,7 +1223,7 @@ export default function PosIndex({
                                                     <button
                                                         type="button"
                                                         onClick={() => updateQuantity(index, item.quantity - 1)}
-                                                        className="flex h-6 w-6 items-center justify-center rounded-lg bg-white border border-slate-200 text-xs font-bold hover:bg-slate-100 dark:border-neutral-700 dark:bg-neutral-800"
+                                                        className="flex h-7 w-7 items-center justify-center rounded-lg bg-white border border-slate-200 text-xs font-bold hover:bg-slate-100 dark:border-neutral-700 dark:bg-neutral-800 shadow-sm"
                                                     >
                                                         -
                                                     </button>
@@ -1087,7 +1233,7 @@ export default function PosIndex({
                                                     <button
                                                         type="button"
                                                         onClick={() => updateQuantity(index, item.quantity + 1)}
-                                                        className="flex h-6 w-6 items-center justify-center rounded-lg bg-white border border-slate-200 text-xs font-bold hover:bg-slate-100 dark:border-neutral-700 dark:bg-neutral-800"
+                                                        className="flex h-7 w-7 items-center justify-center rounded-lg bg-white border border-slate-200 text-xs font-bold hover:bg-slate-100 dark:border-neutral-700 dark:bg-neutral-800 shadow-sm"
                                                     >
                                                         +
                                                     </button>
@@ -1101,7 +1247,8 @@ export default function PosIndex({
                                                 <button
                                                     type="button"
                                                     onClick={() => removeFromCart(index)}
-                                                    className="text-slate-400 hover:text-red-500"
+                                                    className="p-1 text-slate-400 hover:text-red-500"
+                                                    title="Eliminar del carrito"
                                                 >
                                                     ✕
                                                 </button>
@@ -1130,9 +1277,9 @@ export default function PosIndex({
                                             className="w-24 rounded-lg border border-slate-200 p-1 text-right font-mono text-xs dark:border-neutral-700 dark:bg-neutral-800 dark:text-white"
                                         />
                                     </div>
-                                    <div className="flex justify-between text-sm font-bold text-slate-900 dark:text-white pt-1 border-t dark:border-neutral-800">
+                                    <div className="flex justify-between text-base font-bold text-slate-900 dark:text-white pt-1 border-t dark:border-neutral-800">
                                         <span>TOTAL A PAGAR:</span>
-                                        <span className="font-mono text-lg text-indigo-600 dark:text-indigo-400">
+                                        <span className="font-mono text-xl font-extrabold text-indigo-600 dark:text-indigo-400">
                                             ${cartTotal.toFixed(2)}
                                         </span>
                                     </div>
@@ -1140,14 +1287,14 @@ export default function PosIndex({
 
                                 {/* PAYMENT METHODS */}
                                 <div>
-                                    <label className="block text-[11px] font-semibold text-slate-500">Método de pago:</label>
-                                    <div className="mt-1 grid grid-cols-4 gap-1 text-xs font-semibold">
+                                    <label className="block text-[11px] font-semibold text-slate-500 mb-1">Método de pago:</label>
+                                    <div className="grid grid-cols-4 gap-1.5 text-xs font-semibold">
                                         <button
                                             type="button"
                                             onClick={() => setPaymentMethod('cash')}
                                             className={`rounded-xl border p-2 text-center transition ${
                                                 paymentMethod === 'cash'
-                                                    ? 'border-indigo-600 bg-indigo-50 text-indigo-700 dark:border-indigo-500 dark:bg-indigo-950/40 dark:text-indigo-300'
+                                                    ? 'border-indigo-600 bg-indigo-50 text-indigo-700 shadow-sm font-bold dark:border-indigo-500 dark:bg-indigo-950/40 dark:text-indigo-300'
                                                     : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50 dark:border-neutral-800 dark:bg-neutral-800 dark:text-slate-300'
                                             }`}
                                         >
@@ -1158,7 +1305,7 @@ export default function PosIndex({
                                             onClick={() => setPaymentMethod('card')}
                                             className={`rounded-xl border p-2 text-center transition ${
                                                 paymentMethod === 'card'
-                                                    ? 'border-indigo-600 bg-indigo-50 text-indigo-700 dark:border-indigo-500 dark:bg-indigo-950/40 dark:text-indigo-300'
+                                                    ? 'border-indigo-600 bg-indigo-50 text-indigo-700 shadow-sm font-bold dark:border-indigo-500 dark:bg-indigo-950/40 dark:text-indigo-300'
                                                     : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50 dark:border-neutral-800 dark:bg-neutral-800 dark:text-slate-300'
                                             }`}
                                         >
@@ -1169,7 +1316,7 @@ export default function PosIndex({
                                             onClick={() => setPaymentMethod('transfer')}
                                             className={`rounded-xl border p-2 text-center transition ${
                                                 paymentMethod === 'transfer'
-                                                    ? 'border-indigo-600 bg-indigo-50 text-indigo-700 dark:border-indigo-500 dark:bg-indigo-950/40 dark:text-indigo-300'
+                                                    ? 'border-indigo-600 bg-indigo-50 text-indigo-700 shadow-sm font-bold dark:border-indigo-500 dark:bg-indigo-950/40 dark:text-indigo-300'
                                                     : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50 dark:border-neutral-800 dark:bg-neutral-800 dark:text-slate-300'
                                             }`}
                                         >
@@ -1185,21 +1332,21 @@ export default function PosIndex({
                                             }}
                                             className={`rounded-xl border p-2 text-center transition ${
                                                 paymentMethod === 'credit'
-                                                    ? 'border-purple-600 bg-purple-50 text-purple-700 font-bold dark:border-purple-500 dark:bg-purple-950/40 dark:text-purple-300'
-                                                    : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50 dark:border-neutral-800 dark:bg-neutral-800 dark:text-slate-300'
+                                                    ? 'border-purple-600 bg-purple-600 text-white font-extrabold shadow-md'
+                                                    : 'border-purple-300 bg-purple-50 text-purple-700 hover:bg-purple-100 font-bold dark:border-purple-800 dark:bg-purple-950/40 dark:text-purple-300'
                                             }`}
                                         >
-                                            📝 A Crédito
+                                            📜 A Crédito
                                         </button>
                                     </div>
                                 </div>
 
-                                {/* CREDIT TERMS & DETAILS PANEL */}
+                                {/* EXECUTIVE CREDIT TERMS & FINANCING PANEL */}
                                 {paymentMethod === 'credit' && (
-                                    <div className="rounded-xl border border-purple-200 bg-purple-50/60 p-3 dark:border-purple-950 dark:bg-purple-950/25 text-xs space-y-2.5">
+                                    <div className="rounded-2xl border-2 border-purple-400 bg-purple-50/70 p-3.5 dark:border-purple-700 dark:bg-purple-950/30 text-xs space-y-3 shadow-sm">
                                         <div className="flex items-center justify-between">
-                                            <span className="font-bold text-purple-900 dark:text-purple-300">
-                                                Plazo de Crédito:
+                                            <span className="font-extrabold text-purple-900 dark:text-purple-200 flex items-center gap-1.5">
+                                                <span>📋</span> Plazo de Crédito:
                                             </span>
                                             <div className="flex gap-1.5 font-bold">
                                                 {[7, 15, 30].map((days) => (
@@ -1207,10 +1354,10 @@ export default function PosIndex({
                                                         key={days}
                                                         type="button"
                                                         onClick={() => setCreditDays(days)}
-                                                        className={`px-2.5 py-1 rounded-lg transition ${
+                                                        className={`px-3 py-1.5 rounded-xl transition font-bold ${
                                                             creditDays === days
-                                                                ? 'bg-purple-600 text-white shadow-sm'
-                                                                : 'bg-white text-purple-700 border border-purple-300 dark:bg-neutral-900 dark:text-purple-300 dark:border-purple-800'
+                                                                ? 'bg-purple-700 text-white shadow-md'
+                                                                : 'bg-white text-purple-800 border border-purple-200 hover:bg-purple-100 dark:bg-neutral-900 dark:text-purple-300 dark:border-purple-800'
                                                         }`}
                                                     >
                                                         {days} días
@@ -1219,16 +1366,16 @@ export default function PosIndex({
                                             </div>
                                         </div>
 
-                                        <div className="flex items-center justify-between text-slate-600 dark:text-slate-400 pt-1 border-t border-purple-200 dark:border-purple-900/50">
-                                            <span>Fecha de Vencimiento:</span>
-                                            <span className="font-bold text-red-600 font-mono text-sm">
+                                        <div className="flex items-center justify-between rounded-xl bg-white/80 p-2 text-slate-700 dark:bg-neutral-900/80 dark:text-slate-300">
+                                            <span className="text-[11px] font-medium">📅 Fecha límite de pago:</span>
+                                            <span className="font-bold text-red-600 font-mono text-xs">
                                                 {calculateDueDate(creditDays)}
                                             </span>
                                         </div>
 
-                                        <div className="grid grid-cols-2 gap-2 pt-1 border-t border-purple-200 dark:border-purple-900/50">
+                                        <div className="grid grid-cols-2 gap-2">
                                             <div>
-                                                <label className="block text-[10px] font-semibold text-slate-600 dark:text-slate-400">
+                                                <label className="block text-[10px] font-bold text-purple-900 dark:text-purple-300">
                                                     Anticipo / Enganche ($):
                                                 </label>
                                                 <input
@@ -1239,47 +1386,75 @@ export default function PosIndex({
                                                     placeholder="0.00"
                                                     value={creditDownpayment}
                                                     onChange={(e) => setCreditDownpayment(e.target.value)}
-                                                    className="mt-0.5 w-full rounded-lg border border-purple-300 bg-white p-1 text-right font-mono text-xs dark:border-purple-800 dark:bg-neutral-900 dark:text-white"
+                                                    className="mt-1 w-full rounded-xl border border-purple-300 bg-white p-2 text-right font-mono font-bold text-xs dark:border-purple-800 dark:bg-neutral-900 dark:text-white"
                                                 />
                                             </div>
                                             <div>
-                                                <label className="block text-[10px] font-semibold text-slate-600 dark:text-slate-400">
-                                                    Saldo a Crédito:
+                                                <label className="block text-[10px] font-bold text-purple-900 dark:text-purple-300">
+                                                    Saldo en Pagaré:
                                                 </label>
-                                                <div className="mt-1 text-right font-mono font-extrabold text-sm text-purple-800 dark:text-purple-300">
+                                                <div className="mt-1 p-2 rounded-xl bg-purple-100/80 text-right font-mono font-black text-sm text-purple-900 dark:bg-purple-900/50 dark:text-purple-200">
                                                     ${Math.max(0, cartTotal - (Number(creditDownpayment) || 0)).toFixed(2)}
                                                 </div>
                                             </div>
                                         </div>
+
+                                        <p className="text-[10px] text-purple-700 dark:text-purple-300 italic">
+                                            ℹ️ Se generará pagaré mercantil y nota de remisión para firma del cliente.
+                                        </p>
                                     </div>
                                 )}
 
                                 {/* CASH TENDERED & CHANGE CALCULATOR */}
                                 {paymentMethod === 'cash' && (
-                                    <div className="grid grid-cols-2 gap-2 rounded-xl bg-slate-50 p-2.5 dark:bg-neutral-950 text-xs border border-slate-200 dark:border-neutral-800">
-                                        <div>
-                                            <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400">
-                                                Efectivo recibido:
-                                            </label>
-                                            <div className="mt-1 flex items-center gap-1 rounded-lg border border-slate-300 bg-white px-2 py-1 dark:border-neutral-700 dark:bg-neutral-900">
-                                                <span className="font-mono text-slate-400">$</span>
-                                                <input
-                                                    type="number"
-                                                    min="0"
-                                                    step="0.01"
-                                                    placeholder="0.00"
-                                                    value={amountTendered}
-                                                    onChange={(e) => setAmountTendered(e.target.value)}
-                                                    className="w-full bg-transparent font-mono text-xs font-bold outline-none dark:text-white"
-                                                />
-                                            </div>
+                                    <div className="space-y-2 rounded-2xl bg-slate-50 p-3 dark:bg-neutral-950 text-xs border border-slate-200 dark:border-neutral-800">
+                                        {/* Quick Bills Shortcuts */}
+                                        <div className="flex items-center gap-1.5 flex-wrap">
+                                            <span className="text-[10px] font-bold text-slate-400">Atajos:</span>
+                                            {[50, 100, 200, 500, 1000].map((bill) => (
+                                                <button
+                                                    key={bill}
+                                                    type="button"
+                                                    onClick={() => setAmountTendered(String(bill))}
+                                                    className="rounded-lg bg-white border border-slate-200 px-2 py-0.5 font-mono text-[10px] font-bold text-slate-700 hover:bg-indigo-50 hover:text-indigo-600 dark:border-neutral-700 dark:bg-neutral-900 dark:text-slate-300"
+                                                >
+                                                    ${bill}
+                                                </button>
+                                            ))}
+                                            <button
+                                                type="button"
+                                                onClick={() => setAmountTendered(String(cartTotal))}
+                                                className="rounded-lg bg-indigo-50 border border-indigo-200 px-2 py-0.5 text-[10px] font-bold text-indigo-700 hover:bg-indigo-100 dark:bg-indigo-950/40 dark:text-indigo-300"
+                                            >
+                                                Exacto
+                                            </button>
                                         </div>
-                                        <div>
-                                            <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400">
-                                                Cambio:
-                                            </label>
-                                            <div className="mt-1 flex items-center px-2 py-1 font-mono text-sm font-extrabold text-emerald-600 dark:text-emerald-400">
-                                                ${changeDue.toFixed(2)}
+
+                                        <div className="grid grid-cols-2 gap-2 pt-1">
+                                            <div>
+                                                <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400">
+                                                    Efectivo recibido:
+                                                </label>
+                                                <div className="mt-1 flex items-center gap-1 rounded-xl border border-slate-300 bg-white px-2.5 py-1.5 dark:border-neutral-700 dark:bg-neutral-900">
+                                                    <span className="font-mono text-slate-400">$</span>
+                                                    <input
+                                                        type="number"
+                                                        min="0"
+                                                        step="0.01"
+                                                        placeholder="0.00"
+                                                        value={amountTendered}
+                                                        onChange={(e) => setAmountTendered(e.target.value)}
+                                                        className="w-full bg-transparent font-mono text-xs font-bold outline-none dark:text-white"
+                                                    />
+                                                </div>
+                                            </div>
+                                            <div>
+                                                <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400">
+                                                    Cambio:
+                                                </label>
+                                                <div className="mt-1 flex items-center px-2 py-1.5 font-mono text-base font-extrabold text-emerald-600 dark:text-emerald-400">
+                                                    ${changeDue.toFixed(2)}
+                                                </div>
                                             </div>
                                         </div>
                                     </div>
@@ -1288,9 +1463,17 @@ export default function PosIndex({
                                 <button
                                     type="submit"
                                     disabled={cart.length === 0 || submitting}
-                                    className="w-full rounded-2xl bg-indigo-600 py-3 text-sm font-bold text-white shadow-lg transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-40"
+                                    className={`w-full rounded-2xl py-3.5 text-sm font-extrabold text-white shadow-xl transition disabled:cursor-not-allowed disabled:opacity-40 ${
+                                        paymentMethod === 'credit'
+                                            ? 'bg-purple-600 hover:bg-purple-700'
+                                            : 'bg-indigo-600 hover:bg-indigo-700'
+                                    }`}
                                 >
-                                    {submitting ? 'Registrando venta...' : `Cobrar $${cartTotal.toFixed(2)}`}
+                                    {submitting
+                                        ? 'Procesando...'
+                                        : paymentMethod === 'credit'
+                                        ? `📜 Generar Venta a Crédito y Pagaré ($${cartTotal.toFixed(2)})`
+                                        : `✓ Cobrar $${cartTotal.toFixed(2)}`}
                                 </button>
                             </form>
                         </div>
