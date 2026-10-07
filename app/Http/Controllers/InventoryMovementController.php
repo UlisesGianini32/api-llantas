@@ -34,7 +34,8 @@ class InventoryMovementController extends Controller
                         ->orWhereHas('product', function ($product) use ($search): void {
                             $product->where('name', 'like', "%{$search}%")
                                 ->orWhere('sku', 'like', "%{$search}%")
-                                ->orWhere('barcode', 'like', "%{$search}%");
+                                ->orWhere('barcode', 'like', "%{$search}%")
+                                ->orWhere('barcode_secondary', 'like', "%{$search}%");
                         })
                         ->orWhereHas('location', function ($location) use ($search): void {
                             $location->where('code', 'like', "%{$search}%")
@@ -42,7 +43,13 @@ class InventoryMovementController extends Controller
                         });
                 });
             })
-            ->when($type !== '', fn ($query) => $query->where('type', $type))
+            ->when($type !== '', function ($query) use ($type) {
+                if ($type === 'TRANSFER') {
+                    $query->whereIn('type', [InventoryMovement::TRANSFER_IN, InventoryMovement::TRANSFER_OUT]);
+                } else {
+                    $query->where('type', $type);
+                }
+            })
             ->orderByDesc('occurred_at')
             ->orderByDesc('id')
             ->paginate(25)
@@ -57,7 +64,17 @@ class InventoryMovementController extends Controller
         return Inertia::render('Inventory/Movements/Index', [
             'movements' => $movements,
             'filters' => ['search' => $search, 'type' => $type],
-            'types' => InventoryMovement::types(),
+            'types' => [
+                'RECEIPT',
+                'TRANSFER',
+                'ADJUSTMENT_IN',
+                'ADJUSTMENT_OUT',
+                'RETURN',
+                'DAMAGE',
+                'INITIAL',
+                'TRANSFER_IN',
+                'TRANSFER_OUT',
+            ],
         ]);
     }
 
@@ -69,17 +86,22 @@ class InventoryMovementController extends Controller
                 ->where('is_active', true)
                 ->where('product_type', InventoryProduct::SIMPLE)
                 ->orderBy('name')
-                ->get(['id', 'name', 'sku', 'barcode', 'brand', 'primary_location_id']),
+                ->get(['id', 'name', 'sku', 'barcode', 'barcode_secondary', 'brand', 'primary_location_id']),
             'locations' => InventoryLocation::query()
                 ->where('is_active', true)
                 ->orderByRaw('sort_order IS NULL')
                 ->orderBy('sort_order')
                 ->orderBy('code')
                 ->get(['id', 'code', 'name']),
-            'types' => array_values(array_diff(
-                InventoryMovement::types(),
-                [InventoryMovement::TRANSFER_IN, InventoryMovement::TRANSFER_OUT],
-            )),
+            'types' => [
+                'RECEIPT',
+                'TRANSFER',
+                'ADJUSTMENT_IN',
+                'ADJUSTMENT_OUT',
+                'RETURN',
+                'DAMAGE',
+                'INITIAL',
+            ],
         ]);
     }
 
@@ -91,6 +113,80 @@ class InventoryMovementController extends Controller
         $user = $request->user();
 
         try {
+            // Manejo de movimiento tipo TRANSFER (Mover entre ubicaciones)
+            if ($validated['type'] === 'TRANSFER') {
+                $destinationLocationId = (int) ($validated['destination_location_id'] ?? 0);
+                $destLoc = InventoryLocation::findOrFail($destinationLocationId);
+
+                $itemList = ! empty($validated['items']) ? $validated['items'] : [[
+                    'inventory_product_id' => $validated['inventory_product_id'],
+                    'quantity' => $validated['quantity'],
+                    'inventory_location_id' => $validated['inventory_location_id'] ?? null,
+                    'notes' => $validated['notes'] ?? null,
+                ]];
+
+                $count = DB::transaction(function () use ($itemList, $validated, $user, $movements, $destLoc) {
+                    $recorded = 0;
+                    foreach ($itemList as $item) {
+                        $originLocationId = ! empty($item['inventory_location_id'])
+                            ? (int) $item['inventory_location_id']
+                            : (! empty($validated['inventory_location_id']) ? (int) $validated['inventory_location_id'] : null);
+
+                        $product = InventoryProduct::findOrFail($item['inventory_product_id']);
+                        if (! $originLocationId) {
+                            $originLocationId = $product->primary_location_id;
+                        }
+                        if (! $originLocationId) {
+                            throw new InvalidArgumentException("El producto '{$product->name}' no tiene ubicación de origen.");
+                        }
+                        if ($originLocationId === $destLoc->id) {
+                            throw new InvalidArgumentException("La ubicación de origen y destino no pueden ser la misma para '{$product->name}'.");
+                        }
+
+                        $originLoc = InventoryLocation::findOrFail($originLocationId);
+                        $qty = (int) $item['quantity'];
+                        $ref = ! empty($validated['reference'])
+                            ? $validated['reference']
+                            : "Mover: {$originLoc->code} → {$destLoc->code}";
+
+                        $itemNotes = trim((string) ($item['notes'] ?? ''));
+                        $baseNotes = trim((string) ($validated['notes'] ?? ''));
+                        $combinedNotes = $baseNotes !== '' && $itemNotes !== ''
+                            ? "{$baseNotes} | {$itemNotes}"
+                            : ($itemNotes !== '' ? $itemNotes : ($baseNotes !== '' ? $baseNotes : null));
+
+                        // 1. Salida de origen
+                        $movements->recordManual([
+                            'inventory_product_id' => $product->id,
+                            'inventory_location_id' => $originLoc->id,
+                            'type' => InventoryMovement::TRANSFER_OUT,
+                            'quantity' => $qty,
+                            'reference' => $ref,
+                            'notes' => $combinedNotes,
+                            'occurred_at' => $validated['occurred_at'] ?? now(),
+                        ], $user);
+
+                        // 2. Entrada a destino
+                        $movements->recordManual([
+                            'inventory_product_id' => $product->id,
+                            'inventory_location_id' => $destLoc->id,
+                            'type' => InventoryMovement::TRANSFER_IN,
+                            'quantity' => $qty,
+                            'reference' => $ref,
+                            'notes' => $combinedNotes,
+                            'occurred_at' => $validated['occurred_at'] ?? now(),
+                        ], $user);
+
+                        $recorded++;
+                    }
+
+                    return $recorded;
+                });
+
+                return redirect()->route('inventory.movements.index')
+                    ->with('success', "Se movieron {$count} producto(s) a la ubicación {$destLoc->code} correctamente.");
+            }
+
             if (! empty($validated['items'])) {
                 $count = DB::transaction(function () use ($validated, $user, $movements) {
                     $recorded = 0;

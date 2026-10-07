@@ -68,6 +68,8 @@ class PosSaleService
                     $q->where('sku', 'like', "%{$query}%")
                         ->orWhere('barcode', $query)
                         ->orWhere('barcode', 'like', "%{$query}%")
+                        ->orWhere('barcode_secondary', $query)
+                        ->orWhere('barcode_secondary', 'like', "%{$query}%")
                         ->orWhere('name', 'like', "%{$query}%");
                 })
                 ->limit(40)
@@ -159,6 +161,7 @@ class PosSaleService
                 'id' => $product->id,
                 'sku' => $product->sku,
                 'barcode' => $product->barcode,
+                'barcode_secondary' => $product->barcode_secondary,
                 'name' => $product->name,
                 'brand' => $product->brand,
                 'product_type' => $product->product_type,

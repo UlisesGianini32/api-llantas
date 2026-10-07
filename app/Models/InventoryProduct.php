@@ -19,6 +19,7 @@ class InventoryProduct extends Model
         'sku',
         'product_type',
         'barcode',
+        'barcode_secondary',
         'name',
         'brand',
         'supplier',
@@ -132,5 +133,11 @@ class InventoryProduct extends Model
     {
         $barcode = trim((string) ($value ?? ''));
         $this->attributes['barcode'] = $barcode === '' ? null : $barcode;
+    }
+
+    public function setBarcodeSecondaryAttribute($value): void
+    {
+        $barcode = trim((string) ($value ?? ''));
+        $this->attributes['barcode_secondary'] = $barcode === '' ? null : $barcode;
     }
 }

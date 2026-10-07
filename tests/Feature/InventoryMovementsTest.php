@@ -71,6 +71,16 @@ class InventoryMovementsTest extends TestCase
         $kitReservationsMigration->up();
         $channelLinksMigration = require database_path('migrations/2026_09_25_000001_create_inventory_channel_links_table.php');
         $channelLinksMigration->up();
+
+        Schema::table('inventory_locations', function (Blueprint $table): void {
+            $table->string('amazon_aisle', 10)->nullable();
+        });
+
+        Schema::table('inventory_products', function (Blueprint $table): void {
+            $table->foreignId('secondary_location_id')->nullable()->constrained('inventory_locations')->nullOnDelete();
+            $table->string('reserve_notes', 255)->nullable();
+            $table->string('barcode_secondary', 100)->nullable();
+        });
     }
 
     protected function tearDown(): void
@@ -465,6 +475,50 @@ class InventoryMovementsTest extends TestCase
             'type' => InventoryMovement::RECEIPT,
             'quantity' => 24,
         ]);
+    }
+
+    public function test_transfer_movement_moves_stock_between_locations(): void
+    {
+        [$product, $origin] = $this->productAndLocation('SKU-MOVE-TEST', '7500000000999', 'ORIG-1');
+        $destination = InventoryLocation::create(['code' => 'DEST-2']);
+
+        // Stock inicial de 10 en origen
+        $this->actingAs($this->admin())->post(route('inventory.movements.store'), [
+            'inventory_product_id' => $product->id,
+            'inventory_location_id' => $origin->id,
+            'type' => InventoryMovement::INITIAL,
+            'quantity' => 10,
+        ])->assertRedirect(route('inventory.movements.index'));
+
+        // Mover 4 unidades de ORIG-1 a DEST-2
+        $this->actingAs($this->admin())->post(route('inventory.movements.store'), [
+            'inventory_product_id' => $product->id,
+            'inventory_location_id' => $origin->id,
+            'destination_location_id' => $destination->id,
+            'type' => 'TRANSFER',
+            'quantity' => 4,
+            'notes' => 'Reubicación de prueba',
+        ])->assertRedirect(route('inventory.movements.index'));
+
+        // Se generan movimientos pareados TRANSFER_OUT (-4) y TRANSFER_IN (+4)
+        $this->assertDatabaseHas('inventory_movements', [
+            'inventory_product_id' => $product->id,
+            'inventory_location_id' => $origin->id,
+            'type' => InventoryMovement::TRANSFER_OUT,
+            'quantity' => -4,
+        ]);
+
+        $this->assertDatabaseHas('inventory_movements', [
+            'inventory_product_id' => $product->id,
+            'inventory_location_id' => $destination->id,
+            'type' => InventoryMovement::TRANSFER_IN,
+            'quantity' => 4,
+        ]);
+
+        $stockService = app(\App\Services\InventoryStockService::class);
+        $this->assertSame(6, $stockService->physicalStockByLocation($product, $origin));
+        $this->assertSame(4, $stockService->physicalStockByLocation($product, $destination));
+        $this->assertSame(10, $stockService->physicalStock($product));
     }
 
     /** @return array{0: InventoryProduct, 1: InventoryLocation} */

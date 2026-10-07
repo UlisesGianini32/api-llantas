@@ -1,6 +1,9 @@
 const MOVEMENT_TYPE_LABELS = {
     INITIAL: 'Inventario inicial',
     RECEIPT: 'Entrada',
+    TRANSFER: 'Mover (Transferencia)',
+    TRANSFER_IN: 'Transferencia (Entrada)',
+    TRANSFER_OUT: 'Transferencia (Salida)',
     RETURN: 'Devolución',
     ADJUSTMENT_IN: 'Ajuste de entrada',
     SALE: 'Venta',

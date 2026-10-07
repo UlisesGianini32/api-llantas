@@ -17,13 +17,17 @@ class StoreInventoryMovementRequest extends FormRequest
     {
         return [
             'inventory_location_id' => ['nullable', 'integer', 'exists:inventory_locations,id'],
+            'destination_location_id' => ['required_if:type,TRANSFER', 'nullable', 'integer', 'exists:inventory_locations,id'],
             'type' => [
                 'required',
                 'string',
-                Rule::in(array_values(array_diff(
-                    InventoryMovement::types(),
-                    [InventoryMovement::TRANSFER_IN, InventoryMovement::TRANSFER_OUT],
-                ))),
+                Rule::in([
+                    ...array_values(array_diff(
+                        InventoryMovement::types(),
+                        [InventoryMovement::TRANSFER_IN, InventoryMovement::TRANSFER_OUT],
+                    )),
+                    'TRANSFER',
+                ]),
             ],
             'reference_type' => ['nullable', 'string', 'max:255'],
             'reference_id' => ['nullable', 'integer'],
@@ -74,6 +78,16 @@ class StoreInventoryMovementRequest extends FormRequest
                         'inventory_location_id',
                         'Debes seleccionar una ubicación de almacén o el producto debe tener una asignada.'
                     );
+                }
+            }
+
+            if ($this->input('type') === 'TRANSFER') {
+                $destLoc = (int) $this->input('destination_location_id');
+                if (! $destLoc) {
+                    $validator->errors()->add('destination_location_id', 'Debes seleccionar la ubicación destino para mover los productos.');
+                }
+                if ($globalLoc && $destLoc && (int) $globalLoc === $destLoc) {
+                    $validator->errors()->add('destination_location_id', 'La ubicación destino debe ser distinta a la ubicación de origen.');
                 }
             }
         });

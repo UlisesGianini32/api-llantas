@@ -6,12 +6,14 @@ use App\Models\BrandRestockConfiguration;
 use App\Models\InventoryChannelLink;
 use App\Models\InventoryMovement;
 use App\Models\InventoryProduct;
+use App\Models\InventoryReservation;
 use App\Models\MeliFullShipment;
 use App\Models\MeliFullShipmentItem;
 use App\Models\MeliFullStock;
 use App\Services\InventoryStockService;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 
 class InventoryDemandForecastingService
 {
@@ -29,39 +31,137 @@ class InventoryDemandForecastingService
 
     /**
      * @param  array<string, mixed>  $options
+     * @param  array<string, mixed>|null  $batchData  Datos pre-agrupados opcionales para evitar N+1 queries masivos
      * @return array<string, mixed>
      */
-    public function getProductForecast(InventoryProduct $product, array $options = []): array
+    public function getProductForecast(InventoryProduct $product, array $options = [], ?array $batchData = null): array
     {
-        $now = isset($options['as_of']) ? Carbon::parse($options['as_of']) : Carbon::now();
+        $now = isset($options['as_of']) ? Carbon::parse($options['as_of']) : ($batchData['now'] ?? Carbon::now());
 
-        // 1. Obtener salidas históricas combinando Ledger local (POS/mostrador/salidas) + Ventas FULL Mercado Libre
-        $sales30dBreakdown = $this->getProductSalesBreakdownInWindow($product, $now->copy()->subDays(30), $now);
-        $sales60dBreakdown = $this->getProductSalesBreakdownInWindow($product, $now->copy()->subDays(60), $now);
-        $sales90dBreakdown = $this->getProductSalesBreakdownInWindow($product, $now->copy()->subDays(90), $now);
-        $sales180dBreakdown = $this->getProductSalesBreakdownInWindow($product, $now->copy()->subDays(180), $now);
+        if ($batchData !== null) {
+            $pid = $product->id;
+            $localRow = $batchData['local_movements'][$pid] ?? null;
+            $fullRow  = $batchData['full_metrics'][$pid] ?? null;
 
-        $sales30d = $sales30dBreakdown['total'];
-        $sales60d = $sales60dBreakdown['total'];
-        $sales90d = $sales90dBreakdown['total'];
-        $sales180d = $sales180dBreakdown['total'];
+            $salesLocal30d = (int) ($localRow?->sales_30d ?? 0);
+            $salesFull30d  = (int) ($fullRow['qty_30d'] ?? 0);
 
-        $dailyRate30d = $sales30d / 30;
-        $dailyRate90d = $sales90d / 90;
-        $dailyRate180d = $sales180d / 180;
+            $sales30d = $salesLocal30d + $salesFull30d;
+            $sales60d = (int) ($localRow?->sales_60d ?? 0) + (int) ($fullRow['qty_60d'] ?? 0);
+            $sales90d = (int) ($localRow?->sales_90d ?? 0) + (int) ($fullRow['qty_90d'] ?? 0);
+            $sales180d = (int) ($localRow?->sales_180d ?? 0) + (int) ($fullRow['qty_180d'] ?? 0);
 
-        // Velocidad base ponderada: 50% últimos 30 días, 30% últimos 90 días, 20% últimos 180 días
-        $baseDailyVelocity = ($dailyRate30d * 0.50) + ($dailyRate90d * 0.30) + ($dailyRate180d * 0.20);
+            $dailyRate30d = $sales30d / 30;
+            $dailyRate90d = $sales90d / 90;
+            $dailyRate180d = $sales180d / 180;
 
-        // 2. Factor de estacionalidad (mes del año anterior vs promedio del año anterior)
-        $seasonalFactor = $this->calculateSeasonalFactor($product, $now);
+            $baseDailyVelocity = ($dailyRate30d * 0.50) + ($dailyRate90d * 0.30) + ($dailyRate180d * 0.20);
+
+            // Factor de estacionalidad desde batch
+            $lyMonthTotal = (int) ($localRow?->sales_ly_month ?? 0) + (int) ($fullRow['qty_ly_month'] ?? 0);
+            $lyYearTotal  = (int) ($localRow?->sales_ly_year ?? 0) + (int) ($fullRow['qty_ly_year'] ?? 0);
+
+            if ($lyYearTotal <= 0 || $lyMonthTotal <= 0) {
+                $seasonalFactor = 1.0;
+            } else {
+                $averageMonthlySales = $lyYearTotal / 12;
+                if ($averageMonthlySales <= 0) {
+                    $seasonalFactor = 1.0;
+                } else {
+                    $seasonalFactor = max(0.5, min(2.5, round($lyMonthTotal / $averageMonthlySales, 2)));
+                }
+            }
+
+            $brandKey = mb_strtoupper(trim((string) $product->brand));
+            $brandConfig = $batchData['brand_configs'][$brandKey] ?? null;
+
+            $physicalStock = (int) ($batchData['physical_stocks'][$pid] ?? 0);
+            $reservedStock = (int) ($batchData['reserved_stocks'][$pid] ?? 0);
+            $availableStock = max(0, $physicalStock - $reservedStock);
+
+            $sku = strtoupper(trim((string) $product->sku));
+            $barcode = strtoupper(trim((string) $product->barcode));
+            $barcodeSec = strtoupper(trim((string) ($product->barcode_secondary ?? '')));
+
+            $fullStockAvailable = 0;
+            $counted = [];
+            if ($sku !== '' && isset($batchData['meli_full_stocks'][$sku])) {
+                $fullStockAvailable += (int) $batchData['meli_full_stocks'][$sku];
+                $counted[$sku] = true;
+            }
+            if ($barcode !== '' && ! isset($counted[$barcode]) && isset($batchData['meli_full_stocks'][$barcode])) {
+                $fullStockAvailable += (int) $batchData['meli_full_stocks'][$barcode];
+                $counted[$barcode] = true;
+            }
+            if ($barcodeSec !== '' && ! isset($counted[$barcodeSec]) && isset($batchData['meli_full_stocks'][$barcodeSec])) {
+                $fullStockAvailable += (int) $batchData['meli_full_stocks'][$barcodeSec];
+            }
+
+            $fullStockInTransit = (int) ($batchData['meli_shipment_stocks'][$pid] ?? 0);
+        } else {
+            // Modo individual (para pruebas o consultas de un solo producto)
+            $sales30dBreakdown = $this->getProductSalesBreakdownInWindow($product, $now->copy()->subDays(30), $now);
+            $sales60dBreakdown = $this->getProductSalesBreakdownInWindow($product, $now->copy()->subDays(60), $now);
+            $sales90dBreakdown = $this->getProductSalesBreakdownInWindow($product, $now->copy()->subDays(90), $now);
+            $sales180dBreakdown = $this->getProductSalesBreakdownInWindow($product, $now->copy()->subDays(180), $now);
+
+            $sales30d = $sales30dBreakdown['total'];
+            $sales60d = $sales60dBreakdown['total'];
+            $sales90d = $sales90dBreakdown['total'];
+            $sales180d = $sales180dBreakdown['total'];
+
+            $salesLocal30d = $sales30dBreakdown['local'];
+            $salesFull30d = $sales30dBreakdown['full'];
+
+            $dailyRate30d = $sales30d / 30;
+            $dailyRate90d = $sales90d / 90;
+            $dailyRate180d = $sales180d / 180;
+
+            $baseDailyVelocity = ($dailyRate30d * 0.50) + ($dailyRate90d * 0.30) + ($dailyRate180d * 0.20);
+            $seasonalFactor = $this->calculateSeasonalFactor($product, $now);
+
+            $brandConfig = $product->brand ? BrandRestockConfiguration::forBrand($product->brand) : null;
+
+            $physicalStock = $this->stockService->physicalStock($product);
+            $reservedStock = $this->stockService->reservedStock($product);
+            $availableStock = max(0, $physicalStock - $reservedStock);
+
+            $sku = strtoupper(trim((string) $product->sku));
+            $barcode = strtoupper(trim((string) $product->barcode));
+            $barcodeSec = strtoupper(trim((string) ($product->barcode_secondary ?? '')));
+
+            $fullStockAvailable = 0;
+            if (Schema::hasTable('meli_full_stocks')) {
+                $fullStockAvailable = (int) MeliFullStock::query()
+                    ->where(function ($q) use ($sku, $barcode, $barcodeSec) {
+                        if ($sku !== '') {
+                            $q->where('sku', $sku);
+                        }
+                        if ($barcode !== '') {
+                            $q->orWhere('sku', $barcode);
+                        }
+                        if ($barcodeSec !== '') {
+                            $q->orWhere('sku', $barcodeSec);
+                        }
+                    })
+                    ->sum('full_available_quantity');
+            }
+
+            $fullStockInTransit = 0;
+            if (Schema::hasTable('meli_full_shipments') && Schema::hasTable('meli_full_shipment_items')) {
+                $fullStockInTransit = (int) MeliFullShipmentItem::query()
+                    ->where('inventory_product_id', $product->id)
+                    ->whereHas('shipment', function ($q) {
+                        $q->whereIn('status', [MeliFullShipment::STATUS_IN_TRANSIT, MeliFullShipment::STATUS_PACKED]);
+                    })
+                    ->sum('quantity_sent');
+            }
+        }
 
         // Demanda diaria proyectada
         $expectedDailyDemand = round($baseDailyVelocity * $seasonalFactor, 4);
 
-        // 3. Cadencia y parámetros de reabastecimiento (Configuración por marca / producto)
-        $brandConfig = $product->brand ? BrandRestockConfiguration::forBrand($product->brand) : null;
-
+        // Cadencia y parámetros de reabastecimiento
         $cadencePreset = $options['cadence_preset']
             ?? $product->restock_cadence_days
             ?? $brandConfig?->cadence_preset
@@ -84,41 +184,7 @@ class InventoryDemandForecastingService
             ?? $brandConfig?->safety_stock_days
             ?? ($targetCoverageDays >= 90 ? 20 : 5));
 
-        // 4. Existencias actuales en Almacén Local
-        $physicalStock = $this->stockService->physicalStock($product);
-        $reservedStock = $this->stockService->reservedStock($product);
-        $availableStock = max(0, $physicalStock - $reservedStock);
-
-        // 4.1. Existencias en Mercado Libre FULL y en tránsito
-        $sku = strtoupper(trim((string) $product->sku));
-        $barcode = strtoupper(trim((string) $product->barcode));
-
-        $fullStockAvailable = 0;
-        if (\Illuminate\Support\Facades\Schema::hasTable('meli_full_stocks')) {
-            $fullStockAvailable = (int) MeliFullStock::query()
-                ->where(function ($q) use ($sku, $barcode) {
-                    if ($sku !== '') {
-                        $q->where('sku', $sku);
-                    }
-                    if ($barcode !== '') {
-                        $q->orWhere('sku', $barcode);
-                    }
-                })
-                ->sum('full_available_quantity');
-        }
-
-        $fullStockInTransit = 0;
-        if (\Illuminate\Support\Facades\Schema::hasTable('meli_full_shipments') && \Illuminate\Support\Facades\Schema::hasTable('meli_full_shipment_items')) {
-            $fullStockInTransit = (int) MeliFullShipmentItem::query()
-                ->where('inventory_product_id', $product->id)
-                ->whereHas('shipment', function ($q) {
-                    $q->whereIn('status', [MeliFullShipment::STATUS_IN_TRANSIT, MeliFullShipment::STATUS_PACKED]);
-                })
-                ->sum('quantity_sent');
-        }
-
         // 5. Cálculos de stock objetivo y reorden
-        // Stock de seguridad = demanda durante días de colchón (o min_stock manual)
         $safetyStockUnits = (int) max(
             (int) ceil($expectedDailyDemand * $safetyStockDays),
             (int) ($product->min_stock ?? 0)
@@ -162,6 +228,7 @@ class InventoryDemandForecastingService
             'product_id' => $product->id,
             'sku' => $product->sku,
             'barcode' => $product->barcode,
+            'barcode_secondary' => $product->barcode_secondary,
             'name' => $product->name,
             'brand' => $product->brand ?: 'Sin marca',
             'supplier' => $product->supplier ?: 'Sin proveedor',
@@ -172,8 +239,8 @@ class InventoryDemandForecastingService
 
             // Ventas históricas desglosadas
             'sales_30d' => $sales30d,
-            'sales_local_30d' => $sales30dBreakdown['local'],
-            'sales_full_30d' => $sales30dBreakdown['full'],
+            'sales_local_30d' => $salesLocal30d,
+            'sales_full_30d' => $salesFull30d,
             'sales_60d' => $sales60d,
             'sales_90d' => $sales90d,
             'sales_180d' => $sales180d,
@@ -229,11 +296,251 @@ class InventoryDemandForecastingService
             $query->where(function ($q) use ($s) {
                 $q->where('sku', 'like', "%{$s}%")
                     ->orWhere('barcode', 'like', "%{$s}%")
+                    ->orWhere('barcode_secondary', 'like', "%{$s}%")
                     ->orWhere('name', 'like', "%{$s}%");
             });
         }
 
         $products = $query->orderBy('brand')->orderBy('name')->get();
+
+        // Obtener marcas únicas y configuraciones
+        $brands = InventoryProduct::query()
+            ->whereNotNull('brand')
+            ->where('brand', '!=', '')
+            ->distinct()
+            ->orderBy('brand')
+            ->pluck('brand')
+            ->values();
+
+        $allBrandConfigs = BrandRestockConfiguration::all();
+        $brandConfigs = $allBrandConfigs->keyBy('brand');
+
+        if ($products->isEmpty()) {
+            return [
+                'summary' => [
+                    'total_skus' => 0,
+                    'critical_count' => 0,
+                    'warning_count' => 0,
+                    'optimal_count' => 0,
+                    'overstock_count' => 0,
+                    'total_suggested_units' => 0,
+                    'total_estimated_investment' => 0.0,
+                    'total_sales_full_30d' => 0,
+                    'total_sales_local_30d' => 0,
+                ],
+                'items' => [],
+                'brands' => $brands,
+                'brand_configs' => $brandConfigs,
+                'presets' => BrandRestockConfiguration::PRESETS,
+            ];
+        }
+
+        // =========================================================================
+        // PRECARGA BATCH (Elimina el problema N+1 que causaba lentitud en el reporte)
+        // =========================================================================
+        $productIds = $products->pluck('id')->all();
+        $now = isset($filters['as_of']) ? Carbon::parse($filters['as_of']) : Carbon::now();
+
+        $date180d = $now->copy()->subDays(180);
+        $date90d  = $now->copy()->subDays(90);
+        $date60d  = $now->copy()->subDays(60);
+        $date30d  = $now->copy()->subDays(30);
+
+        $lyMonthStart = $now->copy()->subYear()->startOfMonth();
+        $lyMonthEnd   = $now->copy()->subYear()->endOfMonth();
+        $lyYearStart  = $now->copy()->subYear()->startOfYear();
+        $lyYearEnd    = $now->copy()->subYear()->endOfYear();
+
+        $minDate = $date180d->lt($lyYearStart) ? $date180d : $lyYearStart;
+
+        // 1. Existencias físicas locales en una sola consulta agrupada
+        $physicalStocks = InventoryMovement::query()
+            ->whereIn('inventory_product_id', $productIds)
+            ->selectRaw('inventory_product_id, SUM(quantity) as qty')
+            ->groupBy('inventory_product_id')
+            ->pluck('qty', 'inventory_product_id')
+            ->all();
+
+        // 2. Existencias reservadas activas en una sola consulta agrupada
+        $reservedStocks = InventoryReservation::query()
+            ->active()
+            ->whereIn('inventory_product_id', $productIds)
+            ->selectRaw('inventory_product_id, SUM(quantity) as qty')
+            ->groupBy('inventory_product_id')
+            ->pluck('qty', 'inventory_product_id')
+            ->all();
+
+        // 3. Salidas locales agrupadas por ventanas de tiempo con SUM condicional
+        $localMovements = DB::table('inventory_movements')
+            ->select('inventory_product_id')
+            ->selectRaw('SUM(CASE WHEN occurred_at >= ? AND occurred_at <= ? THEN ABS(quantity) ELSE 0 END) as sales_30d', [$date30d, $now])
+            ->selectRaw('SUM(CASE WHEN occurred_at >= ? AND occurred_at <= ? THEN ABS(quantity) ELSE 0 END) as sales_60d', [$date60d, $now])
+            ->selectRaw('SUM(CASE WHEN occurred_at >= ? AND occurred_at <= ? THEN ABS(quantity) ELSE 0 END) as sales_90d', [$date90d, $now])
+            ->selectRaw('SUM(CASE WHEN occurred_at >= ? AND occurred_at <= ? THEN ABS(quantity) ELSE 0 END) as sales_180d', [$date180d, $now])
+            ->selectRaw('SUM(CASE WHEN occurred_at >= ? AND occurred_at <= ? THEN ABS(quantity) ELSE 0 END) as sales_ly_month', [$lyMonthStart, $lyMonthEnd])
+            ->selectRaw('SUM(CASE WHEN occurred_at >= ? AND occurred_at <= ? THEN ABS(quantity) ELSE 0 END) as sales_ly_year', [$lyYearStart, $lyYearEnd])
+            ->whereIn('inventory_product_id', $productIds)
+            ->where(function ($q) {
+                $q->where('type', InventoryMovement::SALE)
+                    ->orWhere('quantity', '<', 0);
+            })
+            ->where('occurred_at', '>=', $minDate)
+            ->where('occurred_at', '<=', $now)
+            ->groupBy('inventory_product_id')
+            ->get()
+            ->keyBy('inventory_product_id');
+
+        // 4. Mapeo de publicaciones MeLi e identificadores (SKUs / Barcodes)
+        $mlmToProductIds = [];
+        $skuToProductIds = [];
+
+        if (Schema::hasTable('inventory_channel_links')) {
+            $channelLinks = InventoryChannelLink::query()
+                ->where('channel', InventoryChannelLink::MERCADO_LIBRE)
+                ->whereIn('inventory_product_id', $productIds)
+                ->get(['inventory_product_id', 'external_product_id']);
+
+            foreach ($channelLinks as $link) {
+                $extId = trim((string) $link->external_product_id);
+                if ($extId !== '') {
+                    $mlmToProductIds[$extId][] = (int) $link->inventory_product_id;
+                }
+            }
+        }
+
+        foreach ($products as $prod) {
+            $sku = strtoupper(trim((string) $prod->sku));
+            if ($sku !== '') {
+                $skuToProductIds[$sku][] = (int) $prod->id;
+            }
+            $barcode = strtoupper(trim((string) $prod->barcode));
+            if ($barcode !== '') {
+                $skuToProductIds[$barcode][] = (int) $prod->id;
+            }
+            $barcodeSec = strtoupper(trim((string) ($prod->barcode_secondary ?? '')));
+            if ($barcodeSec !== '') {
+                $skuToProductIds[$barcodeSec][] = (int) $prod->id;
+            }
+        }
+
+        // 5. Ventas Mercado Libre FULL agrupadas por publicación y SKU
+        $fullMetricsByProduct = [];
+        if (Schema::hasTable('meli_orders') && Schema::hasTable('meli_order_items')) {
+            $allMlms = array_keys($mlmToProductIds);
+            $allSkus = array_keys($skuToProductIds);
+
+            if (! empty($allMlms) || ! empty($allSkus)) {
+                $fullOrderItems = DB::table('meli_orders as o')
+                    ->join('meli_order_items as i', 'i.meli_order_id', '=', 'o.id')
+                    ->whereRaw("LOWER(COALESCE(o.status, '')) NOT IN ('cancelled', 'invalid')")
+                    ->where(function ($q) {
+                        $q->whereRaw("LOWER(COALESCE(o.shipping_logistic_type, '')) = 'fulfillment'")
+                            ->orWhereRaw("LOWER(COALESCE(o.shipping_mode, '')) = 'fulfillment'")
+                            ->orWhereRaw("LOWER(COALESCE(o.shipping_type, '')) = 'fulfillment'");
+                    })
+                    ->where('o.created_at', '>=', $minDate)
+                    ->where('o.created_at', '<=', $now)
+                    ->where(function ($q) use ($allMlms, $allSkus) {
+                        $hasCond = false;
+                        if (! empty($allMlms)) {
+                            $q->whereIn('i.item_id', $allMlms);
+                            $hasCond = true;
+                        }
+                        if (! empty($allSkus)) {
+                            if ($hasCond) {
+                                $q->orWhereIn('i.sku', $allSkus);
+                            } else {
+                                $q->whereIn('i.sku', $allSkus);
+                            }
+                        }
+                    })
+                    ->select('i.item_id', 'i.sku')
+                    ->selectRaw('SUM(CASE WHEN o.created_at >= ? AND o.created_at <= ? THEN i.quantity ELSE 0 END) as qty_30d', [$date30d, $now])
+                    ->selectRaw('SUM(CASE WHEN o.created_at >= ? AND o.created_at <= ? THEN i.quantity ELSE 0 END) as qty_60d', [$date60d, $now])
+                    ->selectRaw('SUM(CASE WHEN o.created_at >= ? AND o.created_at <= ? THEN i.quantity ELSE 0 END) as qty_90d', [$date90d, $now])
+                    ->selectRaw('SUM(CASE WHEN o.created_at >= ? AND o.created_at <= ? THEN i.quantity ELSE 0 END) as qty_180d', [$date180d, $now])
+                    ->selectRaw('SUM(CASE WHEN o.created_at >= ? AND o.created_at <= ? THEN i.quantity ELSE 0 END) as qty_ly_month', [$lyMonthStart, $lyMonthEnd])
+                    ->selectRaw('SUM(CASE WHEN o.created_at >= ? AND o.created_at <= ? THEN i.quantity ELSE 0 END) as qty_ly_year', [$lyYearStart, $lyYearEnd])
+                    ->groupBy('i.item_id', 'i.sku')
+                    ->get();
+
+                foreach ($fullOrderItems as $row) {
+                    $matchedProductIds = [];
+                    $itemId = trim((string) $row->item_id);
+                    if ($itemId !== '' && isset($mlmToProductIds[$itemId])) {
+                        foreach ($mlmToProductIds[$itemId] as $pid) {
+                            $matchedProductIds[$pid] = true;
+                        }
+                    }
+                    $itemSku = strtoupper(trim((string) $row->sku));
+                    if ($itemSku !== '' && isset($skuToProductIds[$itemSku])) {
+                        foreach ($skuToProductIds[$itemSku] as $pid) {
+                            $matchedProductIds[$pid] = true;
+                        }
+                    }
+
+                    foreach (array_keys($matchedProductIds) as $pid) {
+                        if (! isset($fullMetricsByProduct[$pid])) {
+                            $fullMetricsByProduct[$pid] = [
+                                'qty_30d' => 0,
+                                'qty_60d' => 0,
+                                'qty_90d' => 0,
+                                'qty_180d' => 0,
+                                'qty_ly_month' => 0,
+                                'qty_ly_year' => 0,
+                            ];
+                        }
+                        $fullMetricsByProduct[$pid]['qty_30d'] += (int) $row->qty_30d;
+                        $fullMetricsByProduct[$pid]['qty_60d'] += (int) $row->qty_60d;
+                        $fullMetricsByProduct[$pid]['qty_90d'] += (int) $row->qty_90d;
+                        $fullMetricsByProduct[$pid]['qty_180d'] += (int) $row->qty_180d;
+                        $fullMetricsByProduct[$pid]['qty_ly_month'] += (int) $row->qty_ly_month;
+                        $fullMetricsByProduct[$pid]['qty_ly_year'] += (int) $row->qty_ly_year;
+                    }
+                }
+            }
+        }
+
+        // 6. Stock disponible en bodega MeLi FULL agrupado
+        $meliFullStockMap = [];
+        if (Schema::hasTable('meli_full_stocks')) {
+            $meliFullStockMap = DB::table('meli_full_stocks')
+                ->whereNotNull('sku')
+                ->where('sku', '!=', '')
+                ->selectRaw('UPPER(TRIM(sku)) as clean_sku, SUM(full_available_quantity) as total_qty')
+                ->groupBy(DB::raw('UPPER(TRIM(sku))'))
+                ->pluck('total_qty', 'clean_sku')
+                ->all();
+        }
+
+        // 7. Stock MeLi FULL en tránsito agrupado por producto
+        $meliShipmentStockMap = [];
+        if (Schema::hasTable('meli_full_shipments') && Schema::hasTable('meli_full_shipment_items')) {
+            $meliShipmentStockMap = DB::table('meli_full_shipment_items as i')
+                ->join('meli_full_shipments as s', 's.id', '=', 'i.meli_full_shipment_id')
+                ->whereIn('s.status', [MeliFullShipment::STATUS_IN_TRANSIT, MeliFullShipment::STATUS_PACKED])
+                ->whereIn('i.inventory_product_id', $productIds)
+                ->select('i.inventory_product_id', DB::raw('SUM(i.quantity_sent) as total_qty'))
+                ->groupBy('i.inventory_product_id')
+                ->pluck('total_qty', 'i.inventory_product_id')
+                ->all();
+        }
+
+        $brandConfigsMap = [];
+        foreach ($allBrandConfigs as $cfg) {
+            $brandConfigsMap[mb_strtoupper(trim((string) $cfg->brand))] = $cfg;
+        }
+
+        $batchData = [
+            'now' => $now,
+            'physical_stocks' => $physicalStocks,
+            'reserved_stocks' => $reservedStocks,
+            'brand_configs' => $brandConfigsMap,
+            'local_movements' => $localMovements,
+            'full_metrics' => $fullMetricsByProduct,
+            'meli_full_stocks' => $meliFullStockMap,
+            'meli_shipment_stocks' => $meliShipmentStockMap,
+        ];
 
         $items = [];
         $totalSkus = 0;
@@ -257,8 +564,11 @@ class InventoryDemandForecastingService
             if ($overrideCoverage) {
                 $options['target_coverage_days'] = $overrideCoverage;
             }
+            if (isset($filters['as_of'])) {
+                $options['as_of'] = $filters['as_of'];
+            }
 
-            $forecast = $this->getProductForecast($prod, $options);
+            $forecast = $this->getProductForecast($prod, $options, $batchData);
 
             // Filtrar por estado de semáforo si aplica
             if (! empty($filters['status']) && $forecast['status'] !== strtoupper($filters['status'])) {
@@ -281,17 +591,6 @@ class InventoryDemandForecastingService
             $totalSalesFull30d += $forecast['sales_full_30d'];
             $totalSalesLocal30d += $forecast['sales_local_30d'];
         }
-
-        // Obtener marcas únicas y configuraciones
-        $brands = InventoryProduct::query()
-            ->whereNotNull('brand')
-            ->where('brand', '!=', '')
-            ->distinct()
-            ->orderBy('brand')
-            ->pluck('brand')
-            ->values();
-
-        $brandConfigs = BrandRestockConfiguration::all()->keyBy('brand');
 
         return [
             'summary' => [
@@ -359,11 +658,12 @@ class InventoryDemandForecastingService
         // 2. Ventas despachadas directamente por Mercado Libre FULL
         $sku = strtoupper(trim((string) $product->sku));
         $barcode = strtoupper(trim((string) $product->barcode));
+        $barcodeSec = strtoupper(trim((string) ($product->barcode_secondary ?? '')));
 
         $fullSales = 0;
-        if (\Illuminate\Support\Facades\Schema::hasTable('meli_orders') && \Illuminate\Support\Facades\Schema::hasTable('meli_order_items')) {
+        if (Schema::hasTable('meli_orders') && Schema::hasTable('meli_order_items')) {
             $linkedMlms = [];
-            if (\Illuminate\Support\Facades\Schema::hasTable('inventory_channel_links')) {
+            if (Schema::hasTable('inventory_channel_links')) {
                 $linkedMlms = InventoryChannelLink::query()
                     ->where('channel', InventoryChannelLink::MERCADO_LIBRE)
                     ->where('inventory_product_id', $product->id)
@@ -372,10 +672,10 @@ class InventoryDemandForecastingService
                     ->all();
             }
 
-            if (! empty($linkedMlms) || $sku !== '' || $barcode !== '') {
+            if (! empty($linkedMlms) || $sku !== '' || $barcode !== '' || $barcodeSec !== '') {
                 $fullQuery = DB::table('meli_orders as o')
                     ->join('meli_order_items as i', 'i.meli_order_id', '=', 'o.id')
-                    ->where(function ($q) use ($linkedMlms, $sku, $barcode) {
+                    ->where(function ($q) use ($linkedMlms, $sku, $barcode, $barcodeSec) {
                         $hasCondition = false;
                         if (! empty($linkedMlms)) {
                             $q->whereIn('i.item_id', $linkedMlms);
@@ -391,6 +691,9 @@ class InventoryDemandForecastingService
                         }
                         if ($barcode !== '') {
                             $q->orWhereRaw('UPPER(TRIM(i.sku)) = ?', [$barcode]);
+                        }
+                        if ($barcodeSec !== '') {
+                            $q->orWhereRaw('UPPER(TRIM(i.sku)) = ?', [$barcodeSec]);
                         }
                     })
                     ->whereRaw("LOWER(COALESCE(o.status, '')) NOT IN ('cancelled', 'invalid')")

@@ -563,6 +563,11 @@ export default function RestockForecast({
                                             <span className="font-mono font-bold text-indigo-600 dark:text-indigo-400 block">
                                                 {item.sku}
                                             </span>
+                                            {item.barcode_secondary && (
+                                                <span className="font-mono text-[10px] text-slate-500 dark:text-slate-400 block">
+                                                    Cód 2: {item.barcode_secondary}
+                                                </span>
+                                            )}
                                             <span className="line-clamp-2 text-slate-800 dark:text-slate-200 font-semibold">
                                                 {item.name}
                                             </span>

@@ -31,6 +31,7 @@ class InventoryProductController extends Controller
                     $nested->where('name', 'like', "%{$search}%")
                         ->orWhere('sku', 'like', "%{$search}%")
                         ->orWhere('barcode', 'like', "%{$search}%")
+                        ->orWhere('barcode_secondary', 'like', "%{$search}%")
                         ->orWhere('reserve_notes', 'like', "%{$search}%")
                         ->orWhereHas('primaryLocation', function ($location) use ($search): void {
                             $location->where('code', 'like', "%{$search}%")

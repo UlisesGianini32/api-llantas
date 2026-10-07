@@ -59,6 +59,8 @@ class PosSaleTest extends TestCase
         (require database_path('migrations/2026_09_26_000001_add_remote_user_product_id_to_inventory_channel_links.php'))->up();
         (require database_path('migrations/2026_09_30_000001_create_pos_sales_tables.php'))->up();
         (require database_path('migrations/2026_09_30_000002_create_pos_shifts_tables.php'))->up();
+        (require database_path('migrations/2026_10_06_190000_create_customers_and_pos_credit_tables.php'))->up();
+        (require database_path('migrations/2026_10_07_183419_add_barcode_secondary_to_inventory_products_table.php'))->up();
 
         $this->cashier = User::forceCreate([
             'name' => 'Cajero Mostrador',
@@ -112,6 +114,7 @@ class PosSaleTest extends TestCase
         $prod1 = InventoryProduct::forceCreate([
             'sku' => 'TINTE-ROJO',
             'barcode' => '888123',
+            'barcode_secondary' => '999777',
             'name' => 'Tinte Capilar Rojo Pasión',
             'product_type' => InventoryProduct::SIMPLE,
             'price_public' => 120.00,
@@ -127,11 +130,17 @@ class PosSaleTest extends TestCase
             'is_active' => true,
         ]);
 
-        // Search by barcode
+        // Search by primary barcode
         $resBarcode = $this->actingAs($this->cashier)->getJson('/pos/search?q=888123');
         $resBarcode->assertOk();
         $this->assertCount(1, $resBarcode->json('products'));
         $this->assertSame('TINTE-ROJO', $resBarcode->json('products.0.sku'));
+
+        // Search by secondary barcode
+        $resSec = $this->actingAs($this->cashier)->getJson('/pos/search?q=999777');
+        $resSec->assertOk();
+        $this->assertCount(1, $resSec->json('products'));
+        $this->assertSame('TINTE-ROJO', $resSec->json('products.0.sku'));
 
         // Search by partial name
         $resName = $this->actingAs($this->cashier)->getJson('/pos/search?q=Tinte');

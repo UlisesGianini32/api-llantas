@@ -9,6 +9,9 @@ export default function InventoryMovementForm({ products = [], locations = [], t
     const defaultType = types.includes('RECEIPT') ? 'RECEIPT' : (types[0] || 'RECEIPT')
     const [type, setType] = useState(defaultType)
     const [locationId, setLocationId] = useState(locations[0]?.id ? String(locations[0].id) : '')
+    const [destinationLocationId, setDestinationLocationId] = useState(
+        locations.length > 1 ? String(locations[1]?.id) : (locations[0]?.id ? String(locations[0].id) : '')
+    )
     const [reference, setReference] = useState('')
     const [generalNotes, setGeneralNotes] = useState('')
 
@@ -112,11 +115,13 @@ export default function InventoryMovementForm({ products = [], locations = [], t
         }
     }
 
-    // Clasificación de si el tipo suma o resta stock
+    // Clasificación de si el tipo suma, resta o transfiere stock
     const isPositiveType = useMemo(() => {
         const positives = ['RECEIPT', 'INITIAL', 'RETURN', 'ADJUSTMENT_IN']
         return positives.includes(type)
     }, [type])
+
+    const isTransferType = type === 'TRANSFER'
 
     // Filtro para el buscador manual desplegable
     const filteredProducts = useMemo(() => {
@@ -125,7 +130,7 @@ export default function InventoryMovementForm({ products = [], locations = [], t
         return products.filter((p) => {
             const nameMatch = p.name?.toLowerCase().includes(q)
             const skuMatch = p.sku?.toLowerCase().includes(q)
-            const barcodeMatch = p.barcode?.toLowerCase().includes(q)
+            const barcodeMatch = p.barcode?.toLowerCase().includes(q) || p.barcode_secondary?.toLowerCase().includes(q)
             const brandMatch = p.brand?.toLowerCase().includes(q)
             return nameMatch || skuMatch || barcodeMatch || brandMatch
         }).slice(0, 30)
@@ -228,8 +233,9 @@ export default function InventoryMovementForm({ products = [], locations = [], t
         if (!code) return null
         return products.find((p) => {
             const b = (p.barcode || '').trim().toLowerCase()
+            const b2 = (p.barcode_secondary || '').trim().toLowerCase()
             const s = (p.sku || '').trim().toLowerCase()
-            return b === code || s === code || String(p.id) === code
+            return b === code || b2 === code || s === code || String(p.id) === code
         })
     }
 
@@ -353,12 +359,24 @@ export default function InventoryMovementForm({ products = [], locations = [], t
             return
         }
 
+        if (isTransferType) {
+            if (!destinationLocationId) {
+                setErrors({ destination_location_id: 'Debes seleccionar la ubicación de destino a la que se moverán los productos.' })
+                return
+            }
+            if (locationId && String(locationId) === String(destinationLocationId)) {
+                setErrors({ destination_location_id: 'La ubicación de destino debe ser diferente a la ubicación de origen.' })
+                return
+            }
+        }
+
         setSubmitting(true)
 
         // Se envía payload con los items y la ubicación por ítem
         const payload = {
             type,
             inventory_location_id: locationId ? parseInt(locationId, 10) : null,
+            destination_location_id: isTransferType && destinationLocationId ? parseInt(destinationLocationId, 10) : null,
             reference: reference.trim() || null,
             notes: generalNotes.trim() || null,
             occurred_at: new Date().toISOString(),
@@ -454,7 +472,11 @@ export default function InventoryMovementForm({ products = [], locations = [], t
                                     </select>
                                 </div>
                                 <div className="mt-2 flex items-center gap-2 text-xs">
-                                    {isPositiveType ? (
+                                    {isTransferType ? (
+                                        <span className="inline-flex items-center gap-1 rounded-md bg-indigo-50 px-2 py-0.5 font-medium text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300">
+                                            <span>🔄</span> Mover productos (Salida de Origen y Entrada en Destino)
+                                        </span>
+                                    ) : isPositiveType ? (
                                         <span className="inline-flex items-center gap-1 rounded-md bg-emerald-50 px-2 py-0.5 font-medium text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300">
                                             <span>+</span> Aumenta existencias (Entrada de mercancía)
                                         </span>
@@ -467,32 +489,85 @@ export default function InventoryMovementForm({ products = [], locations = [], t
                                 {errors.type && <p className="mt-1.5 text-xs text-rose-600 font-medium">{errors.type}</p>}
                             </div>
 
-                            {/* UBICACIÓN DE RESPALDO */}
-                            <div>
-                                <label className="block text-sm font-semibold text-slate-900 dark:text-slate-100">
-                                    Ubicación general / Respaldo
-                                </label>
-                                <div className="mt-1.5">
-                                    <select
-                                        value={locationId}
-                                        onChange={(e) => setLocationId(e.target.value)}
-                                        className="w-full rounded-xl border border-slate-300 bg-white px-4 py-2.5 font-medium text-slate-900 shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 dark:border-neutral-700 dark:bg-neutral-950 dark:text-white"
-                                    >
-                                        <option value="">(Ubicación automática de cada producto)</option>
-                                        {locations.map((loc) => (
-                                            <option key={loc.id} value={loc.id}>
-                                                {loc.code} {loc.name ? `— ${loc.name}` : ''}
-                                            </option>
-                                        ))}
-                                    </select>
+                            {/* UBICACIONES */}
+                            {isTransferType ? (
+                                <div className="space-y-4">
+                                    <div>
+                                        <label className="block text-sm font-semibold text-slate-900 dark:text-slate-100">
+                                            📍 Ubicación Origen (De dónde sale) <span className="text-rose-500">*</span>
+                                        </label>
+                                        <div className="mt-1.5">
+                                            <select
+                                                value={locationId}
+                                                onChange={(e) => setLocationId(e.target.value)}
+                                                className="w-full rounded-xl border border-slate-300 bg-white px-4 py-2.5 font-medium text-slate-900 shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 dark:border-neutral-700 dark:bg-neutral-950 dark:text-white"
+                                            >
+                                                <option value="">(Ubicación asignada a cada producto)</option>
+                                                {locations.map((loc) => (
+                                                    <option key={loc.id} value={loc.id}>
+                                                        {loc.code} {loc.name ? `— ${loc.name}` : ''}
+                                                    </option>
+                                                ))}
+                                            </select>
+                                        </div>
+                                        {errors.inventory_location_id && (
+                                            <p className="mt-1.5 text-xs text-rose-600 font-medium">{errors.inventory_location_id}</p>
+                                        )}
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-sm font-semibold text-slate-900 dark:text-slate-100">
+                                            🎯 Ubicación Destino (A dónde entra) <span className="text-rose-500">*</span>
+                                        </label>
+                                        <div className="mt-1.5">
+                                            <select
+                                                value={destinationLocationId}
+                                                onChange={(e) => setDestinationLocationId(e.target.value)}
+                                                className="w-full rounded-xl border border-slate-300 bg-white px-4 py-2.5 font-medium text-slate-900 shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 dark:border-neutral-700 dark:bg-neutral-950 dark:text-white"
+                                            >
+                                                <option value="">Selecciona ubicación destino...</option>
+                                                {locations.map((loc) => (
+                                                    <option key={loc.id} value={loc.id}>
+                                                        {loc.code} {loc.name ? `— ${loc.name}` : ''}
+                                                    </option>
+                                                ))}
+                                            </select>
+                                        </div>
+                                        <p className="mt-1.5 text-[11px] text-indigo-600 dark:text-indigo-400">
+                                            🔄 Se descontará el stock de la ubicación origen y se sumará en la ubicación destino.
+                                        </p>
+                                        {errors.destination_location_id && (
+                                            <p className="mt-1.5 text-xs text-rose-600 font-medium">{errors.destination_location_id}</p>
+                                        )}
+                                    </div>
                                 </div>
-                                <p className="mt-1.5 text-[11px] text-slate-500 dark:text-neutral-400">
-                                    💡 Se aplicará como respaldo únicamente si algún producto escaneado no tiene ubicación asignada.
-                                </p>
-                                {errors.inventory_location_id && (
-                                    <p className="mt-1.5 text-xs text-rose-600 font-medium">{errors.inventory_location_id}</p>
-                                )}
-                            </div>
+                            ) : (
+                                <div>
+                                    <label className="block text-sm font-semibold text-slate-900 dark:text-slate-100">
+                                        Ubicación general / Respaldo
+                                    </label>
+                                    <div className="mt-1.5">
+                                        <select
+                                            value={locationId}
+                                            onChange={(e) => setLocationId(e.target.value)}
+                                            className="w-full rounded-xl border border-slate-300 bg-white px-4 py-2.5 font-medium text-slate-900 shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 dark:border-neutral-700 dark:bg-neutral-950 dark:text-white"
+                                        >
+                                            <option value="">(Ubicación automática de cada producto)</option>
+                                            {locations.map((loc) => (
+                                                <option key={loc.id} value={loc.id}>
+                                                    {loc.code} {loc.name ? `— ${loc.name}` : ''}
+                                                </option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                    <p className="mt-1.5 text-[11px] text-slate-500 dark:text-neutral-400">
+                                        💡 Se aplicará como respaldo únicamente si algún producto escaneado no tiene ubicación asignada.
+                                    </p>
+                                    {errors.inventory_location_id && (
+                                        <p className="mt-1.5 text-xs text-rose-600 font-medium">{errors.inventory_location_id}</p>
+                                    )}
+                                </div>
+                            )}
                         </div>
 
                         {/* Referencia y Notas Generales */}

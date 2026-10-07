@@ -64,6 +64,16 @@ class InventoryProductsTest extends TestCase
         $kitReservationsMigration->up();
         $channelLinksMigration = require database_path('migrations/2026_09_25_000001_create_inventory_channel_links_table.php');
         $channelLinksMigration->up();
+
+        Schema::table('inventory_locations', function (Blueprint $table): void {
+            $table->string('amazon_aisle', 10)->nullable();
+        });
+
+        Schema::table('inventory_products', function (Blueprint $table): void {
+            $table->foreignId('secondary_location_id')->nullable()->constrained('inventory_locations')->nullOnDelete();
+            $table->string('reserve_notes', 255)->nullable();
+            $table->string('barcode_secondary', 100)->nullable();
+        });
     }
 
     protected function tearDown(): void
@@ -394,6 +404,34 @@ class InventoryProductsTest extends TestCase
         $this->assertTrue(Schema::hasTable('inventory_products'));
         $this->assertFalse(Schema::hasColumn('inventory_products', 'stock'));
         $this->assertFalse(Schema::hasColumn('inventory_products', 'llanta_id'));
+    }
+
+    public function test_admin_can_manage_and_search_by_secondary_barcode(): void
+    {
+        $this->actingAs($this->admin());
+
+        // Crear producto con código secundario
+        $this->post(route('inventory.products.store'), [
+            'sku' => 'SKU-SEC-BAR',
+            'name' => 'Producto con 2 códigos',
+            'barcode' => '7501234567890',
+            'barcode_secondary' => ' 7509876543210 ',
+            'cost' => 100,
+            'price_public' => 150,
+        ])->assertRedirect(route('inventory.products.index'));
+
+        $this->assertDatabaseHas('inventory_products', [
+            'sku' => 'SKU-SEC-BAR',
+            'barcode' => '7501234567890',
+            'barcode_secondary' => '7509876543210',
+        ]);
+
+        // Buscar por código de barras secundario
+        $this->get(route('inventory.products.index', ['search' => '7509876543210']))
+            ->assertOk()
+            ->assertInertia(fn (Assert $page): Assert => $page
+                ->where('products.data.0.sku', 'SKU-SEC-BAR')
+                ->where('products.data.0.barcode_secondary', '7509876543210'));
     }
 
     public function test_operations_user_cannot_manage_inventory_catalog(): void

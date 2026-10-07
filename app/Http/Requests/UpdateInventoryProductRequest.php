@@ -22,6 +22,7 @@ class UpdateInventoryProductRequest extends FormRequest
             'sku' => ['required', 'string', 'max:100', 'regex:/\S/', Rule::unique('inventory_products', 'sku')->ignore($productId)],
             'product_type' => ['sometimes', 'string', Rule::in(InventoryProduct::TYPES)],
             'barcode' => ['nullable', 'string', 'max:100', Rule::unique('inventory_products', 'barcode')->ignore($productId)],
+            'barcode_secondary' => ['nullable', 'string', 'max:100'],
             'name' => ['required', 'string', 'max:255'],
             'brand' => ['nullable', 'string', 'max:100'],
             'supplier' => ['nullable', 'string', 'max:100'],
@@ -43,6 +44,7 @@ class UpdateInventoryProductRequest extends FormRequest
         $this->merge([
             'sku' => trim((string) $this->input('sku', '')),
             'barcode' => ($barcode = trim((string) $this->input('barcode', ''))) === '' ? null : $barcode,
+            'barcode_secondary' => ($barcodeSec = trim((string) $this->input('barcode_secondary', ''))) === '' ? null : $barcodeSec,
         ]);
     }
 }
