@@ -33,6 +33,7 @@ class User extends Authenticatable
         'name',
         'email',
         'password',
+        'role',
         'meli_id',
         'official_store_id',   // ✅ NUEVO
         'access_token',
