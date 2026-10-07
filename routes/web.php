@@ -4,6 +4,7 @@ use App\Http\Controllers\AmsPedidosController;
 use App\Http\Controllers\AmsProductIssueController;
 use App\Http\Controllers\AmsSecondaryOrdersController;
 use App\Http\Controllers\AuthController;
+use App\Http\Controllers\CustomerController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\ExcelImportController;
 use App\Http\Controllers\InventoryChannelLinkController;
@@ -135,8 +136,12 @@ Route::middleware(['auth', 'role'])->group(function () {
             ->whereNumber('posSale')->name('sales.show');
         Route::get('/sales/{posSale}/receipt', [PosController::class, 'receipt'])
             ->whereNumber('posSale')->name('sales.receipt');
+        Route::get('/sales/{posSale}/voucher', [CustomerController::class, 'voucher'])
+            ->whereNumber('posSale')->name('sales.voucher');
         Route::post('/sales/{posSale}/cancel', [PosController::class, 'cancel'])
             ->whereNumber('posSale')->name('sales.cancel');
+
+        Route::get('/customers/search', [CustomerController::class, 'search'])->name('customers.search');
 
         // Turnos y Caja (Shifts & Drawer)
         Route::prefix('shifts')->name('shifts.')->group(function () {
@@ -153,6 +158,19 @@ Route::middleware(['auth', 'role'])->group(function () {
         });
         Route::post('/drawer/open', [PosShiftController::class, 'drawer'])->name('drawer.open');
     });
+
+    // CLIENTES & CARTERA DE CRÉDITO (Estilistas, Mayoristas, Créditos 7/15/30 días)
+    Route::prefix('pos/clientes')->name('customers.')->group(function () {
+        Route::get('/', [CustomerController::class, 'index'])->name('index');
+        Route::post('/', [CustomerController::class, 'store'])->name('store');
+        Route::get('/{customer}', [CustomerController::class, 'show'])
+            ->whereNumber('customer')->name('show');
+        Route::put('/{customer}', [CustomerController::class, 'update'])
+            ->whereNumber('customer')->name('update');
+        Route::post('/{customer}/pagos', [CustomerController::class, 'addPayment'])
+            ->whereNumber('customer')->name('payments.store');
+    });
+    Route::get('/clientes', fn () => redirect()->route('customers.index'));
 
     // REABASTECIMIENTO INTELIGENTE Y PRONÓSTICO DE COMPRAS (Ticket 19)
     Route::prefix('reabastecimiento')->name('restock.')->group(function () {

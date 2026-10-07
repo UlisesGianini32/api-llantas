@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { Head, router, usePage } from '@inertiajs/react'
+import { Head, Link, router, usePage } from '@inertiajs/react'
 import AppShell from '@/Components/layout/AppShell'
 import {
     connectQz,
@@ -19,6 +19,8 @@ export default function PosIndex({
     defaultLocationId = null,
     initialProducts = [],
     recentSales = [],
+    customers = [],
+    creditAlerts = {},
     currentShift = null,
     shiftSummary = null,
 }) {
@@ -70,10 +72,26 @@ export default function PosIndex({
     const [qzConnected, setQzConnected] = useState(false)
     const [settingsModalOpen, setSettingsModalOpen] = useState(false)
 
-    // State: Customer
+    // State: Customer & Credit
+    const [customerList, setCustomerList] = useState(customers)
+    const [selectedCustomer, setSelectedCustomer] = useState(null)
     const [customerType, setCustomerType] = useState('public') // 'public' | 'stylist'
     const [customerName, setCustomerName] = useState('Público en general')
     const [customerPhone, setCustomerPhone] = useState('')
+    const [customerDropdownOpen, setCustomerDropdownOpen] = useState(false)
+    const [quickCustomerModalOpen, setQuickCustomerModalOpen] = useState(false)
+    const [newCustomerForm, setNewCustomerForm] = useState({
+        name: '',
+        business_name: '',
+        phone: '',
+        credit_limit: '5000',
+        credit_days_default: 15,
+        address: '',
+    })
+
+    // State: Credit terms
+    const [creditDays, setCreditDays] = useState(15) // 7, 15, 30
+    const [creditDownpayment, setCreditDownpayment] = useState('')
 
     // State: Search & Catalog
     const [searchQuery, setSearchQuery] = useState('')
@@ -267,6 +285,64 @@ export default function PosIndex({
     const tenderedVal = Number(amountTendered || 0)
     const changeDue = paymentMethod === 'cash' && tenderedVal >= cartTotal ? tenderedVal - cartTotal : 0
 
+    const handleSelectCustomer = (cust) => {
+        if (!cust) {
+            setSelectedCustomer(null)
+            setCustomerName('Público en general')
+            setCustomerPhone('')
+            setCustomerDropdownOpen(false)
+            return
+        }
+        setSelectedCustomer(cust)
+        setCustomerName(cust.name)
+        setCustomerPhone(cust.phone || '')
+        if (cust.credit_days_default) {
+            setCreditDays(cust.credit_days_default)
+        }
+        setCustomerDropdownOpen(false)
+    }
+
+    const handleQuickCreateCustomer = async (e) => {
+        e.preventDefault()
+        if (!newCustomerForm.name.trim()) return
+
+        try {
+            const res = await fetch('/pos/clientes', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    Accept: 'application/json',
+                    'X-CSRF-TOKEN': getCsrfToken(),
+                },
+                body: JSON.stringify(newCustomerForm),
+            })
+            const data = await res.json()
+            if (data.ok && data.customer) {
+                setCustomerList((prev) => [data.customer, ...prev])
+                handleSelectCustomer(data.customer)
+                setQuickCustomerModalOpen(false)
+                setNewCustomerForm({
+                    name: '',
+                    business_name: '',
+                    phone: '',
+                    credit_limit: '5000',
+                    credit_days_default: 15,
+                    address: '',
+                })
+            } else {
+                window.alert('Error creando cliente: ' + (data.message || 'Datos incompletos'))
+            }
+        } catch (err) {
+            window.alert('Error de red creando cliente: ' + err.message)
+        }
+    }
+
+    const calculateDueDate = (days) => {
+        const d = new Date()
+        d.setDate(d.getDate() + Number(days))
+        return d.toLocaleDateString('es-MX', { day: '2-digit', month: '2-digit', year: 'numeric' })
+    }
+
     // Switch customer type and update cart prices
     const handleCustomerTypeChange = (type) => {
         setCustomerType(type)
@@ -296,16 +372,27 @@ export default function PosIndex({
             return
         }
 
+        if (paymentMethod === 'credit') {
+            if (!selectedCustomer && (!customerName || customerName.trim() === '' || customerName.trim() === 'Público en general')) {
+                setStockError('Para otorgar venta a crédito es obligatorio seleccionar o registrar un cliente/estilista.')
+                return
+            }
+        }
+
         setSubmitting(true)
         setStockError(null)
 
+        const downpaymentVal = paymentMethod === 'credit' && creditDownpayment ? Number(creditDownpayment) : null
+
         const payload = {
             inventory_location_id: selectedLocationId,
+            customer_id: selectedCustomer ? selectedCustomer.id : null,
             customer_name: customerName,
             customer_phone: customerPhone,
             customer_type: customerType,
             payment_method: paymentMethod,
-            amount_tendered: paymentMethod === 'cash' ? tenderedVal : null,
+            credit_days: paymentMethod === 'credit' ? creditDays : null,
+            amount_tendered: paymentMethod === 'cash' ? tenderedVal : downpaymentVal,
             discount_amount: discountVal,
             tax_amount: 0,
             notes: notes,
@@ -340,6 +427,7 @@ export default function PosIndex({
             // Success: clear cart and show receipt modal
             setCart([])
             setAmountTendered('')
+            setCreditDownpayment('')
             setGlobalDiscount('')
             setNotes('')
             setLastSaleModal({
@@ -631,6 +719,19 @@ export default function PosIndex({
                         >
                             Ventas ({recentSales.length})
                         </button>
+
+                        {/* Clientes & Cartera Button with Alerts */}
+                        <Link
+                            href="/pos/clientes"
+                            className="flex items-center gap-1.5 rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-200"
+                        >
+                            <span>👥</span> Clientes
+                            {((creditAlerts?.overdue_sales_count || 0) + (creditAlerts?.due_soon_sales_count || 0)) > 0 && (
+                                <span className="rounded-full bg-red-600 px-1.5 py-0.2 text-[10px] font-extrabold text-white animate-pulse" title="Créditos por vencer o vencidos">
+                                    {(creditAlerts.overdue_sales_count || 0) + (creditAlerts.due_soon_sales_count || 0)}
+                                </span>
+                            )}
+                        </Link>
                     </div>
                 </div>
 
@@ -836,28 +937,118 @@ export default function PosIndex({
                                     )}
                                 </div>
 
-                                {/* CUSTOMER INFO */}
-                                <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
-                                    <div>
-                                        <label className="text-[11px] font-semibold text-slate-500">Cliente:</label>
-                                        <input
-                                            type="text"
-                                            value={customerName}
-                                            onChange={(e) => setCustomerName(e.target.value)}
-                                            placeholder="Nombre del cliente"
-                                            className="mt-0.5 w-full rounded-lg border border-slate-200 p-1.5 text-xs dark:border-neutral-700 dark:bg-neutral-800 dark:text-white"
-                                        />
+                                {/* CUSTOMER INFO & SELECTION */}
+                                <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-2.5 dark:border-neutral-800 dark:bg-neutral-950 text-xs">
+                                    <div className="flex items-center justify-between pb-1.5">
+                                        <span className="font-bold text-slate-700 dark:text-slate-300 flex items-center gap-1">
+                                            <span>👤</span> Cliente / Estilista:
+                                        </span>
+                                        <button
+                                            type="button"
+                                            onClick={() => setQuickCustomerModalOpen(true)}
+                                            className="text-[11px] font-bold text-indigo-600 hover:underline dark:text-indigo-400"
+                                        >
+                                            + Nuevo Cliente
+                                        </button>
                                     </div>
-                                    <div>
-                                        <label className="text-[11px] font-semibold text-slate-500">Teléfono (opcional):</label>
-                                        <input
-                                            type="text"
-                                            value={customerPhone}
-                                            onChange={(e) => setCustomerPhone(e.target.value)}
-                                            placeholder="WhatsApp o celular"
-                                            className="mt-0.5 w-full rounded-lg border border-slate-200 p-1.5 text-xs dark:border-neutral-700 dark:bg-neutral-800 dark:text-white"
-                                        />
-                                    </div>
+
+                                    {selectedCustomer ? (
+                                        <div className="flex items-center justify-between rounded-xl bg-indigo-50 p-2.5 text-indigo-950 dark:bg-indigo-950/40 dark:text-indigo-200 border border-indigo-200 dark:border-indigo-800">
+                                            <div className="min-w-0 flex-1">
+                                                <div className="flex items-center gap-1.5">
+                                                    <p className="font-bold truncate">{selectedCustomer.name}</p>
+                                                    {selectedCustomer.business_name && (
+                                                        <span className="rounded bg-indigo-200 px-1.5 py-0.2 text-[10px] font-semibold text-indigo-800 dark:bg-indigo-900 dark:text-indigo-300">
+                                                            {selectedCustomer.business_name}
+                                                        </span>
+                                                    )}
+                                                </div>
+                                                <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px] text-slate-500 dark:text-slate-400">
+                                                    <span>Tel: {selectedCustomer.phone || 'Sin tel'}</span>
+                                                    <span>•</span>
+                                                    <span>Plazo: {creditDays} días</span>
+                                                    {selectedCustomer.credit_limit && (
+                                                        <span>• Límite: ${Number(selectedCustomer.credit_limit).toFixed(2)}</span>
+                                                    )}
+                                                </div>
+                                            </div>
+                                            <button
+                                                type="button"
+                                                onClick={() => handleSelectCustomer(null)}
+                                                className="ml-2 rounded-lg p-1 text-slate-400 hover:bg-white hover:text-slate-700 dark:hover:bg-neutral-800"
+                                                title="Quitar cliente seleccionado"
+                                            >
+                                                ✕
+                                            </button>
+                                        </div>
+                                    ) : (
+                                        <div className="space-y-1.5 relative">
+                                            <div className="grid grid-cols-2 gap-2">
+                                                <div className="relative">
+                                                    <input
+                                                        type="text"
+                                                        value={customerName}
+                                                        onChange={(e) => {
+                                                            setCustomerName(e.target.value)
+                                                            setCustomerDropdownOpen(true)
+                                                        }}
+                                                        onFocus={() => setCustomerDropdownOpen(true)}
+                                                        placeholder="Nombre del cliente..."
+                                                        className="w-full rounded-lg border border-slate-300 p-1.5 text-xs dark:border-neutral-700 dark:bg-neutral-900 dark:text-white"
+                                                    />
+                                                </div>
+                                                <div>
+                                                    <input
+                                                        type="text"
+                                                        value={customerPhone}
+                                                        onChange={(e) => setCustomerPhone(e.target.value)}
+                                                        placeholder="WhatsApp o celular"
+                                                        className="w-full rounded-lg border border-slate-300 p-1.5 text-xs dark:border-neutral-700 dark:bg-neutral-900 dark:text-white"
+                                                    />
+                                                </div>
+                                            </div>
+
+                                            {/* Dropdown list of existing customers */}
+                                            {customerDropdownOpen && customerList.length > 0 && (
+                                                <div className="absolute left-0 right-0 top-full z-20 mt-1 max-h-40 overflow-y-auto rounded-xl border border-slate-200 bg-white p-1 shadow-xl dark:border-neutral-700 dark:bg-neutral-900 divide-y dark:divide-neutral-800 text-xs">
+                                                    <div className="flex items-center justify-between px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                                                        <span>Clientes registrados</span>
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => setCustomerDropdownOpen(false)}
+                                                            className="text-slate-400 hover:text-slate-600"
+                                                        >
+                                                            ✕
+                                                        </button>
+                                                    </div>
+                                                    {customerList
+                                                        .filter(
+                                                            (c) =>
+                                                                !customerName ||
+                                                                customerName === 'Público en general' ||
+                                                                c.name.toLowerCase().includes(customerName.toLowerCase()) ||
+                                                                (c.business_name && c.business_name.toLowerCase().includes(customerName.toLowerCase()))
+                                                        )
+                                                        .slice(0, 10)
+                                                        .map((c) => (
+                                                            <div
+                                                                key={c.id}
+                                                                onClick={() => handleSelectCustomer(c)}
+                                                                className="cursor-pointer p-2 hover:bg-indigo-50 dark:hover:bg-neutral-800 transition rounded-lg flex items-center justify-between"
+                                                            >
+                                                                <div>
+                                                                    <span className="font-bold text-slate-800 dark:text-slate-200">{c.name}</span>
+                                                                    {c.business_name && (
+                                                                        <span className="text-[10px] text-slate-500 ml-1">({c.business_name})</span>
+                                                                    )}
+                                                                </div>
+                                                                <span className="font-mono text-[10px] text-slate-400">{c.phone || ''}</span>
+                                                            </div>
+                                                        ))}
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
                                 </div>
 
                                 {/* CART ITEMS LIST */}
@@ -950,7 +1141,7 @@ export default function PosIndex({
                                 {/* PAYMENT METHODS */}
                                 <div>
                                     <label className="block text-[11px] font-semibold text-slate-500">Método de pago:</label>
-                                    <div className="mt-1 grid grid-cols-3 gap-1.5 text-xs font-semibold">
+                                    <div className="mt-1 grid grid-cols-4 gap-1 text-xs font-semibold">
                                         <button
                                             type="button"
                                             onClick={() => setPaymentMethod('cash')}
@@ -984,8 +1175,84 @@ export default function PosIndex({
                                         >
                                             📱 Transf.
                                         </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                setPaymentMethod('credit')
+                                                if (customerType !== 'stylist') {
+                                                    handleCustomerTypeChange('stylist')
+                                                }
+                                            }}
+                                            className={`rounded-xl border p-2 text-center transition ${
+                                                paymentMethod === 'credit'
+                                                    ? 'border-purple-600 bg-purple-50 text-purple-700 font-bold dark:border-purple-500 dark:bg-purple-950/40 dark:text-purple-300'
+                                                    : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50 dark:border-neutral-800 dark:bg-neutral-800 dark:text-slate-300'
+                                            }`}
+                                        >
+                                            📝 A Crédito
+                                        </button>
                                     </div>
                                 </div>
+
+                                {/* CREDIT TERMS & DETAILS PANEL */}
+                                {paymentMethod === 'credit' && (
+                                    <div className="rounded-xl border border-purple-200 bg-purple-50/60 p-3 dark:border-purple-950 dark:bg-purple-950/25 text-xs space-y-2.5">
+                                        <div className="flex items-center justify-between">
+                                            <span className="font-bold text-purple-900 dark:text-purple-300">
+                                                Plazo de Crédito:
+                                            </span>
+                                            <div className="flex gap-1.5 font-bold">
+                                                {[7, 15, 30].map((days) => (
+                                                    <button
+                                                        key={days}
+                                                        type="button"
+                                                        onClick={() => setCreditDays(days)}
+                                                        className={`px-2.5 py-1 rounded-lg transition ${
+                                                            creditDays === days
+                                                                ? 'bg-purple-600 text-white shadow-sm'
+                                                                : 'bg-white text-purple-700 border border-purple-300 dark:bg-neutral-900 dark:text-purple-300 dark:border-purple-800'
+                                                        }`}
+                                                    >
+                                                        {days} días
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        </div>
+
+                                        <div className="flex items-center justify-between text-slate-600 dark:text-slate-400 pt-1 border-t border-purple-200 dark:border-purple-900/50">
+                                            <span>Fecha de Vencimiento:</span>
+                                            <span className="font-bold text-red-600 font-mono text-sm">
+                                                {calculateDueDate(creditDays)}
+                                            </span>
+                                        </div>
+
+                                        <div className="grid grid-cols-2 gap-2 pt-1 border-t border-purple-200 dark:border-purple-900/50">
+                                            <div>
+                                                <label className="block text-[10px] font-semibold text-slate-600 dark:text-slate-400">
+                                                    Anticipo / Enganche ($):
+                                                </label>
+                                                <input
+                                                    type="number"
+                                                    step="0.01"
+                                                    min="0"
+                                                    max={cartTotal}
+                                                    placeholder="0.00"
+                                                    value={creditDownpayment}
+                                                    onChange={(e) => setCreditDownpayment(e.target.value)}
+                                                    className="mt-0.5 w-full rounded-lg border border-purple-300 bg-white p-1 text-right font-mono text-xs dark:border-purple-800 dark:bg-neutral-900 dark:text-white"
+                                                />
+                                            </div>
+                                            <div>
+                                                <label className="block text-[10px] font-semibold text-slate-600 dark:text-slate-400">
+                                                    Saldo a Crédito:
+                                                </label>
+                                                <div className="mt-1 text-right font-mono font-extrabold text-sm text-purple-800 dark:text-purple-300">
+                                                    ${Math.max(0, cartTotal - (Number(creditDownpayment) || 0)).toFixed(2)}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
 
                                 {/* CASH TENDERED & CHANGE CALCULATOR */}
                                 {paymentMethod === 'cash' && (
@@ -1075,6 +1342,17 @@ export default function PosIndex({
 
                         {/* PRINTING BUTTONS */}
                         <div className="mt-4 grid grid-cols-2 gap-2">
+                            {lastSaleModal.payment_method === 'credit' && (
+                                <a
+                                    href={`/pos/sales/${lastSaleModal.id}/voucher`}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="col-span-2 flex items-center justify-center gap-1.5 rounded-xl bg-purple-600 py-2.5 text-xs font-bold text-white shadow hover:bg-purple-700"
+                                >
+                                    📄 Ver Pagaré / Comprobante de Crédito (PDF)
+                                </a>
+                            )}
+
                             {lastSaleModal.receipt?.escpos_base64 && (
                                 <button
                                     type="button"
@@ -1617,6 +1895,16 @@ export default function PosIndex({
 
                                             {sale.status === 'completed' && (
                                                 <div className="flex items-center gap-1.5">
+                                                    {sale.payment_method === 'credit' && (
+                                                        <a
+                                                            href={`/pos/sales/${sale.id}/voucher`}
+                                                            target="_blank"
+                                                            rel="noopener noreferrer"
+                                                            className="rounded-lg border border-purple-200 bg-purple-50 px-2 py-1 text-[11px] font-semibold text-purple-700 hover:bg-purple-100 dark:border-purple-800 dark:bg-purple-950/50 dark:text-purple-300"
+                                                        >
+                                                            📄 Pagaré
+                                                        </a>
+                                                    )}
                                                     <button
                                                         type="button"
                                                         onClick={async () => {
@@ -1696,6 +1984,143 @@ export default function PosIndex({
                                     className="rounded-xl bg-red-600 px-4 py-1.5 text-xs font-semibold text-white hover:bg-red-700"
                                 >
                                     Confirmar cancelación
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+
+            {/* MODAL: REGISTRAR CLIENTE / ESTILISTA RÁPIDO */}
+            {quickCustomerModalOpen && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+                    <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl dark:bg-neutral-900">
+                        <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-neutral-800">
+                            <h3 className="text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                                <span>👤</span> Registrar Nuevo Cliente / Estilista
+                            </h3>
+                            <button
+                                type="button"
+                                onClick={() => setQuickCustomerModalOpen(false)}
+                                className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-neutral-800"
+                            >
+                                ✕
+                            </button>
+                        </div>
+
+                        <form onSubmit={handleQuickCreateCustomer} className="mt-4 space-y-3">
+                            <div>
+                                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300">
+                                    Nombre completo *
+                                </label>
+                                <input
+                                    type="text"
+                                    required
+                                    placeholder="ej. Laura Sánchez"
+                                    value={newCustomerForm.name}
+                                    onChange={(e) =>
+                                        setNewCustomerForm({ ...newCustomerForm, name: e.target.value })
+                                    }
+                                    className="mt-1 w-full rounded-xl border border-slate-300 p-2.5 text-xs dark:border-neutral-700 dark:bg-neutral-950 dark:text-white"
+                                />
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-2">
+                                <div>
+                                    <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300">
+                                        Negocio / Salón
+                                    </label>
+                                    <input
+                                        type="text"
+                                        placeholder="ej. Laura Studio"
+                                        value={newCustomerForm.business_name}
+                                        onChange={(e) =>
+                                            setNewCustomerForm({ ...newCustomerForm, business_name: e.target.value })
+                                        }
+                                        className="mt-1 w-full rounded-xl border border-slate-300 p-2.5 text-xs dark:border-neutral-700 dark:bg-neutral-950 dark:text-white"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300">
+                                        Teléfono / WhatsApp
+                                    </label>
+                                    <input
+                                        type="tel"
+                                        placeholder="6621234567"
+                                        value={newCustomerForm.phone}
+                                        onChange={(e) =>
+                                            setNewCustomerForm({ ...newCustomerForm, phone: e.target.value })
+                                        }
+                                        className="mt-1 w-full rounded-xl border border-slate-300 p-2.5 text-xs dark:border-neutral-700 dark:bg-neutral-950 dark:text-white"
+                                    />
+                                </div>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-2">
+                                <div>
+                                    <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300">
+                                        Límite de crédito ($)
+                                    </label>
+                                    <input
+                                        type="number"
+                                        step="0.01"
+                                        min="0"
+                                        value={newCustomerForm.credit_limit}
+                                        onChange={(e) =>
+                                            setNewCustomerForm({ ...newCustomerForm, credit_limit: e.target.value })
+                                        }
+                                        className="mt-1 w-full rounded-xl border border-slate-300 p-2.5 text-xs dark:border-neutral-700 dark:bg-neutral-950 dark:text-white"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300">
+                                        Días de crédito
+                                    </label>
+                                    <select
+                                        value={newCustomerForm.credit_days_default}
+                                        onChange={(e) =>
+                                            setNewCustomerForm({
+                                                ...newCustomerForm,
+                                                credit_days_default: Number(e.target.value),
+                                            })
+                                        }
+                                        className="mt-1 w-full rounded-xl border border-slate-300 p-2.5 text-xs dark:border-neutral-700 dark:bg-neutral-950 dark:text-white"
+                                    >
+                                        <option value={7}>7 días</option>
+                                        <option value={15}>15 días</option>
+                                        <option value={30}>30 días</option>
+                                    </select>
+                                </div>
+                            </div>
+
+                            <div>
+                                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300">
+                                    Dirección (opcional)
+                                </label>
+                                <input
+                                    type="text"
+                                    placeholder="Colonia, calle, etc."
+                                    value={newCustomerForm.address}
+                                    onChange={(e) =>
+                                        setNewCustomerForm({ ...newCustomerForm, address: e.target.value })
+                                    }
+                                    className="mt-1 w-full rounded-xl border border-slate-300 p-2.5 text-xs dark:border-neutral-700 dark:bg-neutral-950 dark:text-white"
+                                />
+                            </div>
+
+                            <div className="flex justify-end gap-2 pt-3 border-t border-slate-100 dark:border-neutral-800">
+                                <button
+                                    type="button"
+                                    onClick={() => setQuickCustomerModalOpen(false)}
+                                    className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50 dark:border-neutral-700 dark:text-slate-300"
+                                >
+                                    Cancelar
+                                </button>
+                                <button
+                                    type="submit"
+                                    className="rounded-xl bg-indigo-600 px-4 py-2 text-xs font-bold text-white hover:bg-indigo-700 shadow"
+                                >
+                                    Guardar y Seleccionar
                                 </button>
                             </div>
                         </form>

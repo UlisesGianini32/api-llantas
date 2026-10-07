@@ -92,12 +92,22 @@ class PosReceiptService
             'cash' => 'Efectivo',
             'card' => 'Tarjeta Débito/Crédito',
             'transfer' => 'Transferencia',
+            'credit' => 'CRÉDITO ('.($sale->credit_days ?? 15).' días)',
             default => 'Otro / Mixto',
         };
 
         $lines[] = $this->twoColumns('Forma de pago:', $methodLabel, $width);
 
-        if ($sale->payment_method === 'cash' && $sale->amount_tendered !== null) {
+        if ($sale->payment_method === 'credit') {
+            $dueDateStr = $sale->credit_due_date ? $sale->credit_due_date->format('d/m/Y') : 'N/A';
+            $lines[] = $this->twoColumns('Vence el:', $dueDateStr, $width);
+            $lines[] = $this->twoColumns('Anticipo:', '$'.number_format((float) $sale->amount_paid, 2), $width);
+            $lines[] = $this->twoColumns('SALDO PENDIENTE:', '$'.number_format((float) $sale->balance_due, 2), $width);
+            $lines[] = '';
+            $lines[] = $this->center('_______________________________', $width);
+            $lines[] = $this->center('Firma del Deudor / Estilista', $width);
+            $lines[] = $this->center('Pagaré a la vista y conformidad', $width);
+        } elseif ($sale->payment_method === 'cash' && $sale->amount_tendered !== null) {
             $lines[] = $this->twoColumns('Efectivo recibido:', '$'.number_format((float) $sale->amount_tendered, 2), $width);
             $lines[] = $this->twoColumns('Cambio entregado:', '$'.number_format((float) $sale->change_due, 2), $width);
         }

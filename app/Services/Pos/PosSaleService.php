@@ -3,6 +3,8 @@
 namespace App\Services\Pos;
 
 use App\Exceptions\PosInsufficientStockException;
+use App\Models\Customer;
+use App\Models\CustomerPayment;
 use App\Models\InventoryLocation;
 use App\Models\InventoryMovement;
 use App\Models\InventoryProduct;
@@ -244,11 +246,64 @@ class PosSaleService
                 $changeDue = $amountTendered - $total;
             }
 
+            $paymentMethod = $data['payment_method'] ?? PosSale::PAYMENT_CASH;
+            $customerId = ! empty($data['customer_id']) ? (int) $data['customer_id'] : null;
+            $customer = null;
+
+            if ($customerId) {
+                $customer = Customer::find($customerId);
+            }
+
+            // Crear cliente sobre la marcha si se solicita o si es crédito sin ID previo pero con nombre válido
+            if (! $customer && (! empty($data['create_customer']) || $paymentMethod === PosSale::PAYMENT_CREDIT)) {
+                $rawCustomerName = trim((string) ($data['customer_name'] ?? ''));
+                if ($rawCustomerName !== '' && $rawCustomerName !== 'Público en general') {
+                    $customer = Customer::create([
+                        'name' => $rawCustomerName,
+                        'phone' => ! empty($data['customer_phone']) ? trim((string) $data['customer_phone']) : null,
+                        'business_name' => ! empty($data['customer_business_name']) ? trim((string) $data['customer_business_name']) : null,
+                        'address' => ! empty($data['customer_address']) ? trim((string) $data['customer_address']) : null,
+                        'credit_limit' => isset($data['customer_credit_limit']) ? (float) $data['customer_credit_limit'] : 5000.0,
+                        'credit_days_default' => isset($data['credit_days']) ? (int) $data['credit_days'] : 15,
+                        'is_active' => true,
+                    ]);
+                    $customerId = $customer->id;
+                }
+            }
+
+            if ($paymentMethod === PosSale::PAYMENT_CREDIT && ! $customer) {
+                throw new InvalidArgumentException('Para realizar una venta a crédito es obligatorio seleccionar o registrar un cliente/estilista.');
+            }
+
+            $paymentStatus = PosSale::PAYMENT_STATUS_PAID;
+            $creditDays = null;
+            $creditDueDate = null;
+            $balanceDue = 0.0;
+            $amountPaid = $total;
+            $downpayment = 0.0;
+
+            if ($paymentMethod === PosSale::PAYMENT_CREDIT) {
+                $creditDays = in_array((int) ($data['credit_days'] ?? 15), [7, 15, 30], true)
+                    ? (int) $data['credit_days']
+                    : (int) ($customer->credit_days_default ?: 15);
+                $creditDueDate = Carbon::today()->addDays($creditDays)->toDateString();
+
+                $downpayment = $amountTendered !== null && $amountTendered > 0 ? min($total, $amountTendered) : 0.0;
+                $balanceDue = max(0.0, round($total - $downpayment, 2));
+                $amountPaid = $downpayment;
+                $paymentStatus = $balanceDue <= 0
+                    ? PosSale::PAYMENT_STATUS_PAID
+                    : ($downpayment > 0 ? PosSale::PAYMENT_STATUS_CREDIT_PARTIAL : PosSale::PAYMENT_STATUS_CREDIT_PENDING);
+            }
+
             // Buscar turno activo del cajero en esta ubicación
             $activeShift = $this->shiftService->getActiveShift($cashier, $location->id);
 
             // Generar folio de venta único para la fecha
             $saleNumber = $this->generateSaleNumber();
+
+            $customerFinalName = $customer ? $customer->name : (trim((string) ($data['customer_name'] ?? 'Público en general')) ?: 'Público en general');
+            $customerFinalPhone = $customer?->phone ?: (! empty($data['customer_phone']) ? trim((string) $data['customer_phone']) : null);
 
             // 2. Guardar venta en base de datos
             $sale = PosSale::create([
@@ -256,10 +311,16 @@ class PosSaleService
                 'user_id' => $cashier->id,
                 'inventory_location_id' => $location->id,
                 'pos_shift_id' => $activeShift?->id,
-                'customer_name' => trim((string) ($data['customer_name'] ?? 'Público en general')) ?: 'Público en general',
-                'customer_phone' => ! empty($data['customer_phone']) ? trim((string) $data['customer_phone']) : null,
+                'customer_id' => $customerId,
+                'customer_name' => $customerFinalName,
+                'customer_phone' => $customerFinalPhone,
                 'customer_type' => $customerType,
-                'payment_method' => $data['payment_method'] ?? PosSale::PAYMENT_CASH,
+                'payment_method' => $paymentMethod,
+                'payment_status' => $paymentStatus,
+                'credit_days' => $creditDays,
+                'credit_due_date' => $creditDueDate,
+                'balance_due' => $balanceDue,
+                'amount_paid' => $amountPaid,
                 'subtotal' => $computedSubtotal,
                 'discount_amount' => $totalDiscount,
                 'tax_amount' => $taxAmount,
@@ -269,6 +330,20 @@ class PosSaleService
                 'status' => PosSale::STATUS_COMPLETED,
                 'notes' => ! empty($data['notes']) ? trim((string) $data['notes']) : null,
             ]);
+
+            // Si es venta a crédito con anticipo / enganche, registrar el abono inicial
+            if ($paymentMethod === PosSale::PAYMENT_CREDIT && $downpayment > 0 && $customer) {
+                CustomerPayment::create([
+                    'customer_id' => $customer->id,
+                    'pos_sale_id' => $sale->id,
+                    'user_id' => $cashier->id,
+                    'amount' => $downpayment,
+                    'payment_method' => 'cash',
+                    'payment_date' => now(),
+                    'receipt_number' => 'ENG-'.$sale->sale_number,
+                    'notes' => 'Anticipo/Enganche inicial en venta a crédito',
+                ]);
+            }
 
             // 3. Crear ítems y movimientos de inventario atómicos
             foreach ($validatedItems as $vItem) {
@@ -323,7 +398,7 @@ class PosSaleService
                 }
             }
 
-            return $sale->load(['items.product', 'cashier', 'location']);
+            return $sale->load(['items.product', 'cashier', 'location', 'customer', 'payments']);
         });
     }
 
@@ -377,12 +452,14 @@ class PosSaleService
 
             $sale->update([
                 'status' => PosSale::STATUS_CANCELLED,
+                'payment_status' => PosSale::PAYMENT_STATUS_CANCELLED,
+                'balance_due' => 0,
                 'cancelled_at' => now(),
                 'cancelled_by' => $user->id,
                 'cancel_reason' => trim($reason),
             ]);
 
-            return $sale->fresh(['items.product', 'cashier', 'location', 'cancelledBy']);
+            return $sale->fresh(['items.product', 'cashier', 'location', 'cancelledBy', 'customer', 'payments']);
         });
     }
 

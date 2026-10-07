@@ -133,8 +133,11 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                     <NavItem href="/dashboard" active={currentPath === '/dashboard'} onNavigate={onNavigate}>
                         Dashboard
                     </NavItem>
-                    <NavItem href="/pos" active={currentPath.startsWith('/pos')} onNavigate={onNavigate}>
+                    <NavItem href="/pos" active={currentPath === '/pos'} onNavigate={onNavigate}>
                         Punto de Venta (POS)
+                    </NavItem>
+                    <NavItem href="/pos/clientes" active={currentPath.startsWith('/pos/clientes') || currentPath.startsWith('/clientes')} onNavigate={onNavigate}>
+                        Clientes y Créditos
                     </NavItem>
                 </div>
             </div>

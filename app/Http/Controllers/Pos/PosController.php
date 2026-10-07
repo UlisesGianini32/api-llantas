@@ -4,8 +4,10 @@ namespace App\Http\Controllers\Pos;
 
 use App\Exceptions\PosInsufficientStockException;
 use App\Http\Controllers\Controller;
+use App\Models\Customer;
 use App\Models\InventoryLocation;
 use App\Models\PosSale;
+use App\Services\Pos\CustomerCreditService;
 use App\Services\Pos\PosReceiptService;
 use App\Services\Pos\PosSaleService;
 use App\Services\Pos\PosShiftService;
@@ -22,7 +24,8 @@ class PosController extends Controller
     public function __construct(
         private readonly PosSaleService $posSaleService,
         private readonly PosShiftService $posShiftService,
-        private readonly PosReceiptService $posReceiptService
+        private readonly PosReceiptService $posReceiptService,
+        private readonly CustomerCreditService $creditService
     ) {}
 
     public function index(Request $request): Response
@@ -40,12 +43,21 @@ class PosController extends Controller
         $recentSales = PosSale::query()
             ->with([
                 'cashier:id,name',
+                'customer:id,name,phone,business_name',
                 'items:id,pos_sale_id,product_name,sku,quantity,unit_price,subtotal',
             ])
             ->whereDate('created_at', Carbon::today())
             ->orderByDesc('id')
             ->limit(20)
             ->get();
+
+        $customers = Customer::query()
+            ->where('is_active', true)
+            ->orderBy('name')
+            ->limit(50)
+            ->get(['id', 'name', 'business_name', 'phone', 'credit_limit', 'credit_days_default']);
+
+        $creditAlerts = $this->creditService->getCreditPortfolioSummary();
 
         $currentShift = $this->posShiftService->getActiveShift($request->user(), $defaultLocation->id);
         $shiftSummary = $currentShift ? $this->posShiftService->calculateShiftSummary($currentShift) : null;
@@ -55,6 +67,8 @@ class PosController extends Controller
             'defaultLocationId' => $defaultLocation->id,
             'initialProducts' => $initialProducts,
             'recentSales' => $recentSales,
+            'customers' => $customers,
+            'creditAlerts' => $creditAlerts,
             'currentShift' => $currentShift ? $currentShift->load(['location', 'cashier']) : null,
             'shiftSummary' => $shiftSummary,
         ]);
@@ -81,10 +95,16 @@ class PosController extends Controller
             'items.*.unit_price' => ['nullable', 'numeric', 'min:0'],
             'items.*.discount' => ['nullable', 'numeric', 'min:0'],
             'inventory_location_id' => ['nullable', 'integer', 'exists:inventory_locations,id'],
+            'customer_id' => ['nullable', 'integer', 'exists:customers,id'],
+            'create_customer' => ['nullable', 'boolean'],
             'customer_name' => ['nullable', 'string', 'max:255'],
             'customer_phone' => ['nullable', 'string', 'max:50'],
+            'customer_business_name' => ['nullable', 'string', 'max:255'],
+            'customer_address' => ['nullable', 'string', 'max:500'],
+            'customer_credit_limit' => ['nullable', 'numeric', 'min:0'],
+            'credit_days' => ['nullable', 'integer', 'in:7,15,30'],
             'customer_type' => ['nullable', 'string', 'in:public,stylist'],
-            'payment_method' => ['required', 'string', 'in:cash,card,transfer,mixed'],
+            'payment_method' => ['required', 'string', 'in:cash,card,transfer,mixed,credit'],
             'amount_tendered' => ['nullable', 'numeric', 'min:0'],
             'discount_amount' => ['nullable', 'numeric', 'min:0'],
             'tax_amount' => ['nullable', 'numeric', 'min:0'],
