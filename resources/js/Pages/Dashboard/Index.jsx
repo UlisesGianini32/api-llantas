@@ -8,27 +8,33 @@ function StatCard({ title, value, subtitle, barPercent, barLabel, colorClass }) 
     const pct = Math.min(100, Math.max(0, Number(barPercent) || 0))
 
     return (
-        <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm transition hover:-translate-y-0.5 hover:shadow-md dark:border-neutral-800 dark:bg-neutral-900">
-            <p className="text-sm font-medium text-slate-500 dark:text-slate-400">{title}</p>
-            <p className="mt-3 text-3xl font-bold text-slate-900 dark:text-white">{value}</p>
-            <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">{subtitle}</p>
-            <div className="mt-4 h-1.5 rounded-full bg-slate-100 dark:bg-neutral-800">
+        <div className="group relative overflow-hidden rounded-2xl border border-slate-200/80 bg-gradient-to-b from-white to-slate-50/50 p-5 shadow-2xs transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md dark:border-neutral-800/80 dark:from-neutral-900 dark:to-neutral-900/80">
+            <div className="flex items-center justify-between gap-2">
+                <p className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-neutral-400">{title}</p>
+                {barLabel && (
+                    <span className="rounded-md bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-600 dark:bg-neutral-800 dark:text-neutral-400">
+                        {barLabel}
+                    </span>
+                )}
+            </div>
+
+            <p className="mt-3 text-3xl font-black tracking-tight text-slate-900 dark:text-white">{value}</p>
+            <p className="mt-1.5 text-xs text-slate-500 dark:text-neutral-400">{subtitle}</p>
+
+            <div className="mt-4 h-1.5 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-neutral-800">
                 <div
-                    className={`h-1.5 rounded-full transition-all ${colorClass}`}
+                    className={`h-full rounded-full transition-all duration-500 ${colorClass}`}
                     style={{ width: `${pct}%` }}
                 />
             </div>
-            {barLabel && (
-                <p className="mt-2 text-xs text-slate-500 dark:text-slate-500">{barLabel}</p>
-            )}
         </div>
     )
 }
 
 function stockBadgeClass(stock) {
-    if (stock <= 0) return 'bg-red-100 text-red-700 ring-red-200 dark:bg-red-950/40 dark:text-red-400 dark:ring-red-900'
-    if (stock <= 2) return 'bg-orange-100 text-orange-700 ring-orange-200 dark:bg-orange-950/40 dark:text-orange-400 dark:ring-orange-900'
-    return 'bg-yellow-100 text-yellow-700 ring-yellow-200 dark:bg-yellow-950/40 dark:text-yellow-400 dark:ring-yellow-900'
+    if (stock <= 0) return 'bg-rose-50 text-rose-700 ring-rose-200 dark:bg-rose-950/40 dark:text-rose-400 dark:ring-rose-900'
+    if (stock <= 2) return 'bg-amber-50 text-amber-700 ring-amber-200 dark:bg-amber-950/40 dark:text-amber-400 dark:ring-amber-900'
+    return 'bg-yellow-50 text-yellow-700 ring-yellow-200 dark:bg-yellow-950/40 dark:text-yellow-400 dark:ring-yellow-900'
 }
 
 function ZeroStockModal({ open, onClose, onConfirm, busy }) {
@@ -251,23 +257,39 @@ export default function DashboardIndex(props) {
                         description="Costo × stock acumulado (llantas y combos)."
                     />
                     <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-                        <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm dark:border-neutral-800 dark:bg-neutral-900">
-                            <p className="text-sm font-semibold text-slate-900 dark:text-white">Valor inventario llantas</p>
-                            <p className="mt-3 text-3xl font-bold text-emerald-600 dark:text-emerald-400">
+                        <div className="relative overflow-hidden rounded-2xl border border-slate-200/80 bg-gradient-to-br from-white via-white to-emerald-50/30 p-6 shadow-2xs transition-all hover:shadow-xs dark:border-neutral-800/80 dark:from-neutral-900 dark:via-neutral-900 dark:to-emerald-950/20">
+                            <div className="flex items-center justify-between">
+                                <span className="rounded-lg bg-emerald-50 px-2.5 py-1 text-xs font-bold text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300">
+                                    Catálogo Individual
+                                </span>
+                                <span className="text-xs font-medium text-slate-400">MXN</span>
+                            </div>
+                            <p className="mt-4 text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-neutral-400">
+                                Valor inventario llantas
+                            </p>
+                            <p className="mt-2 text-3xl font-black tracking-tight text-slate-900 dark:text-white sm:text-4xl">
                                 ${Number(props.valorInventarioLlantas || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                             </p>
-                            <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">
-                                Valor total actual del inventario individual.
+                            <p className="mt-2 text-xs text-slate-500 dark:text-neutral-400">
+                                Valorización total al costo del inventario físico individual registrado.
                             </p>
                         </div>
 
-                        <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm dark:border-neutral-800 dark:bg-neutral-900">
-                            <p className="text-sm font-semibold text-slate-900 dark:text-white">Valor teórico combos</p>
-                            <p className="mt-3 text-3xl font-bold text-indigo-600 dark:text-indigo-400">
+                        <div className="relative overflow-hidden rounded-2xl border border-slate-200/80 bg-gradient-to-br from-white via-white to-indigo-50/30 p-6 shadow-2xs transition-all hover:shadow-xs dark:border-neutral-800/80 dark:from-neutral-900 dark:via-neutral-900 dark:to-indigo-950/20">
+                            <div className="flex items-center justify-between">
+                                <span className="rounded-lg bg-indigo-50 px-2.5 py-1 text-xs font-bold text-indigo-700 dark:bg-indigo-500/10 dark:text-indigo-300">
+                                    Combos & Ensambles
+                                </span>
+                                <span className="text-xs font-medium text-slate-400">MXN</span>
+                            </div>
+                            <p className="mt-4 text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-neutral-400">
+                                Valor teórico combos
+                            </p>
+                            <p className="mt-2 text-3xl font-black tracking-tight text-indigo-600 dark:text-indigo-400 sm:text-4xl">
                                 ${Number(props.valorInventarioCompuestos || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                             </p>
-                            <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">
-                                Valor estimado de productos compuestos.
+                            <p className="mt-2 text-xs text-slate-500 dark:text-neutral-400">
+                                Valor estimado potencial de venta de productos compuestos en existencia.
                             </p>
                         </div>
                     </div>
@@ -526,38 +548,38 @@ export default function DashboardIndex(props) {
                     />
 
                     <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-5">
-                        <Link href="/llantas" className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm transition hover:-translate-y-0.5 hover:shadow-md dark:border-neutral-800 dark:bg-neutral-900">
-                            <p className="text-xs font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400">Inventario</p>
-                            <p className="mt-2 text-base font-bold text-slate-900 dark:text-white">Ver llantas</p>
-                            <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">Consulta el inventario individual.</p>
+                        <Link href="/llantas" className="group rounded-2xl border border-slate-200/80 bg-white p-5 shadow-2xs transition-all duration-150 hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-xs dark:border-neutral-800/80 dark:bg-neutral-900 dark:hover:border-neutral-700">
+                            <span className="rounded-md bg-blue-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-blue-700 dark:bg-blue-500/10 dark:text-blue-300">Inventario</span>
+                            <p className="mt-3 text-sm font-bold text-slate-900 transition-colors group-hover:text-blue-600 dark:text-white dark:group-hover:text-blue-400">Ver llantas</p>
+                            <p className="mt-1 text-xs text-slate-500 dark:text-neutral-400">Consulta el inventario individual.</p>
                         </Link>
 
-                        <Link href="/productos" className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm transition hover:-translate-y-0.5 hover:shadow-md dark:border-neutral-800 dark:bg-neutral-900">
-                            <p className="text-xs font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400">Combos</p>
-                            <p className="mt-2 text-base font-bold text-slate-900 dark:text-white">Productos compuestos</p>
-                            <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">Administra juegos, pares y combos.</p>
+                        <Link href="/productos" className="group rounded-2xl border border-slate-200/80 bg-white p-5 shadow-2xs transition-all duration-150 hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-xs dark:border-neutral-800/80 dark:bg-neutral-900 dark:hover:border-neutral-700">
+                            <span className="rounded-md bg-violet-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-violet-700 dark:bg-violet-500/10 dark:text-violet-300">Combos</span>
+                            <p className="mt-3 text-sm font-bold text-slate-900 transition-colors group-hover:text-violet-600 dark:text-white dark:group-hover:text-violet-400">Productos compuestos</p>
+                            <p className="mt-1 text-xs text-slate-500 dark:text-neutral-400">Administra juegos, pares y combos.</p>
                         </Link>
 
-                        <Link href="/excel/vista" className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm transition hover:-translate-y-0.5 hover:shadow-md dark:border-neutral-800 dark:bg-neutral-900">
-                            <p className="text-xs font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400">Inventario</p>
-                            <p className="mt-2 text-base font-bold text-emerald-600 dark:text-emerald-400">Importar Excel</p>
-                            <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">Sube y procesa tu archivo de inventario.</p>
+                        <Link href="/excel/vista" className="group rounded-2xl border border-slate-200/80 bg-white p-5 shadow-2xs transition-all duration-150 hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-xs dark:border-neutral-800/80 dark:bg-neutral-900 dark:hover:border-neutral-700">
+                            <span className="rounded-md bg-emerald-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300">Excel</span>
+                            <p className="mt-3 text-sm font-bold text-emerald-600 transition-colors group-hover:text-emerald-500 dark:text-emerald-400">Importar Excel</p>
+                            <p className="mt-1 text-xs text-slate-500 dark:text-neutral-400">Sube y procesa tu archivo de inventario.</p>
                         </Link>
 
                         <button
                             type="button"
                             onClick={() => setZeroModalOpen(true)}
-                            className="w-full rounded-3xl border border-red-200 bg-white p-5 text-left shadow-sm transition hover:-translate-y-0.5 hover:shadow-md dark:border-red-900 dark:bg-neutral-900"
+                            className="group w-full rounded-2xl border border-rose-200/80 bg-rose-50/30 p-5 text-left shadow-2xs transition-all duration-150 hover:-translate-y-0.5 hover:border-rose-300 hover:shadow-xs dark:border-rose-900/60 dark:bg-rose-950/20"
                         >
-                            <p className="text-xs font-medium uppercase tracking-wide text-red-500 dark:text-red-400">Acción peligrosa</p>
-                            <p className="mt-2 text-base font-bold text-slate-900 dark:text-white">Poner stock en 0</p>
-                            <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">Reinicia todo el stock del sistema.</p>
+                            <span className="rounded-md bg-rose-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-rose-700 dark:bg-rose-900/50 dark:text-rose-300">Crítico</span>
+                            <p className="mt-3 text-sm font-bold text-rose-600 dark:text-rose-400">Poner stock en 0</p>
+                            <p className="mt-1 text-xs text-slate-500 dark:text-neutral-400">Reinicia todo el stock del sistema.</p>
                         </button>
 
-                        <Link href="/dashboard/meli/refresh-token" method="post" as="button" className="w-full rounded-3xl border border-slate-200 bg-white p-5 text-left shadow-sm transition hover:-translate-y-0.5 hover:shadow-md dark:border-neutral-800 dark:bg-neutral-900">
-                            <p className="text-xs font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400">Mercado Libre</p>
-                            <p className="mt-2 text-base font-bold text-slate-900 dark:text-white">Refrescar token ML</p>
-                            <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">Actualiza el acceso para sincronización.</p>
+                        <Link href="/dashboard/meli/refresh-token" method="post" as="button" className="group w-full rounded-2xl border border-slate-200/80 bg-white p-5 text-left shadow-2xs transition-all duration-150 hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-xs dark:border-neutral-800/80 dark:bg-neutral-900 dark:hover:border-neutral-700">
+                            <span className="rounded-md bg-amber-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">Mercado Libre</span>
+                            <p className="mt-3 text-sm font-bold text-slate-900 transition-colors group-hover:text-amber-600 dark:text-white dark:group-hover:text-amber-400">Refrescar token ML</p>
+                            <p className="mt-1 text-xs text-slate-500 dark:text-neutral-400">Actualiza el acceso para sincronización.</p>
                         </Link>
                     </div>
                 </section>
