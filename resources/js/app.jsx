@@ -18,6 +18,7 @@ if (savedTheme === 'dark') {
 }
 
 createInertiaApp({
+    title: (title) => (title ? `${title} - SBS` : 'SBS - Salon & Barber Supply'),
     resolve: (name) =>
         resolvePageComponent(
             `./Pages/${name}.jsx`,

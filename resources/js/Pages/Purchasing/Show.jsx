@@ -307,16 +307,20 @@ export default function PurchasingShow({ order, locations = [] }) {
                     <div className="border-b border-slate-200 pb-6 dark:border-neutral-800">
                         <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-start">
                             <div>
-                                <div className="flex items-center gap-3">
-                                    <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-slate-900 text-white font-bold">
-                                        LL
+                                <div className="flex items-center gap-3.5">
+                                    <div className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-full bg-slate-950 shadow-sm ring-1 ring-slate-900/10">
+                                        <img
+                                            src="/logo-beauty-shop.png"
+                                            alt="T.O. THE BEAUTY SHOP"
+                                            className="h-full w-full object-cover"
+                                        />
                                     </div>
                                     <div>
-                                        <h2 className="text-xl font-extrabold text-slate-900 dark:text-white">
-                                            LLANTAS Y RINES DE SONORA
+                                        <h2 className="text-xl font-extrabold tracking-tight text-slate-900 dark:text-white">
+                                            T.O. THE BEAUTY SHOP
                                         </h2>
                                         <p className="text-xs text-slate-500 dark:text-slate-400">
-                                            RFC: LRS-120304-XYZ • Hermosillo, Sonora, México
+                                            Salon & Barber Supply • Hermosillo, Sonora, México
                                         </p>
                                     </div>
                                 </div>

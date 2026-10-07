@@ -516,20 +516,20 @@ function SidebarBrand() {
                 className="group flex items-center justify-between rounded-2xl border border-slate-200/80 bg-gradient-to-b from-white to-slate-50/70 p-3 shadow-2xs transition hover:border-slate-300 hover:shadow-xs dark:border-neutral-800 dark:from-neutral-900 dark:to-neutral-950"
             >
                 <div className="flex items-center gap-3">
-                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-white shadow-xs ring-1 ring-slate-900/5 dark:bg-neutral-800 dark:ring-white/10">
-                        <img src="/logo-llantas.png" alt="Llantas" className="h-7 w-7 object-contain" />
+                    <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-slate-950 p-1 shadow-xs ring-1 ring-slate-900/10 dark:bg-neutral-900 dark:ring-white/10">
+                        <img src="/logo-sbs-icon.png" alt="SBS" className="h-full w-full object-contain rounded-lg" />
                     </div>
                     <div>
                         <div className="flex items-center gap-1.5">
-                            <span className="text-sm font-black tracking-tight text-slate-900 dark:text-white">
-                                Llantas ERP
+                            <span className="text-base font-black tracking-tight text-slate-900 dark:text-white">
+                                SBS
                             </span>
                             <span className="rounded bg-indigo-600 px-1.5 py-0.2 text-[9px] font-bold text-white shadow-2xs">
                                 PRO
                             </span>
                         </div>
-                        <p className="text-[11px] font-medium text-slate-500 dark:text-neutral-400">
-                            Inventario & POS
+                        <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 dark:text-neutral-400">
+                            Salon & Barber Supply
                         </p>
                     </div>
                 </div>
