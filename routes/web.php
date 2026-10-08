@@ -70,6 +70,9 @@ Route::get('/auth/meli/callback', [AuthController::class, 'handleMeliCallback'])
     ->name('meli.callback');
 Route::get('/auth/shopify/callback', [ChannelSettingsController::class, 'handleShopifyCallback'])
     ->name('shopify.callback');
+Route::get('/orden-compra/{purchaseOrder}/pdf', [PurchaseOrderController::class, 'pdf'])
+    ->whereNumber('purchaseOrder')
+    ->name('purchasing.orders.public-pdf');
 
 Route::middleware(['auth', 'role'])->group(function () {
     // SISTEMA
@@ -190,6 +193,8 @@ Route::middleware(['auth', 'role'])->group(function () {
         Route::get('/buscar-productos', [PurchaseOrderController::class, 'searchProducts'])->name('search-products');
         Route::get('/{purchaseOrder}', [PurchaseOrderController::class, 'show'])
             ->whereNumber('purchaseOrder')->name('show');
+        Route::get('/{purchaseOrder}/pdf', [PurchaseOrderController::class, 'pdf'])
+            ->whereNumber('purchaseOrder')->name('pdf');
         Route::post('/{purchaseOrder}/ordenar', [PurchaseOrderController::class, 'order'])
             ->whereNumber('purchaseOrder')->name('order');
         Route::post('/{purchaseOrder}/recibir', [PurchaseOrderController::class, 'receive'])

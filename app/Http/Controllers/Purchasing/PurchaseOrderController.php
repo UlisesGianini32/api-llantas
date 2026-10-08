@@ -156,13 +156,37 @@ class PurchaseOrderController extends Controller
             ->where('is_active', true)
             ->get(['id', 'code', 'name']);
 
-        $supplier = Supplier::query()
-            ->where('name', $purchaseOrder->supplier_name)
-            ->first(['id', 'name', 'phone', 'contact_name', 'email']);
+        $supplier = null;
+        if (\Illuminate\Support\Facades\Schema::hasTable('suppliers')) {
+            $supplier = Supplier::query()
+                ->where('name', $purchaseOrder->supplier_name)
+                ->first(['id', 'name', 'phone', 'contact_name', 'email']);
+        }
 
         return Inertia::render('Purchasing/Show', [
             'order' => $purchaseOrder,
             'locations' => $locations,
+            'supplier' => $supplier,
+        ]);
+    }
+
+    public function pdf(PurchaseOrder $purchaseOrder): \Illuminate\View\View
+    {
+        $purchaseOrder->load([
+            'location:id,code,name',
+            'buyer:id,name,email',
+            'items.product:id,sku,barcode,barcode_secondary,name,brand',
+        ]);
+
+        $supplier = null;
+        if (\Illuminate\Support\Facades\Schema::hasTable('suppliers')) {
+            $supplier = Supplier::query()
+                ->where('name', $purchaseOrder->supplier_name)
+                ->first(['id', 'name', 'phone', 'contact_name', 'email']);
+        }
+
+        return view('purchasing.order-pdf', [
+            'order' => $purchaseOrder,
             'supplier' => $supplier,
         ]);
     }

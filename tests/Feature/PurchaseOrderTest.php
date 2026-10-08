@@ -397,4 +397,30 @@ class PurchaseOrderTest extends TestCase
         $response->assertOk();
         $response->assertJsonFragment(['sku' => 'MICH-205-55-16']);
     }
+
+    public function test_can_view_purchase_order_pdf_view(): void
+    {
+        $order = $this->service->createOrder([
+            'supplier_name' => 'Michelin Mexico SA',
+            'inventory_location_id' => $this->location->id,
+            'items' => [
+                [
+                    'inventory_product_id' => $this->productA->id,
+                    'quantity_ordered' => 5,
+                    'unit_cost' => 1500.00,
+                ],
+            ],
+        ], $this->admin);
+
+        $response = $this->actingAs($this->admin)->get("/compras/ordenes/{$order->id}/pdf");
+        $response->assertOk();
+        $response->assertSee('T.O. THE BEAUTY SHOP');
+        $response->assertSee($order->order_number);
+        $response->assertSee('Michelin Mexico SA');
+
+        // Public route for suppliers
+        $publicResponse = $this->get("/orden-compra/{$order->id}/pdf");
+        $publicResponse->assertOk();
+        $publicResponse->assertSee('T.O. THE BEAUTY SHOP');
+    }
 }

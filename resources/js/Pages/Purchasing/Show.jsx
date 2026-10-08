@@ -61,10 +61,12 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
     const [orderDate, setOrderDate] = useState(defaultOrderDate)
     const [orderingSubmitting, setOrderingSubmitting] = useState(false)
 
-    // Modal states: WhatsApp
-    const [whatsappModalOpen, setWhatsappModalOpen] = useState(false)
+    // Modal states: PDF Preview & WhatsApp send
+    const [pdfModalOpen, setPdfModalOpen] = useState(false)
     const [whatsappPhone, setWhatsappPhone] = useState(supplier?.phone || '')
-    const [copiedWhatsApp, setCopiedWhatsApp] = useState(false)
+    const [downloadingPdf, setDownloadingPdf] = useState(false)
+    const [pdfSentAlert, setPdfSentAlert] = useState(false)
+    const pdfSheetRef = useRef(null)
 
     // Modal states: Recepción física
     const [receiveModalOpen, setReceiveModalOpen] = useState(
@@ -116,6 +118,58 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
             }, 100)
         }
     }, [receiveModalOpen])
+
+    // Generate and download PDF from rendered sheet
+    const handleDownloadPdf = async () => {
+        if (!pdfSheetRef.current) return
+        setDownloadingPdf(true)
+        try {
+            const html2pdf = (await import('html2pdf.js')).default
+            const element = pdfSheetRef.current
+            const opt = {
+                margin: [8, 8, 8, 8],
+                filename: `Orden-de-Compra-${order.order_number}.pdf`,
+                image: { type: 'jpeg', quality: 0.98 },
+                html2canvas: { scale: 2, useCORS: true, logging: false },
+                jsPDF: { unit: 'mm', format: 'letter', orientation: 'portrait' },
+            }
+            await html2pdf().set(opt).from(element).save()
+        } catch (err) {
+            console.error('Error al generar PDF:', err)
+            window.open(`/compras/ordenes/${order.id}/pdf`, '_blank')
+        } finally {
+            setDownloadingPdf(false)
+        }
+    }
+
+    // Send PDF via WhatsApp: downloads the PDF and opens WhatsApp with direct document link
+    const handleSendWhatsAppWithPdf = async () => {
+        // 1. Download PDF to machine so user can attach it
+        await handleDownloadPdf()
+
+        // 2. Open WhatsApp Web with supplier phone and direct link to official PDF
+        const cleanPhone = (whatsappPhone || '').replace(/\D/g, '')
+        const origin = typeof window !== 'undefined' ? window.location.origin : ''
+        const publicPdfUrl = `${origin}/orden-compra/${order.id}/pdf`
+
+        const msg = [
+            `📄 *ORDEN DE COMPRA: ${order.order_number}*`,
+            `*T.O. THE BEAUTY SHOP (SBS)*`,
+            ``,
+            `Estimado(a) ${order.supplier_name}, le comparto la orden de compra adjunta en formato PDF.`,
+            ``,
+            `Enlace directo al documento oficial:`,
+            `${publicPdfUrl}`,
+            ``,
+            `*Total piezas solicitadas:* ${order.total_units_ordered} pzas`,
+            `_Favor de confirmar acuse de recibo y fecha de entrega. ¡Muchas gracias!_`,
+        ].join('\n')
+
+        const encoded = encodeURIComponent(msg)
+        const url = cleanPhone ? `https://wa.me/${cleanPhone}?text=${encoded}` : `https://wa.me/?text=${encoded}`
+        window.open(url, '_blank')
+        setPdfSentAlert(true)
+    }
 
     // Handle "Mark as Ordered" (Colocar orden al proveedor)
     const handleMarkOrdered = (e) => {
@@ -350,47 +404,6 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
         )
     }
 
-    // WhatsApp Message Generator (No costs, clean list of items)
-    const whatsAppMessage = useMemo(() => {
-        const lines = [
-            `*ORDEN DE COMPRA: ${order.order_number}*`,
-            `*T.O. THE BEAUTY SHOP (SBS)*`,
-            `_Salon & Barber Supply_`,
-            ``,
-            `*Proveedor:* ${order.supplier_name}`,
-            `*Fecha de Emisión:* ${formatDate(order.ordered_at || order.created_at)}`,
-            `*Almacén de Entrega:* ${order.location?.name || 'Almacén General SBS'}`,
-            order.supplier_quote_reference ? `*Referencia / Folio:* ${order.supplier_quote_reference}` : null,
-            ``,
-            `*PARTIDAS SOLICITADAS:*`,
-            ...(order.items || []).map((it, idx) => {
-                const sku = it.product?.sku || it.sku || '-'
-                const name = it.product?.name || it.product_name || '-'
-                return `${idx + 1}. [${sku}] ${name} -> *${it.quantity_ordered} pzas*`
-            }),
-            ``,
-            `*Total de piezas solicitadas:* ${order.total_units_ordered} pzas`,
-            order.notes ? `*Observaciones:* ${order.notes}` : null,
-            ``,
-            `_Por favor confirmar acuse de recibo y fecha de entrega. ¡Muchas gracias!_`,
-        ].filter(Boolean)
-
-        return lines.join('\n')
-    }, [order])
-
-    const handleOpenWhatsApp = () => {
-        const cleanPhone = (whatsappPhone || '').replace(/\D/g, '')
-        const encoded = encodeURIComponent(whatsAppMessage)
-        const url = cleanPhone ? `https://wa.me/${cleanPhone}?text=${encoded}` : `https://wa.me/?text=${encoded}`
-        window.open(url, '_blank')
-    }
-
-    const handleCopyWhatsApp = () => {
-        navigator.clipboard.writeText(whatsAppMessage)
-        setCopiedWhatsApp(true)
-        setTimeout(() => setCopiedWhatsApp(false), 2500)
-    }
-
     const printOrder = () => {
         window.print()
     }
@@ -443,7 +456,7 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                     </div>
 
                     <div className="flex flex-wrap items-center gap-2.5">
-                        {/* Imprimir / Descargar PDF */}
+                        {/* Imprimir / Descargar PDF directo */}
                         <button
                             type="button"
                             onClick={printOrder}
@@ -452,19 +465,22 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                             <svg className="h-4 w-4 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" />
                             </svg>
-                            Descargar / Imprimir PDF
+                            Imprimir Formato
                         </button>
 
-                        {/* Enviar por WhatsApp */}
+                        {/* Botón Principal: Ver PDF y Enviar por WhatsApp */}
                         <button
                             type="button"
-                            onClick={() => setWhatsappModalOpen(true)}
-                            className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-3.5 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-700 dark:bg-emerald-600 dark:hover:bg-emerald-500"
+                            onClick={() => {
+                                setPdfSentAlert(false)
+                                setPdfModalOpen(true)
+                            }}
+                            className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-700 dark:bg-emerald-600 dark:hover:bg-emerald-500"
                         >
                             <svg className="h-4 w-4" fill="currentColor" viewBox="0 0 24 24">
                                 <path d="M.057 24l1.687-6.163c-1.041-1.804-1.588-3.849-1.587-5.946.003-6.556 5.338-11.891 11.893-11.891 3.181.001 6.167 1.24 8.413 3.488 2.245 2.248 3.481 5.236 3.48 8.414-.003 6.557-5.338 11.892-11.893 11.892-1.99-.001-3.951-.5-5.688-1.448l-6.305 1.654zm6.597-3.807c1.676.995 3.276 1.591 5.392 1.592 5.448 0 9.886-4.434 9.889-9.885.002-5.462-4.415-9.89-9.881-9.892-5.452 0-9.887 4.434-9.889 9.884-.001 2.225.651 3.891 1.746 5.634l-.999 3.648 3.742-.981zm11.387-5.464c-.074-.124-.272-.198-.57-.347-.297-.149-1.758-.868-2.031-.967-.272-.099-.47-.149-.669.149-.198.297-.768.967-.941 1.165-.173.198-.347.223-.644.074-.297-.149-1.255-.462-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.297-.347.446-.521.151-.172.2-.296.3-.495.099-.198.05-.372-.025-.521-.075-.148-.669-1.611-.916-2.206-.242-.579-.487-.501-.669-.51l-.57-.01c-.198 0-.52.074-.792.372s-1.04 1.016-1.04 2.479 1.065 2.876 1.213 3.074c.149.198 2.095 3.2 5.076 4.487.709.306 1.263.489 1.694.626.712.226 1.36.194 1.872.118.571-.085 1.758-.719 2.006-1.413.248-.695.248-1.29.173-1.414z" />
                             </svg>
-                            Enviar por WhatsApp
+                            Ver / Enviar PDF (WhatsApp)
                         </button>
 
                         {order.status === 'DRAFT' && (
@@ -837,90 +853,259 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                 </div>
             </div>
 
-            {/* Modal: WhatsApp */}
-            {whatsappModalOpen && (
+            {/* Modal: Vista Previa y Envío de Orden de Compra (PDF) */}
+            {pdfModalOpen && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
-                    <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-xl dark:bg-neutral-900">
-                        <div className="flex items-center justify-between border-b border-slate-200 pb-3 dark:border-neutral-800">
-                            <div className="flex items-center gap-2.5">
-                                <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-emerald-600 text-white">
-                                    <svg className="h-5 w-5" fill="currentColor" viewBox="0 0 24 24">
-                                        <path d="M.057 24l1.687-6.163c-1.041-1.804-1.588-3.849-1.587-5.946.003-6.556 5.338-11.891 11.893-11.891 3.181.001 6.167 1.24 8.413 3.488 2.245 2.248 3.481 5.236 3.48 8.414-.003 6.557-5.338 11.892-11.893 11.892-1.99-.001-3.951-.5-5.688-1.448l-6.305 1.654zm6.597-3.807c1.676.995 3.276 1.591 5.392 1.592 5.448 0 9.886-4.434 9.889-9.885.002-5.462-4.415-9.89-9.881-9.892-5.452 0-9.887 4.434-9.889 9.884-.001 2.225.651 3.891 1.746 5.634l-.999 3.648 3.742-.981zm11.387-5.464c-.074-.124-.272-.198-.57-.347-.297-.149-1.758-.868-2.031-.967-.272-.099-.47-.149-.669.149-.198.297-.768.967-.941 1.165-.173.198-.347.223-.644.074-.297-.149-1.255-.462-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.297-.347.446-.521.151-.172.2-.296.3-.495.099-.198.05-.372-.025-.521-.075-.148-.669-1.611-.916-2.206-.242-.579-.487-.501-.669-.51l-.57-.01c-.198 0-.52.074-.792.372s-1.04 1.016-1.04 2.479 1.065 2.876 1.213 3.074c.149.198 2.095 3.2 5.076 4.487.709.306 1.263.489 1.694.626.712.226 1.36.194 1.872.118.571-.085 1.758-.719 2.006-1.413.248-.695.248-1.29.173-1.414z" />
+                    <div className="w-full max-w-4xl max-h-[92vh] flex flex-col rounded-2xl bg-white shadow-2xl dark:bg-neutral-900 overflow-hidden">
+                        {/* Modal Header */}
+                        <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4 dark:border-neutral-800">
+                            <div className="flex items-center gap-3">
+                                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-600 text-white shadow-sm">
+                                    <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                                     </svg>
                                 </div>
                                 <div>
                                     <h3 className="text-base font-bold text-slate-900 dark:text-white">
-                                        Enviar Orden por WhatsApp
+                                        Vista Previa del Documento PDF
                                     </h3>
-                                    <p className="text-xs text-slate-500">
-                                        Envía el detalle formal de las partidas sin costos directamente al proveedor.
+                                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                                        Revise el formato formal de la orden de compra antes de descargarla o enviarla por WhatsApp.
                                     </p>
                                 </div>
                             </div>
                             <button
                                 type="button"
-                                onClick={() => setWhatsappModalOpen(false)}
-                                className="text-slate-400 hover:text-slate-600"
+                                onClick={() => setPdfModalOpen(false)}
+                                className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-neutral-800"
                             >
-                                <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
                                 </svg>
                             </button>
                         </div>
 
-                        <div className="mt-4 space-y-4">
-                            <div>
-                                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-600 dark:text-slate-400">
-                                    Teléfono WhatsApp del Proveedor
-                                </label>
-                                <input
-                                    type="text"
-                                    value={whatsappPhone}
-                                    onChange={(e) => setWhatsappPhone(e.target.value)}
-                                    placeholder="Ej. 6621234567 o 526621234567"
-                                    className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm text-slate-800 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-100"
-                                />
-                                <p className="mt-1 text-[11px] text-slate-400">
-                                    {supplier?.contact_name ? `Contacto registrado: ${supplier.contact_name}` : 'Si no ingresa teléfono, se abrirá WhatsApp para que seleccione el chat.'}
-                                </p>
+                        {/* Confirmation Alert after sending */}
+                        {pdfSentAlert && (
+                            <div className="mx-6 mt-3 flex items-center justify-between rounded-xl bg-emerald-50 px-4 py-2.5 text-xs font-semibold text-emerald-800 border border-emerald-200 dark:bg-emerald-950/40 dark:border-emerald-900 dark:text-emerald-300">
+                                <div className="flex items-center gap-2">
+                                    <svg className="h-4 w-4 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                                    </svg>
+                                    <span>
+                                        ¡Archivo PDF generado y descargado! En la ventana de WhatsApp abierta, simplemente adjunte o arrastre el archivo PDF para compartirlo con el proveedor.
+                                    </span>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={() => setPdfSentAlert(false)}
+                                    className="text-emerald-700 hover:text-emerald-900 font-bold ml-2"
+                                >
+                                    ✕
+                                </button>
                             </div>
+                        )}
 
-                            <div>
-                                <div className="flex items-center justify-between">
-                                    <label className="block text-xs font-semibold uppercase tracking-wider text-slate-600 dark:text-slate-400">
-                                        Vista Previa del Mensaje
+                        {/* Modal Body: Authentic Visual PDF Document Preview */}
+                        <div className="flex-1 overflow-y-auto px-6 py-4 bg-slate-100/70 dark:bg-neutral-950/40">
+                            <div
+                                ref={pdfSheetRef}
+                                className="mx-auto max-w-[760px] rounded-xl bg-white p-8 text-slate-900 shadow-sm border border-slate-200"
+                            >
+                                {/* Header */}
+                                <div className="flex items-start justify-between border-b-2 border-slate-200 pb-5">
+                                    <div className="flex items-center gap-3.5">
+                                        <img
+                                            src="/logo-beauty-shop.png"
+                                            alt="T.O. THE BEAUTY SHOP"
+                                            className="h-14 w-14 rounded-full border border-slate-200 object-cover bg-black"
+                                        />
+                                        <div>
+                                            <h2 className="text-xl font-black text-slate-900">
+                                                T.O. THE BEAUTY SHOP
+                                            </h2>
+                                            <p className="text-xs text-slate-500 font-medium">
+                                                Salon & Barber Supply (SBS) • Hermosillo, Sonora, México
+                                            </p>
+                                        </div>
+                                    </div>
+
+                                    <div className="text-right">
+                                        <span className="inline-block rounded bg-emerald-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-emerald-700 border border-emerald-200">
+                                            Documento Oficial
+                                        </span>
+                                        <h3 className="text-xl font-black text-slate-900 mt-1">
+                                            ORDEN DE COMPRA
+                                        </h3>
+                                        <p className="font-mono text-sm font-bold text-indigo-600">
+                                            {order.order_number}
+                                        </p>
+                                        <p className="text-xs text-slate-500 mt-0.5">
+                                            Fecha de emisión: {formatDate(order.ordered_at || order.created_at)}
+                                        </p>
+                                    </div>
+                                </div>
+
+                                {/* Supplier & Delivery Grid */}
+                                <div className="mt-5 grid grid-cols-2 gap-4 text-xs">
+                                    <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-3">
+                                        <p className="font-bold uppercase tracking-wider text-slate-500">Datos del Proveedor</p>
+                                        <p className="mt-1 text-sm font-bold text-slate-900">{order.supplier_name}</p>
+                                        {order.brand && (
+                                            <p className="mt-0.5 text-slate-600"><strong>Línea / Marca:</strong> {order.brand}</p>
+                                        )}
+                                        {order.supplier_quote_reference && (
+                                            <p className="mt-0.5 text-slate-600"><strong>Referencia / Folio:</strong> {order.supplier_quote_reference}</p>
+                                        )}
+                                        {supplier?.phone && (
+                                            <p className="mt-0.5 text-slate-600"><strong>Teléfono:</strong> {supplier.phone}</p>
+                                        )}
+                                    </div>
+
+                                    <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-3">
+                                        <p className="font-bold uppercase tracking-wider text-slate-500">Lugar de Entrega / Almacén</p>
+                                        <p className="mt-1 text-sm font-bold text-slate-900">
+                                            {order.location ? order.location.name : 'Almacén General SBS'}
+                                        </p>
+                                        {order.location?.code && (
+                                            <p className="mt-0.5 text-slate-600"><strong>Código Almacén:</strong> {order.location.code}</p>
+                                        )}
+                                        {order.buyer && (
+                                            <p className="mt-0.5 text-slate-600"><strong>Comprador SBS:</strong> {order.buyer.name}</p>
+                                        )}
+                                    </div>
+                                </div>
+
+                                {/* Items Table: Only SKU, Producto, Cantidad Pedida. Zero costs. */}
+                                <div className="mt-5">
+                                    <table className="w-full text-left text-xs">
+                                        <thead>
+                                            <tr className="border-b-2 border-slate-200 bg-slate-50 text-[11px] font-bold uppercase tracking-wider text-slate-600">
+                                                <th className="py-2.5 px-3 w-10 text-center">#</th>
+                                                <th className="py-2.5 px-3 w-32">SKU</th>
+                                                <th className="py-2.5 px-3">Producto / Descripción</th>
+                                                <th className="py-2.5 px-3 w-28 text-center">Cantidad Pedida</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-slate-100">
+                                            {(order.items || []).map((it, idx) => (
+                                                <tr key={it.id || idx}>
+                                                    <td className="py-2.5 px-3 text-center text-slate-400 font-mono text-[11px]">{idx + 1}</td>
+                                                    <td className="py-2.5 px-3 font-mono font-bold text-slate-900">
+                                                        {it.product?.sku || it.sku || '-'}
+                                                    </td>
+                                                    <td className="py-2.5 px-3 text-slate-800">
+                                                        <span className="font-semibold">{it.product?.name || it.product_name || '-'}</span>
+                                                        {it.product?.brand && (
+                                                            <span className="text-[10px] text-slate-400 block">Marca: {it.product.brand}</span>
+                                                        )}
+                                                    </td>
+                                                    <td className="py-2.5 px-3 text-center font-bold text-slate-900 text-sm">
+                                                        {it.quantity_ordered} pzas
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+
+                                {/* Summary & Signatures */}
+                                <div className="mt-6 flex justify-between items-start gap-4 border-t-2 border-slate-200 pt-4 text-xs">
+                                    <div className="flex-1">
+                                        <p className="font-bold uppercase tracking-wider text-slate-500">Observaciones</p>
+                                        <p className="mt-1 text-slate-600">
+                                            {order.notes || 'Favor de entregar la mercancía debidamente empacada e identificada con este folio de orden de compra.'}
+                                        </p>
+                                    </div>
+
+                                    <div className="w-60 rounded-lg border border-slate-200 bg-slate-50 p-3">
+                                        <div className="flex justify-between text-slate-600">
+                                            <span>Partidas ordenadas:</span>
+                                            <strong className="text-slate-900">{(order.items || []).length}</strong>
+                                        </div>
+                                        <div className="mt-1.5 flex justify-between border-t border-slate-200 pt-1.5 font-bold text-slate-900">
+                                            <span>Total piezas pedidas:</span>
+                                            <span className="text-emerald-700 text-sm">{order.total_units_ordered} pzas</span>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div className="mt-10 grid grid-cols-2 gap-8 text-center text-xs pt-4">
+                                    <div className="border-t border-slate-300 pt-2">
+                                        <p className="font-bold text-slate-800">Autorizado por Compras</p>
+                                        <p className="text-[10px] text-slate-500">T.O. THE BEAUTY SHOP (SBS)</p>
+                                    </div>
+                                    <div className="border-t border-slate-300 pt-2">
+                                        <p className="font-bold text-slate-800">Recibido en Almacén</p>
+                                        <p className="text-[10px] text-slate-500">Firma / Sello de Recepción</p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Modal Footer: Action Bar */}
+                        <div className="border-t border-slate-200 bg-white px-6 py-4 dark:border-neutral-800 dark:bg-neutral-900">
+                            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                                {/* Phone input */}
+                                <div className="flex items-center gap-2">
+                                    <label className="text-xs font-bold text-slate-600 dark:text-slate-400 whitespace-nowrap">
+                                        WhatsApp:
                                     </label>
+                                    <input
+                                        type="text"
+                                        value={whatsappPhone}
+                                        onChange={(e) => setWhatsappPhone(e.target.value)}
+                                        placeholder="Ej. 6621234567..."
+                                        className="w-48 rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs text-slate-800 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-100"
+                                    />
+                                    {supplier?.contact_name && (
+                                        <span className="text-[11px] text-slate-400 hidden md:inline">
+                                            ({supplier.contact_name})
+                                        </span>
+                                    )}
+                                </div>
+
+                                {/* Buttons */}
+                                <div className="flex flex-wrap items-center gap-2.5">
+                                    {/* Abrir en pestaña nueva */}
+                                    <a
+                                        href={`/compras/ordenes/${order.id}/pdf`}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="inline-flex items-center gap-1.5 rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-200"
+                                    >
+                                        <svg className="h-3.5 w-3.5 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                                        </svg>
+                                        Abrir en Pestaña / Imprimir
+                                    </a>
+
+                                    {/* Descargar archivo PDF */}
                                     <button
                                         type="button"
-                                        onClick={handleCopyWhatsApp}
-                                        className="text-xs font-medium text-indigo-600 hover:underline dark:text-indigo-400"
+                                        disabled={downloadingPdf}
+                                        onClick={handleDownloadPdf}
+                                        className="inline-flex items-center gap-1.5 rounded-xl border border-slate-300 bg-slate-50 px-3.5 py-2 text-xs font-semibold text-slate-800 hover:bg-slate-100 disabled:opacity-50 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-200"
                                     >
-                                        {copiedWhatsApp ? '✓ ¡Copiado!' : 'Copiar texto'}
+                                        <svg className="h-4 w-4 text-slate-600 dark:text-slate-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                                        </svg>
+                                        {downloadingPdf ? 'Generando PDF...' : 'Descargar PDF'}
+                                    </button>
+
+                                    {/* Enviar PDF por WhatsApp */}
+                                    <button
+                                        type="button"
+                                        disabled={downloadingPdf}
+                                        onClick={handleSendWhatsAppWithPdf}
+                                        className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-bold text-white shadow-sm hover:bg-emerald-700 disabled:opacity-50"
+                                    >
+                                        <svg className="h-4 w-4" fill="currentColor" viewBox="0 0 24 24">
+                                            <path d="M.057 24l1.687-6.163c-1.041-1.804-1.588-3.849-1.587-5.946.003-6.556 5.338-11.891 11.893-11.891 3.181.001 6.167 1.24 8.413 3.488 2.245 2.248 3.481 5.236 3.48 8.414-.003 6.557-5.338 11.892-11.893 11.892-1.99-.001-3.951-.5-5.688-1.448l-6.305 1.654zm6.597-3.807c1.676.995 3.276 1.591 5.392 1.592 5.448 0 9.886-4.434 9.889-9.885.002-5.462-4.415-9.89-9.881-9.892-5.452 0-9.887 4.434-9.889 9.884-.001 2.225.651 3.891 1.746 5.634l-.999 3.648 3.742-.981zm11.387-5.464c-.074-.124-.272-.198-.57-.347-.297-.149-1.758-.868-2.031-.967-.272-.099-.47-.149-.669.149-.198.297-.768.967-.941 1.165-.173.198-.347.223-.644.074-.297-.149-1.255-.462-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.297-.347.446-.521.151-.172.2-.296.3-.495.099-.198.05-.372-.025-.521-.075-.148-.669-1.611-.916-2.206-.242-.579-.487-.501-.669-.51l-.57-.01c-.198 0-.52.074-.792.372s-1.04 1.016-1.04 2.479 1.065 2.876 1.213 3.074c.149.198 2.095 3.2 5.076 4.487.709.306 1.263.489 1.694.626.712.226 1.36.194 1.872.118.571-.085 1.758-.719 2.006-1.413.248-.695.248-1.29.173-1.414z" />
+                                        </svg>
+                                        Enviar PDF por WhatsApp
                                     </button>
                                 </div>
-                                <div className="mt-1 max-h-56 overflow-y-auto whitespace-pre-wrap rounded-xl border border-slate-200 bg-slate-50 p-3 font-mono text-xs text-slate-700 dark:border-neutral-800 dark:bg-neutral-950 dark:text-slate-300">
-                                    {whatsAppMessage}
-                                </div>
-                            </div>
-
-                            <div className="mt-6 flex justify-end gap-3 border-t border-slate-200 pt-4 dark:border-neutral-800">
-                                <button
-                                    type="button"
-                                    onClick={() => setWhatsappModalOpen(false)}
-                                    className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100 dark:border-neutral-700 dark:text-slate-300 dark:hover:bg-neutral-800"
-                                >
-                                    Cerrar
-                                </button>
-                                <button
-                                    type="button"
-                                    onClick={handleOpenWhatsApp}
-                                    className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-5 py-2 text-sm font-semibold text-white hover:bg-emerald-700 shadow-sm"
-                                >
-                                    <svg className="h-4 w-4" fill="currentColor" viewBox="0 0 24 24">
-                                        <path d="M.057 24l1.687-6.163c-1.041-1.804-1.588-3.849-1.587-5.946.003-6.556 5.338-11.891 11.893-11.891 3.181.001 6.167 1.24 8.413 3.488 2.245 2.248 3.481 5.236 3.48 8.414-.003 6.557-5.338 11.892-11.893 11.892-1.99-.001-3.951-.5-5.688-1.448l-6.305 1.654zm6.597-3.807c1.676.995 3.276 1.591 5.392 1.592 5.448 0 9.886-4.434 9.889-9.885.002-5.462-4.415-9.89-9.881-9.892-5.452 0-9.887 4.434-9.889 9.884-.001 2.225.651 3.891 1.746 5.634l-.999 3.648 3.742-.981zm11.387-5.464c-.074-.124-.272-.198-.57-.347-.297-.149-1.758-.868-2.031-.967-.272-.099-.47-.149-.669.149-.198.297-.768.967-.941 1.165-.173.198-.347.223-.644.074-.297-.149-1.255-.462-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.297-.347.446-.521.151-.172.2-.296.3-.495.099-.198.05-.372-.025-.521-.075-.148-.669-1.611-.916-2.206-.242-.579-.487-.501-.669-.51l-.57-.01c-.198 0-.52.074-.792.372s-1.04 1.016-1.04 2.479 1.065 2.876 1.213 3.074c.149.198 2.095 3.2 5.076 4.487.709.306 1.263.489 1.694.626.712.226 1.36.194 1.872.118.571-.085 1.758-.719 2.006-1.413.248-.695.248-1.29.173-1.414z" />
-                                    </svg>
-                                    Abrir en WhatsApp
-                                </button>
                             </div>
                         </div>
                     </div>
