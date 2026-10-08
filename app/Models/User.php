@@ -33,7 +33,6 @@ class User extends Authenticatable
         'name',
         'email',
         'password',
-        'role',
         'meli_id',
         'official_store_id',   // ✅ NUEVO
         'access_token',
@@ -88,6 +87,11 @@ class User extends Authenticatable
     public function isOperations(): bool
     {
         return $this->hasRole(self::ROLE_OPERATIONS);
+    }
+
+    public function canOperate(): bool
+    {
+        return $this->isAdmin() || $this->isOperations();
     }
 
     public function isPos(): bool

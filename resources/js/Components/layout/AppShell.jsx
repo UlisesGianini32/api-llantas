@@ -559,6 +559,7 @@ function SidebarBrand() {
    ========================================================================= */
 function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
     const isAdmin = role === 'admin'
+    const canOperate = isAdmin || role === 'operations'
 
     return (
         <nav className="space-y-5">
@@ -596,7 +597,7 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
             </div>
 
             {/* INVENTARIO & ALMACÉN */}
-            {isAdmin && (
+            {canOperate && (
                 <div>
                     <p className="mb-1.5 px-3 text-[10px] font-bold uppercase tracking-wider text-slate-400 dark:text-neutral-500">
                         Almacén & Catálogo
@@ -899,7 +900,7 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                         ⚠️ Incidencias
                     </NavItem>
 
-                    {!isAdmin && (
+                    {!canOperate && (
                         <>
                             <NavItem
                                 href="/almacen/canales"

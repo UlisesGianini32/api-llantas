@@ -43,8 +43,10 @@ final class UserAccess
     private const OPERATIONS_ROUTE_PATTERNS = [
         ...self::COMMON_ACCOUNT_PATTERNS,
         'pos.*',
+        'customers.*',
         'restock.*',
         'purchasing.*',
+        'inventory.*',
         'meli.sync-manual',
         'meli.questions.*',
         'meli.messaging.*',
@@ -55,13 +57,6 @@ final class UserAccess
         'ams.*',
         'qz.*',
         'settings.index',
-        'inventory.kits.index',
-        'inventory.kits.show',
-        'inventory.kits.reservations.show',
-        'inventory.channels.index',
-        'inventory.channels.show',
-        'inventory.channels.mercado-libre.import',
-        'inventory.channels.mercado-libre.stock',
     ];
 
     public static function canAccessRoute(User $user, ?string $routeName): bool

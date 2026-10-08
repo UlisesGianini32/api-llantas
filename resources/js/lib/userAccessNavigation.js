@@ -47,9 +47,13 @@ const sections = [
 
 export function sidebarSectionsForRole(role) {
     const isAdmin = role === 'admin'
+    const canOperate = isAdmin || role === 'operations'
 
     return sections
-        .filter((section) => isAdmin || !section.adminOnly)
-        .map((section) => ({ ...section, items: section.items.filter((item) => isAdmin || !item.adminOnly) }))
+        .filter((section) => (section.key === 'system' ? isAdmin : (canOperate || !section.adminOnly)))
+        .map((section) => ({
+            ...section,
+            items: section.items.filter((item) => (section.key === 'system' ? isAdmin : (canOperate || !item.adminOnly))),
+        }))
         .filter((section) => section.items.length > 0)
 }
