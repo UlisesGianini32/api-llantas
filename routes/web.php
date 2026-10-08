@@ -57,6 +57,7 @@ use App\Http\Controllers\Settings\ChannelSettingsController;
 use App\Http\Controllers\Settings\PasswordController;
 use App\Http\Controllers\Settings\ProfileController;
 use App\Http\Controllers\SyscomMeliController;
+use App\Http\Controllers\SyscomOrdersController;
 use App\Http\Controllers\SystemActionController;
 use App\Http\Controllers\SystemHealthController;
 use App\Http\Controllers\SystemLogController;
@@ -686,6 +687,7 @@ Route::middleware(['auth', 'role'])->group(function () {
 
     // SYSCOM → MERCADO LIBRE
     Route::get('/syscom-ml', [SyscomMeliController::class, 'index'])->name('syscom.meli.index');
+    Route::get('/syscom-ml/pedidos', [SyscomOrdersController::class, 'index'])->name('syscom.meli.pedidos');
     Route::get('/syscom-ml/{id}/editar', [SyscomMeliController::class, 'editWeb'])->name('syscom.meli.edit');
     Route::put('/syscom-ml/{id}', [SyscomMeliController::class, 'updateWeb'])->name('syscom.meli.update');
 

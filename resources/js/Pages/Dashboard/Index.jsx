@@ -1,32 +1,39 @@
-import { Link, router } from '@inertiajs/react'
-import { useEffect, useState } from 'react'
+import { Head, Link, router } from '@inertiajs/react'
 import AppShell from '@/Components/layout/AppShell'
 import PageSection from '@/Components/ui/PageSection'
 import Pagination from '@/Components/ui/Pagination'
 
-function StatCard({ title, value, subtitle, barPercent, barLabel, colorClass }) {
-    const pct = Math.min(100, Math.max(0, Number(barPercent) || 0))
-
+function MetricCard({ title, value, subtitle, badge, badgeColor = 'bg-slate-100 text-slate-700 dark:bg-neutral-800 dark:text-neutral-300', icon, colorClass, highlight = false }) {
     return (
-        <div className="group relative overflow-hidden rounded-2xl border border-slate-200/80 bg-gradient-to-b from-white to-slate-50/50 p-5 shadow-2xs transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md dark:border-neutral-800/80 dark:from-neutral-900 dark:to-neutral-900/80">
+        <div className={`group relative overflow-hidden rounded-2xl border p-5 shadow-2xs transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md ${
+            highlight
+                ? 'border-indigo-200 bg-gradient-to-br from-indigo-50/40 via-white to-white dark:border-indigo-900/60 dark:from-indigo-950/20 dark:via-neutral-900 dark:to-neutral-900'
+                : 'border-slate-200/80 bg-white dark:border-neutral-800/80 dark:bg-neutral-900'
+        }`}>
             <div className="flex items-center justify-between gap-2">
-                <p className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-neutral-400">{title}</p>
-                {barLabel && (
-                    <span className="rounded-md bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-600 dark:bg-neutral-800 dark:text-neutral-400">
-                        {barLabel}
+                <div className="flex items-center gap-2">
+                    {icon && (
+                        <div className={`flex h-8 w-8 items-center justify-center rounded-xl ${colorClass || 'bg-slate-100 text-slate-600 dark:bg-neutral-800 dark:text-slate-300'}`}>
+                            {icon}
+                        </div>
+                    )}
+                    <p className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-neutral-400">
+                        {title}
+                    </p>
+                </div>
+                {badge && (
+                    <span className={`rounded-md px-2 py-0.5 text-[10px] font-bold ${badgeColor}`}>
+                        {badge}
                     </span>
                 )}
             </div>
 
-            <p className="mt-3 text-3xl font-black tracking-tight text-slate-900 dark:text-white">{value}</p>
-            <p className="mt-1.5 text-xs text-slate-500 dark:text-neutral-400">{subtitle}</p>
-
-            <div className="mt-4 h-1.5 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-neutral-800">
-                <div
-                    className={`h-full rounded-full transition-all duration-500 ${colorClass}`}
-                    style={{ width: `${pct}%` }}
-                />
-            </div>
+            <p className="mt-3 text-2xl sm:text-3xl font-black tracking-tight text-slate-900 dark:text-white">
+                {value}
+            </p>
+            <p className="mt-1 text-xs text-slate-500 dark:text-neutral-400">
+                {subtitle}
+            </p>
         </div>
     )
 }
@@ -37,94 +44,20 @@ function stockBadgeClass(stock) {
     return 'bg-yellow-50 text-yellow-700 ring-yellow-200 dark:bg-yellow-950/40 dark:text-yellow-400 dark:ring-yellow-900'
 }
 
-function ZeroStockModal({ open, onClose, onConfirm, busy }) {
-    useEffect(() => {
-        if (!open) return
-        const onKey = (e) => {
-            if (e.key === 'Escape') onClose()
-        }
-        window.addEventListener('keydown', onKey)
-        return () => window.removeEventListener('keydown', onKey)
-    }, [open, onClose])
-
-    if (!open) return null
-
-    return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-            <button
-                type="button"
-                className="absolute inset-0 bg-black/50 backdrop-blur-[1px]"
-                aria-label="Cerrar"
-                onClick={onClose}
-            />
-            <div className="relative z-10 w-full max-w-md rounded-3xl border border-slate-200 bg-white p-6 shadow-xl dark:border-neutral-700 dark:bg-neutral-900">
-                <p className="text-xs font-semibold uppercase tracking-wide text-red-600 dark:text-red-400">Acción irreversible</p>
-                <h4 className="mt-2 text-xl font-bold text-slate-900 dark:text-white">¿Poner todo el stock en cero?</h4>
-                <p className="mt-3 text-sm leading-relaxed text-slate-600 dark:text-slate-400">
-                    Se pondrá el stock en <strong>0</strong> para todas las llantas y todos los productos compuestos. Esta
-                    operación no se puede deshacer desde el panel.
-                </p>
-                <div className="mt-6 flex flex-col gap-2 sm:flex-row sm:justify-end">
-                    <button
-                        type="button"
-                        onClick={onClose}
-                        disabled={busy}
-                        className="rounded-2xl border border-slate-200 bg-white px-5 py-2.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:opacity-50 dark:border-neutral-700 dark:bg-neutral-900 dark:text-slate-200 dark:hover:bg-neutral-800"
-                    >
-                        Cancelar
-                    </button>
-                    <button
-                        type="button"
-                        onClick={onConfirm}
-                        disabled={busy}
-                        className="rounded-2xl bg-red-600 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-red-700 disabled:opacity-50"
-                    >
-                        {busy ? 'Procesando…' : 'Sí, poner stock en 0'}
-                    </button>
-                </div>
-            </div>
-        </div>
-    )
-}
-
-export default function DashboardIndex(props) {
-    const filters = props.filters || {}
-    const stockBajo = props.stockBajo || { data: [] }
-    const [zeroModalOpen, setZeroModalOpen] = useState(false)
-    const [zeroBusy, setZeroBusy] = useState(false)
-
-    const totalLlantas = Number(props.totalLlantas || 0)
-    const totalCompuestos = Number(props.totalCompuestos || 0)
-    const llantasSinStock = Number(props.llantasSinStock || 0)
-    const compuestosSinStock = Number(props.compuestosSinStock ?? 0)
-    const llantasConStockSaludable = Number(props.llantasConStockSaludable ?? 0)
-    const existenciasLlantas = Number(props.existenciasLlantas || 0)
-    const syscomSyncOkToday = Number(props.syscomSyncOkToday || 0)
-    const syscomSyncSkipToday = Number(props.syscomSyncSkipToday || 0)
-    const syscomSyncErrToday = Number(props.syscomSyncErrToday || 0)
-    const syscomPedidosRecientes = Array.isArray(props.syscomPedidosRecientes) ? props.syscomPedidosRecientes : []
-
-    const pct = (num, den) => (den > 0 ? (num / den) * 100 : 0)
-
-    const copyText = async (text) => {
-        const t = String(text || '')
-        if (!t) return
-        try {
-            await navigator.clipboard.writeText(t)
-        } catch {
-            window.prompt('Copiar:', t)
-        }
-    }
+export default function DashboardIndex({ ecommerce = {}, catalog = {}, filters = {}, stockBajo = { data: [] } }) {
+    const search = filters.search || ''
+    const sort = filters.sort || 'stock'
+    const dir = filters.dir || 'asc'
 
     const submitSearch = (e) => {
         e.preventDefault()
         const form = new FormData(e.currentTarget)
-        const search = form.get('search') || ''
+        const newSearch = form.get('search') || ''
 
         router.get('/dashboard', {
-            search,
-            sort: filters.sort || 'stock',
-            dir: filters.dir || 'asc',
+            search: newSearch,
+            sort,
+            dir,
         }, {
             preserveState: true,
             preserveScroll: true,
@@ -132,28 +65,23 @@ export default function DashboardIndex(props) {
     }
 
     const sortLink = (column) => {
-        const currentSort = filters.sort || 'stock'
-        const currentDir = filters.dir || 'asc'
-        const nextDir = currentSort === column && currentDir === 'asc' ? 'desc' : 'asc'
-
-        return `/dashboard?search=${encodeURIComponent(filters.search || '')}&sort=${column}&dir=${nextDir}`
+        const nextDir = sort === column && dir === 'asc' ? 'desc' : 'asc'
+        return `/dashboard?search=${encodeURIComponent(search)}&sort=${column}&dir=${nextDir}`
     }
 
     const SortTh = ({ column, label, align = 'left', sticky = false }) => {
-        const active = (filters.sort || 'stock') === column
-        const dir = filters.dir || 'asc'
+        const active = sort === column
         const alignClass = align === 'right' ? 'text-right' : align === 'center' ? 'text-center' : 'text-left'
-        const linkJustify =
-            align === 'right' ? 'justify-end' : align === 'center' ? 'justify-center' : 'justify-start'
+        const linkJustify = align === 'right' ? 'justify-end' : align === 'center' ? 'justify-center' : 'justify-start'
         const stickyClass = sticky
             ? 'sticky left-0 z-20 bg-slate-50 shadow-[2px_0_8px_-4px_rgba(0,0,0,0.08)] dark:bg-neutral-800/90 dark:shadow-[2px_0_8px_-4px_rgba(0,0,0,0.4)]'
             : ''
 
         return (
-            <th className={`px-4 py-4 ${alignClass} ${stickyClass}`}>
+            <th className={`px-4 py-3.5 ${alignClass} ${stickyClass}`}>
                 <Link
                     href={sortLink(column)}
-                    className={`inline-flex w-full items-center gap-1.5 font-semibold text-slate-700 transition hover:text-indigo-600 dark:text-slate-200 dark:hover:text-indigo-400 ${linkJustify}`}
+                    className={`inline-flex w-full items-center gap-1.5 font-bold text-slate-700 transition hover:text-indigo-600 dark:text-slate-200 dark:hover:text-indigo-400 ${linkJustify}`}
                 >
                     <span>{label}</span>
                     <span className="text-[10px] text-slate-400 dark:text-slate-500" aria-hidden>
@@ -164,433 +92,499 @@ export default function DashboardIndex(props) {
         )
     }
 
-    const confirmZeroStock = () => {
-        setZeroBusy(true)
-        router.post(
-            '/dashboard/stock/zero',
-            {},
-            {
-                preserveScroll: true,
-                onFinish: () => {
-                    setZeroBusy(false)
-                    setZeroModalOpen(false)
-                },
-            },
-        )
+    const formatMoney = (val) => {
+        return `$${Number(val || 0).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MXN`
     }
 
-    const searchActive = Boolean((filters.search || '').trim())
     const stockRows = stockBajo.data || []
     const stockTotal = Number(stockBajo.total ?? 0)
-    const emptyMessage =
-        stockTotal === 0
-            ? searchActive
-                ? 'No hay coincidencias con la búsqueda en stock crítico.'
-                : 'No hay productos en stock crítico (todos tienen más de 4 unidades).'
-            : 'No se encontraron resultados'
 
     return (
         <AppShell title="Dashboard">
-            <div className="space-y-10">
-                <div>
-                    <p className="text-sm font-semibold uppercase tracking-[0.18em] text-indigo-600 dark:text-indigo-400">
-                        Panel principal
-                    </p>
-                    <h2 className="mt-2 text-3xl font-bold tracking-tight text-slate-900 dark:text-white">
-                        Dashboard de inventario
-                    </h2>
-                    <p className="mt-2 max-w-2xl text-sm text-slate-600 dark:text-slate-400">
-                        Control general de llantas, productos compuestos, stock crítico y procesos operativos.
-                    </p>
+            <Head title="Panel de Control E-commerce - SBS" />
+
+            <div className="space-y-8">
+                {/* Header Principal con Identidad SBS */}
+                <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between border-b border-slate-200/80 pb-6 dark:border-neutral-800/80">
+                    <div>
+                        <div className="flex items-center gap-2">
+                            <span className="inline-flex items-center gap-1.5 rounded-full bg-slate-900 px-2.5 py-0.5 text-[11px] font-bold tracking-wider text-white dark:bg-white dark:text-slate-900">
+                                <span>SBS</span>
+                                <span className="opacity-60">|</span>
+                                <span className="text-pink-300 dark:text-pink-600">T.O. THE BEAUTY SHOP</span>
+                            </span>
+                            <span className="text-xs font-semibold text-slate-400 dark:text-neutral-500">
+                                Panel E-commerce & Retail
+                            </span>
+                        </div>
+                        <h1 className="mt-2 text-2xl sm:text-3xl font-black tracking-tight text-slate-900 dark:text-white">
+                            Panel de Control General
+                        </h1>
+                        <p className="mt-1 text-sm text-slate-500 dark:text-neutral-400">
+                            Monitoreo en tiempo real de ventas omnicanal, despacho de pedidos y salud del inventario SBS.
+                        </p>
+                    </div>
+
+                    {/* Botones de Acción Operativa */}
+                    <div className="flex flex-wrap items-center gap-2.5">
+                        <Link
+                            href="/pos"
+                            className="inline-flex items-center gap-2 rounded-xl bg-slate-900 px-4 py-2.5 text-xs font-bold text-white shadow-sm transition hover:bg-slate-800 dark:bg-white dark:text-slate-900 dark:hover:bg-slate-100"
+                        >
+                            <svg className="h-4 w-4 text-emerald-400 dark:text-emerald-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 9V7a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2m2 4h10a2 2 0 002-2v-6a2 2 0 00-2-2H9a2 2 0 00-2 2v6a2 2 0 002 2zm7-5a2 2 0 11-4 0 2 2 0 014 0z" />
+                            </svg>
+                            Punto de Venta POS
+                        </Link>
+                        <Link
+                            href="/almacen/productos"
+                            className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-xs font-bold text-slate-700 shadow-2xs transition hover:bg-slate-50 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-200 dark:hover:bg-neutral-700"
+                        >
+                            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
+                            </svg>
+                            Catálogo Maestro
+                        </Link>
+                        <Link
+                            href="/compras/ordenes/crear"
+                            className="inline-flex items-center gap-2 rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-2.5 text-xs font-bold text-indigo-700 transition hover:bg-indigo-100 dark:border-indigo-900/60 dark:bg-indigo-950/40 dark:text-indigo-300 dark:hover:bg-indigo-900/50"
+                        >
+                            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                            </svg>
+                            Nueva Orden de Compra
+                        </Link>
+                    </div>
                 </div>
 
-                <section className="space-y-4">
-                    <PageSection
-                        eyebrow="Inventario"
-                        title="Resumen de catálogo y existencias"
-                        description="Indicadores calculados en tiempo real sobre tu base de datos."
-                    />
-                    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-                        <StatCard
-                            title="Llantas individuales"
-                            value={totalLlantas.toLocaleString()}
-                            subtitle="Referencias en catálogo"
-                            barPercent={pct(totalLlantas - llantasSinStock, totalLlantas)}
-                            barLabel={`${pct(totalLlantas - llantasSinStock, totalLlantas).toFixed(1)}% del catálogo con al menos 1 pieza`}
-                            colorClass="bg-blue-500"
-                        />
-                        <StatCard
-                            title="Tipos de combos"
-                            value={totalCompuestos.toLocaleString()}
-                            subtitle="Productos compuestos creados"
-                            barPercent={pct(totalCompuestos - compuestosSinStock, totalCompuestos)}
-                            barLabel={`${pct(totalCompuestos - compuestosSinStock, totalCompuestos).toFixed(1)}% combos con existencia`}
-                            colorClass="bg-violet-500"
-                        />
-                        <StatCard
-                            title="Stock llantas"
-                            value={existenciasLlantas.toLocaleString()}
-                            subtitle={
-                                totalLlantas > 0
-                                    ? `Promedio ${(existenciasLlantas / totalLlantas).toFixed(1)} piezas por referencia`
-                                    : 'Piezas disponibles actualmente'
+                {/* FILA 1: KPIs Principales de Ventas y Despacho */}
+                <section className="space-y-3">
+                    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                        {/* Ventas Totales Hoy */}
+                        <MetricCard
+                            title="Ventas Totales Hoy"
+                            value={formatMoney(ecommerce.totalSalesToday)}
+                            subtitle={`${Number(ecommerce.totalOrdersToday || 0)} órdenes combinadas (ML + Tienda)`}
+                            badge="Hoy"
+                            badgeColor="bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300"
+                            highlight
+                            colorClass="bg-emerald-50 text-emerald-600 dark:bg-emerald-950/50 dark:text-emerald-400"
+                            icon={
+                                <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                </svg>
                             }
-                            barPercent={pct(llantasConStockSaludable, totalLlantas)}
-                            barLabel={`${pct(llantasConStockSaludable, totalLlantas).toFixed(1)}% SKUs con más de 4 piezas`}
-                            colorClass="bg-emerald-500"
                         />
-                        <StatCard
-                            title="Llantas agotadas"
-                            value={llantasSinStock.toLocaleString()}
-                            subtitle="Referencias en cero"
-                            barPercent={pct(llantasSinStock, totalLlantas)}
-                            barLabel={`${pct(llantasSinStock, totalLlantas).toFixed(1)}% del catálogo sin stock`}
-                            colorClass="bg-rose-500"
+
+                        {/* Pedidos por Despachar */}
+                        <MetricCard
+                            title="Pedidos x Despachar"
+                            value={Number(ecommerce.meli?.pendingDispatch || 0).toLocaleString()}
+                            subtitle="Órdenes Mercado Libre listas para preparación"
+                            badge={Number(ecommerce.meli?.pendingDispatch || 0) > 0 ? 'Pendiente' : 'Al día ✓'}
+                            badgeColor={
+                                Number(ecommerce.meli?.pendingDispatch || 0) > 0
+                                    ? 'bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300'
+                                    : 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300'
+                            }
+                            colorClass="bg-amber-50 text-amber-600 dark:bg-amber-950/50 dark:text-amber-400"
+                            icon={
+                                <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4" />
+                                </svg>
+                            }
+                        />
+
+                        {/* Ventas en Mostrador POS */}
+                        <MetricCard
+                            title="Mostrador POS Hoy"
+                            value={formatMoney(ecommerce.pos?.totalToday)}
+                            subtitle={`${Number(ecommerce.pos?.ordersToday || 0)} tickets cobrados en tienda`}
+                            badge="Tienda Física"
+                            badgeColor="bg-blue-100 text-blue-800 dark:bg-blue-950/60 dark:text-blue-300"
+                            colorClass="bg-blue-50 text-blue-600 dark:bg-blue-950/50 dark:text-blue-400"
+                            icon={
+                                <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 11V7a4 4 0 00-8 0v4M5 9h14l1 12H4L5 9z" />
+                                </svg>
+                            }
+                        />
+
+                        {/* Atención al Cliente / Reputación ML */}
+                        <MetricCard
+                            title="Atención al Cliente ML"
+                            value={`${Number(ecommerce.support?.unansweredQuestions || 0)} preg.`}
+                            subtitle={`${Number(ecommerce.support?.openClaims || 0)} reclamos abiertos actualmente`}
+                            badge={
+                                Number(ecommerce.support?.unansweredQuestions || 0) === 0 && Number(ecommerce.support?.openClaims || 0) === 0
+                                    ? 'Excelente ✓'
+                                    : 'Requiere Atención'
+                            }
+                            badgeColor={
+                                Number(ecommerce.support?.unansweredQuestions || 0) === 0 && Number(ecommerce.support?.openClaims || 0) === 0
+                                    ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300'
+                                    : 'bg-rose-100 text-rose-800 dark:bg-rose-950/60 dark:text-rose-300'
+                            }
+                            colorClass="bg-purple-50 text-purple-600 dark:bg-purple-950/50 dark:text-purple-400"
+                            icon={
+                                <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                                </svg>
+                            }
                         />
                     </div>
                 </section>
 
+                {/* FILA 2: Operación por Canal (Mercado Libre vs POS Mostrador) */}
+                <section className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+                    {/* Tarjeta Canal Online: Mercado Libre */}
+                    <div className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white p-6 shadow-2xs dark:border-neutral-800/80 dark:bg-neutral-900">
+                        <div className="flex items-center justify-between border-b border-slate-100 pb-4 dark:border-neutral-800">
+                            <div className="flex items-center gap-3">
+                                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-amber-500/10 text-amber-600 dark:bg-amber-500/20 dark:text-amber-400">
+                                    <svg className="h-6 w-6" viewBox="0 0 24 24" fill="currentColor">
+                                        <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/>
+                                    </svg>
+                                </div>
+                                <div>
+                                    <h3 className="font-bold text-slate-900 dark:text-white">Canal Online: Mercado Libre</h3>
+                                    <p className="text-xs text-slate-500 dark:text-neutral-400">E-commerce y sincronización de órdenes</p>
+                                </div>
+                            </div>
+                            <span className="rounded-lg bg-amber-50 px-2.5 py-1 text-xs font-bold text-amber-700 dark:bg-amber-950/40 dark:text-amber-400">
+                                Mercado Libre
+                            </span>
+                        </div>
+
+                        <div className="mt-5 grid grid-cols-2 gap-4">
+                            <div className="rounded-xl bg-slate-50 p-4 dark:bg-neutral-800/50">
+                                <p className="text-xs text-slate-500 dark:text-neutral-400">Ventas Hoy</p>
+                                <p className="mt-1 text-xl font-black text-slate-900 dark:text-white">
+                                    {formatMoney(ecommerce.meli?.totalToday)}
+                                </p>
+                                <p className="mt-0.5 text-[11px] text-slate-400">
+                                    {Number(ecommerce.meli?.ordersToday || 0)} pedidos hoy
+                                </p>
+                            </div>
+                            <div className="rounded-xl bg-slate-50 p-4 dark:bg-neutral-800/50">
+                                <p className="text-xs text-slate-500 dark:text-neutral-400">Envíos en Tránsito</p>
+                                <p className="mt-1 text-xl font-black text-indigo-600 dark:text-indigo-400">
+                                    {Number(ecommerce.meli?.inTransit || 0)} paquetes
+                                </p>
+                                <p className="mt-0.5 text-[11px] text-slate-400">
+                                    {Number(ecommerce.meli?.deliveredToday || 0)} entregados hoy
+                                </p>
+                            </div>
+                        </div>
+
+                        <div className="mt-5 flex flex-wrap items-center gap-2 pt-4 border-t border-slate-100 dark:border-neutral-800">
+                            <Link
+                                href="/ams/pedidos"
+                                className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-50 px-3 py-1.5 text-xs font-bold text-indigo-700 hover:bg-indigo-100 dark:bg-indigo-950/50 dark:text-indigo-300"
+                            >
+                                Despacho AMS
+                            </Link>
+                            <Link
+                                href="/mercado-libre/etiquetas"
+                                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-neutral-700 dark:text-slate-300 dark:hover:bg-neutral-800"
+                            >
+                                Imprimir Etiquetas
+                            </Link>
+                            <Link
+                                href="/meli/preguntas"
+                                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-neutral-700 dark:text-slate-300 dark:hover:bg-neutral-800"
+                            >
+                                Responder Preguntas ({Number(ecommerce.support?.unansweredQuestions || 0)})
+                            </Link>
+                        </div>
+                    </div>
+
+                    {/* Tarjeta Canal Físico: Punto de Venta POS */}
+                    <div className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white p-6 shadow-2xs dark:border-neutral-800/80 dark:bg-neutral-900">
+                        <div className="flex items-center justify-between border-b border-slate-100 pb-4 dark:border-neutral-800">
+                            <div className="flex items-center gap-3">
+                                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-500/10 text-blue-600 dark:bg-blue-500/20 dark:text-blue-400">
+                                    <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
+                                    </svg>
+                                </div>
+                                <div>
+                                    <h3 className="font-bold text-slate-900 dark:text-white">Canal Físico: Punto de Venta SBS</h3>
+                                    <p className="text-xs text-slate-500 dark:text-neutral-400">Mostrador y ventas a estilistas</p>
+                                </div>
+                            </div>
+                            <span className="rounded-lg bg-blue-50 px-2.5 py-1 text-xs font-bold text-blue-700 dark:bg-blue-500/10 dark:text-blue-300">
+                                Retail SBS
+                            </span>
+                        </div>
+
+                        <div className="mt-5 grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                            <div className="rounded-xl bg-slate-50 p-3 text-center dark:bg-neutral-800/50">
+                                <p className="text-[11px] font-semibold text-slate-500 dark:text-neutral-400">Efectivo</p>
+                                <p className="mt-1 text-sm font-bold text-slate-900 dark:text-white">
+                                    ${Number(ecommerce.pos?.cash || 0).toLocaleString()}
+                                </p>
+                            </div>
+                            <div className="rounded-xl bg-slate-50 p-3 text-center dark:bg-neutral-800/50">
+                                <p className="text-[11px] font-semibold text-slate-500 dark:text-neutral-400">Tarjeta</p>
+                                <p className="mt-1 text-sm font-bold text-slate-900 dark:text-white">
+                                    ${Number(ecommerce.pos?.card || 0).toLocaleString()}
+                                </p>
+                            </div>
+                            <div className="rounded-xl bg-slate-50 p-3 text-center dark:bg-neutral-800/50">
+                                <p className="text-[11px] font-semibold text-slate-500 dark:text-neutral-400">Transferencia</p>
+                                <p className="mt-1 text-sm font-bold text-slate-900 dark:text-white">
+                                    ${Number(ecommerce.pos?.transfer || 0).toLocaleString()}
+                                </p>
+                            </div>
+                            <div className="rounded-xl bg-slate-50 p-3 text-center dark:bg-neutral-800/50">
+                                <p className="text-[11px] font-semibold text-slate-500 dark:text-neutral-400">Crédito</p>
+                                <p className="mt-1 text-sm font-bold text-amber-600 dark:text-amber-400">
+                                    ${Number(ecommerce.pos?.credit || 0).toLocaleString()}
+                                </p>
+                            </div>
+                        </div>
+
+                        <div className="mt-5 flex flex-wrap items-center gap-2 pt-4 border-t border-slate-100 dark:border-neutral-800">
+                            <Link
+                                href="/pos"
+                                className="inline-flex items-center gap-1.5 rounded-lg bg-blue-50 px-3 py-1.5 text-xs font-bold text-blue-700 hover:bg-blue-100 dark:bg-blue-950/50 dark:text-blue-300"
+                            >
+                                Nueva Venta en Caja
+                            </Link>
+                            <Link
+                                href="/pos/clientes"
+                                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-neutral-700 dark:text-slate-300 dark:hover:bg-neutral-800"
+                            >
+                                Clientes & Créditos Estilistas
+                            </Link>
+                        </div>
+                    </div>
+                </section>
+
+                {/* FILA 3: Inventario y Salud del Catálogo SBS */}
                 <section className="space-y-4">
                     <PageSection
-                        eyebrow="Valor"
-                        title="Valorización a costo"
-                        description="Costo × stock acumulado (llantas y combos)."
+                        eyebrow="Inventario SBS"
+                        title="Catálogo General y Existencias"
+                        description="Valores reales calculados sobre el inventario físico disponible en almacén."
                     />
-                    <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-                        <div className="relative overflow-hidden rounded-2xl border border-slate-200/80 bg-gradient-to-br from-white via-white to-emerald-50/30 p-6 shadow-2xs transition-all hover:shadow-xs dark:border-neutral-800/80 dark:from-neutral-900 dark:via-neutral-900 dark:to-emerald-950/20">
-                            <div className="flex items-center justify-between">
-                                <span className="rounded-lg bg-emerald-50 px-2.5 py-1 text-xs font-bold text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300">
-                                    Catálogo Individual
+
+                    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                        <div className="relative overflow-hidden rounded-2xl border border-slate-200/80 bg-white p-5 shadow-2xs dark:border-neutral-800/80 dark:bg-neutral-900">
+                            <p className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-neutral-400">
+                                Productos en Catálogo
+                            </p>
+                            <p className="mt-2 text-3xl font-black tracking-tight text-slate-900 dark:text-white">
+                                {Number(catalog.totalProducts || 0).toLocaleString()}
+                            </p>
+                            <p className="mt-1 text-xs text-slate-500 dark:text-neutral-400">
+                                Referencias individuales registradas
+                            </p>
+                            <div className="mt-3 flex items-center justify-between text-[11px] text-slate-500">
+                                <span>Con existencia</span>
+                                <span className="font-bold text-emerald-600">
+                                    {Number(catalog.healthyStock || 0)} SKUs
                                 </span>
-                                <span className="text-xs font-medium text-slate-400">MXN</span>
                             </div>
-                            <p className="mt-4 text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-neutral-400">
-                                Valor inventario llantas
-                            </p>
-                            <p className="mt-2 text-3xl font-black tracking-tight text-slate-900 dark:text-white sm:text-4xl">
-                                ${Number(props.valorInventarioLlantas || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                            </p>
-                            <p className="mt-2 text-xs text-slate-500 dark:text-neutral-400">
-                                Valorización total al costo del inventario físico individual registrado.
-                            </p>
                         </div>
 
-                        <div className="relative overflow-hidden rounded-2xl border border-slate-200/80 bg-gradient-to-br from-white via-white to-indigo-50/30 p-6 shadow-2xs transition-all hover:shadow-xs dark:border-neutral-800/80 dark:from-neutral-900 dark:via-neutral-900 dark:to-indigo-950/20">
-                            <div className="flex items-center justify-between">
-                                <span className="rounded-lg bg-indigo-50 px-2.5 py-1 text-xs font-bold text-indigo-700 dark:bg-indigo-500/10 dark:text-indigo-300">
-                                    Combos & Ensambles
+                        <div className="relative overflow-hidden rounded-2xl border border-slate-200/80 bg-white p-5 shadow-2xs dark:border-neutral-800/80 dark:bg-neutral-900">
+                            <p className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-neutral-400">
+                                Kits & Combos Compuestos
+                            </p>
+                            <p className="mt-2 text-3xl font-black tracking-tight text-violet-600 dark:text-violet-400">
+                                {Number(catalog.totalCombos || 0).toLocaleString()}
+                            </p>
+                            <p className="mt-1 text-xs text-slate-500 dark:text-neutral-400">
+                                Paquetes y tratamientos armados
+                            </p>
+                            <div className="mt-3 flex items-center justify-between text-[11px] text-slate-500">
+                                <span>Valor teórico</span>
+                                <span className="font-bold text-slate-700 dark:text-slate-300">
+                                    ${Number(catalog.combosTheoreticalValue || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}
                                 </span>
-                                <span className="text-xs font-medium text-slate-400">MXN</span>
                             </div>
-                            <p className="mt-4 text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-neutral-400">
-                                Valor teórico combos
+                        </div>
+
+                        <div className="relative overflow-hidden rounded-2xl border border-slate-200/80 bg-white p-5 shadow-2xs dark:border-neutral-800/80 dark:bg-neutral-900">
+                            <p className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-neutral-400">
+                                Unidades Físicas en Almacén
                             </p>
-                            <p className="mt-2 text-3xl font-black tracking-tight text-indigo-600 dark:text-indigo-400 sm:text-4xl">
-                                ${Number(props.valorInventarioCompuestos || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                            <p className="mt-2 text-3xl font-black tracking-tight text-emerald-600 dark:text-emerald-400">
+                                {Number(catalog.totalPieces || 0).toLocaleString()}
                             </p>
-                            <p className="mt-2 text-xs text-slate-500 dark:text-neutral-400">
-                                Valor estimado potencial de venta de productos compuestos en existencia.
+                            <p className="mt-1 text-xs text-slate-500 dark:text-neutral-400">
+                                Piezas totales disponibles
+                            </p>
+                            <div className="mt-3 flex items-center justify-between text-[11px] text-slate-500">
+                                <span>Agotados (Stock 0)</span>
+                                <span className="font-bold text-rose-600">
+                                    {Number(catalog.outOfStock || 0)} SKUs
+                                </span>
+                            </div>
+                        </div>
+
+                        <div className="relative overflow-hidden rounded-2xl border border-slate-200/80 bg-gradient-to-br from-white via-white to-indigo-50/30 p-5 shadow-2xs dark:border-neutral-800/80 dark:from-neutral-900 dark:via-neutral-900 dark:to-indigo-950/20">
+                            <div className="flex items-center justify-between">
+                                <p className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-neutral-400">
+                                    Valor Inventario (Costo)
+                                </p>
+                                <span className="text-xs font-bold text-indigo-600 dark:text-indigo-400">MXN</span>
+                            </div>
+                            <p className="mt-2 text-2xl sm:text-3xl font-black tracking-tight text-slate-900 dark:text-white">
+                                ${Number(catalog.inventoryValueCost || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                            </p>
+                            <p className="mt-1 text-xs text-slate-500 dark:text-neutral-400">
+                                Valorización al costo de piezas físicas
                             </p>
                         </div>
                     </div>
                 </section>
 
+                {/* FILA 4: Alertas de Reabastecimiento / Stock Crítico */}
                 <section className="space-y-4">
-                    <PageSection
-                        eyebrow="ML → SYSCOM"
-                        title="Estado de sincronización de hoy"
-                        description="Resultado del proceso automático que convierte ventas de Mercado Libre en pedidos SYSCOM."
-                    />
-                    <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-                        <StatCard
-                            title="Pedidos SYSCOM creados"
-                            value={syscomSyncOkToday.toLocaleString()}
-                            subtitle="Órdenes ML convertidas correctamente"
-                            barPercent={100}
-                            barLabel="Hoy"
-                            colorClass="bg-emerald-500"
-                        />
-                        <StatCard
-                            title="SKIP (no SYSCOM)"
-                            value={syscomSyncSkipToday.toLocaleString()}
-                            subtitle="Órdenes ML que no corresponden a publicaciones SYSCOM"
-                            barPercent={100}
-                            barLabel="Hoy"
-                            colorClass="bg-slate-400"
-                        />
-                        <StatCard
-                            title="Errores SYSCOM"
-                            value={syscomSyncErrToday.toLocaleString()}
-                            subtitle="Fallos reales al crear pedido en SYSCOM"
-                            barPercent={syscomSyncErrToday > 0 ? 100 : 0}
-                            barLabel="Hoy"
-                            colorClass="bg-rose-500"
-                        />
-                    </div>
-
-                    <div className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm dark:border-neutral-800 dark:bg-neutral-900">
-                        <div className="border-b border-slate-200 px-6 py-4 dark:border-neutral-800">
-                            <h3 className="text-lg font-bold text-slate-900 dark:text-white">Folios SYSCOM recientes</h3>
-                            <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-                                Pedidos generados en SYSCOM (sucursal). Últimos 40 por fecha de sincronización.
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                        <div>
+                            <h2 className="text-xl font-black tracking-tight text-slate-900 dark:text-white">
+                                Alertas de Reabastecimiento
+                            </h2>
+                            <p className="text-xs text-slate-500 dark:text-neutral-400">
+                                Productos con stock crítico (≤ 4 unidades). Genera órdenes de compra a proveedores para evitar quiebres de inventario.
                             </p>
                         </div>
-                        {syscomPedidosRecientes.length === 0 ? (
-                            <div className="px-6 py-10 text-center text-sm text-slate-500 dark:text-slate-400">
-                                Aún no hay folios registrados.
-                            </div>
-                        ) : (
-                            <div className="overflow-x-auto">
-                                <table className="min-w-full text-left text-sm">
-                                    <thead className="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-600 dark:bg-neutral-800/80 dark:text-slate-400">
-                                        <tr>
-                                            <th className="px-4 py-3">Orden ML</th>
-                                            <th className="px-4 py-3">Ref. orden compra</th>
-                                            <th className="px-4 py-3">Folio SYSCOM</th>
-                                            <th className="px-4 py-3">Sincronizado</th>
-                                            <th className="px-4 py-3 text-right">Copiar</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody className="divide-y divide-slate-100 dark:divide-neutral-800">
-                                        {syscomPedidosRecientes.map((row) => {
-                                            const mlCancelled = Boolean(row.ml_cancelled)
-                                            const syscomCancelled = Boolean(row.syscom_cancelled)
-                                            const strike = mlCancelled
-                                                ? 'line-through text-slate-400 dark:text-slate-500'
-                                                : ''
-                                            const folioClass = syscomCancelled
-                                                ? 'text-slate-400 line-through dark:text-slate-500'
-                                                : mlCancelled
-                                                  ? 'text-amber-700 dark:text-amber-400'
-                                                  : 'text-emerald-700 dark:text-emerald-400'
 
-                                            return (
-                                            <tr key={row.order_id} className="text-slate-800 dark:text-slate-200">
-                                                <td className={`whitespace-nowrap px-4 py-3 font-mono text-xs ${strike}`}>{row.order_id}</td>
-                                                <td className={`whitespace-nowrap px-4 py-3 font-mono text-xs text-slate-600 dark:text-slate-400 ${strike}`}>
-                                                    {row.referencia_ml}
-                                                </td>
-                                                <td className={`px-4 py-3 font-mono text-xs font-semibold ${folioClass}`}>
-                                                    {row.syscom_order_folio}
-                                                    {mlCancelled && !syscomCancelled && (
-                                                        <span className="ml-2 block text-[10px] font-normal normal-case text-amber-700 dark:text-amber-400">
-                                                            ML cancelada — pendiente SYSCOM
-                                                        </span>
-                                                    )}
-                                                    {syscomCancelled && (
-                                                        <span className="ml-2 block text-[10px] font-normal normal-case text-slate-500">
-                                                            Cancelado SYSCOM {row.syscom_order_cancelled_at || ''}
-                                                        </span>
-                                                    )}
-                                                </td>
-                                                <td className="whitespace-nowrap px-4 py-3 text-slate-600 dark:text-slate-400">
-                                                    {row.syscom_order_synced_at || '—'}
-                                                </td>
-                                                <td className="px-4 py-3 text-right">
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => copyText(row.syscom_order_folio)}
-                                                        className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 dark:border-neutral-600 dark:bg-neutral-800 dark:text-slate-200 dark:hover:bg-neutral-700"
-                                                    >
-                                                        Folio
-                                                    </button>
-                                                </td>
-                                            </tr>
-                                            )
-                                        })}
-                                    </tbody>
-                                </table>
-                            </div>
-                        )}
+                        <Link
+                            href="/compras/ordenes/crear"
+                            className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-3.5 py-2 text-xs font-bold text-white shadow-sm hover:bg-indigo-700 transition"
+                        >
+                            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                            </svg>
+                            Crear Orden de Compra
+                        </Link>
                     </div>
-                </section>
 
-                <section className="space-y-4">
-                    <PageSection
-                        eyebrow="Stock crítico"
-                        title="Buscar y revisar referencias con poco stock"
-                        description="Listado de llantas con stock ≤ 4. Ordena columnas y usa la búsqueda para filtrar."
-                    />
-
-                    <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm dark:border-neutral-800 dark:bg-neutral-900">
-                        <form onSubmit={submitSearch}>
-                            <label htmlFor="search" className="mb-3 block text-sm font-semibold text-slate-900 dark:text-white">
-                                Buscar en esta lista
-                            </label>
-
-                            <div className="flex flex-col gap-3 md:flex-row">
+                    {/* Buscador de Stock Crítico */}
+                    <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-2xs dark:border-neutral-800 dark:bg-neutral-900">
+                        <form onSubmit={submitSearch} className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                            <div className="relative flex-1">
                                 <input
-                                    id="search"
                                     name="search"
-                                    defaultValue={filters.search || ''}
-                                    placeholder="SKU, título o MLM…"
-                                    className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-slate-900 outline-none ring-0 transition focus:border-indigo-500 focus:bg-white dark:border-neutral-700 dark:bg-neutral-950 dark:text-white"
+                                    defaultValue={search}
+                                    placeholder="Buscar por SKU, marca o descripción..."
+                                    className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm text-slate-800 placeholder-slate-400 outline-none transition focus:border-indigo-500 focus:bg-white dark:border-neutral-700 dark:bg-neutral-950 dark:text-slate-100"
                                 />
-
+                            </div>
+                            <div className="flex items-center gap-2">
                                 <button
                                     type="submit"
-                                    className="rounded-2xl bg-indigo-600 px-5 py-3 text-sm font-semibold text-white transition hover:bg-indigo-700"
+                                    className="rounded-xl bg-indigo-600 px-4 py-2.5 text-xs font-bold text-white transition hover:bg-indigo-700"
                                 >
                                     Buscar
                                 </button>
-
-                                <Link
-                                    href="/dashboard"
-                                    className="rounded-2xl border border-slate-200 bg-white px-5 py-3 text-center text-sm font-semibold text-slate-700 transition hover:bg-slate-50 dark:border-neutral-700 dark:bg-neutral-900 dark:text-slate-200 dark:hover:bg-neutral-800"
-                                >
-                                    Limpiar
-                                </Link>
+                                {search && (
+                                    <Link
+                                        href="/dashboard"
+                                        className="rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-50 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-200"
+                                    >
+                                        Limpiar
+                                    </Link>
+                                )}
                             </div>
                         </form>
                     </div>
 
-                    <div className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm dark:border-neutral-800 dark:bg-neutral-900">
-                        <div className="flex flex-col gap-3 border-b border-slate-200 px-6 py-5 dark:border-neutral-800 md:flex-row md:items-center md:justify-between">
-                            <div>
-                                <h2 className="text-xl font-bold text-slate-900 dark:text-white">Tabla de stock crítico</h2>
-                                <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-                                    Productos con stock menor o igual a 4.
-                                </p>
+                    {/* Tabla de Productos con Stock Crítico */}
+                    <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xs dark:border-neutral-800 dark:bg-neutral-900">
+                        <div className="flex items-center justify-between border-b border-slate-200 px-5 py-3.5 dark:border-neutral-800">
+                            <div className="flex items-center gap-2">
+                                <span className="inline-flex h-2.5 w-2.5 rounded-full bg-rose-500" />
+                                <h3 className="font-bold text-slate-900 dark:text-white text-sm">
+                                    Productos en Stock Crítico
+                                </h3>
+                                <span className="rounded-md bg-rose-50 px-2 py-0.5 text-xs font-bold text-rose-700 dark:bg-rose-950/40 dark:text-rose-400">
+                                    {stockTotal.toLocaleString()} encontrados
+                                </span>
                             </div>
 
-                            <div className="flex flex-wrap items-center gap-3">
-                                {stockBajo.from != null && stockBajo.to != null && stockTotal > 0 && (
-                                    <span className="text-sm text-slate-600 dark:text-slate-400">
-                                        Mostrando{' '}
-                                        <span className="font-semibold text-slate-900 dark:text-white">
-                                            {stockBajo.from}–{stockBajo.to}
-                                        </span>{' '}
-                                        de {stockTotal.toLocaleString()}
-                                    </span>
-                                )}
-                                <div className="inline-flex items-center rounded-full bg-rose-50 px-4 py-2 text-sm font-semibold text-rose-600 dark:bg-rose-500/10 dark:text-rose-400">
-                                    ≤ 4 unidades
-                                </div>
-                            </div>
+                            {stockBajo.from != null && stockBajo.to != null && (
+                                <span className="text-xs text-slate-500 dark:text-neutral-400">
+                                    Mostrando {stockBajo.from}–{stockBajo.to} de {stockTotal}
+                                </span>
+                            )}
                         </div>
 
                         <div className="overflow-x-auto">
-                            <table className="min-w-full text-sm">
-                                <thead className="bg-slate-50 dark:bg-neutral-800/70">
-                                    <tr className="text-xs uppercase tracking-wide text-slate-600 dark:text-slate-300">
+                            <table className="min-w-full text-left text-sm">
+                                <thead className="border-b border-slate-200 bg-slate-50 text-xs font-bold uppercase tracking-wider text-slate-600 dark:border-neutral-800 dark:bg-neutral-800/80 dark:text-slate-400">
+                                    <tr>
                                         <SortTh column="sku" label="SKU" sticky />
                                         <SortTh column="marca" label="Marca" />
-                                        <SortTh column="medida" label="Medida" />
-                                        <SortTh column="descripcion" label="Descripción" />
+                                        <SortTh column="descripcion" label="Descripción del Producto" />
                                         <SortTh column="costo" label="Costo" align="right" />
-                                        <SortTh column="precio_ML" label="Precio ML" align="right" />
-                                        <SortTh column="title_familyname" label="Título" />
-                                        <SortTh column="MLM" label="MLM" />
+                                        <SortTh column="precio_ML" label="Precio Venta" align="right" />
                                         <SortTh column="stock" label="Stock" align="center" />
+                                        <th className="px-4 py-3.5 text-right">Acción</th>
                                     </tr>
                                 </thead>
-
                                 <tbody className="divide-y divide-slate-100 dark:divide-neutral-800">
-                                    {stockRows.length === 0 && (
+                                    {stockRows.length === 0 ? (
                                         <tr>
-                                            <td colSpan="9" className="px-4 py-10 text-center text-slate-500 dark:text-slate-400">
-                                                {emptyMessage}
+                                            <td colSpan="7" className="px-5 py-12 text-center text-sm text-slate-500 dark:text-neutral-400">
+                                                {search
+                                                    ? 'No se encontraron productos críticos con esa búsqueda.'
+                                                    : '¡Excelente! No hay productos con stock menor o igual a 4 unidades.'}
                                             </td>
                                         </tr>
+                                    ) : (
+                                        stockRows.map((item) => (
+                                            <tr key={item.id} className="transition hover:bg-slate-50 dark:hover:bg-neutral-800/50">
+                                                <td className="sticky left-0 z-10 bg-white px-4 py-3.5 font-mono text-xs font-bold text-indigo-600 dark:bg-neutral-900 dark:text-indigo-400">
+                                                    <Link href={`/llantas/${item.id}/editar`} className="hover:underline">
+                                                        {item.sku}
+                                                    </Link>
+                                                </td>
+                                                <td className="px-4 py-3.5 text-xs font-semibold text-slate-800 dark:text-slate-200 uppercase">
+                                                    {item.marca || 'SBS'}
+                                                </td>
+                                                <td className="px-4 py-3.5 text-xs text-slate-600 dark:text-slate-300">
+                                                    <div className="max-w-md truncate" title={item.descripcion || item.title_familyname || ''}>
+                                                        {item.descripcion || item.title_familyname || '—'}
+                                                    </div>
+                                                </td>
+                                                <td className="px-4 py-3.5 text-right font-mono text-xs text-slate-700 dark:text-slate-300">
+                                                    ${Number(item.costo || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                                </td>
+                                                <td className="px-4 py-3.5 text-right font-mono text-xs font-bold text-emerald-600 dark:text-emerald-400">
+                                                    ${Number(item.precio_ML || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                                </td>
+                                                <td className="px-4 py-3.5 text-center">
+                                                    <span className={`inline-flex min-w-[36px] items-center justify-center rounded-full px-2.5 py-0.5 text-xs font-bold ring-1 ${stockBadgeClass(Number(item.stock || 0))}`}>
+                                                        {item.stock} pz
+                                                    </span>
+                                                </td>
+                                                <td className="px-4 py-3.5 text-right">
+                                                    <Link
+                                                        href={`/compras/ordenes/crear?sku=${encodeURIComponent(item.sku)}`}
+                                                        className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-semibold text-slate-700 hover:border-indigo-300 hover:bg-indigo-50 hover:text-indigo-700 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-300 dark:hover:bg-neutral-700"
+                                                    >
+                                                        + Pedir OC
+                                                    </Link>
+                                                </td>
+                                            </tr>
+                                        ))
                                     )}
-
-                                    {stockRows.map((item, index) => (
-                                        <tr key={`${item.sku}-${index}`} className="group hover:bg-slate-50 dark:hover:bg-neutral-800/60">
-                                            <td className="sticky left-0 z-10 bg-white px-4 py-4 shadow-[2px_0_8px_-4px_rgba(0,0,0,0.08)] group-hover:bg-slate-50 dark:bg-neutral-900 dark:shadow-[2px_0_8px_-4px_rgba(0,0,0,0.4)] dark:group-hover:bg-neutral-800/60">
-                                                <Link
-                                                    href={`/llantas/${item.id}/editar`}
-                                                    className="font-mono text-sm font-semibold text-blue-600 hover:underline dark:text-blue-400"
-                                                >
-                                                    {item.sku}
-                                                </Link>
-                                            </td>
-                                            <td className="px-4 py-4 text-slate-800 dark:text-slate-200">{item.marca ?? 'SIN MARCA'}</td>
-                                            <td className="px-4 py-4 text-slate-700 dark:text-slate-300">{item.medida ?? 'N/A'}</td>
-                                            <td className="px-4 py-4 text-slate-600 dark:text-slate-400">
-                                                <div className="max-w-xs truncate md:max-w-sm lg:max-w-md" title={item.descripcion ?? ''}>
-                                                    {item.descripcion ?? '—'}
-                                                </div>
-                                            </td>
-                                            <td className="px-4 py-4 text-right text-slate-700 dark:text-slate-300">
-                                                ${Number(item.costo || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                                            </td>
-                                            <td className="px-4 py-4 text-right font-bold text-emerald-600 dark:text-emerald-400">
-                                                ${Number(item.precio_ML || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                                            </td>
-                                            <td className="px-4 py-4 text-slate-700 dark:text-slate-300">
-                                                <div className="max-w-xs truncate" title={item.title_familyname ?? ''}>
-                                                    {item.title_familyname}
-                                                </div>
-                                            </td>
-                                            <td className="px-4 py-4 text-slate-500 dark:text-slate-400">{item.MLM ?? '—'}</td>
-                                            <td className="px-4 py-4 text-center">
-                                                <span className={`inline-flex min-w-[42px] items-center justify-center rounded-full px-3 py-1 text-xs font-bold ring-1 ${stockBadgeClass(Number(item.stock || 0))}`}>
-                                                    {item.stock}
-                                                </span>
-                                            </td>
-                                        </tr>
-                                    ))}
                                 </tbody>
                             </table>
                         </div>
 
-                        <div className="border-t border-slate-200 px-6 py-4 dark:border-neutral-800">
+                        <div className="border-t border-slate-200 px-5 py-3.5 dark:border-neutral-800">
                             <Pagination links={stockBajo.links || []} />
                         </div>
                     </div>
                 </section>
-
-                <section className="space-y-4">
-                    <PageSection
-                        eyebrow="Operaciones"
-                        title="Acciones rápidas"
-                        description="Accesos directos y procesos importantes del sistema."
-                    />
-
-                    <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-5">
-                        <Link href="/llantas" className="group rounded-2xl border border-slate-200/80 bg-white p-5 shadow-2xs transition-all duration-150 hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-xs dark:border-neutral-800/80 dark:bg-neutral-900 dark:hover:border-neutral-700">
-                            <span className="rounded-md bg-blue-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-blue-700 dark:bg-blue-500/10 dark:text-blue-300">Inventario</span>
-                            <p className="mt-3 text-sm font-bold text-slate-900 transition-colors group-hover:text-blue-600 dark:text-white dark:group-hover:text-blue-400">Ver llantas</p>
-                            <p className="mt-1 text-xs text-slate-500 dark:text-neutral-400">Consulta el inventario individual.</p>
-                        </Link>
-
-                        <Link href="/productos" className="group rounded-2xl border border-slate-200/80 bg-white p-5 shadow-2xs transition-all duration-150 hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-xs dark:border-neutral-800/80 dark:bg-neutral-900 dark:hover:border-neutral-700">
-                            <span className="rounded-md bg-violet-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-violet-700 dark:bg-violet-500/10 dark:text-violet-300">Combos</span>
-                            <p className="mt-3 text-sm font-bold text-slate-900 transition-colors group-hover:text-violet-600 dark:text-white dark:group-hover:text-violet-400">Productos compuestos</p>
-                            <p className="mt-1 text-xs text-slate-500 dark:text-neutral-400">Administra juegos, pares y combos.</p>
-                        </Link>
-
-                        <Link href="/excel/vista" className="group rounded-2xl border border-slate-200/80 bg-white p-5 shadow-2xs transition-all duration-150 hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-xs dark:border-neutral-800/80 dark:bg-neutral-900 dark:hover:border-neutral-700">
-                            <span className="rounded-md bg-emerald-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300">Excel</span>
-                            <p className="mt-3 text-sm font-bold text-emerald-600 transition-colors group-hover:text-emerald-500 dark:text-emerald-400">Importar Excel</p>
-                            <p className="mt-1 text-xs text-slate-500 dark:text-neutral-400">Sube y procesa tu archivo de inventario.</p>
-                        </Link>
-
-                        <button
-                            type="button"
-                            onClick={() => setZeroModalOpen(true)}
-                            className="group w-full rounded-2xl border border-rose-200/80 bg-rose-50/30 p-5 text-left shadow-2xs transition-all duration-150 hover:-translate-y-0.5 hover:border-rose-300 hover:shadow-xs dark:border-rose-900/60 dark:bg-rose-950/20"
-                        >
-                            <span className="rounded-md bg-rose-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-rose-700 dark:bg-rose-900/50 dark:text-rose-300">Crítico</span>
-                            <p className="mt-3 text-sm font-bold text-rose-600 dark:text-rose-400">Poner stock en 0</p>
-                            <p className="mt-1 text-xs text-slate-500 dark:text-neutral-400">Reinicia todo el stock del sistema.</p>
-                        </button>
-
-                        <Link href="/dashboard/meli/refresh-token" method="post" as="button" className="group w-full rounded-2xl border border-slate-200/80 bg-white p-5 text-left shadow-2xs transition-all duration-150 hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-xs dark:border-neutral-800/80 dark:bg-neutral-900 dark:hover:border-neutral-700">
-                            <span className="rounded-md bg-amber-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">Mercado Libre</span>
-                            <p className="mt-3 text-sm font-bold text-slate-900 transition-colors group-hover:text-amber-600 dark:text-white dark:group-hover:text-amber-400">Refrescar token ML</p>
-                            <p className="mt-1 text-xs text-slate-500 dark:text-neutral-400">Actualiza el acceso para sincronización.</p>
-                        </Link>
-                    </div>
-                </section>
             </div>
-
-            <ZeroStockModal
-                open={zeroModalOpen}
-                onClose={() => !zeroBusy && setZeroModalOpen(false)}
-                onConfirm={confirmZeroStock}
-                busy={zeroBusy}
-            />
         </AppShell>
     )
 }

@@ -4,7 +4,10 @@ namespace App\Http\Controllers;
 
 use App\Jobs\SyncMeliStockAndPriceJob;
 use App\Models\Llanta;
+use App\Models\MeliClaim;
 use App\Models\MeliOrder;
+use App\Models\MeliQuestion;
+use App\Models\PosSale;
 use App\Models\ProductoCompuesto;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Artisan;
@@ -19,12 +22,12 @@ class DashboardController extends Controller
     {
         $search = trim((string) $request->search);
 
-        // ✅ Ordenamiento (para STOCK BAJO)
+        // ✅ Ordenamiento (para Stock Crítico)
         $sort = $request->get('sort', 'stock');
         $dir  = $request->get('dir', 'asc');
         $dir  = in_array($dir, ['asc', 'desc'], true) ? $dir : 'asc';
 
-        // ✅ Solo columnas permitidas (evita SQL injection)
+        // ✅ Solo columnas permitidas
         $allowedSort = [
             'sku', 'marca', 'medida', 'descripcion',
             'costo', 'precio_ML', 'title_familyname', 'MLM', 'stock',
@@ -34,12 +37,14 @@ class DashboardController extends Controller
             $sort = 'stock';
         }
 
-        // ✅ función reusable para aplicar búsqueda por SKU / Título / MLM
+        // ✅ Búsqueda por SKU, título, descripción, marca o MLM
         $applySearch = function ($q) use ($search) {
             if ($search !== '') {
                 $q->where(function ($qq) use ($search) {
                     $qq->where('sku', 'like', "%{$search}%")
                         ->orWhere('title_familyname', 'like', "%{$search}%")
+                        ->orWhere('descripcion', 'like', "%{$search}%")
+                        ->orWhere('marca', 'like', "%{$search}%")
                         ->orWhere('MLM', 'like', "%{$search}%");
                 });
             }
@@ -61,90 +66,134 @@ class DashboardController extends Controller
                 'stock'
             )
             ->orderBy($sort, $dir)
-            ->paginate(10)
+            ->paginate(15)
             ->withQueryString();
 
         $today = now()->toDateString();
-        $syscomSyncOkToday = MeliOrder::query()
-            ->whereDate('syscom_order_synced_at', $today)
-            ->count();
-        $syscomSyncSkipToday = MeliOrder::query()
-            ->whereDate('updated_at', $today)
-            ->where('syscom_order_error', 'like', 'SKIP_NO_SYSCOM_ITEMS:%')
-            ->count();
-        $syscomSyncErrToday = MeliOrder::query()
-            ->whereDate('updated_at', $today)
-            ->whereNotNull('syscom_order_error')
-            ->where('syscom_order_error', 'not like', 'SKIP_NO_SYSCOM_ITEMS:%')
-            ->count();
 
-        $syscomPedidosRecientes = MeliOrder::query()
-            ->whereNotNull('syscom_order_folio')
-            ->where('syscom_order_folio', '!=', '')
-            ->orderByDesc('syscom_order_synced_at')
-            ->limit(40)
-            ->get([
-                'order_id',
-                'status',
-                'syscom_order_folio',
-                'syscom_order_synced_at',
-                'syscom_order_cancelled_at',
-                'syscom_order_cancel_error',
-            ])
-            ->map(static function (MeliOrder $o) {
-                $status = mb_strtolower(trim((string) ($o->status ?? '')));
-                $mlCancelled = in_array($status, ['cancelled', 'canceled', 'invalid', 'expired'], true);
-                $syscomCancelled = $o->syscom_order_cancelled_at !== null;
+        // 1. VENTAS PUNTO DE VENTA (POS) HOY
+        $posTodayQuery = PosSale::query()
+            ->whereDate('created_at', $today)
+            ->where('status', '!=', PosSale::STATUS_CANCELLED);
 
-                return [
-                    'order_id' => (string) $o->order_id,
-                    'referencia_ml' => 'ML-' . $o->order_id,
-                    'syscom_order_folio' => (string) $o->syscom_order_folio,
-                    'syscom_order_synced_at' => $o->syscom_order_synced_at?->format('d/m/Y H:i'),
-                    'ml_cancelled' => $mlCancelled,
-                    'syscom_cancelled' => $syscomCancelled,
-                    'syscom_order_cancelled_at' => $o->syscom_order_cancelled_at?->format('d/m/Y H:i'),
-                    'syscom_order_cancel_error' => $syscomCancelled
-                        ? null
-                        : ($mlCancelled ? (string) ($o->syscom_order_cancel_error ?? '') : null),
-                ];
+        $posTotalToday = (float) (clone $posTodayQuery)->sum('total');
+        $posOrdersToday = (int) (clone $posTodayQuery)->count();
+
+        $posCashToday = (float) (clone $posTodayQuery)->where('payment_method', PosSale::PAYMENT_CASH)->sum('total');
+        $posCardToday = (float) (clone $posTodayQuery)->where('payment_method', PosSale::PAYMENT_CARD)->sum('total');
+        $posTransferToday = (float) (clone $posTodayQuery)->where('payment_method', PosSale::PAYMENT_TRANSFER)->sum('total');
+        $posCreditToday = (float) (clone $posTodayQuery)->where('payment_method', PosSale::PAYMENT_CREDIT)->sum('total');
+
+        // 2. VENTAS MERCADO LIBRE HOY
+        $meliOrdersTodayQuery = MeliOrder::query()
+            ->whereDate('created_at', $today)
+            ->whereNotIn('status', ['cancelled', 'canceled', 'invalid']);
+
+        $meliOrdersToday = (int) (clone $meliOrdersTodayQuery)->count();
+
+        $meliSalesTotalToday = (float) DB::table('meli_order_items')
+            ->join('meli_orders', 'meli_order_items.meli_order_id', '=', 'meli_orders.id')
+            ->whereDate('meli_orders.created_at', $today)
+            ->whereNotIn('meli_orders.status', ['cancelled', 'canceled', 'invalid'])
+            ->sum(DB::raw('meli_order_items.unit_price * meli_order_items.quantity'));
+
+        if ($meliSalesTotalToday <= 0 && $meliOrdersToday > 0) {
+            $orders = (clone $meliOrdersTodayQuery)->get(['raw']);
+            foreach ($orders as $ord) {
+                $meliSalesTotalToday += (float) data_get($ord->raw, 'total_amount', 0);
+            }
+        }
+
+        // Totales combinados
+        $totalSalesToday = $posTotalToday + $meliSalesTotalToday;
+        $totalOrdersToday = $posOrdersToday + $meliOrdersToday;
+        $avgTicketToday = $totalOrdersToday > 0 ? round($totalSalesToday / $totalOrdersToday, 2) : 0.0;
+
+        // 3. FULFILLMENT / DESPACHO DE PEDIDOS
+        $pendingDispatch = MeliOrder::query()
+            ->whereNotIn('status', ['cancelled', 'canceled', 'invalid'])
+            ->where(function ($q) {
+                $q->whereNull('shipping_status')
+                  ->orWhereIn('shipping_status', ['pending', 'handling', 'ready_to_ship']);
             })
-            ->values()
-            ->all();
+            ->count();
+
+        $inTransit = MeliOrder::query()
+            ->where('shipping_status', 'shipped')
+            ->count();
+
+        $deliveredToday = MeliOrder::query()
+            ->where('shipping_status', 'delivered')
+            ->whereDate('updated_at', $today)
+            ->count();
+
+        // 4. ATENCIÓN AL CLIENTE / REPUTACIÓN
+        $unansweredQuestions = MeliQuestion::query()
+            ->where('status', 'UNANSWERED')
+            ->count();
+
+        $openClaims = MeliClaim::query()
+            ->where('stage', '!=', 'closed')
+            ->count();
+
+        // 5. INVENTARIO & CATÁLOGO SBS
+        $totalProducts = (int) Llanta::count();
+        $totalCombos = (int) ProductoCompuesto::count();
+        $totalPieces = (int) Llanta::sum('stock');
+        $outOfStock = (int) Llanta::where('stock', 0)->count();
+        $criticalStock = (int) Llanta::where('stock', '>', 0)->where('stock', '<=', 4)->count();
+        $healthyStock = (int) Llanta::where('stock', '>', 4)->count();
+
+        $inventoryValueCost = (float) Llanta::sum(DB::raw('costo * stock'));
+        $combosTheoreticalValue = (float) ProductoCompuesto::sum(DB::raw('costo * stock'));
 
         return Inertia::render('Dashboard/Index', [
-            // ======================
-            // TOTALES (NO se filtran)
-            // ======================
-            'totalLlantas' => Llanta::count(),
-            'totalCompuestos' => ProductoCompuesto::count(),
-            'existenciasLlantas' => (int) Llanta::sum('stock'),
-            'llantasSinStock' => Llanta::where('stock', 0)->count(),
-            'compuestosSinStock' => ProductoCompuesto::where('stock', 0)->count(),
-            'llantasConStockSaludable' => Llanta::where('stock', '>', 4)->count(),
+            // Métricas Principales de Negocio E-commerce
+            'ecommerce' => [
+                'totalSalesToday' => $totalSalesToday,
+                'totalOrdersToday' => $totalOrdersToday,
+                'avgTicketToday' => $avgTicketToday,
+                'pos' => [
+                    'totalToday' => $posTotalToday,
+                    'ordersToday' => $posOrdersToday,
+                    'cash' => $posCashToday,
+                    'card' => $posCardToday,
+                    'transfer' => $posTransferToday,
+                    'credit' => $posCreditToday,
+                ],
+                'meli' => [
+                    'totalToday' => $meliSalesTotalToday,
+                    'ordersToday' => $meliOrdersToday,
+                    'pendingDispatch' => $pendingDispatch,
+                    'inTransit' => $inTransit,
+                    'deliveredToday' => $deliveredToday,
+                ],
+                'support' => [
+                    'unansweredQuestions' => $unansweredQuestions,
+                    'openClaims' => $openClaims,
+                ],
+            ],
 
-            // ======================
-            // VALORES
-            // ======================
-            'valorInventarioLlantas' => (float) Llanta::sum(DB::raw('costo * stock')),
-            'valorInventarioCompuestos' => (float) ProductoCompuesto::sum(DB::raw('costo * stock')),
-            'syscomSyncOkToday' => $syscomSyncOkToday,
-            'syscomSyncSkipToday' => $syscomSyncSkipToday,
-            'syscomSyncErrToday' => $syscomSyncErrToday,
-            'syscomPedidosRecientes' => $syscomPedidosRecientes,
+            // Inventario y Catálogo SBS
+            'catalog' => [
+                'totalProducts' => $totalProducts,
+                'totalCombos' => $totalCombos,
+                'totalPieces' => $totalPieces,
+                'outOfStock' => $outOfStock,
+                'criticalStock' => $criticalStock,
+                'healthyStock' => $healthyStock,
+                'inventoryValueCost' => $inventoryValueCost,
+                'combosTheoreticalValue' => $combosTheoreticalValue,
+            ],
 
-            // ======================
-            // FILTROS / ESTADO UI
-            // ======================
+            // Filtros / Estado UI
             'filters' => [
                 'search' => $search,
                 'sort' => $sort,
                 'dir' => $dir,
             ],
 
-            // ======================
-            // STOCK BAJO (FILTRABLE + ORDENABLE)
-            // ======================
+            // Alertas de Reabastecimiento (Stock Crítico)
             'stockBajo' => [
                 'data' => $stockBajo->items(),
                 'current_page' => $stockBajo->currentPage(),
@@ -162,20 +211,19 @@ class DashboardController extends Controller
     {
         return response()->json([
             'totales' => [
-                'llantas' => Llanta::count(),
+                'productos' => Llanta::count(),
                 'compuestos' => ProductoCompuesto::count(),
-                'existencias_llantas' => Llanta::sum('stock'),
+                'existencias' => Llanta::sum('stock'),
             ],
             'valores' => [
-                'llantas' => Llanta::sum(DB::raw('costo * stock')),
-                'pares' => ProductoCompuesto::where('tipo', 'par')->sum(DB::raw('costo * stock')),
-                'juego4' => ProductoCompuesto::where('tipo', 'juego4')->sum(DB::raw('costo * stock')),
+                'catalogo' => Llanta::sum(DB::raw('costo * stock')),
+                'compuestos' => ProductoCompuesto::sum(DB::raw('costo * stock')),
             ],
         ]);
     }
 
     /**
-     * ✅ Poner stock en 0 (llantas + producto_compuestos)
+     * Poner stock en 0 (Mantenimiento)
      */
     public function zeroStock(Request $request)
     {
@@ -203,7 +251,7 @@ class DashboardController extends Controller
                 'duration_ms' => $ms,
             ]);
 
-            return back()->with('success', 'Stock puesto en 0 para llantas y productos compuestos.');
+            return back()->with('success', 'Stock puesto en 0 para catálogo y productos compuestos.');
         } catch (\Throwable $e) {
             $ms = (int) ((microtime(true) - $t0) * 1000);
 
@@ -220,7 +268,7 @@ class DashboardController extends Controller
     }
 
     /**
-     * 🔄 Refrescar token MercadoLibre (php artisan meli:refresh-token)
+     * Refrescar token MercadoLibre
      */
     public function refreshMeliToken(Request $request)
     {
@@ -264,7 +312,7 @@ class DashboardController extends Controller
     }
 
     /**
-     * ▶️ Sync manual — AHORA se manda a QUEUE para evitar 504
+     * Sync manual Meli
      */
     public function syncMeliManual(Request $request)
     {

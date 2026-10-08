@@ -703,7 +703,7 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                             }
                             onNavigate={onNavigate}
                         >
-                            Llantas individuales
+                            Catálogo individual
                         </NavItem>
                         <NavItem
                             href="/llantas/comparador"
@@ -711,7 +711,7 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                             active={currentPath.startsWith('/llantas/comparador')}
                             onNavigate={onNavigate}
                         >
-                            Comparador llantas
+                            Comparador catálogo
                         </NavItem>
                         <NavItem
                             href="/productos"
@@ -719,7 +719,7 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                             active={currentPath === '/productos' || currentPath.startsWith('/productos/')}
                             onNavigate={onNavigate}
                         >
-                            Llantas compuestas
+                            Kits y combos
                         </NavItem>
                         <NavItem
                             href="/price-rules"
@@ -732,10 +732,21 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                         <NavItem
                             href="/syscom-ml"
                             icon={IconTag}
-                            active={currentPath.startsWith('/syscom-ml')}
+                            active={
+                                currentPath === '/syscom-ml' ||
+                                (currentPath.startsWith('/syscom-ml/') && !currentPath.startsWith('/syscom-ml/pedidos'))
+                            }
                             onNavigate={onNavigate}
                         >
                             SYSCOM → ML
+                        </NavItem>
+                        <NavItem
+                            href="/syscom-ml/pedidos"
+                            icon={IconTruck}
+                            active={currentPath.startsWith('/syscom-ml/pedidos')}
+                            onNavigate={onNavigate}
+                        >
+                            Pedidos SYSCOM
                         </NavItem>
                         <NavItem
                             href="/importar-excel"
