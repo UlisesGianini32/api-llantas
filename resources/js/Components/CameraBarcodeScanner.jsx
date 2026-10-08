@@ -175,7 +175,7 @@ export default function CameraBarcodeScanner({
     if (!isOpen) return null
 
     return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-3 backdrop-blur-sm">
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/80 p-3 backdrop-blur-sm">
             <div className="relative flex w-full max-w-md flex-col overflow-hidden rounded-3xl bg-neutral-900 shadow-2xl border border-neutral-800 text-white">
                 {/* Header */}
                 <div className="flex items-center justify-between border-b border-neutral-800 px-4 py-3">

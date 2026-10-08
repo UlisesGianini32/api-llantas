@@ -1,6 +1,7 @@
 import { useState, useMemo, useRef, useEffect } from 'react'
 import { Head, Link, router } from '@inertiajs/react'
 import AppShell from '@/Components/layout/AppShell'
+import CameraBarcodeScanner from '@/Components/CameraBarcodeScanner'
 
 function formatDate(dateStr) {
     if (!dateStr) return '-'
@@ -22,6 +23,23 @@ function formatDateTime(dateStr) {
         hour: '2-digit',
         minute: '2-digit',
     })
+}
+
+const playBeep = (freq = 880, duration = 0.08) => {
+    try {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext
+        if (!AudioCtx) return
+        const ctx = new AudioCtx()
+        const osc = ctx.createOscillator()
+        const gain = ctx.createGain()
+        osc.frequency.value = freq
+        osc.connect(gain)
+        gain.connect(ctx.destination)
+        osc.start()
+        gain.gain.setValueAtTime(0.15, ctx.currentTime)
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + duration)
+        osc.stop(ctx.currentTime + duration)
+    } catch {}
 }
 
 const STATUS_BADGES = {
@@ -63,9 +81,10 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
 
     // Modal states: PDF Preview & WhatsApp send
     const [pdfModalOpen, setPdfModalOpen] = useState(false)
+    const [recipientType, setRecipientType] = useState('supplier') // 'supplier' | 'joico_group' | 'other'
     const [whatsappPhone, setWhatsappPhone] = useState(supplier?.phone || '')
     const [downloadingPdf, setDownloadingPdf] = useState(false)
-    const [pdfSentAlert, setPdfSentAlert] = useState(false)
+    const [pdfSentAlert, setPdfSentAlert] = useState(null)
     const pdfSheetRef = useRef(null)
 
     // Modal states: Recepción física
@@ -91,9 +110,10 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
     )
     const [receiveSubmitting, setReceiveSubmitting] = useState(false)
 
-    // Scanner & catalog search in reception modal
+    // Scanner & Camera state in reception modal
     const [scanBarcode, setScanBarcode] = useState('')
     const [scanFeedback, setScanFeedback] = useState(null)
+    const [isCameraOpen, setIsCameraOpen] = useState(false)
     const scanInputRef = useRef(null)
 
     const [showCatalogSearch, setShowCatalogSearch] = useState(false)
@@ -142,66 +162,111 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
         }
     }
 
-    // Send PDF via WhatsApp: downloads the PDF and opens WhatsApp with direct document link
+    // Send PDF via WhatsApp: supports Web Share API with File or direct WhatsApp Web link
     const handleSendWhatsAppWithPdf = async () => {
-        // 1. Download PDF to machine so user can attach it
-        await handleDownloadPdf()
-
-        // 2. Open WhatsApp Web with supplier phone and direct link to official PDF
-        const cleanPhone = (whatsappPhone || '').replace(/\D/g, '')
+        setDownloadingPdf(true)
+        const filename = `Orden-de-Compra-${order.order_number}.pdf`
         const origin = typeof window !== 'undefined' ? window.location.origin : ''
         const publicPdfUrl = `${origin}/orden-compra/${order.id}/pdf`
 
-        const msg = [
+        const isJoicoGroup = recipientType === 'joico_group'
+        const cleanPhone = !isJoicoGroup ? (whatsappPhone || '').replace(/\D/g, '') : ''
+
+        const msgLines = [
             `📄 *ORDEN DE COMPRA: ${order.order_number}*`,
             `*T.O. THE BEAUTY SHOP (SBS)*`,
             ``,
-            `Estimado(a) ${order.supplier_name}, le comparto la orden de compra adjunta en formato PDF.`,
+            isJoicoGroup
+                ? `Hola equipo Joico, compartimos la orden de compra adjunta en formato PDF.`
+                : `Estimado(a) ${order.supplier_name}, le compartimos la orden de compra oficial en formato PDF.`,
             ``,
-            `Enlace directo al documento oficial:`,
+            `Enlace directo para consultar el documento:`,
             `${publicPdfUrl}`,
             ``,
             `*Total piezas solicitadas:* ${order.total_units_ordered} pzas`,
-            `_Favor de confirmar acuse de recibo y fecha de entrega. ¡Muchas gracias!_`,
-        ].join('\n')
+            `_Favor de confirmar pedido y fecha estimada de entrega. ¡Muchas gracias!_`,
+        ]
+        const textMessage = msgLines.join('\n')
 
-        const encoded = encodeURIComponent(msg)
-        const url = cleanPhone ? `https://wa.me/${cleanPhone}?text=${encoded}` : `https://wa.me/?text=${encoded}`
-        window.open(url, '_blank')
-        setPdfSentAlert(true)
-    }
-
-    // Handle "Mark as Ordered" (Colocar orden al proveedor)
-    const handleMarkOrdered = (e) => {
-        e.preventDefault()
-        setOrderingSubmitting(true)
-        router.post(
-            `/compras/ordenes/${order.id}/ordenar`,
-            {
-                supplier_quote_reference: orderQuoteRef,
-                ordered_at: orderDate,
-                expected_delivery_date: orderDate,
-            },
-            {
-                onFinish: () => {
-                    setOrderingSubmitting(false)
-                    setOrderModalOpen(false)
-                },
+        try {
+            const html2pdf = (await import('html2pdf.js')).default
+            const element = pdfSheetRef.current
+            const opt = {
+                margin: [8, 8, 8, 8],
+                filename: filename,
+                image: { type: 'jpeg', quality: 0.98 },
+                html2canvas: { scale: 2, useCORS: true, logging: false },
+                jsPDF: { unit: 'mm', format: 'letter', orientation: 'portrait' },
             }
-        )
+
+            // Generate blob
+            const pdfBlob = await html2pdf().set(opt).from(element).outputPdf('blob')
+
+            // If browser supports Web Share with files (Mobile/Edge/Chrome)
+            if (navigator.canShare && navigator.canShare({ files: [new File([pdfBlob], filename, { type: 'application/pdf' })] })) {
+                const pdfFile = new File([pdfBlob], filename, { type: 'application/pdf' })
+                await navigator.share({
+                    files: [pdfFile],
+                    title: `Orden de Compra ${order.order_number}`,
+                    text: textMessage,
+                })
+                setPdfSentAlert({
+                    type: 'success',
+                    text: '¡PDF compartido directamente a WhatsApp como documento adjunto!',
+                })
+                setDownloadingPdf(false)
+                return
+            }
+
+            // Fallback for desktop: download file directly & open WhatsApp
+            const downloadUrl = URL.createObjectURL(pdfBlob)
+            const a = document.createElement('a')
+            a.href = downloadUrl
+            a.download = filename
+            document.body.appendChild(a)
+            a.click()
+            document.body.removeChild(a)
+            URL.revokeObjectURL(downloadUrl)
+
+            // Open WhatsApp Web
+            const encoded = encodeURIComponent(textMessage)
+            let waUrl = ''
+            if (isJoicoGroup || !cleanPhone) {
+                // Opens WhatsApp without preset phone so user selects "Grupo Joico" or any chat
+                waUrl = `https://web.whatsapp.com/send?text=${encoded}`
+            } else {
+                waUrl = `https://wa.me/${cleanPhone}?text=${encoded}`
+            }
+            window.open(waUrl, '_blank')
+
+            setPdfSentAlert({
+                type: 'info',
+                text: isJoicoGroup
+                    ? `✓ Se descargó "${filename}". En la ventana de WhatsApp abierta, selecciona tu Grupo de Pedidos Joico y arrastra o adjunta el PDF al chat.`
+                    : `✓ Se descargó "${filename}". En WhatsApp, simplemente arrastra o adjunta el archivo PDF descargado para enviarlo al proveedor.`,
+            })
+        } catch (err) {
+            console.error('Error al enviar por WhatsApp:', err)
+            // Fallback: download PDF using handleDownloadPdf
+            await handleDownloadPdf()
+            const encoded = encodeURIComponent(textMessage)
+            const waUrl = cleanPhone ? `https://wa.me/${cleanPhone}?text=${encoded}` : `https://web.whatsapp.com/send?text=${encoded}`
+            window.open(waUrl, '_blank')
+        } finally {
+            setDownloadingPdf(false)
+        }
     }
 
-    // Barcode scanner trigger
-    const handleScanBarcode = async (e) => {
-        if (e) e.preventDefault()
-        const code = scanBarcode.trim()
-        if (!code) return
+    // Process a barcode scanned via gun or camera
+    const processBarcode = async (code) => {
+        const clean = (code || '').trim()
+        if (!clean) return false
 
         setScanFeedback(null)
 
         // 1. Check if barcode or SKU matches existing receiving items
         const matchIndex = receivingItems.findIndex((it) => {
-            const c = code.toLowerCase()
+            const c = clean.toLowerCase()
             return (
                 (it.barcode && it.barcode.toLowerCase() === c) ||
                 (it.barcode_secondary && it.barcode_secondary.toLowerCase() === c) ||
@@ -210,6 +275,7 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
         })
 
         if (matchIndex !== -1) {
+            playBeep(880, 0.08)
             const item = receivingItems[matchIndex]
             const newQty = (parseInt(item.quantity_received) || 0) + 1
             const updated = [...receivingItems]
@@ -222,22 +288,22 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                 type: 'success',
                 text: `¡Escaneado (+1)! ${item.name || item.sku} - Total recibido: ${newQty}`,
             })
-            setScanBarcode('')
-            return
+            return true
         }
 
-        // 2. Query backend if not matched locally
+        // 2. Query backend if not matched in the current order
         try {
-            const res = await fetch(`/compras/ordenes/buscar-productos?q=${encodeURIComponent(code)}`)
+            const res = await fetch(`/compras/ordenes/buscar-productos?q=${encodeURIComponent(clean)}`)
             const data = await res.json()
             const foundProducts = data.data || []
 
             if (foundProducts.length > 0) {
+                playBeep(980, 0.1)
                 const prod = foundProducts.find(
                     (p) =>
-                        (p.barcode && p.barcode.toLowerCase() === code.toLowerCase()) ||
-                        (p.barcode_secondary && p.barcode_secondary.toLowerCase() === code.toLowerCase()) ||
-                        (p.sku && p.sku.toLowerCase() === code.toLowerCase())
+                        (p.barcode && p.barcode.toLowerCase() === clean.toLowerCase()) ||
+                        (p.barcode_secondary && p.barcode_secondary.toLowerCase() === clean.toLowerCase()) ||
+                        (p.sku && p.sku.toLowerCase() === clean.toLowerCase())
                 ) || foundProducts[0]
 
                 // Check if already in receivingItems by product_id
@@ -253,7 +319,7 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                         text: `¡Escaneado (+1)! ${prod.name} - Total: ${newQty}`,
                     })
                 } else {
-                    // Add as extra product!
+                    // Add as extra product
                     setReceivingItems((prev) => [
                         ...prev,
                         {
@@ -273,20 +339,34 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                         text: `¡Producto adicional ingresado! ${prod.name} (SKU: ${prod.sku})`,
                     })
                 }
+                return true
             } else {
+                playBeep(330, 0.2)
                 setScanFeedback({
                     type: 'error',
-                    text: `Código "${code}" no encontrado en la orden ni en el catálogo de productos.`,
+                    text: `Código "${clean}" no encontrado en la orden ni en el catálogo de productos.`,
                 })
+                return false
             }
         } catch {
             setScanFeedback({
                 type: 'error',
                 text: 'Error de comunicación al buscar el producto escaneado.',
             })
+            return false
         }
+    }
 
+    const handleScanBarcodeForm = async (e) => {
+        if (e) e.preventDefault()
+        const code = scanBarcode.trim()
+        if (!code) return
+        await processBarcode(code)
         setScanBarcode('')
+    }
+
+    const handleCameraScan = async (decodedText) => {
+        await processBarcode(decodedText)
     }
 
     // Catalog search for extra products
@@ -386,6 +466,26 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
         )
     }
 
+    // Handle "Mark as Ordered"
+    const handleMarkOrdered = (e) => {
+        e.preventDefault()
+        setOrderingSubmitting(true)
+        router.post(
+            `/compras/ordenes/${order.id}/ordenar`,
+            {
+                supplier_quote_reference: orderQuoteRef,
+                ordered_at: orderDate,
+                expected_delivery_date: orderDate,
+            },
+            {
+                onFinish: () => {
+                    setOrderingSubmitting(false)
+                    setOrderModalOpen(false)
+                },
+            }
+        )
+    }
+
     // Handle "Cancel Order"
     const handleCancelSubmit = (e) => {
         e.preventDefault()
@@ -456,7 +556,7 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                     </div>
 
                     <div className="flex flex-wrap items-center gap-2.5">
-                        {/* Imprimir / Descargar PDF directo */}
+                        {/* Imprimir Formato Directo */}
                         <button
                             type="button"
                             onClick={printOrder}
@@ -472,7 +572,7 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                         <button
                             type="button"
                             onClick={() => {
-                                setPdfSentAlert(false)
+                                setPdfSentAlert(null)
                                 setPdfModalOpen(true)
                             }}
                             className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-700 dark:bg-emerald-600 dark:hover:bg-emerald-500"
@@ -578,7 +678,7 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                     </div>
                 </div>
 
-                {/* Formal Printable Purchase Order Sheet (No unit cost, importe, or financial totals) */}
+                {/* Formal Printable Purchase Order Sheet (Receptor: T.O. THE BEAUTY SHOP, zero costs) */}
                 <div className="print-sheet rounded-2xl border border-slate-200 bg-white p-8 shadow-sm print:border-none print:shadow-none print:p-0 dark:border-neutral-800 dark:bg-neutral-900">
                     {/* Header info */}
                     <div className="border-b border-slate-200 pb-6 dark:border-neutral-800">
@@ -616,7 +716,7 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                             </div>
                         </div>
 
-                        {/* Supplier & Delivery info grid */}
+                        {/* Supplier & Receptor info grid */}
                         <div className="mt-6 grid grid-cols-1 gap-6 sm:grid-cols-2">
                             <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4 dark:border-neutral-800 dark:bg-neutral-950/40">
                                 <p className="text-xs font-bold uppercase tracking-wider text-slate-500">Datos del Proveedor</p>
@@ -634,15 +734,16 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                             </div>
 
                             <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4 dark:border-neutral-800 dark:bg-neutral-950/40">
-                                <p className="text-xs font-bold uppercase tracking-wider text-slate-500">Lugar de Entrega / Almacén</p>
+                                <p className="text-xs font-bold uppercase tracking-wider text-slate-500">Receptor / Solicitante</p>
                                 <p className="mt-1 text-base font-bold text-slate-900 dark:text-white">
-                                    {order.location ? `${order.location.name} (${order.location.code})` : 'Almacén General SBS'}
+                                    T.O. THE BEAUTY SHOP
                                 </p>
-                                {order.buyer && (
-                                    <p className="mt-1 text-xs text-slate-500">
-                                        Comprador: {order.buyer.name} ({order.buyer.email})
-                                    </p>
-                                )}
+                                <p className="text-xs text-slate-600 dark:text-slate-300">
+                                    <span className="font-semibold">Almacén de Entrega:</span> {order.location ? `${order.location.name} (${order.location.code})` : 'Almacén General SBS'}
+                                </p>
+                                <p className="text-xs text-slate-400">
+                                    Salon & Barber Supply (SBS)
+                                </p>
                             </div>
                         </div>
                     </div>
@@ -853,10 +954,10 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                 </div>
             </div>
 
-            {/* Modal: Vista Previa y Envío de Orden de Compra (PDF) */}
+            {/* Modal: Vista Previa y Envío de Orden de Compra (PDF & WhatsApp / Grupo Joico) */}
             {pdfModalOpen && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
-                    <div className="w-full max-w-4xl max-h-[92vh] flex flex-col rounded-2xl bg-white shadow-2xl dark:bg-neutral-900 overflow-hidden">
+                    <div className="w-full max-w-4xl max-h-[94vh] flex flex-col rounded-2xl bg-white shadow-2xl dark:bg-neutral-900 overflow-hidden">
                         {/* Modal Header */}
                         <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4 dark:border-neutral-800">
                             <div className="flex items-center gap-3">
@@ -870,7 +971,7 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                                         Vista Previa del Documento PDF
                                     </h3>
                                     <p className="text-xs text-slate-500 dark:text-slate-400">
-                                        Revise el formato formal de la orden de compra antes de descargarla o enviarla por WhatsApp.
+                                        Revise el formato en PDF antes de adjuntarlo y enviarlo por WhatsApp o descargarlo.
                                     </p>
                                 </div>
                             </div>
@@ -885,28 +986,30 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                             </button>
                         </div>
 
-                        {/* Confirmation Alert after sending */}
+                        {/* Confirmation Alert */}
                         {pdfSentAlert && (
-                            <div className="mx-6 mt-3 flex items-center justify-between rounded-xl bg-emerald-50 px-4 py-2.5 text-xs font-semibold text-emerald-800 border border-emerald-200 dark:bg-emerald-950/40 dark:border-emerald-900 dark:text-emerald-300">
+                            <div className={`mx-6 mt-3 flex items-center justify-between rounded-xl px-4 py-2.5 text-xs font-semibold border ${
+                                pdfSentAlert.type === 'success'
+                                    ? 'bg-emerald-50 text-emerald-800 border-emerald-200 dark:bg-emerald-950/40 dark:border-emerald-900 dark:text-emerald-300'
+                                    : 'bg-blue-50 text-blue-800 border-blue-200 dark:bg-blue-950/40 dark:border-blue-900 dark:text-blue-300'
+                            }`}>
                                 <div className="flex items-center gap-2">
-                                    <svg className="h-4 w-4 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                                    <svg className="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                                     </svg>
-                                    <span>
-                                        ¡Archivo PDF generado y descargado! En la ventana de WhatsApp abierta, simplemente adjunte o arrastre el archivo PDF para compartirlo con el proveedor.
-                                    </span>
+                                    <span>{pdfSentAlert.text}</span>
                                 </div>
                                 <button
                                     type="button"
-                                    onClick={() => setPdfSentAlert(false)}
-                                    className="text-emerald-700 hover:text-emerald-900 font-bold ml-2"
+                                    onClick={() => setPdfSentAlert(null)}
+                                    className="font-bold ml-2 text-slate-500 hover:text-slate-800"
                                 >
                                     ✕
                                 </button>
                             </div>
                         )}
 
-                        {/* Modal Body: Authentic Visual PDF Document Preview */}
+                        {/* Modal Body: Visual Document Sheet Preview */}
                         <div className="flex-1 overflow-y-auto px-6 py-4 bg-slate-100/70 dark:bg-neutral-950/40">
                             <div
                                 ref={pdfSheetRef}
@@ -946,7 +1049,7 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                                     </div>
                                 </div>
 
-                                {/* Supplier & Delivery Grid */}
+                                {/* Supplier & Receptor info grid */}
                                 <div className="mt-5 grid grid-cols-2 gap-4 text-xs">
                                     <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-3">
                                         <p className="font-bold uppercase tracking-wider text-slate-500">Datos del Proveedor</p>
@@ -963,16 +1066,12 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                                     </div>
 
                                     <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-3">
-                                        <p className="font-bold uppercase tracking-wider text-slate-500">Lugar de Entrega / Almacén</p>
-                                        <p className="mt-1 text-sm font-bold text-slate-900">
-                                            {order.location ? order.location.name : 'Almacén General SBS'}
+                                        <p className="font-bold uppercase tracking-wider text-slate-500">Receptor / Solicitante</p>
+                                        <p className="mt-1 text-sm font-bold text-slate-900">T.O. THE BEAUTY SHOP</p>
+                                        <p className="mt-0.5 text-slate-600">
+                                            <strong>Almacén de Entrega:</strong> {order.location ? `${order.location.name} (${order.location.code})` : 'Almacén General SBS'}
                                         </p>
-                                        {order.location?.code && (
-                                            <p className="mt-0.5 text-slate-600"><strong>Código Almacén:</strong> {order.location.code}</p>
-                                        )}
-                                        {order.buyer && (
-                                            <p className="mt-0.5 text-slate-600"><strong>Comprador SBS:</strong> {order.buyer.name}</p>
-                                        )}
+                                        <p className="text-[11px] text-slate-400">Salon & Barber Supply (SBS)</p>
                                     </div>
                                 </div>
 
@@ -1043,29 +1142,77 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                             </div>
                         </div>
 
-                        {/* Modal Footer: Action Bar */}
-                        <div className="border-t border-slate-200 bg-white px-6 py-4 dark:border-neutral-800 dark:bg-neutral-900">
-                            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                                {/* Phone input */}
+                        {/* Modal Footer: Action Bar & Destination Selector */}
+                        <div className="border-t border-slate-200 bg-white px-6 py-4 dark:border-neutral-800 dark:bg-neutral-900 space-y-3">
+                            {/* Destination Selector Tabs */}
+                            <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-50 dark:bg-neutral-950 p-2.5 rounded-xl border border-slate-200 dark:border-neutral-800">
                                 <div className="flex items-center gap-2">
-                                    <label className="text-xs font-bold text-slate-600 dark:text-slate-400 whitespace-nowrap">
-                                        WhatsApp:
-                                    </label>
-                                    <input
-                                        type="text"
-                                        value={whatsappPhone}
-                                        onChange={(e) => setWhatsappPhone(e.target.value)}
-                                        placeholder="Ej. 6621234567..."
-                                        className="w-48 rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs text-slate-800 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-100"
-                                    />
-                                    {supplier?.contact_name && (
-                                        <span className="text-[11px] text-slate-400 hidden md:inline">
-                                            ({supplier.contact_name})
-                                        </span>
-                                    )}
+                                    <span className="text-xs font-bold text-slate-700 dark:text-slate-300">
+                                        Destino de Envío WhatsApp:
+                                    </span>
+                                    <div className="inline-flex rounded-lg border border-slate-300 bg-white p-0.5 dark:border-neutral-700 dark:bg-neutral-900 text-xs">
+                                        <button
+                                            type="button"
+                                            onClick={() => setRecipientType('supplier')}
+                                            className={`rounded-md px-3 py-1 font-semibold transition ${
+                                                recipientType === 'supplier'
+                                                    ? 'bg-emerald-600 text-white shadow-xs'
+                                                    : 'text-slate-600 hover:text-slate-900 dark:text-slate-400'
+                                            }`}
+                                        >
+                                            Proveedor {supplier?.contact_name ? `(${supplier.contact_name})` : ''}
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => setRecipientType('joico_group')}
+                                            className={`rounded-md px-3 py-1 font-semibold transition ${
+                                                recipientType === 'joico_group'
+                                                    ? 'bg-emerald-600 text-white shadow-xs'
+                                                    : 'text-slate-600 hover:text-slate-900 dark:text-slate-400'
+                                            }`}
+                                        >
+                                            👥 Grupo de Pedidos Joico
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => setRecipientType('other')}
+                                            className={`rounded-md px-3 py-1 font-semibold transition ${
+                                                recipientType === 'other'
+                                                    ? 'bg-emerald-600 text-white shadow-xs'
+                                                    : 'text-slate-600 hover:text-slate-900 dark:text-slate-400'
+                                            }`}
+                                        >
+                                            Otro Teléfono
+                                        </button>
+                                    </div>
                                 </div>
 
-                                {/* Buttons */}
+                                {recipientType !== 'joico_group' ? (
+                                    <div className="flex items-center gap-2">
+                                        <label className="text-xs font-semibold text-slate-500">
+                                            Teléfono:
+                                        </label>
+                                        <input
+                                            type="text"
+                                            value={whatsappPhone}
+                                            onChange={(e) => setWhatsappPhone(e.target.value)}
+                                            placeholder="Ej. 8186914410..."
+                                            className="w-40 rounded-lg border border-slate-300 px-2.5 py-1 text-xs text-slate-800 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-100"
+                                        />
+                                    </div>
+                                ) : (
+                                    <span className="text-xs text-emerald-700 dark:text-emerald-400 font-medium">
+                                        ✓ Se abrirá WhatsApp para seleccionar directamente el chat del grupo Joico
+                                    </span>
+                                )}
+                            </div>
+
+                            {/* Action Buttons */}
+                            <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+                                <div className="text-xs text-slate-500">
+                                    {downloadingPdf ? '⏳ Generando documento...' : 'El PDF se adjunta y descarga para su envío.'}
+                                </div>
+
                                 <div className="flex flex-wrap items-center gap-2.5">
                                     {/* Abrir en pestaña nueva */}
                                     <a
@@ -1090,10 +1237,10 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                                         <svg className="h-4 w-4 text-slate-600 dark:text-slate-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
                                         </svg>
-                                        {downloadingPdf ? 'Generando PDF...' : 'Descargar PDF'}
+                                        {downloadingPdf ? 'Descargando...' : 'Descargar Archivo PDF'}
                                     </button>
 
-                                    {/* Enviar PDF por WhatsApp */}
+                                    {/* Enviar / Adjuntar PDF a WhatsApp */}
                                     <button
                                         type="button"
                                         disabled={downloadingPdf}
@@ -1103,7 +1250,7 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                                         <svg className="h-4 w-4" fill="currentColor" viewBox="0 0 24 24">
                                             <path d="M.057 24l1.687-6.163c-1.041-1.804-1.588-3.849-1.587-5.946.003-6.556 5.338-11.891 11.893-11.891 3.181.001 6.167 1.24 8.413 3.488 2.245 2.248 3.481 5.236 3.48 8.414-.003 6.557-5.338 11.892-11.893 11.892-1.99-.001-3.951-.5-5.688-1.448l-6.305 1.654zm6.597-3.807c1.676.995 3.276 1.591 5.392 1.592 5.448 0 9.886-4.434 9.889-9.885.002-5.462-4.415-9.89-9.881-9.892-5.452 0-9.887 4.434-9.889 9.884-.001 2.225.651 3.891 1.746 5.634l-.999 3.648 3.742-.981zm11.387-5.464c-.074-.124-.272-.198-.57-.347-.297-.149-1.758-.868-2.031-.967-.272-.099-.47-.149-.669.149-.198.297-.768.967-.941 1.165-.173.198-.347.223-.644.074-.297-.149-1.255-.462-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.297-.347.446-.521.151-.172.2-.296.3-.495.099-.198.05-.372-.025-.521-.075-.148-.669-1.611-.916-2.206-.242-.579-.487-.501-.669-.51l-.57-.01c-.198 0-.52.074-.792.372s-1.04 1.016-1.04 2.479 1.065 2.876 1.213 3.074c.149.198 2.095 3.2 5.076 4.487.709.306 1.263.489 1.694.626.712.226 1.36.194 1.872.118.571-.085 1.758-.719 2.006-1.413.248-.695.248-1.29.173-1.414z" />
                                         </svg>
-                                        Enviar PDF por WhatsApp
+                                        {recipientType === 'joico_group' ? 'Enviar a Grupo Joico' : 'Enviar PDF a WhatsApp'}
                                     </button>
                                 </div>
                             </div>
@@ -1176,7 +1323,7 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                 </div>
             )}
 
-            {/* Modal: Recepción Física de Mercancía con Scanner y Productos Extras */}
+            {/* Modal: Recepción Física de Mercancía con Lector de Barras, Cámara y Productos Extras */}
             {receiveModalOpen && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
                     <div className="w-full max-w-3xl max-h-[92vh] overflow-y-auto rounded-2xl bg-white p-6 shadow-xl dark:bg-neutral-900">
@@ -1186,7 +1333,7 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                                     Recepción Física de Mercancía en Almacén
                                 </h3>
                                 <p className="text-xs text-slate-500 dark:text-slate-400">
-                                    Escanee productos con el lector de código de barras o ajuste manualmente las cantidades recibidas.
+                                    Escanee productos con pistola lectora o con la cámara del celular/tablet.
                                 </p>
                             </div>
                             <button
@@ -1200,15 +1347,15 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                             </button>
                         </div>
 
-                        {/* Scanner Barcode Gun Input */}
+                        {/* Scanner Barcode Gun Input & Camera Button */}
                         <div className="mt-4 rounded-xl border border-indigo-200 bg-indigo-50/60 p-3.5 dark:border-indigo-900/50 dark:bg-indigo-950/20">
-                            <form onSubmit={handleScanBarcode} className="flex items-center gap-2">
+                            <form onSubmit={handleScanBarcodeForm} className="flex flex-wrap items-center gap-2">
                                 <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-indigo-600 text-white">
                                     <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z" />
                                     </svg>
                                 </div>
-                                <div className="flex-1">
+                                <div className="flex-1 min-w-[200px]">
                                     <input
                                         ref={scanInputRef}
                                         type="text"
@@ -1223,6 +1370,18 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                                     className="rounded-lg bg-indigo-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-indigo-700 shadow-sm"
                                 >
                                     Escanear
+                                </button>
+                                {/* Botón para activar cámara */}
+                                <button
+                                    type="button"
+                                    onClick={() => setIsCameraOpen(true)}
+                                    className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-bold text-white shadow-sm hover:bg-emerald-700 transition"
+                                >
+                                    <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+                                    </svg>
+                                    Escanear con Cámara
                                 </button>
                             </form>
 
@@ -1529,6 +1688,14 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                     </div>
                 </div>
             )}
+
+            {/* Modal de Escáner con Cámara de Celular / Tablet */}
+            <CameraBarcodeScanner
+                isOpen={isCameraOpen}
+                onScan={handleCameraScan}
+                onClose={() => setIsCameraOpen(false)}
+                title="Escanear Producto para Recepción"
+            />
 
             {/* Modal: Cancel Order */}
             {cancelModalOpen && (

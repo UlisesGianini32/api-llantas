@@ -373,14 +373,13 @@
             </div>
 
             <div class="info-card">
-                <div class="info-label">Lugar de Entrega / Almacén</div>
-                <div class="info-value-main">{{ $order->location ? $order->location->name : 'Almacén General SBS' }}</div>
+                <div class="info-label">Receptor / Solicitante</div>
+                <div class="info-value-main">T.O. THE BEAUTY SHOP</div>
+                <div class="info-sub"><strong>Almacén de Entrega:</strong> {{ $order->location ? $order->location->name : 'Almacén General SBS' }}</div>
                 @if($order->location?->code)
                     <div class="info-sub"><strong>Código Almacén:</strong> {{ $order->location->code }}</div>
                 @endif
-                @if($order->buyer)
-                    <div class="info-sub"><strong>Comprador SBS:</strong> {{ $order->buyer->name }}</div>
-                @endif
+                <div class="info-sub" style="color: #64748b;">Salon & Barber Supply (SBS)</div>
             </div>
         </div>
 
