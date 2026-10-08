@@ -139,12 +139,32 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
         }
     }, [receiveModalOpen])
 
+    // Helper to dynamically load html2pdf from CDN on-demand without requiring heavy node_modules build bundling
+    const getHtml2Pdf = () => {
+        return new Promise((resolve, reject) => {
+            if (typeof window !== 'undefined' && window.html2pdf) {
+                return resolve(window.html2pdf)
+            }
+            const script = document.createElement('script')
+            script.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.2/html2pdf.bundle.min.js'
+            script.onload = () => {
+                if (window.html2pdf) {
+                    resolve(window.html2pdf)
+                } else {
+                    reject(new Error('html2pdf no se cargó correctamente'))
+                }
+            }
+            script.onerror = () => reject(new Error('No se pudo cargar la librería html2pdf'))
+            document.head.appendChild(script)
+        })
+    }
+
     // Generate and download PDF from rendered sheet
     const handleDownloadPdf = async () => {
         if (!pdfSheetRef.current) return
         setDownloadingPdf(true)
         try {
-            const html2pdf = (await import('html2pdf.js')).default
+            const html2pdf = await getHtml2Pdf()
             const element = pdfSheetRef.current
             const opt = {
                 margin: [8, 8, 8, 8],
@@ -189,7 +209,7 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
         const textMessage = msgLines.join('\n')
 
         try {
-            const html2pdf = (await import('html2pdf.js')).default
+            const html2pdf = await getHtml2Pdf()
             const element = pdfSheetRef.current
             const opt = {
                 margin: [8, 8, 8, 8],
