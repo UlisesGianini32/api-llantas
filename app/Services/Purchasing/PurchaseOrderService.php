@@ -103,24 +103,27 @@ class PurchaseOrderService
     public function markAsOrdered(
         PurchaseOrder $order,
         ?string $supplierQuoteRef = null,
+        ?string $orderedAt = null,
         ?string $expectedDelivery = null
     ): PurchaseOrder {
         if (! $order->isDraft()) {
             throw new InvalidArgumentException("Solo las órdenes en estado BORRADOR pueden ser enviadas al proveedor. Estado actual: {$order->status}");
         }
 
+        $orderDate = $orderedAt ? Carbon::parse($orderedAt) : now();
+
         $order->update([
             'status' => PurchaseOrder::STATUS_ORDERED,
-            'ordered_at' => now(),
+            'ordered_at' => $orderDate,
             'supplier_quote_reference' => $supplierQuoteRef ? trim($supplierQuoteRef) : $order->supplier_quote_reference,
-            'expected_delivery_date' => $expectedDelivery ? Carbon::parse($expectedDelivery) : $order->expected_delivery_date,
+            'expected_delivery_date' => $expectedDelivery ? Carbon::parse($expectedDelivery) : $orderDate,
         ]);
 
         return $order->fresh(['location', 'buyer', 'items']);
     }
 
     /**
-     * @param  array<int, array{item_id: int, quantity_received: int}>  $itemsToReceive
+     * @param  array<int, array{item_id?: int, product_id?: int, quantity_received: int}>  $itemsToReceive
      */
     public function receiveItems(
         PurchaseOrder $order,
@@ -168,32 +171,50 @@ class PurchaseOrderService
             $totalBatchUnits = 0;
 
             foreach ($itemsToReceive as $receivedEntry) {
-                $itemId = (int) ($receivedEntry['item_id'] ?? 0);
+                $itemId = ! empty($receivedEntry['item_id']) ? (int) $receivedEntry['item_id'] : null;
+                $productId = ! empty($receivedEntry['product_id']) ? (int) $receivedEntry['product_id'] : null;
                 $qty = (int) ($receivedEntry['quantity_received'] ?? 0);
 
                 if ($qty <= 0) {
                     continue;
                 }
 
-                $orderItem = PurchaseOrderItem::where('purchase_order_id', $order->id)
-                    ->where('id', $itemId)
-                    ->lockForUpdate()
-                    ->firstOrFail();
+                if ($itemId) {
+                    $orderItem = PurchaseOrderItem::where('purchase_order_id', $order->id)
+                        ->where('id', $itemId)
+                        ->lockForUpdate()
+                        ->firstOrFail();
 
-                $pendingQty = $orderItem->quantityPending();
-                if ($qty > $pendingQty) {
-                    throw new InvalidArgumentException(
-                        "No se pueden recibir {$qty} unidades del SKU {$orderItem->sku}. Cantidad pendiente por recibir: {$pendingQty}."
-                    );
+                    $newTotalReceived = $orderItem->quantity_received + $qty;
+                    if ($newTotalReceived > $orderItem->quantity_ordered) {
+                        $orderItem->quantity_ordered = $newTotalReceived;
+                    }
+                    $isItemComplete = $newTotalReceived >= $orderItem->quantity_ordered;
+
+                    $orderItem->update([
+                        'quantity_ordered' => $orderItem->quantity_ordered,
+                        'quantity_received' => $newTotalReceived,
+                        'subtotal' => $orderItem->unit_cost * $orderItem->quantity_ordered,
+                        'status' => $isItemComplete ? PurchaseOrderItem::STATUS_RECEIVED : PurchaseOrderItem::STATUS_PARTIAL,
+                    ]);
+                } elseif ($productId) {
+                    $product = InventoryProduct::findOrFail($productId);
+                    $unitCost = (float) ($product->cost ?? 0);
+
+                    $orderItem = PurchaseOrderItem::create([
+                        'purchase_order_id' => $order->id,
+                        'inventory_product_id' => $product->id,
+                        'sku' => $product->sku,
+                        'product_name' => $product->name,
+                        'quantity_ordered' => $qty,
+                        'quantity_received' => $qty,
+                        'unit_cost' => $unitCost,
+                        'subtotal' => $unitCost * $qty,
+                        'status' => PurchaseOrderItem::STATUS_RECEIVED,
+                    ]);
+                } else {
+                    continue;
                 }
-
-                $newTotalReceived = $orderItem->quantity_received + $qty;
-                $isItemComplete = $newTotalReceived >= $orderItem->quantity_ordered;
-
-                $orderItem->update([
-                    'quantity_received' => $newTotalReceived,
-                    'status' => $isItemComplete ? PurchaseOrderItem::STATUS_RECEIVED : PurchaseOrderItem::STATUS_PARTIAL,
-                ]);
 
                 // Guardar renglón del comprobante de recepción
                 PurchaseOrderReceiptItem::create([
@@ -231,9 +252,15 @@ class PurchaseOrderService
             $allItems = $order->items;
             $allReceived = $allItems->every(fn (PurchaseOrderItem $item) => $item->isFullyReceived());
             $newOrderTotalReceived = (int) $allItems->sum('quantity_received');
+            $newOrderTotalOrdered = (int) $allItems->sum('quantity_ordered');
+            $newOrderTotalCost = (float) $allItems->sum('subtotal');
 
             $order->update([
+                'total_items_count' => $allItems->count(),
+                'total_units_ordered' => $newOrderTotalOrdered,
                 'total_units_received' => $newOrderTotalReceived,
+                'total_cost' => $newOrderTotalCost,
+                'subtotal' => $newOrderTotalCost,
                 'status' => $allReceived ? PurchaseOrder::STATUS_RECEIVED : PurchaseOrder::STATUS_PARTIAL,
                 'received_at' => $allReceived ? now() : null,
             ]);

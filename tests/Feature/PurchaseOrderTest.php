@@ -341,4 +341,60 @@ class PurchaseOrderTest extends TestCase
         $this->assertEquals('Proveedor sin stock de la medida solicitada', $order->cancel_reason);
         $this->assertEquals($this->admin->id, $order->cancelled_by);
     }
+
+    public function test_can_receive_extra_product_not_in_original_order(): void
+    {
+        $order = $this->service->createOrder([
+            'supplier_name' => 'Michelin Mexico SA',
+            'inventory_location_id' => $this->location->id,
+            'items' => [
+                [
+                    'inventory_product_id' => $this->productA->id,
+                    'quantity_ordered' => 5,
+                    'unit_cost' => 1500.00,
+                ],
+            ],
+        ], $this->admin);
+
+        $this->service->markAsOrdered($order, 'COT-1234', '2026-10-07', '2026-10-07');
+        $item = $order->items()->firstOrFail();
+
+        // Receive the 5 of product A, PLUS 2 extra of product B (which wasn't on the PO)
+        $response = $this->actingAs($this->admin)->post("/compras/ordenes/{$order->id}/recibir", [
+            'inventory_location_id' => $this->location->id,
+            'carrier' => 'Paquetexpress',
+            'tracking_number' => 'PE-999888',
+            'items' => [
+                ['item_id' => $item->id, 'quantity_received' => 5],
+                ['product_id' => $this->productB->id, 'quantity_received' => 2],
+            ],
+        ]);
+
+        $response->assertRedirect();
+        $order->refresh();
+
+        $this->assertSame(2, $order->items()->count());
+        $this->assertSame(7, (int) $order->total_units_received);
+        $this->assertSame(7, (int) $order->total_units_ordered);
+        $this->assertSame(PurchaseOrder::STATUS_RECEIVED, $order->status);
+
+        // Verify movement ledger for both products
+        $this->assertDatabaseHas('inventory_movements', [
+            'inventory_product_id' => $this->productA->id,
+            'type' => InventoryMovement::RECEIPT,
+            'quantity' => 5,
+        ]);
+        $this->assertDatabaseHas('inventory_movements', [
+            'inventory_product_id' => $this->productB->id,
+            'type' => InventoryMovement::RECEIPT,
+            'quantity' => 2,
+        ]);
+    }
+
+    public function test_can_search_products_for_purchase_orders(): void
+    {
+        $response = $this->actingAs($this->admin)->getJson('/compras/ordenes/buscar-productos?q=Michelin');
+        $response->assertOk();
+        $response->assertJsonFragment(['sku' => 'MICH-205-55-16']);
+    }
 }

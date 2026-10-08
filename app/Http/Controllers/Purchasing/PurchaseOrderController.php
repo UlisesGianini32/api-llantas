@@ -146,7 +146,7 @@ class PurchaseOrderController extends Controller
             'location:id,code,name',
             'buyer:id,name,email',
             'cancelledBy:id,name',
-            'items.product:id,sku,name,brand,cost',
+            'items.product:id,sku,barcode,barcode_secondary,name,brand,cost',
             'receipts.receivedBy:id,name',
             'receipts.location:id,code,name',
             'receipts.items.product:id,sku,name',
@@ -156,16 +156,44 @@ class PurchaseOrderController extends Controller
             ->where('is_active', true)
             ->get(['id', 'code', 'name']);
 
+        $supplier = Supplier::query()
+            ->where('name', $purchaseOrder->supplier_name)
+            ->first(['id', 'name', 'phone', 'contact_name', 'email']);
+
         return Inertia::render('Purchasing/Show', [
             'order' => $purchaseOrder,
             'locations' => $locations,
+            'supplier' => $supplier,
         ]);
+    }
+
+    public function searchProducts(Request $request): JsonResponse
+    {
+        $q = trim((string) $request->input('q', ''));
+        if ($q === '') {
+            return response()->json(['data' => []]);
+        }
+
+        $products = InventoryProduct::query()
+            ->where('is_active', true)
+            ->where(function ($query) use ($q) {
+                $query->where('sku', 'like', "%{$q}%")
+                    ->orWhere('barcode', 'like', "%{$q}%")
+                    ->orWhere('barcode_secondary', 'like', "%{$q}%")
+                    ->orWhere('name', 'like', "%{$q}%")
+                    ->orWhere('brand', 'like', "%{$q}%");
+            })
+            ->limit(20)
+            ->get(['id', 'sku', 'barcode', 'barcode_secondary', 'name', 'brand', 'cost']);
+
+        return response()->json(['data' => $products]);
     }
 
     public function order(Request $request, PurchaseOrder $purchaseOrder): JsonResponse|RedirectResponse
     {
         $validated = $request->validate([
             'supplier_quote_reference' => ['nullable', 'string', 'max:100'],
+            'ordered_at' => ['nullable', 'date'],
             'expected_delivery_date' => ['nullable', 'date'],
         ]);
 
@@ -173,6 +201,7 @@ class PurchaseOrderController extends Controller
             $updated = $this->poService->markAsOrdered(
                 $purchaseOrder,
                 $validated['supplier_quote_reference'] ?? null,
+                $validated['ordered_at'] ?? null,
                 $validated['expected_delivery_date'] ?? null
             );
 
@@ -202,7 +231,8 @@ class PurchaseOrderController extends Controller
             'tracking_number' => ['nullable', 'string', 'max:100'],
             'notes' => ['nullable', 'string', 'max:1000'],
             'items' => ['required', 'array', 'min:1'],
-            'items.*.item_id' => ['required', 'integer'],
+            'items.*.item_id' => ['nullable', 'integer'],
+            'items.*.product_id' => ['nullable', 'integer', 'exists:inventory_products,id'],
             'items.*.quantity_received' => ['required', 'integer', 'min:1'],
         ]);
 

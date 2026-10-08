@@ -187,6 +187,7 @@ Route::middleware(['auth', 'role'])->group(function () {
         Route::get('/', [PurchaseOrderController::class, 'index'])->name('index');
         Route::get('/crear', [PurchaseOrderController::class, 'create'])->name('create');
         Route::post('/', [PurchaseOrderController::class, 'store'])->name('store');
+        Route::get('/buscar-productos', [PurchaseOrderController::class, 'searchProducts'])->name('search-products');
         Route::get('/{purchaseOrder}', [PurchaseOrderController::class, 'show'])
             ->whereNumber('purchaseOrder')->name('show');
         Route::post('/{purchaseOrder}/ordenar', [PurchaseOrderController::class, 'order'])
