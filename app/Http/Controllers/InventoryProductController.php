@@ -131,6 +131,16 @@ class InventoryProductController extends Controller
             $query->where('is_active', false);
         }
 
+        $kits = trim((string) $request->input('kits', 'all'));
+        if ($kits === 'exclude') {
+            $query->where(function ($q): void {
+                $q->whereNull('product_type')
+                    ->orWhere('product_type', '!=', InventoryProduct::KIT);
+            });
+        } elseif ($kits === 'only') {
+            $query->where('product_type', InventoryProduct::KIT);
+        }
+
         $products = $query->orderBy('brand')->orderBy('name')->get();
 
         $kitStocks = $kitStockService->stocksForKits($products);
@@ -262,6 +272,16 @@ class InventoryProductController extends Controller
             $query->where('is_active', false);
         }
 
+        $kits = trim((string) $request->input('kits', 'all'));
+        if ($kits === 'exclude') {
+            $query->where(function ($q): void {
+                $q->whereNull('product_type')
+                    ->orWhere('product_type', '!=', InventoryProduct::KIT);
+            });
+        } elseif ($kits === 'only') {
+            $query->where('product_type', InventoryProduct::KIT);
+        }
+
         $products = $query->orderBy('brand')->orderBy('name')->get();
 
         $kitStocks = $kitStockService->stocksForKits($products);
@@ -283,22 +303,25 @@ class InventoryProductController extends Controller
         });
 
         if ($status === 'with_stock') {
-            $products = $products->filter(fn ($p) => (int) $p->physical_stock > 0);
+            $products = $products->filter(fn ($p) => (int) $p->available_stock > 0);
         } elseif ($status === 'zero_stock') {
-            $products = $products->filter(fn ($p) => (int) $p->physical_stock <= 0);
+            $products = $products->filter(fn ($p) => (int) $p->available_stock <= 0);
         }
 
         $totalSkus = $products->count();
-        $totalPhysicalUnits = $products->sum(fn ($p) => (int) ($p->physical_stock ?? 0));
-        $totalCostValuation = $products->sum(fn ($p) => (float) ($p->cost ?? 0) * (int) ($p->physical_stock ?? 0));
+        $totalAvailableUnits = $products->sum(fn ($p) => (int) ($p->available_stock ?? 0));
+        $withStockCount = $products->filter(fn ($p) => (int) ($p->available_stock ?? 0) > 0)->count();
+        $zeroStockCount = $totalSkus - $withStockCount;
 
         return view('inventory.report-pdf', [
             'products' => $products,
             'selectedBrand' => $brand !== '' && mb_strtoupper($brand) !== 'TODAS' ? mb_strtoupper($brand) : 'GENERAL (TODO EL CATÁLOGO)',
             'statusFilter' => $status,
+            'kitsFilter' => $kits,
             'totalSkus' => $totalSkus,
-            'totalPhysicalUnits' => $totalPhysicalUnits,
-            'totalCostValuation' => $totalCostValuation,
+            'totalAvailableUnits' => $totalAvailableUnits,
+            'withStockCount' => $withStockCount,
+            'zeroStockCount' => $zeroStockCount,
             'generatedAt' => now()->format('d/m/Y H:i'),
         ]);
     }

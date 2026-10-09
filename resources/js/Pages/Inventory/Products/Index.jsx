@@ -16,6 +16,7 @@ function ReportModal({ isOpen, onClose, brands = [] }) {
     const [reportScope, setReportScope] = useState('all') // 'all' or 'brand'
     const [selectedBrand, setSelectedBrand] = useState(brands[0]?.name || '')
     const [statusFilter, setStatusFilter] = useState('all') // 'all', 'with_stock', 'zero_stock', 'active'
+    const [kitsFilter, setKitsFilter] = useState('all') // 'all', 'exclude', 'only'
     const [isDownloadingPdf, setIsDownloadingPdf] = useState(false)
 
     if (!isOpen) return null
@@ -26,6 +27,7 @@ function ReportModal({ isOpen, onClose, brands = [] }) {
         const params = new URLSearchParams()
         if (brandParam) params.append('brand', brandParam)
         if (statusFilter !== 'all') params.append('status', statusFilter)
+        if (kitsFilter !== 'all') params.append('kits', kitsFilter)
         return `/almacen/productos/exportar?${params.toString()}`
     }
 
@@ -33,6 +35,7 @@ function ReportModal({ isOpen, onClose, brands = [] }) {
         const params = new URLSearchParams()
         if (brandParam) params.append('brand', brandParam)
         if (statusFilter !== 'all') params.append('status', statusFilter)
+        if (kitsFilter !== 'all') params.append('kits', kitsFilter)
         return `/almacen/productos/reporte-pdf?${params.toString()}`
     }
 
@@ -105,6 +108,10 @@ function ReportModal({ isOpen, onClose, brands = [] }) {
                 image: { type: 'jpeg', quality: 0.98 },
                 html2canvas: { scale: 2, useCORS: true, logging: false },
                 jsPDF: { unit: 'mm', format: 'letter', orientation: 'portrait' },
+                pagebreak: {
+                    mode: ['avoid-all', 'css', 'legacy'],
+                    avoid: ['.report-row', '.kpi-card', '.signatures', '.header-grid', '.avoid-break']
+                }
             }).from(sheet).save()
 
             document.body.removeChild(container)
@@ -280,6 +287,62 @@ function ReportModal({ isOpen, onClose, brands = [] }) {
                                     className="text-slate-800"
                                 />
                                 Solo productos activos
+                            </label>
+                        </div>
+                    </div>
+
+                    {/* 3. Filtro de Kits / Paquetes */}
+                    <div>
+                        <label className="text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-300">
+                            3. Kits / Paquetes Compuestos
+                        </label>
+                        <div className="mt-2 grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
+                            <label className={`flex items-center gap-2 rounded-xl border p-2.5 cursor-pointer transition ${
+                                kitsFilter === 'all'
+                                    ? 'border-indigo-600 bg-indigo-50/50 font-bold text-indigo-900 dark:border-indigo-500 dark:bg-indigo-950/30 dark:text-indigo-200'
+                                    : 'border-slate-200 text-slate-700 hover:bg-slate-50 dark:border-neutral-700 dark:text-slate-300 dark:hover:bg-neutral-800'
+                            }`}>
+                                <input
+                                    type="radio"
+                                    name="kitsFilter"
+                                    value="all"
+                                    checked={kitsFilter === 'all'}
+                                    onChange={(e) => setKitsFilter(e.target.value)}
+                                    className="text-indigo-600"
+                                />
+                                <span>Todo (Simples y Kits)</span>
+                            </label>
+
+                            <label className={`flex items-center gap-2 rounded-xl border p-2.5 cursor-pointer transition ${
+                                kitsFilter === 'exclude'
+                                    ? 'border-indigo-600 bg-indigo-50/50 font-bold text-indigo-900 dark:border-indigo-500 dark:bg-indigo-950/30 dark:text-indigo-200'
+                                    : 'border-slate-200 text-slate-700 hover:bg-slate-50 dark:border-neutral-700 dark:text-slate-300 dark:hover:bg-neutral-800'
+                            }`}>
+                                <input
+                                    type="radio"
+                                    name="kitsFilter"
+                                    value="exclude"
+                                    checked={kitsFilter === 'exclude'}
+                                    onChange={(e) => setKitsFilter(e.target.value)}
+                                    className="text-indigo-600"
+                                />
+                                <span>Sin Kits (Solo individuales)</span>
+                            </label>
+
+                            <label className={`flex items-center gap-2 rounded-xl border p-2.5 cursor-pointer transition ${
+                                kitsFilter === 'only'
+                                    ? 'border-indigo-600 bg-indigo-50/50 font-bold text-indigo-900 dark:border-indigo-500 dark:bg-indigo-950/30 dark:text-indigo-200'
+                                    : 'border-slate-200 text-slate-700 hover:bg-slate-50 dark:border-neutral-700 dark:text-slate-300 dark:hover:bg-neutral-800'
+                            }`}>
+                                <input
+                                    type="radio"
+                                    name="kitsFilter"
+                                    value="only"
+                                    checked={kitsFilter === 'only'}
+                                    onChange={(e) => setKitsFilter(e.target.value)}
+                                    className="text-indigo-600"
+                                />
+                                <span>Solo Kits</span>
                             </label>
                         </div>
                     </div>

@@ -104,6 +104,8 @@
             border-bottom: 2px solid #0f172a;
             padding-bottom: 16px;
             margin-bottom: 20px;
+            page-break-inside: avoid !important;
+            break-inside: avoid !important;
         }
 
         .logo-title {
@@ -139,6 +141,7 @@
             text-align: right;
             font-size: 12px;
             color: #64748b;
+            line-height: 1.5;
         }
 
         .meta-right strong {
@@ -150,6 +153,8 @@
             grid-template-columns: repeat(3, 1fr);
             gap: 12px;
             margin-bottom: 24px;
+            page-break-inside: avoid !important;
+            break-inside: avoid !important;
         }
 
         .kpi-card {
@@ -157,6 +162,8 @@
             border: 1px solid #e2e8f0;
             border-radius: 10px;
             padding: 12px 16px;
+            page-break-inside: avoid !important;
+            break-inside: avoid !important;
         }
 
         .kpi-label {
@@ -174,51 +181,90 @@
             margin-top: 4px;
         }
 
-        table {
+        /* Tabla basada en filas individuales para evitar cortes de página */
+        .report-table {
             width: 100%;
-            border-collapse: collapse;
-            font-size: 11px;
+            display: flex;
+            flex-direction: column;
         }
 
-        th {
+        .report-header-row {
+            display: grid;
+            grid-template-columns: 45px 1fr 180px 100px;
             background: #f1f5f9;
             color: #334155;
             font-weight: 800;
             text-transform: uppercase;
             font-size: 10px;
-            letter-spacing: 0.04em;
-            padding: 8px 10px;
+            letter-spacing: 0.05em;
+            padding: 9px 12px;
             border-top: 1px solid #cbd5e1;
             border-bottom: 2px solid #94a3b8;
-            text-align: left;
+            align-items: center;
+            page-break-inside: avoid !important;
+            break-inside: avoid !important;
         }
 
-        td {
-            padding: 7px 10px;
+        .report-row {
+            display: grid;
+            grid-template-columns: 45px 1fr 180px 100px;
+            padding: 8px 12px;
             border-bottom: 1px solid #e2e8f0;
-            vertical-align: middle;
+            align-items: center;
+            font-size: 11px;
+            page-break-inside: avoid !important;
+            break-inside: avoid !important;
         }
 
-        tr:nth-child(even) td {
+        .report-row:nth-child(even) {
             background-color: #fafbfd;
         }
 
-        .text-right { text-align: right; }
-        .text-center { text-align: center; }
-
-        .sku-code {
-            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-            font-weight: 700;
+        .col-num {
             font-size: 11px;
+            font-weight: 700;
+            color: #94a3b8;
+            text-align: center;
+        }
+
+        .col-product {
+            font-weight: 700;
+            color: #0f172a;
+            padding-right: 14px;
+            line-height: 1.35;
+        }
+
+        .col-brand {
+            font-weight: 700;
+            color: #475569;
+            text-transform: uppercase;
+            font-size: 11px;
+            letter-spacing: 0.02em;
+        }
+
+        .col-stock {
+            text-align: center;
+        }
+
+        .badge-kit {
+            display: inline-block;
+            background: #e0e7ff;
             color: #4338ca;
+            font-size: 9px;
+            font-weight: 800;
+            padding: 1px 6px;
+            border-radius: 4px;
+            margin-left: 6px;
+            vertical-align: middle;
+            letter-spacing: 0.05em;
         }
 
         .badge-stock {
             display: inline-block;
-            padding: 2px 7px;
+            padding: 3px 10px;
             border-radius: 12px;
             font-weight: 800;
-            font-size: 11px;
+            font-size: 12px;
         }
 
         .badge-positive {
@@ -240,6 +286,8 @@
             align-items: center;
             font-size: 10px;
             color: #94a3b8;
+            page-break-inside: avoid !important;
+            break-inside: avoid !important;
         }
 
         .signatures {
@@ -248,6 +296,8 @@
             grid-template-columns: 1fr 1fr;
             gap: 40px;
             padding-top: 20px;
+            page-break-inside: avoid !important;
+            break-inside: avoid !important;
         }
 
         .sig-box {
@@ -259,13 +309,18 @@
             font-weight: 600;
         }
 
+        .avoid-break {
+            page-break-inside: avoid !important;
+            break-inside: avoid !important;
+        }
+
         @media print {
             body {
                 background: #ffffff;
                 padding: 0;
             }
             .no-print-bar {
-                display: none;
+                display: none !important;
             }
             .page-sheet {
                 box-shadow: none;
@@ -273,8 +328,9 @@
                 padding: 0;
                 max-width: 100%;
             }
-            tr {
-                page-break-inside: avoid;
+            .report-row, .avoid-break, .signatures, .kpi-card, .kpi-grid, .header-grid {
+                page-break-inside: avoid !important;
+                break-inside: avoid !important;
             }
         }
     </style>
@@ -293,97 +349,81 @@
             <button onclick="window.print()" class="btn-print">
                 🖨️ Imprimir
             </button>
-            <a href="javascript:window.close()" class="btn-back">Cerrar</a>
+            <a href="javascript:window.close()" class="btn-back">✕ Cerrar</a>
         </div>
     </div>
 
     <div class="page-sheet">
-        <div class="header-grid">
+        <div class="header-grid avoid-break">
             <div>
                 <div class="logo-title">SBS · SALON & BARBER SUPPLY</div>
                 <div class="logo-sub">T.O. THE BEAUTY SHOP</div>
-                <div class="report-badge">Reporte de Inventario Físico</div>
+                <div class="report-badge">Reporte de Inventario de Productos</div>
             </div>
             <div class="meta-right">
                 <div><strong>Alcance:</strong> {{ $selectedBrand }}</div>
+                <div><strong>Filtro Kits:</strong> {{ $kitsFilter === 'exclude' ? 'Solo productos simples (sin kits)' : ($kitsFilter === 'only' ? 'Solo kits' : 'Incluye productos y kits') }}</div>
                 <div><strong>Emisión:</strong> {{ $generatedAt }}</div>
                 <div><strong>Almacén:</strong> Almacén General SBS Hermosillo</div>
             </div>
         </div>
 
-        <div class="kpi-grid">
-            <div class="kpi-card">
-                <div class="kpi-label">SKUs Listados</div>
+        <div class="kpi-grid avoid-break">
+            <div class="kpi-card avoid-break">
+                <div class="kpi-label">Productos Listados</div>
                 <div class="kpi-val">{{ number_format($totalSkus) }}</div>
             </div>
-            <div class="kpi-card">
-                <div class="kpi-label">Piezas Físicas Totales</div>
-                <div class="kpi-val">{{ number_format($totalPhysicalUnits) }} <span style="font-size: 12px; font-weight: 500; color: #64748b;">piezas</span></div>
+            <div class="kpi-card avoid-break">
+                <div class="kpi-label">Existencias Disponibles</div>
+                <div class="kpi-val">{{ number_format($totalAvailableUnits) }} <span style="font-size: 12px; font-weight: 500; color: #64748b;">piezas</span></div>
             </div>
-            <div class="kpi-card">
-                <div class="kpi-label">Valorización a Costo</div>
-                <div class="kpi-val" style="color: #4f46e5;">${{ number_format($totalCostValuation, 2) }} <span style="font-size: 11px; font-weight: 600; color: #64748b;">MXN</span></div>
+            <div class="kpi-card avoid-break">
+                <div class="kpi-label">Con Existencias / Agotados</div>
+                <div class="kpi-val" style="color: #059669;">
+                    {{ number_format($withStockCount) }}
+                    <span style="font-size: 11px; font-weight: 600; color: #64748b;">/ {{ number_format($zeroStockCount) }} agotados</span>
+                </div>
             </div>
         </div>
 
-        <table>
-            <thead>
-                <tr>
-                    <th style="width: 14%;">SKU</th>
-                    <th>Producto / Descripción</th>
-                    <th style="width: 13%;">Marca</th>
-                    <th style="width: 10%;">Ubicación</th>
-                    <th class="text-center" style="width: 8%;">Físico</th>
-                    <th class="text-center" style="width: 8%;">Reserv.</th>
-                    <th class="text-center" style="width: 8%;">Disp.</th>
-                    <th class="text-right" style="width: 10%;">Costo</th>
-                    <th class="text-right" style="width: 11%;">Val. Total</th>
-                </tr>
-            </thead>
-            <tbody>
-                @forelse($products as $p)
-                    @php
-                        $physical = (int) ($p->physical_stock ?? 0);
-                        $reserved = (int) ($p->reserved_stock ?? 0);
-                        $available = (int) ($p->available_stock ?? ($physical - $reserved));
-                        $cost = (float) ($p->cost ?? 0);
-                        $val = $cost * $physical;
-                    @endphp
-                    <tr>
-                        <td class="sku-code">{{ $p->sku }}</td>
-                        <td>
-                            <div style="font-weight: 700; color: #0f172a;">{{ $p->name }}</div>
-                            @if($p->barcode)
-                                <div style="font-size: 10px; color: #64748b; font-family: monospace;">Cód: {{ $p->barcode }}</div>
-                            @endif
-                        </td>
-                        <td style="font-weight: 600; color: #334155; text-transform: uppercase;">
-                            {{ $p->brand ?: 'SIN MARCA' }}
-                        </td>
-                        <td style="font-weight: 600; color: #475569;">
-                            {{ $p->primaryLocation ? $p->primaryLocation->code : '—' }}
-                        </td>
-                        <td class="text-center">
-                            <span class="badge-stock {{ $physical > 0 ? 'badge-positive' : 'badge-zero' }}">
-                                {{ $physical }}
-                            </span>
-                        </td>
-                        <td class="text-center" style="color: #64748b;">{{ $reserved }}</td>
-                        <td class="text-center" style="font-weight: 800; color: #0f172a;">{{ $available }}</td>
-                        <td class="text-right" style="color: #475569;">${{ number_format($cost, 2) }}</td>
-                        <td class="text-right" style="font-weight: 800; color: #0f172a;">${{ number_format($val, 2) }}</td>
-                    </tr>
-                @empty
-                    <tr>
-                        <td colspan="9" style="text-align: center; padding: 30px; color: #64748b;">
-                            No hay productos registrados para los filtros seleccionados.
-                        </td>
-                    </tr>
-                @endforelse
-            </tbody>
-        </table>
+        <div class="report-table">
+            <div class="report-header-row avoid-break">
+                <div class="col-num">#</div>
+                <div>Producto / Descripción</div>
+                <div class="col-brand">Marca</div>
+                <div class="col-stock">Existencias</div>
+            </div>
 
-        <div class="signatures">
+            @php $index = 1; @endphp
+            @forelse($products as $p)
+                @php
+                    $available = (int) ($p->available_stock ?? (($p->physical_stock ?? 0) - ($p->reserved_stock ?? 0)));
+                @endphp
+                <div class="report-row avoid-break">
+                    <div class="col-num">{{ $index++ }}</div>
+                    <div class="col-product">
+                        {{ $p->name }}
+                        @if($p->isKit())
+                            <span class="badge-kit">KIT</span>
+                        @endif
+                    </div>
+                    <div class="col-brand">
+                        {{ $p->brand ?: 'SIN MARCA' }}
+                    </div>
+                    <div class="col-stock">
+                        <span class="badge-stock {{ $available > 0 ? 'badge-positive' : 'badge-zero' }}">
+                            {{ $available }}
+                        </span>
+                    </div>
+                </div>
+            @empty
+                <div class="report-row avoid-break" style="grid-template-columns: 1fr; text-align: center; padding: 30px; color: #64748b;">
+                    No hay productos registrados para los filtros seleccionados.
+                </div>
+            @endforelse
+        </div>
+
+        <div class="signatures avoid-break">
             <div class="sig-box">
                 Responsable de Almacén / Auditor
             </div>
@@ -392,8 +432,8 @@
             </div>
         </div>
 
-        <div class="footer-note">
-            <span>Sistema SBS ERP · mrpoolhmo.com · Impreso el {{ $generatedAt }}</span>
+        <div class="footer-note avoid-break">
+            <span>Sistema SBS ERP · mrpoolhmo.com · Generado el {{ $generatedAt }}</span>
             <span>Documento Oficial de Control Interno SBS</span>
         </div>
     </div>
@@ -413,7 +453,11 @@
                 filename: 'Reporte-Inventario-{{ \Illuminate\Support\Str::slug($selectedBrand) }}-{{ date("Y-m-d") }}.pdf',
                 image: { type: 'jpeg', quality: 0.98 },
                 html2canvas: { scale: 2, useCORS: true, logging: false },
-                jsPDF: { unit: 'mm', format: 'letter', orientation: 'portrait' }
+                jsPDF: { unit: 'mm', format: 'letter', orientation: 'portrait' },
+                pagebreak: {
+                    mode: ['avoid-all', 'css', 'legacy'],
+                    avoid: ['.report-row', '.kpi-card', '.signatures', '.header-grid', '.avoid-break']
+                }
             };
             html2pdf().set(opt).from(element).save().then(function() {
                 if (btn) {
