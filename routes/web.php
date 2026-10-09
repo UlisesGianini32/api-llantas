@@ -63,6 +63,8 @@ use App\Http\Controllers\SystemHealthController;
 use App\Http\Controllers\SystemLogController;
 use App\Http\Controllers\SystemQueueController;
 use App\Http\Controllers\SystemServerController;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Route;
 use Laravel\Fortify\Features;
 
@@ -796,3 +798,22 @@ Route::middleware(['auth', 'role'])->group(function () {
 
 Route::get('/', fn () => redirect()->route('login'));
 Route::get('/home', fn () => redirect('/dashboard'))->name('home');
+
+Route::post('/logout', function (Request $request) {
+    $user = $request->user();
+    $token = $user?->getRememberToken();
+
+    Auth::guard('web')->logout();
+
+    // Preservar el remember_token original del usuario para no cerrar la sesión de sus otros dispositivos
+    if ($user && $token) {
+        $user->forceFill(['remember_token' => $token])->saveQuietly();
+    }
+
+    if ($request->hasSession()) {
+        $request->session()->invalidate();
+        $request->session()->regenerateToken();
+    }
+
+    return redirect()->route('login');
+})->name('logout');
