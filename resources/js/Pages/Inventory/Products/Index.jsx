@@ -16,6 +16,7 @@ function ReportModal({ isOpen, onClose, brands = [] }) {
     const [reportScope, setReportScope] = useState('all') // 'all' or 'brand'
     const [selectedBrand, setSelectedBrand] = useState(brands[0]?.name || '')
     const [statusFilter, setStatusFilter] = useState('all') // 'all', 'with_stock', 'zero_stock', 'active'
+    const [isDownloadingPdf, setIsDownloadingPdf] = useState(false)
 
     if (!isOpen) return null
 
@@ -43,6 +44,78 @@ function ReportModal({ isOpen, onClose, brands = [] }) {
     const handleOpenPdf = () => {
         window.open(getPdfUrl(), '_blank')
         onClose()
+    }
+
+    // Helper to dynamically load html2pdf from CDN
+    const getHtml2Pdf = () => {
+        return new Promise((resolve, reject) => {
+            if (typeof window !== 'undefined' && window.html2pdf) {
+                return resolve(window.html2pdf)
+            }
+            const script = document.createElement('script')
+            script.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.2/html2pdf.bundle.min.js'
+            script.onload = () => {
+                if (window.html2pdf) resolve(window.html2pdf)
+                else reject(new Error('html2pdf no se cargó correctamente'))
+            }
+            script.onerror = () => reject(new Error('No se pudo cargar la librería html2pdf'))
+            document.head.appendChild(script)
+        })
+    }
+
+    // Direct PDF download to user's computer
+    const handleDownloadPdf = async () => {
+        setIsDownloadingPdf(true)
+        try {
+            const html2pdf = await getHtml2Pdf()
+            const url = getPdfUrl()
+            const res = await fetch(url)
+            const html = await res.text()
+
+            const parser = new DOMParser()
+            const doc = parser.parseFromString(html, 'text/html')
+            const sheet = doc.querySelector('.page-sheet')
+            const style = doc.querySelector('style')
+
+            if (!sheet) {
+                window.open(`${url}&download=1`, '_blank')
+                onClose()
+                return
+            }
+
+            const container = document.createElement('div')
+            container.style.position = 'fixed'
+            container.style.left = '-9999px'
+            container.style.top = '0'
+            container.style.width = '1024px'
+            container.style.background = '#ffffff'
+
+            if (style) {
+                container.appendChild(style.cloneNode(true))
+            }
+            container.appendChild(sheet)
+            document.body.appendChild(container)
+
+            const cleanBrand = brandParam ? brandParam.replace(/\s+/g, '-') : 'General'
+            const filename = `Reporte-Inventario-${cleanBrand}-${new Date().toISOString().slice(0, 10)}.pdf`
+
+            await html2pdf().set({
+                margin: [8, 8, 8, 8],
+                filename: filename,
+                image: { type: 'jpeg', quality: 0.98 },
+                html2canvas: { scale: 2, useCORS: true, logging: false },
+                jsPDF: { unit: 'mm', format: 'letter', orientation: 'portrait' },
+            }).from(sheet).save()
+
+            document.body.removeChild(container)
+            onClose()
+        } catch (err) {
+            console.error('Error al generar PDF en segundo plano:', err)
+            window.open(`${getPdfUrl()}&download=1`, '_blank')
+            onClose()
+        } finally {
+            setIsDownloadingPdf(false)
+        }
     }
 
     return (
@@ -225,18 +298,43 @@ function ReportModal({ isOpen, onClose, brands = [] }) {
                     <button
                         type="button"
                         onClick={handleOpenPdf}
-                        className="inline-flex items-center justify-center gap-2 rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-2.5 text-xs font-bold text-indigo-700 hover:bg-indigo-100 dark:border-indigo-900 dark:bg-indigo-950/40 dark:text-indigo-300"
+                        className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-50 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-300"
                     >
-                        <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" />
+                        <svg className="h-4 w-4 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
                         </svg>
-                        Ver / Imprimir PDF
+                        Ver / Imprimir
+                    </button>
+
+                    <button
+                        type="button"
+                        onClick={handleDownloadPdf}
+                        disabled={isDownloadingPdf}
+                        className="inline-flex items-center justify-center gap-2 rounded-xl bg-rose-600 px-4 py-2.5 text-xs font-bold text-white shadow-sm hover:bg-rose-700 transition disabled:opacity-50"
+                    >
+                        {isDownloadingPdf ? (
+                            <>
+                                <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
+                                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path>
+                                </svg>
+                                <span>Descargando...</span>
+                            </>
+                        ) : (
+                            <>
+                                <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
+                                </svg>
+                                <span>Descargar en PDF</span>
+                            </>
+                        )}
                     </button>
 
                     <button
                         type="button"
                         onClick={handleDownloadCsv}
-                        className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-2.5 text-xs font-bold text-white shadow-sm hover:bg-emerald-700 transition"
+                        className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-xs font-bold text-white shadow-sm hover:bg-emerald-700 transition"
                     >
                         <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />

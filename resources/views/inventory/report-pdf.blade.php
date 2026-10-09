@@ -52,6 +52,25 @@
             background-color: #4338ca;
         }
 
+        .btn-download-pdf {
+            background-color: #059669;
+            color: #ffffff;
+            border: none;
+            padding: 9px 18px;
+            border-radius: 8px;
+            font-size: 13px;
+            font-weight: 700;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            transition: background 0.15s;
+        }
+
+        .btn-download-pdf:hover {
+            background-color: #047857;
+        }
+
         .btn-back {
             background: #ffffff;
             color: #475569;
@@ -268,8 +287,11 @@
             <span style="font-size: 12px; color: #64748b; margin-left: 8px;">(SBS · Salon & Barber Supply)</span>
         </div>
         <div style="display: flex; gap: 8px;">
+            <button onclick="downloadPdfNow()" class="btn-download-pdf">
+                ⬇️ Descargar Archivo PDF
+            </button>
             <button onclick="window.print()" class="btn-print">
-                🖨️ Imprimir / Guardar en PDF
+                🖨️ Imprimir
             </button>
             <a href="javascript:window.close()" class="btn-back">Cerrar</a>
         </div>
@@ -376,5 +398,46 @@
         </div>
     </div>
 
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.2/html2pdf.bundle.min.js"></script>
+    <script>
+        function downloadPdfNow() {
+            var btn = document.querySelector('.btn-download-pdf');
+            var oldText = btn ? btn.innerHTML : '';
+            if (btn) {
+                btn.innerText = 'Generando archivo...';
+                btn.disabled = true;
+            }
+            var element = document.querySelector('.page-sheet');
+            var opt = {
+                margin: [8, 8, 8, 8],
+                filename: 'Reporte-Inventario-{{ \Illuminate\Support\Str::slug($selectedBrand) }}-{{ date("Y-m-d") }}.pdf',
+                image: { type: 'jpeg', quality: 0.98 },
+                html2canvas: { scale: 2, useCORS: true, logging: false },
+                jsPDF: { unit: 'mm', format: 'letter', orientation: 'portrait' }
+            };
+            html2pdf().set(opt).from(element).save().then(function() {
+                if (btn) {
+                    btn.innerText = '✓ PDF Descargado';
+                    btn.disabled = false;
+                    setTimeout(function() {
+                        btn.innerHTML = oldText;
+                    }, 3000);
+                }
+            }).catch(function(e) {
+                console.error(e);
+                if (btn) {
+                    btn.innerHTML = oldText;
+                    btn.disabled = false;
+                }
+                window.print();
+            });
+        }
+
+        @if(request('download') == 1)
+        window.addEventListener('DOMContentLoaded', function() {
+            setTimeout(downloadPdfNow, 400);
+        });
+        @endif
+    </script>
 </body>
 </html>
