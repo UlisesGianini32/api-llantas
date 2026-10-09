@@ -11,6 +11,7 @@ export default function MeliFullShipmentsPackStation({
     warehouses = {},
     carriers = [],
     nextShipmentCode = 'FULL-ENV-2026-0001',
+    recommendations = [],
 }) {
     // Current Active Shipment
     const [currentShipment, setCurrentShipment] = useState(shipment || {})
@@ -26,11 +27,12 @@ export default function MeliFullShipmentsPackStation({
 
     // Item Search & Picker
     const [searchQuery, setSearchQuery] = useState('')
-    const [searchTab, setSearchTab] = useState('ALL') // 'ALL' | 'FULL' | 'LOCAL'
+    const [searchTab, setSearchTab] = useState('ALL') // 'ALL' | 'FULL' | 'LOCAL' | 'OUT_OF_STOCK' | 'LOW_STOCK' | 'SUGGESTIONS'
     const [selectedItem, setSelectedItem] = useState(null)
     const [inputQty, setInputQty] = useState(10)
     const [inputWeight, setInputWeight] = useState(1.000)
     const [requiresLabeling, setRequiresLabeling] = useState(false)
+    const [showSuggestionsCarousel, setShowSuggestionsCarousel] = useState(true)
 
     // Modal: Link Product
     const [linkModalOpen, setLinkModalOpen] = useState(false)
@@ -80,6 +82,22 @@ export default function MeliFullShipmentsPackStation({
     const isWeightNear = currentBoxWeight >= 27.00 && !isWeightExceeded
     const weightRemaining = Math.max(0, capacityKg - currentBoxWeight)
 
+    // Counts for suggestions and out of stock in Mercado Libre FULL
+    const outOfStockCount = useMemo(() => {
+        return localFullStocks.filter((s) => (s.full_available_quantity ?? 0) === 0).length
+    }, [localFullStocks])
+
+    const lowStockCount = useMemo(() => {
+        return localFullStocks.filter((s) => {
+            const q = s.full_available_quantity ?? 0
+            return q > 0 && q <= 5
+        }).length
+    }, [localFullStocks])
+
+    const readyToSendCount = useMemo(() => {
+        return recommendations.filter((r) => (r.local_stock_available ?? 0) > 0).length
+    }, [recommendations])
+
     // Lookup products map for quick resolution
     const productsMap = useMemo(() => {
         const map = new Map()
@@ -90,6 +108,117 @@ export default function MeliFullShipmentsPackStation({
     // Filtered items in search
     const searchResults = useMemo(() => {
         const q = searchQuery.trim().toLowerCase()
+
+        const formatFullItem = (st, extra = {}) => {
+            const linkedProd = st.linked_product_id ? productsMap.get(st.linked_product_id) : null
+            return {
+                type: 'FULL',
+                id: `full_${st.id}`,
+                mlm: st.mlm,
+                variation_id: st.variation_id,
+                meli_sku: st.sku || extra.meli_sku,
+                title: st.title,
+                thumbnail: st.thumbnail,
+                full_available: st.full_available_quantity ?? st.full_available ?? 0,
+                linked_product_id: st.linked_product_id || linkedProd?.id || null,
+                linked_product: linkedProd,
+                weight_kg: extra.weight_kg || linkedProd?.weight_kg || 1.0,
+                suggested_quantity: extra.suggested_quantity || (linkedProd?.available_stock ? Math.min(linkedProd.available_stock, 10) : 10),
+                priority: extra.priority,
+                badge: extra.badge,
+                reason: extra.reason,
+            }
+        }
+
+        const formatLocalItem = (p) => ({
+            type: 'LOCAL',
+            id: `local_${p.id}`,
+            inventory_product_id: p.id,
+            sku: p.sku,
+            barcode: p.barcode,
+            name: p.name,
+            brand: p.brand || '',
+            available_stock: p.available_stock ?? 0,
+            weight_kg: parseFloat(p.weight_kg) || 1.0,
+            requires_meli_labeling: Boolean(p.requires_meli_labeling),
+        })
+
+        // Tab: AGOTADOS EN FULL
+        if (searchTab === 'OUT_OF_STOCK') {
+            const outOfStock = localFullStocks.filter((st) => (st.full_available_quantity ?? 0) === 0)
+            const filtered = q
+                ? outOfStock.filter((st) =>
+                      (st.mlm && st.mlm.toLowerCase().includes(q)) ||
+                      (st.title && st.title.toLowerCase().includes(q)) ||
+                      (st.sku && st.sku.toLowerCase().includes(q))
+                  )
+                : outOfStock
+            return filtered.slice(0, 30).map((st) =>
+                formatFullItem(st, {
+                    badge: '🔴 AGOTADO EN FULL',
+                    priority: 'CRITICAL',
+                    reason: '0 unidades en almacenes de Mercado Libre FULL',
+                })
+            )
+        }
+
+        // Tab: POR AGOTARSE EN FULL (1 a 5 unidades)
+        if (searchTab === 'LOW_STOCK') {
+            const lowStock = localFullStocks.filter((st) => {
+                const qty = st.full_available_quantity ?? 0
+                return qty > 0 && qty <= 5
+            })
+            const filtered = q
+                ? lowStock.filter((st) =>
+                      (st.mlm && st.mlm.toLowerCase().includes(q)) ||
+                      (st.title && st.title.toLowerCase().includes(q)) ||
+                      (st.sku && st.sku.toLowerCase().includes(q))
+                  )
+                : lowStock
+            return filtered.slice(0, 30).map((st) =>
+                formatFullItem(st, {
+                    badge: '🟡 POR AGOTARSE',
+                    priority: 'HIGH',
+                    reason: `Quedan solo ${st.full_available_quantity} unidades en Mercado Libre FULL`,
+                })
+            )
+        }
+
+        // Tab: SUGERENCIAS INTELIGENTES
+        if (searchTab === 'SUGGESTIONS') {
+            const filtered = q
+                ? recommendations.filter((r) =>
+                      (r.mlm && r.mlm.toLowerCase().includes(q)) ||
+                      (r.title && r.title.toLowerCase().includes(q)) ||
+                      (r.meli_sku && r.meli_sku.toLowerCase().includes(q)) ||
+                      (r.linked_sku && r.linked_sku.toLowerCase().includes(q))
+                  )
+                : recommendations
+            return filtered.slice(0, 35).map((r) =>
+                formatFullItem(
+                    {
+                        id: r.id,
+                        mlm: r.mlm,
+                        variation_id: r.variation_id,
+                        sku: r.meli_sku,
+                        title: r.title,
+                        thumbnail: r.thumbnail,
+                        full_available_quantity: r.full_available,
+                        linked_product_id: r.linked_product_id,
+                    },
+                    {
+                        meli_sku: r.meli_sku,
+                        weight_kg: r.weight_kg,
+                        suggested_quantity: r.suggested_quantity,
+                        priority: r.priority,
+                        badge: r.badge,
+                        reason: r.reason,
+                    }
+                )
+            )
+        }
+
+        // Si la búsqueda está vacía en los tabs generales, no mostrar dropdown
         if (!q) return []
 
         const fullMatches = []
@@ -100,20 +229,7 @@ export default function MeliFullShipmentsPackStation({
                 const matchSku = st.sku && st.sku.toLowerCase().includes(q)
 
                 if (matchMlm || matchTitle || matchSku) {
-                    const linkedProd = st.linked_product_id ? productsMap.get(st.linked_product_id) : null
-                    fullMatches.push({
-                        type: 'FULL',
-                        id: `full_${st.id}`,
-                        mlm: st.mlm,
-                        variation_id: st.variation_id,
-                        meli_sku: st.sku,
-                        title: st.title,
-                        thumbnail: st.thumbnail,
-                        full_available: st.full_available_quantity ?? 0,
-                        linked_product_id: st.linked_product_id,
-                        linked_product: linkedProd,
-                        weight_kg: linkedProd?.weight_kg || 1.0,
-                    })
+                    fullMatches.push(formatFullItem(st))
                 }
             })
         }
@@ -127,31 +243,47 @@ export default function MeliFullShipmentsPackStation({
                 const matchBarcodeSec = p.barcode_secondary && p.barcode_secondary.toLowerCase().includes(q)
 
                 if (matchSku || matchName || matchBarcode || matchBarcodeSec) {
-                    localMatches.push({
-                        type: 'LOCAL',
-                        id: `local_${p.id}`,
-                        inventory_product_id: p.id,
-                        sku: p.sku,
-                        barcode: p.barcode,
-                        name: p.name,
-                        brand: p.brand || '',
-                        available_stock: p.available_stock ?? 0,
-                        weight_kg: parseFloat(p.weight_kg) || 1.0,
-                        requires_meli_labeling: Boolean(p.requires_meli_labeling),
-                    })
+                    localMatches.push(formatLocalItem(p))
                 }
             })
         }
 
         return [...fullMatches.slice(0, 15), ...localMatches.slice(0, 15)]
-    }, [searchQuery, searchTab, localFullStocks, localProducts, productsMap])
+    }, [searchQuery, searchTab, localFullStocks, localProducts, productsMap, recommendations])
 
     // Select an item from search
     const handleSelectItem = (item) => {
         setSelectedItem(item)
         setInputWeight(item.weight_kg || 1.0)
         setRequiresLabeling(item.type === 'FULL' ? true : Boolean(item.requires_meli_labeling))
+        if (item.suggested_quantity && item.suggested_quantity > 0) {
+            setInputQty(item.suggested_quantity)
+        } else {
+            setInputQty(10)
+        }
         setSearchQuery('')
+    }
+
+    // Direct 1-click loading from recommendation card
+    const handleLoadSuggestion = (sug) => {
+        const linkedProd = sug.linked_product_id ? productsMap.get(sug.linked_product_id) : null
+        handleSelectItem({
+            type: 'FULL',
+            id: `full_${sug.id}`,
+            mlm: sug.mlm,
+            variation_id: sug.variation_id,
+            meli_sku: sug.meli_sku || sug.sku,
+            title: sug.title,
+            thumbnail: sug.thumbnail,
+            full_available: sug.full_available ?? 0,
+            linked_product_id: sug.linked_product_id || linkedProd?.id || null,
+            linked_product: linkedProd,
+            weight_kg: sug.weight_kg || linkedProd?.weight_kg || 1.0,
+            suggested_quantity: sug.suggested_quantity > 0 ? sug.suggested_quantity : 10,
+            priority: sug.priority,
+            badge: sug.badge,
+            reason: sug.reason,
+        })
     }
 
     // Barcode scanned via Camera or Gun
@@ -731,6 +863,187 @@ export default function MeliFullShipmentsPackStation({
                                 </div>
                             </div>
 
+                            {/* SUGGESTIONS & OUT OF STOCK SHOWCASE PANEL */}
+                            <div className="mt-6 rounded-2xl border border-amber-300/80 bg-gradient-to-r from-amber-50/70 via-orange-50/50 to-indigo-50/50 p-4 dark:border-amber-500/30 dark:from-neutral-900 dark:via-neutral-850 dark:to-neutral-900">
+                                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                                    <div className="flex items-center gap-2.5">
+                                        <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-amber-500 text-base text-white font-black shadow-sm">
+                                            💡
+                                        </span>
+                                        <div>
+                                            <div className="flex items-center gap-2">
+                                                <h3 className="text-sm font-black text-slate-900 dark:text-white">
+                                                    Sugerencias de Reabastecimiento & Agotados MeLi FULL
+                                                </h3>
+                                                {outOfStockCount > 0 && (
+                                                    <span className="rounded-full bg-rose-100 px-2 py-0.5 text-[10px] font-black text-rose-700 dark:bg-rose-950 dark:text-rose-300">
+                                                        {outOfStockCount} Agotados
+                                                    </span>
+                                                )}
+                                            </div>
+                                            <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                                                Artículos agotados o por agotarse en Mercado Libre FULL listos para empacar.
+                                            </p>
+                                        </div>
+                                    </div>
+
+                                    {/* Action / Tabs / Toggle */}
+                                    <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                                        <button
+                                            type="button"
+                                            onClick={() => setSearchTab('OUT_OF_STOCK')}
+                                            className={`rounded-lg px-2.5 py-1 font-bold transition-colors ${
+                                                searchTab === 'OUT_OF_STOCK'
+                                                    ? 'bg-rose-600 text-white'
+                                                    : 'bg-white text-rose-700 hover:bg-rose-50 border border-rose-200 dark:bg-neutral-800 dark:text-rose-300 dark:border-neutral-700'
+                                            }`}
+                                        >
+                                            🔴 Agotados ({outOfStockCount})
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => setSearchTab('LOW_STOCK')}
+                                            className={`rounded-lg px-2.5 py-1 font-bold transition-colors ${
+                                                searchTab === 'LOW_STOCK'
+                                                    ? 'bg-amber-600 text-white'
+                                                    : 'bg-white text-amber-700 hover:bg-amber-50 border border-amber-200 dark:bg-neutral-800 dark:text-amber-300 dark:border-neutral-700'
+                                            }`}
+                                        >
+                                            🟡 Por Agotarse ({lowStockCount})
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => setSearchTab('SUGGESTIONS')}
+                                            className={`rounded-lg px-2.5 py-1 font-bold transition-colors ${
+                                                searchTab === 'SUGGESTIONS'
+                                                    ? 'bg-indigo-600 text-white'
+                                                    : 'bg-white text-indigo-700 hover:bg-indigo-50 border border-indigo-200 dark:bg-neutral-800 dark:text-indigo-300 dark:border-neutral-700'
+                                            }`}
+                                        >
+                                            ⚡ Listos ({readyToSendCount})
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => setShowSuggestionsCarousel(!showSuggestionsCarousel)}
+                                            className="rounded-lg bg-white px-2 py-1 text-slate-500 hover:text-slate-800 border border-slate-200 dark:bg-neutral-800 dark:text-slate-300 dark:border-neutral-700 font-bold"
+                                            title="Mostrar u ocultar sugerencias"
+                                        >
+                                            {showSuggestionsCarousel ? '▲ Ocultar' : '▼ Mostrar'}
+                                        </button>
+                                    </div>
+                                </div>
+
+                                {/* CARDS LIST / CAROUSEL */}
+                                {showSuggestionsCarousel && (
+                                    <div className="mt-3">
+                                        {recommendations.length === 0 ? (
+                                            <div className="rounded-xl border border-dashed border-slate-200 bg-white/60 p-4 text-center text-xs text-slate-500 dark:border-neutral-800 dark:bg-neutral-900/60">
+                                                No hay publicaciones agotadas o en riesgo en este momento. ¡El stock en MeLi FULL está al día!
+                                            </div>
+                                        ) : (
+                                            <div className="flex gap-3 overflow-x-auto pb-2 pt-1 scrollbar-thin">
+                                                {recommendations.slice(0, 15).map((sug) => {
+                                                    const isCritical = sug.priority === 'CRITICAL'
+                                                    const isOutOfStock = sug.full_available === 0
+                                                    const hasLocalStock = (sug.local_stock_available ?? 0) > 0
+
+                                                    return (
+                                                        <div
+                                                            key={sug.id}
+                                                            className={`flex w-72 flex-shrink-0 flex-col justify-between rounded-xl border bg-white p-3 shadow-sm transition-all hover:shadow dark:bg-neutral-900 ${
+                                                                isCritical
+                                                                    ? 'border-rose-300 dark:border-rose-900/60'
+                                                                    : isOutOfStock
+                                                                      ? 'border-amber-300 dark:border-amber-900/60'
+                                                                      : 'border-slate-200 dark:border-neutral-800'
+                                                            }`}
+                                                        >
+                                                            <div>
+                                                                <div className="flex items-center justify-between gap-1">
+                                                                    <span
+                                                                        className={`rounded-full px-2 py-0.5 text-[9px] font-black ${
+                                                                            isOutOfStock
+                                                                                ? 'bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300'
+                                                                                : 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
+                                                                        }`}
+                                                                    >
+                                                                        {isOutOfStock ? '🔴 Agotado en FULL' : `🟡 Quedan ${sug.full_available} uds`}
+                                                                    </span>
+                                                                    <span className="font-mono text-[10px] text-slate-400">
+                                                                        {sug.mlm}
+                                                                    </span>
+                                                                </div>
+
+                                                                <div className="mt-2 flex items-start gap-2.5">
+                                                                    {sug.thumbnail ? (
+                                                                        <img
+                                                                            src={sug.thumbnail}
+                                                                            alt=""
+                                                                            className="h-10 w-10 flex-shrink-0 rounded-lg object-cover border border-slate-200"
+                                                                        />
+                                                                    ) : (
+                                                                        <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg bg-slate-100 text-base dark:bg-neutral-800">
+                                                                            ⚡
+                                                                        </div>
+                                                                    )}
+                                                                    <div className="min-w-0">
+                                                                        <p className="line-clamp-2 text-xs font-bold text-slate-900 dark:text-white" title={sug.title}>
+                                                                            {sug.title}
+                                                                        </p>
+                                                                        <p className="font-mono text-[10px] text-slate-400 truncate">
+                                                                            {sug.meli_sku || sug.linked_sku || 'Sin SKU'}
+                                                                        </p>
+                                                                    </div>
+                                                                </div>
+
+                                                                {/* STOCK STATUS IN WAREHOUSE */}
+                                                                <div className="mt-2.5 rounded-lg bg-slate-50 p-2 text-[10px] dark:bg-neutral-800/80">
+                                                                    <div className="flex items-center justify-between">
+                                                                        <span className="text-slate-500">Stock Almacén:</span>
+                                                                        <strong
+                                                                            className={`font-mono ${
+                                                                                hasLocalStock
+                                                                                    ? 'text-emerald-600 dark:text-emerald-400'
+                                                                                    : 'text-rose-600 dark:text-rose-400'
+                                                                            }`}
+                                                                        >
+                                                                            {sug.local_stock_available ?? 0} uds
+                                                                        </strong>
+                                                                    </div>
+                                                                    {sug.suggested_quantity > 0 && (
+                                                                        <div className="flex items-center justify-between mt-1 pt-1 border-t border-slate-200/60 dark:border-neutral-700/60">
+                                                                            <span className="text-slate-500">Sugerido enviar:</span>
+                                                                            <span className="font-bold text-indigo-600 dark:text-indigo-400">
+                                                                                +{sug.suggested_quantity} uds ({(sug.suggested_quantity * sug.weight_kg).toFixed(1)} kg)
+                                                                            </span>
+                                                                        </div>
+                                                                    )}
+                                                                </div>
+                                                            </div>
+
+                                                            {/* ACTION BUTTON */}
+                                                            <div className="mt-3">
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => handleLoadSuggestion(sug)}
+                                                                    className={`w-full rounded-lg px-2.5 py-1.5 text-xs font-bold transition-colors flex items-center justify-center gap-1 ${
+                                                                        hasLocalStock
+                                                                            ? 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm'
+                                                                            : 'bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-neutral-800 dark:text-slate-300'
+                                                                    }`}
+                                                                >
+                                                                    <span>➕</span> Cargar en Caja #{boxNumber}
+                                                                </button>
+                                                            </div>
+                                                        </div>
+                                                    )
+                                                })}
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+
                             {/* 2. SEARCH / SCAN PRODUCT SECTION */}
                             <div className="mt-6 rounded-2xl border border-slate-200 bg-slate-50/70 p-4 dark:border-neutral-800 dark:bg-neutral-800/40">
                                 <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -739,7 +1052,7 @@ export default function MeliFullShipmentsPackStation({
                                     </span>
 
                                     {/* FILTER TABS */}
-                                    <div className="flex items-center gap-1 text-xs">
+                                    <div className="flex flex-wrap items-center gap-1 text-xs">
                                         <button
                                             type="button"
                                             onClick={() => setSearchTab('ALL')}
@@ -750,6 +1063,39 @@ export default function MeliFullShipmentsPackStation({
                                             }`}
                                         >
                                             Todos
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => setSearchTab('OUT_OF_STOCK')}
+                                            className={`rounded-lg px-2.5 py-1 font-bold ${
+                                                searchTab === 'OUT_OF_STOCK'
+                                                    ? 'bg-rose-600 text-white'
+                                                    : 'bg-white text-rose-700 hover:bg-rose-50 dark:bg-neutral-700 dark:text-rose-300'
+                                            }`}
+                                        >
+                                            🔴 Agotados MeLi ({outOfStockCount})
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => setSearchTab('LOW_STOCK')}
+                                            className={`rounded-lg px-2.5 py-1 font-bold ${
+                                                searchTab === 'LOW_STOCK'
+                                                    ? 'bg-amber-500 text-white'
+                                                    : 'bg-white text-amber-700 hover:bg-amber-50 dark:bg-neutral-700 dark:text-amber-300'
+                                            }`}
+                                        >
+                                            🟡 Por agotarse ({lowStockCount})
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => setSearchTab('SUGGESTIONS')}
+                                            className={`rounded-lg px-2.5 py-1 font-bold ${
+                                                searchTab === 'SUGGESTIONS'
+                                                    ? 'bg-indigo-600 text-white'
+                                                    : 'bg-white text-slate-600 hover:bg-slate-100 dark:bg-neutral-700 dark:text-slate-300'
+                                            }`}
+                                        >
+                                            💡 Sugeridos ({recommendations.length})
                                         </button>
                                         <button
                                             type="button"
@@ -823,7 +1169,27 @@ export default function MeliFullShipmentsPackStation({
 
                                 {/* SEARCH RESULTS DROPDOWN */}
                                 {searchResults.length > 0 && (
-                                    <div className="mt-2 max-h-64 overflow-y-auto rounded-xl border border-slate-200 bg-white shadow-lg dark:border-neutral-700 dark:bg-neutral-900">
+                                    <div className="mt-2 max-h-72 overflow-y-auto rounded-xl border border-slate-200 bg-white shadow-lg dark:border-neutral-700 dark:bg-neutral-900">
+                                        {/* TAB INFO HEADER */}
+                                        {searchTab === 'OUT_OF_STOCK' && (
+                                            <div className="sticky top-0 z-10 bg-rose-50 px-3 py-2 text-xs font-bold text-rose-800 dark:bg-rose-950/90 dark:text-rose-200 border-b border-rose-100 dark:border-rose-900 flex items-center justify-between">
+                                                <span>🔴 Publicaciones agotadas en bodegas MeLi FULL ({outOfStockCount} en total)</span>
+                                                <span className="text-[10px] font-normal opacity-80">Haz clic para cargar en caja</span>
+                                            </div>
+                                        )}
+                                        {searchTab === 'LOW_STOCK' && (
+                                            <div className="sticky top-0 z-10 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-800 dark:bg-amber-950/90 dark:text-amber-200 border-b border-amber-100 dark:border-amber-900 flex items-center justify-between">
+                                                <span>🟡 Publicaciones por agotarse en MeLi FULL ({lowStockCount} en total)</span>
+                                                <span className="text-[10px] font-normal opacity-80">1 a 5 unidades restantes</span>
+                                            </div>
+                                        )}
+                                        {searchTab === 'SUGGESTIONS' && (
+                                            <div className="sticky top-0 z-10 bg-indigo-50 px-3 py-2 text-xs font-bold text-indigo-800 dark:bg-indigo-950/90 dark:text-indigo-200 border-b border-indigo-100 dark:border-indigo-900 flex items-center justify-between">
+                                                <span>💡 Sugerencias ordenadas por prioridad de reabastecimiento</span>
+                                                <span className="text-[10px] font-normal opacity-80">{readyToSendCount} listos con stock local</span>
+                                            </div>
+                                        )}
+
                                         <div className="divide-y divide-slate-100 text-xs dark:divide-neutral-800">
                                             {searchResults.map((it) => (
                                                 <div
@@ -844,7 +1210,7 @@ export default function MeliFullShipmentsPackStation({
                                                             </div>
                                                         )}
                                                         <div>
-                                                            <div className="flex items-center gap-1.5">
+                                                            <div className="flex flex-wrap items-center gap-1.5">
                                                                 {it.type === 'FULL' ? (
                                                                     <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[9px] font-black text-amber-900 dark:bg-amber-950 dark:text-amber-300">
                                                                         ⚡ FULL ({it.mlm})
@@ -857,27 +1223,53 @@ export default function MeliFullShipmentsPackStation({
                                                                 <span className="font-mono font-bold text-indigo-600 dark:text-indigo-400">
                                                                     {it.sku || it.meli_sku || it.barcode}
                                                                 </span>
+                                                                {it.badge && (
+                                                                    <span
+                                                                        className={`rounded px-1.5 py-0.5 text-[9px] font-black ${
+                                                                            it.badge.includes('AGOTADO')
+                                                                                ? 'bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300'
+                                                                                : 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
+                                                                        }`}
+                                                                    >
+                                                                        {it.badge}
+                                                                    </span>
+                                                                )}
                                                             </div>
                                                             <p className="font-semibold text-slate-800 dark:text-slate-200 line-clamp-1">
                                                                 {it.title || it.name}
                                                             </p>
                                                             {it.type === 'FULL' && (
-                                                                <div className="flex items-center gap-2 text-[10px] text-slate-400">
+                                                                <div className="flex flex-wrap items-center gap-2 text-[10px] text-slate-400 mt-0.5">
+                                                                    <span
+                                                                        className={`font-bold ${
+                                                                            it.full_available === 0
+                                                                                ? 'text-rose-600 dark:text-rose-400'
+                                                                                : it.full_available <= 5
+                                                                                  ? 'text-amber-600 dark:text-amber-400'
+                                                                                  : 'text-slate-500'
+                                                                        }`}
+                                                                    >
+                                                                        {it.full_available === 0 ? '🔴 Stock MeLi: 0 uds' : `Stock MeLi: ${it.full_available} uds`}
+                                                                    </span>
+                                                                    <span>·</span>
                                                                     {it.linked_product ? (
                                                                         <span className="text-emerald-600 font-bold dark:text-emerald-400">
-                                                                            ✓ Vinculado: {it.linked_product.sku} (Stock: {it.linked_product.available_stock} uds)
+                                                                            ✓ Almacén: {it.linked_product.sku} ({it.linked_product.available_stock} uds)
                                                                         </span>
                                                                     ) : (
                                                                         <span className="text-amber-600 font-bold dark:text-amber-400">
                                                                             ⚠️ Sin vincular a catálogo local
                                                                         </span>
                                                                     )}
-                                                                    <span>·</span>
-                                                                    <span>Stock MeLi: {it.full_available} uds</span>
+                                                                    {it.suggested_quantity > 0 && (
+                                                                        <span className="rounded bg-indigo-50 px-1.5 py-0.5 text-[9px] font-bold text-indigo-700 dark:bg-neutral-800 dark:text-indigo-300">
+                                                                            Sugerido: +{it.suggested_quantity} uds
+                                                                        </span>
+                                                                    )}
                                                                 </div>
                                                             )}
                                                             {it.type === 'LOCAL' && (
-                                                                <div className="text-[10px] text-slate-400">
+                                                                <div className="text-[10px] text-slate-400 mt-0.5">
                                                                     Stock Almacén: <strong className="text-slate-700 dark:text-slate-300">{it.available_stock} uds</strong> · Peso: {it.weight_kg} kg
                                                                 </div>
                                                             )}
@@ -886,9 +1278,13 @@ export default function MeliFullShipmentsPackStation({
 
                                                     <button
                                                         type="button"
-                                                        className="rounded-lg bg-indigo-50 px-2.5 py-1 text-xs font-bold text-indigo-700 hover:bg-indigo-100 dark:bg-neutral-800 dark:text-indigo-300"
+                                                        className={`rounded-lg px-2.5 py-1 text-xs font-bold transition-colors ${
+                                                            it.suggested_quantity > 0
+                                                                ? 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm'
+                                                                : 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100 dark:bg-neutral-800 dark:text-indigo-300'
+                                                        }`}
                                                     >
-                                                        Seleccionar
+                                                        {it.suggested_quantity > 0 ? '➕ Cargar en Caja' : 'Seleccionar'}
                                                     </button>
                                                 </div>
                                             ))}

@@ -12,6 +12,7 @@ use App\Models\MeliFullShipmentItem;
 use App\Models\MeliFullStock;
 use App\Models\User;
 use Carbon\Carbon;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use InvalidArgumentException;
@@ -911,5 +912,113 @@ class MeliFullShipmentService
         });
 
         return array_slice($recommendations, 0, $limit);
+    }
+
+    /**
+     * Obtener sugerencias prioritarias de reabastecimiento para la Mesa de Empaque:
+     * 1. Publicaciones FULL que están AGOTADAS (stock = 0 en MeLi FULL).
+     * 2. Publicaciones FULL que están POR AGOTARSE (stock <= 5 en MeLi FULL).
+     * Cruza automáticamente con el stock disponible en almacén local.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    public function getPackStationRecommendations(Collection $mappedFullStocks, Collection $products, int $limit = 80): array
+    {
+        $stockSvc = $this->stockService ?? app(InventoryStockService::class);
+        $productsById = $products->keyBy('id');
+        $productsBySku = $products->keyBy(fn ($p) => strtoupper(trim((string) $p->sku)));
+        $productsByBarcode = $products->filter(fn ($p) => ! empty($p->barcode))->keyBy(fn ($p) => trim((string) $p->barcode));
+
+        $suggestions = [];
+
+        foreach ($mappedFullStocks as $st) {
+            $mlm = strtoupper(trim((string) $st->mlm));
+            $var = $st->variation_id ? trim((string) $st->variation_id) : '';
+
+            $fullStock = (int) ($st->full_available_quantity ?? 0);
+            $sku = strtoupper(trim((string) ($st->sku ?? '')));
+
+            // Encontrar el producto local vinculado si existe
+            $linkedId = $st->linked_product_id;
+            $localProd = $linkedId ? ($productsById[$linkedId] ?? null) : null;
+            if (! $localProd && $sku !== '') {
+                $localProd = $productsBySku[$sku] ?? $productsByBarcode[$sku] ?? null;
+            }
+
+            $localAvailable = $localProd ? ($localProd->available_stock ?? $stockSvc->availableStock($localProd)) : 0;
+            $unitWeight = (float) ($localProd?->weight_kg ?: 1.000);
+
+            $priority = null;
+            $reason = null;
+            $badge = null;
+            $suggested = 0;
+
+            if ($fullStock === 0) {
+                if ($localAvailable > 0) {
+                    $priority = 'CRITICAL';
+                    $badge = '🔴 AGOTADO EN FULL';
+                    $reason = "Agotado en bodegas MeLi (0 uds) · Tienes {$localAvailable} uds disponibles en almacén local";
+                    $suggested = min($localAvailable, 15);
+                } else {
+                    $priority = 'OUT_OF_STOCK_NO_LOCAL';
+                    $badge = '🔴 AGOTADO EN FULL';
+                    $reason = "Agotado en bodegas MeLi (0 uds) · Sin stock registrado en almacén local";
+                    $suggested = 0;
+                }
+            } elseif ($fullStock <= 5) {
+                if ($localAvailable > 0) {
+                    $priority = 'HIGH';
+                    $badge = '🟡 POR AGOTARSE';
+                    $reason = "Quedan solo {$fullStock} uds en bodegas MeLi · Tienes {$localAvailable} uds en almacén local";
+                    $suggested = min($localAvailable, 10);
+                } else {
+                    $priority = 'LOW_STOCK_NO_LOCAL';
+                    $badge = '🟡 POR AGOTARSE';
+                    $reason = "Quedan solo {$fullStock} uds en bodegas MeLi · Sin stock en almacén local";
+                    $suggested = 0;
+                }
+            }
+
+            if ($priority !== null) {
+                $suggestions[] = [
+                    'id' => $st->id,
+                    'type' => 'FULL',
+                    'mlm' => $mlm,
+                    'variation_id' => $var ?: null,
+                    'meli_sku' => $st->sku,
+                    'title' => $st->title,
+                    'thumbnail' => $st->thumbnail,
+                    'full_available' => $fullStock,
+                    'linked_product_id' => $localProd?->id ?? null,
+                    'linked_sku' => $localProd?->sku ?? null,
+                    'linked_name' => $localProd?->name ?? null,
+                    'local_stock_available' => $localAvailable,
+                    'weight_kg' => $unitWeight,
+                    'suggested_quantity' => $suggested,
+                    'priority' => $priority,
+                    'badge' => $badge,
+                    'reason' => $reason,
+                ];
+            }
+        }
+
+        // Ordenar sugerencias: Primero los agotados con stock local listo para enviar!
+        $priorityOrder = [
+            'CRITICAL' => 1,
+            'HIGH' => 2,
+            'OUT_OF_STOCK_NO_LOCAL' => 3,
+            'LOW_STOCK_NO_LOCAL' => 4,
+        ];
+
+        usort($suggestions, function ($a, $b) use ($priorityOrder) {
+            $pA = $priorityOrder[$a['priority']] ?? 99;
+            $pB = $priorityOrder[$b['priority']] ?? 99;
+            if ($pA !== $pB) {
+                return $pA <=> $pB;
+            }
+            return $b['local_stock_available'] <=> $a['local_stock_available'];
+        });
+
+        return array_slice($suggestions, 0, $limit);
     }
 }

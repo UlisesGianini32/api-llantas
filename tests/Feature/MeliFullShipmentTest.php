@@ -792,5 +792,83 @@ class MeliFullShipmentTest extends TestCase
     {
         $response = $this->actingAs($this->user)->get(route('meli-full-shipments.pack-station'));
         $response->assertStatus(200);
+        $response->assertInertia(fn (\Inertia\Testing\AssertableInertia $page) => $page
+            ->component('MeliFullShipments/PackStation')
+            ->has('recommendations')
+            ->has('shipment')
+            ->has('products')
+            ->has('meliFullStocks')
+        );
+    }
+
+    public function test_service_generates_pack_station_recommendations_for_out_of_stock_items(): void
+    {
+        $stockService = app(\App\Services\MeliFullShipmentService::class);
+
+        $mappedStocks = collect([
+            (object) [
+                'id' => 101,
+                'mlm' => 'MLM101',
+                'variation_id' => null,
+                'sku' => $this->product1->sku,
+                'title' => 'Producto Agotado en FULL',
+                'thumbnail' => null,
+                'full_available_quantity' => 0,
+                'linked_product_id' => $this->product1->id,
+            ],
+            (object) [
+                'id' => 102,
+                'mlm' => 'MLM102',
+                'variation_id' => null,
+                'sku' => 'UNKNOWN-SKU',
+                'title' => 'Producto Agotado Sin Local',
+                'thumbnail' => null,
+                'full_available_quantity' => 0,
+                'linked_product_id' => null,
+            ],
+            (object) [
+                'id' => 103,
+                'mlm' => 'MLM103',
+                'variation_id' => null,
+                'sku' => $this->product2->sku,
+                'title' => 'Producto Por Agotarse',
+                'thumbnail' => null,
+                'full_available_quantity' => 3,
+                'linked_product_id' => $this->product2->id,
+            ],
+            (object) [
+                'id' => 104,
+                'mlm' => 'MLM104',
+                'variation_id' => null,
+                'sku' => 'PLENTY-SKU',
+                'title' => 'Producto Con Buen Stock',
+                'thumbnail' => null,
+                'full_available_quantity' => 45,
+                'linked_product_id' => null,
+            ],
+        ]);
+
+        $products = collect([$this->product1, $this->product2]);
+
+        $recommendations = $stockService->getPackStationRecommendations($mappedStocks, $products);
+
+        // Debería incluir los 3 en riesgo/agotados y excluir el que tiene 45 unidades
+        $this->assertCount(3, $recommendations);
+
+        // El primer elemento debe ser CRITICAL (agotado con stock local disponible)
+        $this->assertEquals('CRITICAL', $recommendations[0]['priority']);
+        $this->assertEquals('MLM101', $recommendations[0]['mlm']);
+        $this->assertEquals(0, $recommendations[0]['full_available']);
+        $this->assertGreaterThan(0, $recommendations[0]['local_stock_available']);
+        $this->assertGreaterThan(0, $recommendations[0]['suggested_quantity']);
+
+        // El segundo elemento debe ser HIGH (stock <= 5 con stock local disponible)
+        $this->assertEquals('HIGH', $recommendations[1]['priority']);
+        $this->assertEquals('MLM103', $recommendations[1]['mlm']);
+        $this->assertEquals(3, $recommendations[1]['full_available']);
+
+        // El tercer elemento debe ser OUT_OF_STOCK_NO_LOCAL
+        $this->assertEquals('OUT_OF_STOCK_NO_LOCAL', $recommendations[2]['priority']);
+        $this->assertEquals('MLM102', $recommendations[2]['mlm']);
     }
 }
