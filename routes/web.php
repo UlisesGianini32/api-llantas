@@ -225,6 +225,8 @@ Route::middleware(['auth', 'role'])->group(function () {
     // ALMACÉN: catálogo maestro independiente de llantas y Syscom.
     Route::prefix('almacen/productos')->name('inventory.products.')->group(function () {
         Route::get('/', [InventoryProductController::class, 'index'])->name('index');
+        Route::get('/exportar', [InventoryProductController::class, 'export'])->name('export');
+        Route::get('/reporte-pdf', [InventoryProductController::class, 'reportPdf'])->name('report_pdf');
         Route::get('/crear', [InventoryProductController::class, 'create'])->name('create');
         Route::post('/', [InventoryProductController::class, 'store'])->name('store');
         Route::get('/{inventoryProduct}', [InventoryProductController::class, 'show'])

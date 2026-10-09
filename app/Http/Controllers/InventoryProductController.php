@@ -12,21 +12,30 @@ use App\Services\InventoryKitStockService;
 use App\Services\InventoryStockService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
+use Illuminate\View\View;
 use Inertia\Inertia;
 use Inertia\Response;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class InventoryProductController extends Controller
 {
     public function index(Request $request, InventoryKitStockService $kitStock): Response
     {
         $search = trim((string) $request->input('search', ''));
-        $products = InventoryProduct::query()
+        $brand = trim((string) $request->input('brand', ''));
+
+        $query = InventoryProduct::query()
             ->with(['primaryLocation:id,code,name,amazon_aisle,is_active', 'secondaryLocation:id,code,name,amazon_aisle,is_active', 'kitComponents.component:id,name,sku'])
             ->withSum('movements as physical_stock', 'quantity')
             ->withSum([
-                'reservations as reserved_stock' => fn ($query) => $query
+                'reservations as reserved_stock' => fn ($q) => $q
                     ->where('status', InventoryReservation::ACTIVE),
             ], 'quantity')
+            ->when($brand !== '' && mb_strtoupper($brand) !== 'TODAS', function ($q) use ($brand): void {
+                $q->whereRaw('UPPER(TRIM(brand)) = ?', [mb_strtoupper($brand)]);
+            })
             ->when($search !== '', function ($query) use ($search): void {
                 $query->where(function ($nested) use ($search): void {
                     $nested->where('name', 'like', "%{$search}%")
@@ -44,9 +53,9 @@ class InventoryProductController extends Controller
                         });
                 });
             })
-            ->orderBy('name')
-            ->paginate(25)
-            ->withQueryString();
+            ->orderBy('name');
+
+        $products = $query->paginate(25)->withQueryString();
 
         $kitStocks = $kitStock->stocksForKits($products->getCollection());
         $products->getCollection()->each(function (InventoryProduct $product) use ($kitStocks): void {
@@ -62,9 +71,235 @@ class InventoryProductController extends Controller
             }
         });
 
+        $brands = InventoryProduct::query()
+            ->whereNotNull('brand')
+            ->where('brand', '!=', '')
+            ->selectRaw('UPPER(TRIM(brand)) as clean_brand, COUNT(*) as count')
+            ->groupBy(DB::raw('UPPER(TRIM(brand))'))
+            ->orderBy('clean_brand')
+            ->get()
+            ->map(fn ($r) => [
+                'name' => $r->clean_brand,
+                'count' => (int) $r->count,
+            ])
+            ->values()
+            ->all();
+
         return Inertia::render('Inventory/Products/Index', [
             'products' => $products,
-            'filters' => ['search' => $search],
+            'filters' => [
+                'search' => $search,
+                'brand' => $brand,
+            ],
+            'brands' => $brands,
+        ]);
+    }
+
+    /**
+     * Exportar reporte de inventario en Excel (CSV UTF-8 compatible con acentos y fórmulas)
+     */
+    public function export(Request $request, InventoryKitStockService $kitStockService): StreamedResponse
+    {
+        $brand = trim((string) $request->input('brand', ''));
+        $search = trim((string) $request->input('search', ''));
+        $status = trim((string) $request->input('status', 'all'));
+
+        $query = InventoryProduct::query()
+            ->with(['primaryLocation:id,code,name', 'secondaryLocation:id,code,name', 'kitComponents.component:id,name,sku'])
+            ->withSum('movements as physical_stock', 'quantity')
+            ->withSum([
+                'reservations as reserved_stock' => fn ($q) => $q->where('status', InventoryReservation::ACTIVE),
+            ], 'quantity');
+
+        if ($brand !== '' && mb_strtoupper($brand) !== 'TODAS') {
+            $query->whereRaw('UPPER(TRIM(brand)) = ?', [mb_strtoupper($brand)]);
+        }
+
+        if ($search !== '') {
+            $query->where(function ($nested) use ($search): void {
+                $nested->where('name', 'like', "%{$search}%")
+                    ->orWhere('sku', 'like', "%{$search}%")
+                    ->orWhere('barcode', 'like', "%{$search}%")
+                    ->orWhere('barcode_secondary', 'like', "%{$search}%")
+                    ->orWhere('reserve_notes', 'like', "%{$search}%");
+            });
+        }
+
+        if ($status === 'active') {
+            $query->where('is_active', true);
+        } elseif ($status === 'inactive') {
+            $query->where('is_active', false);
+        }
+
+        $products = $query->orderBy('brand')->orderBy('name')->get();
+
+        $kitStocks = $kitStockService->stocksForKits($products);
+        $products->each(function (InventoryProduct $product) use ($kitStocks): void {
+            if ($product->isKit()) {
+                $stock = $kitStocks->get($product->getKey(), ['physical_stock' => 0, 'available_stock' => 0]);
+                $physical = (int) $stock['physical_stock'];
+                $available = (int) $stock['available_stock'];
+                $product->setAttribute('physical_stock', $physical);
+                $product->setAttribute('reserved_stock', max(0, $physical - $available));
+                $product->setAttribute('available_stock', $available);
+            } else {
+                $physical = (int) ($product->physical_stock ?? 0);
+                $reserved = (int) ($product->reserved_stock ?? 0);
+                $product->setAttribute('physical_stock', $physical);
+                $product->setAttribute('reserved_stock', $reserved);
+                $product->setAttribute('available_stock', $physical - $reserved);
+            }
+        });
+
+        if ($status === 'with_stock') {
+            $products = $products->filter(fn ($p) => (int) $p->physical_stock > 0);
+        } elseif ($status === 'zero_stock') {
+            $products = $products->filter(fn ($p) => (int) $p->physical_stock <= 0);
+        }
+
+        $cleanBrandName = $brand !== '' && mb_strtoupper($brand) !== 'TODAS'
+            ? Str::slug($brand)
+            : 'general';
+        $filename = 'reporte-inventario-' . $cleanBrandName . '-' . date('Ymd-His') . '.csv';
+
+        return response()->streamDownload(function () use ($products): void {
+            $handle = fopen('php://output', 'w');
+            fprintf($handle, chr(0xEF) . chr(0xBB) . chr(0xBF)); // BOM UTF-8 para Excel
+
+            fputcsv($handle, [
+                'SKU',
+                'Producto / Nombre',
+                'Marca',
+                'Proveedor',
+                'Tipo Producto',
+                'Código de Barras Principal',
+                'Código de Barras Secundario',
+                'Ubicación Primaria',
+                'Ubicación Secundaria',
+                'Stock Físico',
+                'Stock Reservado',
+                'Stock Disponible',
+                'Costo Unitario ($)',
+                'Valor Total Almacén ($ Costo x Físico)',
+                'Precio Mercado Libre ($)',
+                'Precio Amazon ($)',
+                'Precio Shopify / Estilista ($)',
+                'Precio Público ($)',
+                'Estado',
+                'Notas de Reserva',
+            ]);
+
+            foreach ($products as $p) {
+                $physical = (int) ($p->physical_stock ?? 0);
+                $reserved = (int) ($p->reserved_stock ?? 0);
+                $available = (int) ($p->available_stock ?? ($physical - $reserved));
+                $cost = (float) ($p->cost ?? 0);
+                $totalValuation = round($cost * $physical, 2);
+
+                fputcsv($handle, [
+                    $p->sku,
+                    $p->name,
+                    $p->brand ?: 'SIN MARCA',
+                    $p->supplier ?: '—',
+                    $p->isKit() ? 'KIT' : 'SIMPLE',
+                    $p->barcode ?: '—',
+                    $p->barcode_secondary ?: '—',
+                    $p->primaryLocation ? $p->primaryLocation->code : 'SIN UBICACIÓN',
+                    $p->secondaryLocation ? $p->secondaryLocation->code : '—',
+                    $physical,
+                    $reserved,
+                    $available,
+                    number_format($cost, 2, '.', ''),
+                    number_format($totalValuation, 2, '.', ''),
+                    $p->price_mercado_libre ? number_format((float) $p->price_mercado_libre, 2, '.', '') : '—',
+                    $p->price_amazon ? number_format((float) $p->price_amazon, 2, '.', '') : '—',
+                    $p->price_stylist ? number_format((float) $p->price_stylist, 2, '.', '') : '—',
+                    $p->price_public ? number_format((float) $p->price_public, 2, '.', '') : '—',
+                    $p->is_active ? 'ACTIVO' : 'INACTIVO',
+                    $p->reserve_notes ?: '—',
+                ]);
+            }
+
+            fclose($handle);
+        }, $filename, [
+            'Content-Type' => 'text/csv; charset=UTF-8',
+        ]);
+    }
+
+    /**
+     * Reporte imprimible / PDF con membrete oficial SBS
+     */
+    public function reportPdf(Request $request, InventoryKitStockService $kitStockService): View
+    {
+        $brand = trim((string) $request->input('brand', ''));
+        $search = trim((string) $request->input('search', ''));
+        $status = trim((string) $request->input('status', 'all'));
+
+        $query = InventoryProduct::query()
+            ->with(['primaryLocation:id,code,name', 'secondaryLocation:id,code,name', 'kitComponents.component:id,name,sku'])
+            ->withSum('movements as physical_stock', 'quantity')
+            ->withSum([
+                'reservations as reserved_stock' => fn ($q) => $q->where('status', InventoryReservation::ACTIVE),
+            ], 'quantity');
+
+        if ($brand !== '' && mb_strtoupper($brand) !== 'TODAS') {
+            $query->whereRaw('UPPER(TRIM(brand)) = ?', [mb_strtoupper($brand)]);
+        }
+
+        if ($search !== '') {
+            $query->where(function ($nested) use ($search): void {
+                $nested->where('name', 'like', "%{$search}%")
+                    ->orWhere('sku', 'like', "%{$search}%")
+                    ->orWhere('barcode', 'like', "%{$search}%")
+                    ->orWhere('barcode_secondary', 'like', "%{$search}%")
+                    ->orWhere('reserve_notes', 'like', "%{$search}%");
+            });
+        }
+
+        if ($status === 'active') {
+            $query->where('is_active', true);
+        } elseif ($status === 'inactive') {
+            $query->where('is_active', false);
+        }
+
+        $products = $query->orderBy('brand')->orderBy('name')->get();
+
+        $kitStocks = $kitStockService->stocksForKits($products);
+        $products->each(function (InventoryProduct $product) use ($kitStocks): void {
+            if ($product->isKit()) {
+                $stock = $kitStocks->get($product->getKey(), ['physical_stock' => 0, 'available_stock' => 0]);
+                $physical = (int) $stock['physical_stock'];
+                $available = (int) $stock['available_stock'];
+                $product->setAttribute('physical_stock', $physical);
+                $product->setAttribute('reserved_stock', max(0, $physical - $available));
+                $product->setAttribute('available_stock', $available);
+            } else {
+                $physical = (int) ($product->physical_stock ?? 0);
+                $reserved = (int) ($product->reserved_stock ?? 0);
+                $product->setAttribute('physical_stock', $physical);
+                $product->setAttribute('reserved_stock', $reserved);
+                $product->setAttribute('available_stock', $physical - $reserved);
+            }
+        });
+
+        if ($status === 'with_stock') {
+            $products = $products->filter(fn ($p) => (int) $p->physical_stock > 0);
+        } elseif ($status === 'zero_stock') {
+            $products = $products->filter(fn ($p) => (int) $p->physical_stock <= 0);
+        }
+
+        $totalSkus = $products->count();
+        $totalPhysicalUnits = $products->sum(fn ($p) => (int) ($p->physical_stock ?? 0));
+        $totalCostValuation = $products->sum(fn ($p) => (float) ($p->cost ?? 0) * (int) ($p->physical_stock ?? 0));
+
+        return view('inventory.report-pdf', [
+            'products' => $products,
+            'selectedBrand' => $brand !== '' && mb_strtoupper($brand) !== 'TODAS' ? mb_strtoupper($brand) : 'GENERAL (TODO EL CATÁLOGO)',
+            'statusFilter' => $status,
+            'totalSkus' => $totalSkus,
+            'totalPhysicalUnits' => $totalPhysicalUnits,
+            'totalCostValuation' => $totalCostValuation,
+            'generatedAt' => now()->format('d/m/Y H:i'),
         ]);
     }
 
