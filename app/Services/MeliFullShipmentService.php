@@ -53,8 +53,8 @@ class MeliFullShipmentService
     {
         return DB::transaction(function () use ($data, $user) {
             $shipmentCode = ! empty($data['shipment_code']) ? trim($data['shipment_code']) : $this->generateShipmentCode();
-            $warehouseCode = $data['meli_warehouse_code'] ?? 'MXCD01';
-            $warehouseName = MeliFullShipment::WAREHOUSES[$warehouseCode] ?? ($data['meli_warehouse_name'] ?? 'CEDIS MeLi');
+            $warehouseCode = $data['meli_warehouse_code'] ?? 'MXCD06';
+            $warehouseName = MeliFullShipment::WAREHOUSES[$warehouseCode] ?? ($data['meli_warehouse_name'] ?? 'CEDIS MeLi Panorama MX06');
 
             $shipment = MeliFullShipment::create([
                 'user_id' => $user?->id,
@@ -63,9 +63,9 @@ class MeliFullShipmentService
                 'meli_warehouse_code' => $warehouseCode,
                 'meli_warehouse_name' => $warehouseName,
                 'meli_shipment_id' => $data['meli_shipment_id'] ?? null,
-                'envia_carrier' => $data['envia_carrier'] ?? 'Paquetexpress',
+                'envia_carrier' => $data['envia_carrier'] ?? 'Estafeta',
                 'envia_tracking_number' => $data['envia_tracking_number'] ?? null,
-                'envia_tracking_url' => $this->buildEnviaTrackingUrl($data['envia_carrier'] ?? null, $data['envia_tracking_number'] ?? null),
+                'envia_tracking_url' => $this->buildEnviaTrackingUrl($data['envia_carrier'] ?? 'Estafeta', $data['envia_tracking_number'] ?? null),
                 'envia_cost' => (float) ($data['envia_cost'] ?? 0),
                 'notes' => $data['notes'] ?? null,
             ]);

@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\InventoryChannelLink;
 use App\Models\InventoryProduct;
+use App\Models\MeliAccount;
 use App\Models\MeliFullShipment;
 use App\Models\MeliFullShipmentBox;
 use App\Models\MeliFullShipmentItem;
@@ -310,9 +311,12 @@ class MeliFullShipmentController extends Controller
         $shipment->load(['boxes.items.inventoryProduct']);
         $boxes = $box ? collect([$box->load('items.inventoryProduct')]) : $shipment->boxes;
 
+        $meliAccount = Schema::hasTable('meli_accounts') ? MeliAccount::first() : null;
+
         return view('labels.meli_full_box', [
             'shipment' => $shipment,
             'boxes' => $boxes,
+            'meliAccount' => $meliAccount,
         ]);
     }
 
@@ -422,7 +426,8 @@ class MeliFullShipmentController extends Controller
         if (! $selectedShipment) {
             $selectedShipment = $this->shipmentService->createShipment([
                 'shipment_code' => $this->shipmentService->generateShipmentCode(),
-                'meli_warehouse_code' => 'MXCD01',
+                'meli_warehouse_code' => 'MXCD06',
+                'envia_carrier' => 'Estafeta',
                 'notes' => 'Envío inicial generado desde la mesa de empaque caja por caja',
                 'boxes' => [],
             ], $request->user());

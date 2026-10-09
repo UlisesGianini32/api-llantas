@@ -20,8 +20,12 @@ class MeliFullShipment extends Model
     public const STATUS_CANCELLED = 'CANCELLED';
 
     public const WAREHOUSES = [
+        'MXCD06' => 'Centro logístico Panorama MX06 (CDMX / Edo. Mex)',
         'MXCD01' => 'CEDIS Cuautitlán Izcalli I (Edo. Mex)',
         'MXCD02' => 'CEDIS Cuautitlán Izcalli II (Edo. Mex)',
+        'MXCD03' => 'CEDIS Tultitlán III (Edo. Mex)',
+        'MXCD04' => 'CEDIS Tultitlán IV (Edo. Mex)',
+        'MXCD05' => 'CEDIS Naucalpan V (Edo. Mex)',
         'MXRC01' => 'CEDIS Tepotzotlán I (Edo. Mex)',
         'MXRC02' => 'CEDIS Tepotzotlán II (Edo. Mex)',
         'MXNL01' => 'CEDIS Apodaca (Nuevo León)',
@@ -31,10 +35,10 @@ class MeliFullShipment extends Model
     ];
 
     public const CARRIERS = [
+        'Estafeta',
         'Paquetexpress',
         'FedEx',
         'DHL',
-        'Estafeta',
         'Redpack',
         'Tres Guerras',
         'Castores',
