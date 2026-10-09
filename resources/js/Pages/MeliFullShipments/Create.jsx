@@ -448,14 +448,23 @@ export default function MeliFullShipmentsCreate({
 
             <div className="space-y-6 p-4 sm:p-6 lg:p-8">
                 {/* TOP BREADCRUMB */}
-                <div className="flex items-center gap-2 text-xs text-slate-500">
-                    <Link href="/meli/full/envios" className="hover:underline">
-                        Envíos FULL
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between text-xs text-slate-500">
+                    <div className="flex items-center gap-2">
+                        <Link href="/meli/full/envios" className="hover:underline">
+                            Envíos FULL
+                        </Link>
+                        <span>/</span>
+                        <span className="font-bold text-slate-800 dark:text-slate-200">
+                            Nuevo Envío (Flujo de 4 Pasos)
+                        </span>
+                    </div>
+
+                    <Link
+                        href="/meli/full/envios/empaque"
+                        className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-300 bg-emerald-50 px-3.5 py-2 text-xs font-bold text-emerald-800 hover:bg-emerald-100 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-300"
+                    >
+                        <span>⚖️</span> ¿Prefieres empacar caja por caja (1 a 1)? Ir a la Mesa de Empaque
                     </Link>
-                    <span>/</span>
-                    <span className="font-bold text-slate-800 dark:text-slate-200">
-                        Nuevo Envío (Flujo de 4 Pasos)
-                    </span>
                 </div>
 
                 {/* 4-STEP WIZARD PROGRESS BAR */}

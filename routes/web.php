@@ -589,11 +589,16 @@ Route::middleware(['auth', 'role'])->group(function () {
 
     // ENVÍOS MERCADO LIBRE FULL (Cajas de 30 y Guías ENVIA)
     Route::get('/meli/full/envios', [MeliFullShipmentController::class, 'index'])->name('meli-full-shipments.index');
+    Route::get('/meli/full/envios/empaque', [MeliFullShipmentController::class, 'packStation'])->name('meli-full-shipments.pack-station');
     Route::get('/meli/full/envios/crear', [MeliFullShipmentController::class, 'create'])->name('meli-full-shipments.create');
     Route::post('/meli/full/envios', [MeliFullShipmentController::class, 'store'])->name('meli-full-shipments.store');
     Route::get('/meli/full/envios/{shipment}', [MeliFullShipmentController::class, 'show'])->name('meli-full-shipments.show');
     Route::get('/meli/full/envios/{shipment}/editar', [MeliFullShipmentController::class, 'edit'])->name('meli-full-shipments.edit');
     Route::put('/meli/full/envios/{shipment}', [MeliFullShipmentController::class, 'update'])->name('meli-full-shipments.update');
+    Route::post('/meli/full/envios/{shipment}/cajas', [MeliFullShipmentController::class, 'storeBox'])->name('meli-full-shipments.store-box');
+    Route::delete('/meli/full/envios/{shipment}/cajas/{box}', [MeliFullShipmentController::class, 'destroyBox'])->name('meli-full-shipments.destroy-box');
+    Route::post('/meli/full/vincular-producto', [MeliFullShipmentController::class, 'linkProduct'])->name('meli-full-shipments.link-product');
+    Route::post('/meli/full/alta-rapida-producto', [MeliFullShipmentController::class, 'quickCreateProduct'])->name('meli-full-shipments.quick-product');
     Route::post('/meli/full/envios/{shipment}/despachar', [MeliFullShipmentController::class, 'dispatch'])->name('meli-full-shipments.dispatch');
     Route::post('/meli/full/envios/{shipment}/revertir', [MeliFullShipmentController::class, 'revert'])->name('meli-full-shipments.revert');
     Route::post('/meli/full/envios/{shipment}/recibir', [MeliFullShipmentController::class, 'receive'])->name('meli-full-shipments.receive');

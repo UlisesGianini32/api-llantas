@@ -619,4 +619,178 @@ class MeliFullShipmentTest extends TestCase
         $labelResponse->assertSee($this->product1->sku);
         $labelResponse->assertSee('Etiquetas de Producto para Mercado Libre FULL');
     }
+
+    public function test_can_pack_box_one_by_one_and_deduct_inventory_stock_immediately(): void
+    {
+        $shipment = MeliFullShipment::create([
+            'user_id' => $this->user->id,
+            'shipment_code' => 'FULL-ENV-2026-0004',
+            'status' => MeliFullShipment::STATUS_DRAFT,
+            'meli_warehouse_code' => 'MXCD01',
+            'meli_warehouse_name' => 'CEDIS Cuautitlán Izcalli I',
+        ]);
+
+        $initialProduct1Stock = (int) InventoryMovement::where('inventory_product_id', $this->product1->id)->sum('quantity');
+        $this->assertEquals(100, $initialProduct1Stock);
+
+        $boxPayload = [
+            'box_number' => 1,
+            'capacity_kg' => 30.00,
+            'items' => [
+                [
+                    'inventory_product_id' => $this->product1->id,
+                    'sku' => $this->product1->sku,
+                    'product_name' => $this->product1->name,
+                    'quantity_sent' => 15,
+                    'unit_weight_kg' => 1.200,
+                    'requires_labeling' => true,
+                ],
+            ],
+        ];
+
+        $response = $this->actingAs($this->user)->postJson(
+            route('meli-full-shipments.store-box', $shipment->id),
+            $boxPayload
+        );
+
+        $response->assertStatus(200);
+        $response->assertJson([
+            'success' => true,
+        ]);
+
+        // Verificar que la caja se creó correctamente
+        $box = MeliFullShipmentBox::where('meli_full_shipment_id', $shipment->id)->first();
+        $this->assertNotNull($box);
+        $this->assertEquals(1, $box->box_number);
+        $this->assertEquals(15, $box->units_count);
+        $this->assertEquals(18.00, (float) $box->weight_kg);
+
+        // Verificar que se descontaron las 15 piezas inmediatamente con un movimiento TRANSFER_OUT
+        $movement = InventoryMovement::where('inventory_product_id', $this->product1->id)
+            ->where('reference_type', 'meli_full_box')
+            ->where('reference_id', $box->id)
+            ->first();
+
+        $this->assertNotNull($movement);
+        $this->assertEquals(InventoryMovement::TRANSFER_OUT, $movement->type);
+        $this->assertEquals(-15, $movement->quantity);
+
+        $stockAfter = (int) InventoryMovement::where('inventory_product_id', $this->product1->id)->sum('quantity');
+        $this->assertEquals(85, $stockAfter);
+    }
+
+    public function test_can_unpack_box_and_reintegrate_stock_to_warehouse(): void
+    {
+        $shipment = MeliFullShipment::create([
+            'user_id' => $this->user->id,
+            'shipment_code' => 'FULL-ENV-2026-0005',
+            'status' => MeliFullShipment::STATUS_DRAFT,
+            'meli_warehouse_code' => 'MXCD01',
+        ]);
+
+        $service = app(MeliFullShipmentService::class);
+        $box = $service->packBox($shipment, [
+            'box_number' => 1,
+            'items' => [
+                [
+                    'inventory_product_id' => $this->product2->id,
+                    'sku' => $this->product2->sku,
+                    'product_name' => $this->product2->name,
+                    'quantity_sent' => 20,
+                    'unit_weight_kg' => 1.0,
+                ],
+            ],
+        ], $this->user);
+
+        // Stock después de empacar debe ser 80 (100 - 20)
+        $stockPacked = (int) InventoryMovement::where('inventory_product_id', $this->product2->id)->sum('quantity');
+        $this->assertEquals(80, $stockPacked);
+
+        // Desempacar la caja mediante la ruta DELETE
+        $response = $this->actingAs($this->user)->deleteJson(
+            route('meli-full-shipments.destroy-box', [$shipment->id, $box->id])
+        );
+
+        $response->assertStatus(200);
+        $response->assertJson([
+            'success' => true,
+        ]);
+
+        // Verificar que la caja fue eliminada
+        $this->assertDatabaseMissing('meli_full_shipment_boxes', ['id' => $box->id]);
+
+        // Verificar que se registró el reintegro (TRANSFER_IN de +20)
+        $stockReintegrated = (int) InventoryMovement::where('inventory_product_id', $this->product2->id)->sum('quantity');
+        $this->assertEquals(100, $stockReintegrated);
+    }
+
+    public function test_can_link_meli_publication_to_local_product(): void
+    {
+        $payload = [
+            'inventory_product_id' => $this->product1->id,
+            'mlm' => 'MLM99887766',
+            'variation_id' => '17283948',
+            'meli_sku' => 'JOICO-KPAK-FULL',
+        ];
+
+        $response = $this->actingAs($this->user)->postJson(
+            route('meli-full-shipments.link-product'),
+            $payload
+        );
+
+        $response->assertStatus(200);
+        $response->assertJson([
+            'success' => true,
+        ]);
+
+        $this->assertDatabaseHas('inventory_channel_links', [
+            'inventory_product_id' => $this->product1->id,
+            'external_listing_id' => 'MLM99887766',
+            'external_variant_id' => '17283948',
+        ]);
+    }
+
+    public function test_can_quick_create_inventory_product_from_pack_station(): void
+    {
+        $payload = [
+            'name' => 'Acondicionador Joico K-Pak Color Therapy 1000ml',
+            'sku' => 'JOI-KPAK-COND-1L',
+            'barcode' => '074469477999',
+            'brand' => 'Joico',
+            'weight_kg' => 1.100,
+            'initial_stock' => 25,
+            'mlm' => 'MLM55443322',
+        ];
+
+        $response = $this->actingAs($this->user)->postJson(
+            route('meli-full-shipments.quick-product'),
+            $payload
+        );
+
+        $response->assertStatus(200);
+        $response->assertJson([
+            'success' => true,
+        ]);
+
+        // Verificar que el producto fue creado
+        $newProduct = InventoryProduct::where('sku', 'JOI-KPAK-COND-1L')->first();
+        $this->assertNotNull($newProduct);
+        $this->assertEquals('Joico', $newProduct->brand);
+
+        // Verificar que se registró el stock inicial de 25
+        $stock = (int) InventoryMovement::where('inventory_product_id', $newProduct->id)->sum('quantity');
+        $this->assertEquals(25, $stock);
+
+        // Verificar que quedó vinculado a MLM55443322
+        $this->assertDatabaseHas('inventory_channel_links', [
+            'inventory_product_id' => $newProduct->id,
+            'external_listing_id' => 'MLM55443322',
+        ]);
+    }
+
+    public function test_pack_station_view_renders_successfully(): void
+    {
+        $response = $this->actingAs($this->user)->get(route('meli-full-shipments.pack-station'));
+        $response->assertStatus(200);
+    }
 }

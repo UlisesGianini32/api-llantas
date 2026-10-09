@@ -115,18 +115,24 @@ export default function MeliFullShipmentsIndex({
                         </p>
                     </div>
 
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                         <Link
                             href="/meli/full"
                             className="inline-flex items-center gap-1.5 rounded-xl border border-slate-300 bg-white px-3.5 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-200"
                         >
-                            📊 Ver Catálogo FULL
+                            📊 Catálogo FULL
+                        </Link>
+                        <Link
+                            href="/meli/full/envios/empaque"
+                            className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-black text-white shadow-sm hover:bg-emerald-700"
+                        >
+                            <span>⚖️</span> Armar Cajas (1 a 1)
                         </Link>
                         <Link
                             href="/meli/full/envios/crear"
                             className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2 text-xs font-bold text-white shadow-sm hover:bg-indigo-700"
                         >
-                            <span>📦</span> Crear Envío (Cajas 30)
+                            <span>📦</span> Crear Envío Manual
                         </Link>
                     </div>
                 </div>

@@ -2,13 +2,18 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\InventoryChannelLink;
 use App\Models\InventoryProduct;
 use App\Models\MeliFullShipment;
 use App\Models\MeliFullShipmentBox;
+use App\Models\MeliFullShipmentItem;
+use App\Models\MeliFullStock;
 use App\Services\InventoryStockService;
 use App\Services\MeliFullShipmentService;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Schema;
 use Inertia\Inertia;
 use Inertia\Response;
 use Throwable;
@@ -323,5 +328,256 @@ class MeliFullShipmentController extends Controller
             'shipment' => $shipment,
             'items' => $items,
         ]);
+    }
+
+    /**
+     * Mesa de Empaque Caja por Caja (30 kg máx) con báscula visual y descuento inmediato
+     */
+    public function packStation(Request $request): Response
+    {
+        $products = InventoryProduct::query()
+            ->where('is_active', true)
+            ->where('product_type', InventoryProduct::SIMPLE)
+            ->select(['id', 'sku', 'barcode', 'barcode_secondary', 'name', 'brand', 'weight_kg', 'requires_meli_labeling'])
+            ->orderBy('name')
+            ->get()
+            ->map(function ($p) {
+                $p->available_stock = $this->stockService->availableStock($p);
+                $p->weight_kg = (float) ($p->weight_kg ?: 1.000);
+                $p->requires_meli_labeling = (bool) $p->requires_meli_labeling;
+                return $p;
+            });
+
+        $meliFullStocks = [];
+        if (Schema::hasTable('meli_full_stocks')) {
+            $meliFullStocks = MeliFullStock::query()
+                ->select(['id', 'mlm', 'variation_id', 'sku', 'title', 'full_available_quantity', 'thumbnail', 'permalink'])
+                ->orderBy('title')
+                ->get();
+        }
+
+        $channelLinks = InventoryChannelLink::query()
+            ->where('channel', InventoryChannelLink::MERCADO_LIBRE)
+            ->select(['id', 'inventory_product_id', 'external_listing_id', 'external_variant_id'])
+            ->get();
+
+        $channelLinkMap = [];
+        foreach ($channelLinks as $link) {
+            $key = strtoupper((string) $link->external_listing_id) . ($link->external_variant_id ? '_' . $link->external_variant_id : '');
+            $channelLinkMap[$key] = $link->inventory_product_id;
+        }
+
+        $pastLinks = MeliFullShipmentItem::query()
+            ->whereNotNull('inventory_product_id')
+            ->whereNotNull('mlm')
+            ->pluck('inventory_product_id', 'mlm')
+            ->all();
+
+        $productsBySku = $products->keyBy(fn ($p) => strtoupper((string) $p->sku));
+        $productsByBarcode = $products->filter(fn ($p) => ! empty($p->barcode))->keyBy(fn ($p) => (string) $p->barcode);
+
+        $mappedFullStocks = collect($meliFullStocks)->map(function ($stock) use ($channelLinkMap, $pastLinks, $productsBySku, $productsByBarcode) {
+            $mlm = strtoupper(trim((string) $stock->mlm));
+            $var = $stock->variation_id ? trim((string) $stock->variation_id) : '';
+            $key = $mlm . ($var ? '_' . $var : '');
+
+            $linkedId = $channelLinkMap[$key]
+                ?? $channelLinkMap[$mlm]
+                ?? $pastLinks[$mlm]
+                ?? null;
+
+            if (! $linkedId && ! empty($stock->sku)) {
+                $stockSku = strtoupper(trim((string) $stock->sku));
+                $linkedId = $productsBySku[$stockSku]?->id ?? $productsByBarcode[$stockSku]?->id ?? null;
+            }
+
+            $stock->linked_product_id = $linkedId;
+            return $stock;
+        });
+
+        // Envíos activos en preparación (borradores o empacados)
+        $draftShipments = MeliFullShipment::query()
+            ->whereIn('status', [MeliFullShipment::STATUS_DRAFT, MeliFullShipment::STATUS_PACKED])
+            ->with(['boxes' => function ($q) {
+                $q->orderBy('box_number')->with('items.inventoryProduct');
+            }, 'user:id,name'])
+            ->orderByDesc('id')
+            ->get();
+
+        $selectedShipmentId = (int) $request->input('shipment_id', 0);
+        $selectedShipment = null;
+
+        if ($selectedShipmentId > 0) {
+            $selectedShipment = $draftShipments->firstWhere('id', $selectedShipmentId)
+                ?? MeliFullShipment::with(['boxes' => function ($q) {
+                    $q->orderBy('box_number')->with('items.inventoryProduct');
+                }, 'user:id,name'])->find($selectedShipmentId);
+        }
+
+        if (! $selectedShipment && $draftShipments->isNotEmpty()) {
+            $selectedShipment = $draftShipments->first();
+        }
+
+        // Si no existe ningún envío en borrador, generar uno nuevo para empacar de inmediato
+        if (! $selectedShipment) {
+            $selectedShipment = $this->shipmentService->createShipment([
+                'shipment_code' => $this->shipmentService->generateShipmentCode(),
+                'meli_warehouse_code' => 'MXCD01',
+                'notes' => 'Envío inicial generado desde la mesa de empaque caja por caja',
+                'boxes' => [],
+            ], $request->user());
+            $selectedShipment->load(['boxes.items.inventoryProduct', 'user:id,name']);
+            $draftShipments = collect([$selectedShipment]);
+        }
+
+        return Inertia::render('MeliFullShipments/PackStation', [
+            'shipment' => $selectedShipment,
+            'draftShipments' => $draftShipments,
+            'products' => $products,
+            'meliFullStocks' => $mappedFullStocks,
+            'warehouses' => MeliFullShipment::WAREHOUSES,
+            'carriers' => MeliFullShipment::CARRIERS,
+            'nextShipmentCode' => $this->shipmentService->generateShipmentCode(),
+        ]);
+    }
+
+    /**
+     * Guardar y sellar una caja individual en el envío actual con descuento inmediato de stock
+     */
+    public function storeBox(Request $request, MeliFullShipment $shipment): JsonResponse|RedirectResponse
+    {
+        $validated = $request->validate([
+            'box_number' => ['nullable', 'integer', 'min:1'],
+            'bulto_number' => ['nullable', 'integer', 'min:1'],
+            'boxes_in_bulto' => ['nullable', 'integer', 'min:1'],
+            'capacity_kg' => ['nullable', 'numeric', 'min:1'],
+            'dimensions' => ['nullable', 'string', 'max:50'],
+            'items' => ['required', 'array', 'min:1'],
+            'items.*.inventory_product_id' => ['nullable', 'integer', 'exists:inventory_products,id'],
+            'items.*.sku' => ['nullable', 'string', 'max:100'],
+            'items.*.product_name' => ['nullable', 'string', 'max:255'],
+            'items.*.mlm' => ['nullable', 'string', 'max:50'],
+            'items.*.variation_id' => ['nullable', 'string', 'max:50'],
+            'items.*.quantity_sent' => ['required', 'integer', 'min:1'],
+            'items.*.requires_labeling' => ['nullable', 'boolean'],
+            'items.*.unit_weight_kg' => ['nullable', 'numeric', 'min:0'],
+            'items.*.notes' => ['nullable', 'string'],
+        ]);
+
+        try {
+            $box = $this->shipmentService->packBox($shipment, $validated, $request->user());
+
+            if ($request->wantsJson()) {
+                return response()->json([
+                    'success' => true,
+                    'message' => "¡Caja #{$box->box_number} sellada con éxito! Se descontaron {$box->units_count} unidades del almacén local.",
+                    'box' => $box,
+                    'shipment' => $shipment->fresh(['boxes.items.inventoryProduct']),
+                ]);
+            }
+
+            return redirect()->route('meli-full-shipments.pack-station', ['shipment_id' => $shipment->id])
+                ->with('success', "¡Caja #{$box->box_number} sellada! {$box->units_count} piezas descontadas del almacén local.");
+        } catch (Throwable $e) {
+            if ($request->wantsJson()) {
+                return response()->json(['success' => false, 'error' => $e->getMessage()], 422);
+            }
+            return back()->with('error', 'Error al guardar la caja: ' . $e->getMessage());
+        }
+    }
+
+    /**
+     * Desempacar y eliminar una caja, reintegrando su inventario físico
+     */
+    public function destroyBox(Request $request, MeliFullShipment $shipment, MeliFullShipmentBox $box): JsonResponse|RedirectResponse
+    {
+        if ($box->meli_full_shipment_id !== $shipment->id) {
+            abort(404, 'La caja no pertenece a este envío.');
+        }
+
+        try {
+            $boxNumber = $box->box_number;
+            $units = $box->units_count;
+            $this->shipmentService->unpackBox($box, $request->user());
+
+            $msg = "Caja #{$boxNumber} eliminada. {$units} unidades reintegradas al almacén local.";
+
+            if ($request->wantsJson()) {
+                return response()->json([
+                    'success' => true,
+                    'message' => $msg,
+                    'shipment' => $shipment->fresh(['boxes.items.inventoryProduct']),
+                ]);
+            }
+
+            return back()->with('success', $msg);
+        } catch (Throwable $e) {
+            if ($request->wantsJson()) {
+                return response()->json(['success' => false, 'error' => $e->getMessage()], 422);
+            }
+            return back()->with('error', 'Error al eliminar caja: ' . $e->getMessage());
+        }
+    }
+
+    /**
+     * Vincular una publicación FULL con un producto de inventario existente
+     */
+    public function linkProduct(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'inventory_product_id' => ['required', 'integer', 'exists:inventory_products,id'],
+            'mlm' => ['required', 'string', 'max:50'],
+            'variation_id' => ['nullable', 'string', 'max:50'],
+            'meli_sku' => ['nullable', 'string', 'max:100'],
+        ]);
+
+        try {
+            $link = $this->shipmentService->linkProductToMeli(
+                $validated['inventory_product_id'],
+                $validated['mlm'],
+                $validated['variation_id'] ?? null,
+                $validated['meli_sku'] ?? null,
+                $request->user()
+            );
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Producto vinculado exitosamente a la publicación FULL.',
+                'link' => $link,
+                'product' => $link->product,
+            ]);
+        } catch (Throwable $e) {
+            return response()->json(['success' => false, 'error' => $e->getMessage()], 422);
+        }
+    }
+
+    /**
+     * Alta rápida de un producto en inventario local desde la mesa de empaque
+     */
+    public function quickCreateProduct(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'name' => ['required', 'string', 'max:255'],
+            'sku' => ['nullable', 'string', 'max:100'],
+            'barcode' => ['nullable', 'string', 'max:100'],
+            'brand' => ['nullable', 'string', 'max:100'],
+            'weight_kg' => ['nullable', 'numeric', 'min:0.01'],
+            'initial_stock' => ['nullable', 'integer', 'min:0'],
+            'mlm' => ['nullable', 'string', 'max:50'],
+            'variation_id' => ['nullable', 'string', 'max:50'],
+            'meli_sku' => ['nullable', 'string', 'max:100'],
+        ]);
+
+        try {
+            $product = $this->shipmentService->quickCreateProduct($validated, $request->user());
+
+            return response()->json([
+                'success' => true,
+                'message' => "Producto {$product->sku} creado con éxito y vinculado a FULL.",
+                'product' => $product,
+            ]);
+        } catch (Throwable $e) {
+            return response()->json(['success' => false, 'error' => $e->getMessage()], 422);
+        }
     }
 }

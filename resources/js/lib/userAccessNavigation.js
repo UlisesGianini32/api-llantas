@@ -28,6 +28,8 @@ const sections = [
         { key: 'scheduled_discounts', label: 'Promociones programadas', href: '/meli-price-manager/scheduled-discounts', adminOnly: true },
         { key: 'uncategorized', label: 'Pendientes de clasificación', href: '/meli-price-manager/uncategorized', adminOnly: true },
         { key: 'full_inventory', label: 'Inventario FULL', href: '/meli/full' },
+        { key: 'full_shipments', label: 'Cajas 30 kg / Envíos FULL', href: '/meli/full/envios' },
+        { key: 'full_pack_station', label: 'Mesa de Empaque (1 a 1)', href: '/meli/full/envios/empaque' },
     ] },
     { key: 'operations', label: 'Operaciones', items: [
         { key: 'ams_orders', label: 'AMS Pedidos', href: '/ams/pedidos', exact: true },

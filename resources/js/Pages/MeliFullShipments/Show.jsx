@@ -206,6 +206,15 @@ export default function MeliFullShipmentsShow({
 
                         {/* ACTIONS BAR */}
                         <div className="flex flex-wrap items-center gap-2">
+                            {['DRAFT', 'PACKED'].includes(shipment.status) && (
+                                <Link
+                                    href={`/meli/full/envios/empaque?shipment_id=${shipment.id}`}
+                                    className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-300 bg-emerald-50 px-3.5 py-2 text-xs font-bold text-emerald-800 hover:bg-emerald-100 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-300"
+                                >
+                                    <span>⚖️</span> Armar Cajas en Mesa (1 a 1)
+                                </Link>
+                            )}
+
                             <a
                                 href={`/meli/full/envios/${shipment.id}/rotulos`}
                                 target="_blank"
