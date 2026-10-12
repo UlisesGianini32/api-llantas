@@ -3,6 +3,38 @@ import { Head, Link, router } from '@inertiajs/react'
 import AppShell from '@/Components/layout/AppShell'
 import CameraBarcodeScanner from '@/Components/CameraBarcodeScanner'
 
+// Helpers para validación y detección inteligente de UPC / EAN de fábrica vs Sticker MeLi
+function isFactoryUpcOrEan(code) {
+    if (!code) return false
+    const clean = String(code).trim()
+    return /^\d{8}$|^\d{12,14}$/.test(clean)
+}
+
+function getItemUpc(item) {
+    if (!item) return null
+    if (isFactoryUpcOrEan(item.barcode)) return String(item.barcode).trim()
+    if (isFactoryUpcOrEan(item.barcode_secondary)) return String(item.barcode_secondary).trim()
+    if (isFactoryUpcOrEan(item.meli_sku)) return String(item.meli_sku).trim()
+    if (isFactoryUpcOrEan(item.sku)) return String(item.sku).trim()
+    if (item.linked_product) {
+        if (isFactoryUpcOrEan(item.linked_product.barcode)) return String(item.linked_product.barcode).trim()
+        if (isFactoryUpcOrEan(item.linked_product.sku)) return String(item.linked_product.sku).trim()
+    }
+    return null
+}
+
+function checkItemRequiresLabeling(item) {
+    if (!item) return false
+    if (item.requires_meli_labeling !== undefined && item.requires_meli_labeling !== null) {
+        return Boolean(item.requires_meli_labeling)
+    }
+    const upc = getItemUpc(item)
+    // Si tiene UPC de fábrica válido, no requiere sticker de MeLi
+    if (upc) return false
+    // Si no tiene código de fábrica (kits como KITALFA15 o SKUs internos), requiere sticker MeLi
+    return true
+}
+
 export default function MeliFullShipmentsPackStation({
     shipment = {},
     draftShipments = [],
@@ -33,6 +65,16 @@ export default function MeliFullShipmentsPackStation({
     const [inputWeight, setInputWeight] = useState(1.000)
     const [requiresLabeling, setRequiresLabeling] = useState(false)
     const [showSuggestionsCarousel, setShowSuggestionsCarousel] = useState(true)
+
+    // Weight persistence state
+    const [savingWeight, setSavingWeight] = useState(false)
+    const [savedWeightNotification, setSavedWeightNotification] = useState(null)
+
+    // Modal: Paso 3 de Mercado Libre (Revisión de Etiquetado y Códigos UPC)
+    const [step3ModalOpen, setStep3ModalOpen] = useState(false)
+    const [step3Phase, setStep3Phase] = useState(1) // 1: Sin etiquetado (Revisar UPCs) | 2: Con etiquetado MeLi (Imprimir stickers)
+    const [step3TargetBox, setStep3TargetBox] = useState(null) // null = active box, or a sealed box object
+    const [verifiedUpcIds, setVerifiedUpcIds] = useState(new Set())
 
     // Modal: Link Product
     const [linkModalOpen, setLinkModalOpen] = useState(false)
@@ -111,6 +153,19 @@ export default function MeliFullShipmentsPackStation({
 
         const formatFullItem = (st, extra = {}) => {
             const linkedProd = st.linked_product_id ? productsMap.get(st.linked_product_id) : null
+            const itemWeight = extra.weight_kg !== undefined && extra.weight_kg !== null
+                ? parseFloat(extra.weight_kg)
+                : (st.weight_kg !== undefined && st.weight_kg !== null
+                    ? parseFloat(st.weight_kg)
+                    : (linkedProd?.weight_kg ? parseFloat(linkedProd.weight_kg) : 1.0))
+            const reqLabeling = extra.requires_meli_labeling !== undefined
+                ? extra.requires_meli_labeling
+                : (st.requires_meli_labeling !== undefined && st.requires_meli_labeling !== null
+                    ? Boolean(st.requires_meli_labeling)
+                    : (linkedProd?.requires_meli_labeling !== undefined
+                        ? Boolean(linkedProd.requires_meli_labeling)
+                        : null))
+
             return {
                 type: 'FULL',
                 id: `full_${st.id}`,
@@ -122,7 +177,8 @@ export default function MeliFullShipmentsPackStation({
                 full_available: st.full_available_quantity ?? st.full_available ?? 0,
                 linked_product_id: st.linked_product_id || linkedProd?.id || null,
                 linked_product: linkedProd,
-                weight_kg: extra.weight_kg || linkedProd?.weight_kg || 1.0,
+                weight_kg: itemWeight,
+                requires_meli_labeling: reqLabeling,
                 suggested_quantity: extra.suggested_quantity || (linkedProd?.available_stock ? Math.min(linkedProd.available_stock, 10) : 10),
                 priority: extra.priority,
                 badge: extra.badge,
@@ -136,11 +192,12 @@ export default function MeliFullShipmentsPackStation({
             inventory_product_id: p.id,
             sku: p.sku,
             barcode: p.barcode,
+            barcode_secondary: p.barcode_secondary,
             name: p.name,
             brand: p.brand || '',
             available_stock: p.available_stock ?? 0,
             weight_kg: parseFloat(p.weight_kg) || 1.0,
-            requires_meli_labeling: Boolean(p.requires_meli_labeling),
+            requires_meli_labeling: p.requires_meli_labeling !== undefined && p.requires_meli_labeling !== null ? Boolean(p.requires_meli_labeling) : null,
         })
 
         // Tab: AGOTADOS EN FULL
@@ -205,10 +262,13 @@ export default function MeliFullShipmentsPackStation({
                         thumbnail: r.thumbnail,
                         full_available_quantity: r.full_available,
                         linked_product_id: r.linked_product_id,
+                        weight_kg: r.weight_kg,
+                        requires_meli_labeling: r.requires_meli_labeling,
                     },
                     {
                         meli_sku: r.meli_sku,
                         weight_kg: r.weight_kg,
+                        requires_meli_labeling: r.requires_meli_labeling,
                         suggested_quantity: r.suggested_quantity,
                         priority: r.priority,
                         badge: r.badge,
@@ -251,11 +311,59 @@ export default function MeliFullShipmentsPackStation({
         return [...fullMatches.slice(0, 15), ...localMatches.slice(0, 15)]
     }, [searchQuery, searchTab, localFullStocks, localProducts, productsMap, recommendations])
 
+    // Save product weight and labeling permanently to server and local cache
+    const handleSaveWeight = async (item, weightValue, reqLabel = null) => {
+        const w = parseFloat(weightValue)
+        if (isNaN(w) || w <= 0) return
+
+        try {
+            setSavingWeight(true)
+            const payload = {
+                weight_kg: w,
+                inventory_product_id: item?.inventory_product_id || item?.linked_product_id || null,
+                mlm: item?.mlm || null,
+                sku: item?.sku || item?.meli_sku || null,
+                requires_meli_labeling: reqLabel !== null ? reqLabel : undefined,
+            }
+
+            const res = await fetch('/meli/full/guardar-peso', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                    'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '',
+                },
+                body: JSON.stringify(payload),
+            })
+            const data = await res.json()
+            if (res.ok && data.success) {
+                if (payload.inventory_product_id) {
+                    setLocalProducts((prev) =>
+                        prev.map((p) => (p.id === payload.inventory_product_id ? { ...p, weight_kg: w } : p))
+                    )
+                }
+                if (payload.mlm) {
+                    setLocalFullStocks((prev) =>
+                        prev.map((st) => (st.mlm === payload.mlm ? { ...st, weight_kg: w } : st))
+                    )
+                }
+
+                setSavedWeightNotification(`✓ Peso guardado permanentemente (${w} kg)`)
+                setTimeout(() => setSavedWeightNotification(null), 3000)
+            }
+        } catch (err) {
+            console.error('Error saving weight:', err)
+        } finally {
+            setSavingWeight(false)
+        }
+    }
+
     // Select an item from search
     const handleSelectItem = (item) => {
         setSelectedItem(item)
-        setInputWeight(item.weight_kg || 1.0)
-        setRequiresLabeling(item.type === 'FULL' ? true : Boolean(item.requires_meli_labeling))
+        const savedWeight = item.weight_kg !== undefined && item.weight_kg !== null ? parseFloat(item.weight_kg) : 1.000
+        setInputWeight(savedWeight > 0 ? savedWeight : 1.000)
+        setRequiresLabeling(checkItemRequiresLabeling(item))
         if (item.suggested_quantity && item.suggested_quantity > 0) {
             setInputQty(item.suggested_quantity)
         } else {
@@ -279,6 +387,7 @@ export default function MeliFullShipmentsPackStation({
             linked_product_id: sug.linked_product_id || linkedProd?.id || null,
             linked_product: linkedProd,
             weight_kg: sug.weight_kg || linkedProd?.weight_kg || 1.0,
+            requires_meli_labeling: sug.requires_meli_labeling,
             suggested_quantity: sug.suggested_quantity > 0 ? sug.suggested_quantity : 10,
             priority: sug.priority,
             badge: sug.badge,
@@ -307,11 +416,12 @@ export default function MeliFullShipmentsPackStation({
                 inventory_product_id: localMatch.id,
                 sku: localMatch.sku,
                 barcode: localMatch.barcode,
+                barcode_secondary: localMatch.barcode_secondary,
                 name: localMatch.name,
                 brand: localMatch.brand || '',
                 available_stock: localMatch.available_stock ?? 0,
                 weight_kg: parseFloat(localMatch.weight_kg) || 1.0,
-                requires_meli_labeling: Boolean(localMatch.requires_meli_labeling),
+                requires_meli_labeling: localMatch.requires_meli_labeling !== undefined ? Boolean(localMatch.requires_meli_labeling) : null,
             })
             return
         }
@@ -336,7 +446,8 @@ export default function MeliFullShipmentsPackStation({
                 full_available: fullMatch.full_available_quantity ?? 0,
                 linked_product_id: fullMatch.linked_product_id,
                 linked_product: linkedProd,
-                weight_kg: linkedProd?.weight_kg || 1.0,
+                weight_kg: fullMatch.weight_kg || linkedProd?.weight_kg || 1.0,
+                requires_meli_labeling: fullMatch.requires_meli_labeling,
             })
             return
         }
@@ -353,6 +464,14 @@ export default function MeliFullShipmentsPackStation({
 
         const w = parseFloat(inputWeight) || 1.0
 
+        // Auto-guardar peso y requerimiento de etiquetado en base de datos si cambiaron
+        const prevWeight = parseFloat(selectedItem.weight_kg) || 0
+        if (w > 0 && Math.abs(prevWeight - w) > 0.001) {
+            handleSaveWeight(selectedItem, w, requiresLabeling)
+        }
+
+        const detectedUpc = getItemUpc(selectedItem)
+
         let itemToAdd = null
         if (selectedItem.type === 'FULL') {
             const linkedProd = selectedItem.linked_product_id ? productsMap.get(selectedItem.linked_product_id) : null
@@ -362,6 +481,8 @@ export default function MeliFullShipmentsPackStation({
                 inventory_product_id: selectedItem.linked_product_id || null,
                 sku: selectedItem.meli_sku || linkedProd?.sku || 'FULL-ITEM',
                 product_name: selectedItem.title || linkedProd?.name || 'Producto FULL',
+                thumbnail: selectedItem.thumbnail || null,
+                upc: detectedUpc,
                 mlm: selectedItem.mlm,
                 variation_id: selectedItem.variation_id,
                 quantity_sent: qty,
@@ -377,6 +498,8 @@ export default function MeliFullShipmentsPackStation({
                 inventory_product_id: selectedItem.inventory_product_id,
                 sku: selectedItem.sku,
                 product_name: selectedItem.name,
+                thumbnail: null,
+                upc: detectedUpc,
                 mlm: null,
                 variation_id: null,
                 quantity_sent: qty,
@@ -409,9 +532,95 @@ export default function MeliFullShipmentsPackStation({
         setInputQty(10)
     }
 
+    // Toggle labeling on an item in the active box
+    const handleToggleItemLabeling = (tempId) => {
+        setCurrentBoxItems((prev) =>
+            prev.map((it) => {
+                if (it.temp_id === tempId) {
+                    const newReq = !it.requires_labeling
+                    handleSaveWeight(it, it.unit_weight_kg, newReq)
+                    return { ...it, requires_labeling: newReq }
+                }
+                return it
+            })
+        )
+    }
+
     // Remove item from current box
     const handleRemoveItemFromCurrentBox = (tempId) => {
         setCurrentBoxItems(currentBoxItems.filter((it) => it.temp_id !== tempId))
+    }
+
+    // Active Box computation for Step 3 modal
+    const activeBoxForStep3 = useMemo(() => {
+        if (step3TargetBox) {
+            return {
+                boxNumber: step3TargetBox.box_number,
+                boxCode: step3TargetBox.box_code,
+                weightKg: parseFloat(step3TargetBox.weight_kg) || 0,
+                unitsCount: step3TargetBox.units_count,
+                items: (step3TargetBox.items || []).map((it) => ({
+                    id: it.id,
+                    temp_id: it.id,
+                    product_name: it.product_name,
+                    sku: it.sku,
+                    mlm: it.mlm,
+                    quantity_sent: it.quantity_sent,
+                    requires_labeling: Boolean(it.requires_labeling),
+                    upc: isFactoryUpcOrEan(it.inventoryProduct?.barcode)
+                        ? it.inventoryProduct.barcode
+                        : (isFactoryUpcOrEan(it.sku) ? it.sku : (it.inventoryProduct?.barcode || null)),
+                    thumbnail: null,
+                    brand: it.inventoryProduct?.brand || '',
+                })),
+            }
+        }
+        return {
+            boxNumber: boxNumber,
+            boxCode: `CAJA #${boxNumber}`,
+            weightKg: currentBoxWeight,
+            unitsCount: currentBoxUnits,
+            items: currentBoxItems.map((it) => ({
+                id: it.temp_id,
+                temp_id: it.temp_id,
+                product_name: it.product_name,
+                sku: it.sku,
+                mlm: it.mlm,
+                quantity_sent: it.quantity_sent,
+                requires_labeling: Boolean(it.requires_labeling),
+                upc: it.upc || getItemUpc(it) || (isFactoryUpcOrEan(it.sku) ? it.sku : null),
+                thumbnail: it.thumbnail,
+                brand: it.brand || '',
+            })),
+        }
+    }, [step3TargetBox, boxNumber, currentBoxWeight, currentBoxUnits, currentBoxItems])
+
+    const step3ItemsWithoutLabel = useMemo(() => {
+        return (activeBoxForStep3.items || []).filter((it) => !it.requires_labeling)
+    }, [activeBoxForStep3])
+
+    const step3ItemsWithLabel = useMemo(() => {
+        return (activeBoxForStep3.items || []).filter((it) => it.requires_labeling)
+    }, [activeBoxForStep3])
+
+    const openStep3Modal = (targetBox = null) => {
+        setStep3TargetBox(targetBox)
+        setStep3Phase(1)
+        setStep3ModalOpen(true)
+    }
+
+    const toggleVerifyUpc = (id) => {
+        setVerifiedUpcIds((prev) => {
+            const next = new Set(prev)
+            if (next.has(id)) next.delete(id)
+            else next.add(id)
+            return next
+        })
+    }
+
+    const verifyAllUpcs = () => {
+        const all = new Set(step3ItemsWithoutLabel.map((it) => it.id))
+        setVerifiedUpcIds(all)
     }
 
     // SEAL / SAVE BOX (DESCONTAR STOCK INMEDIATAMENTE)
@@ -1395,24 +1604,45 @@ export default function MeliFullShipmentsPackStation({
                                             </div>
 
                                             <div>
-                                                <label className="text-[11px] font-bold uppercase text-slate-500 block mb-1">
-                                                    Peso unitario (kg)
-                                                </label>
-                                                <input
-                                                    type="number"
-                                                    step="0.05"
-                                                    min="0.01"
-                                                    value={inputWeight}
-                                                    onChange={(e) => setInputWeight(e.target.value)}
-                                                    className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-bold text-slate-900 dark:border-neutral-700 dark:bg-neutral-800 dark:text-white"
-                                                />
+                                                <div className="flex items-center justify-between mb-1">
+                                                    <label className="text-[11px] font-bold uppercase text-slate-500">
+                                                        Peso unitario (kg)
+                                                    </label>
+                                                    {selectedItem?.weight_kg && parseFloat(selectedItem.weight_kg) > 0 && (
+                                                        <span className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400">
+                                                            ✓ Guardado
+                                                        </span>
+                                                    )}
+                                                </div>
+                                                <div className="flex items-center gap-1.5">
+                                                    <input
+                                                        type="number"
+                                                        step="0.01"
+                                                        min="0.001"
+                                                        value={inputWeight}
+                                                        onChange={(e) => setInputWeight(e.target.value)}
+                                                        className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-bold text-slate-900 dark:border-neutral-700 dark:bg-neutral-800 dark:text-white"
+                                                    />
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => handleSaveWeight(selectedItem, inputWeight, requiresLabeling)}
+                                                        disabled={savingWeight}
+                                                        title="Guardar peso en la base de datos para no volver a pedirlo"
+                                                        className="rounded-xl border border-slate-300 bg-slate-100 hover:bg-slate-200 p-2 text-xs font-bold text-slate-700 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-300"
+                                                    >
+                                                        💾
+                                                    </button>
+                                                </div>
                                                 <span className="text-[10px] text-slate-400 mt-1 block">
                                                     Suma a la caja: +{(parseFloat(inputQty || 0) * parseFloat(inputWeight || 0)).toFixed(2)} kg
                                                 </span>
                                             </div>
 
-                                            <div className="flex items-center">
-                                                <label className="flex items-center gap-2 cursor-pointer mt-3">
+                                            <div className="flex flex-col justify-center">
+                                                <label className="text-[11px] font-bold uppercase text-slate-500 block mb-1">
+                                                    Etiquetado MeLi
+                                                </label>
+                                                <label className="flex items-center gap-2 cursor-pointer">
                                                     <input
                                                         type="checkbox"
                                                         checked={requiresLabeling}
@@ -1420,9 +1650,14 @@ export default function MeliFullShipmentsPackStation({
                                                         className="rounded text-indigo-600 focus:ring-indigo-500"
                                                     />
                                                     <span className="text-xs font-bold text-slate-700 dark:text-slate-300">
-                                                        🏷️ Requiere sticker MeLi
+                                                        {requiresLabeling ? '🏷️ Requiere Sticker MeLi' : '✓ UPC de Fábrica (Sin sticker)'}
                                                     </span>
                                                 </label>
+                                                <span className="text-[10px] text-slate-400 mt-1">
+                                                    {requiresLabeling
+                                                        ? 'Para kits o productos sin código de fábrica'
+                                                        : `Usa código físico (${getItemUpc(selectedItem) || 'UPC original'})`}
+                                                </span>
                                             </div>
 
                                             <div className="flex items-end">
@@ -1441,19 +1676,30 @@ export default function MeliFullShipmentsPackStation({
 
                             {/* 3. CURRENT BOX ITEMS TABLE */}
                             <div className="mt-6">
-                                <div className="flex items-center justify-between mb-3">
+                                <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
                                     <h3 className="text-xs font-bold uppercase tracking-wider text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
                                         <span>📦</span> Contenido actual de la Caja #{boxNumber} ({currentBoxItems.length} tipos de producto)
                                     </h3>
-                                    {currentBoxItems.length > 0 && (
-                                        <button
-                                            type="button"
-                                            onClick={() => setCurrentBoxItems([])}
-                                            className="text-xs text-rose-600 hover:underline"
-                                        >
-                                            Vaciar caja actual
-                                        </button>
-                                    )}
+                                    <div className="flex items-center gap-2">
+                                        {currentBoxItems.length > 0 && (
+                                            <button
+                                                type="button"
+                                                onClick={() => openStep3Modal(null)}
+                                                className="inline-flex items-center gap-1.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-amber-950 font-black px-3.5 py-1.5 text-xs shadow-sm transition-all hover:scale-105"
+                                            >
+                                                <span>🏷️</span> Paso 3: Revisión de UPCs y Stickers ({currentBoxUnits} uds)
+                                            </button>
+                                        )}
+                                        {currentBoxItems.length > 0 && (
+                                            <button
+                                                type="button"
+                                                onClick={() => setCurrentBoxItems([])}
+                                                className="text-xs text-rose-600 hover:underline"
+                                            >
+                                                Vaciar caja
+                                            </button>
+                                        )}
+                                    </div>
                                 </div>
 
                                 {currentBoxItems.length === 0 ? (
@@ -1472,7 +1718,7 @@ export default function MeliFullShipmentsPackStation({
                                             <thead className="bg-slate-50 text-[11px] font-bold uppercase text-slate-500 dark:bg-neutral-800 dark:text-slate-400">
                                                 <tr>
                                                     <th className="py-2.5 px-3">SKU / MeLi</th>
-                                                    <th className="py-2.5 px-3">Producto</th>
+                                                    <th className="py-2.5 px-3">Producto & Etiquetado</th>
                                                     <th className="py-2.5 px-3 text-center">Cantidad</th>
                                                     <th className="py-2.5 px-3 text-center">Peso Unit.</th>
                                                     <th className="py-2.5 px-3 text-center">Peso Total</th>
@@ -1488,13 +1734,27 @@ export default function MeliFullShipmentsPackStation({
                                                             {it.mlm && <span className="text-[10px] text-slate-400 font-normal">{it.mlm}</span>}
                                                         </td>
                                                         <td className="py-2.5 px-3 font-semibold text-slate-800 dark:text-slate-200">
-                                                            <div className="flex items-center gap-1.5">
-                                                                <span>{it.product_name}</span>
-                                                                {it.requires_labeling && (
-                                                                    <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-[9px] font-black text-indigo-800 dark:bg-indigo-950 dark:text-indigo-300">
-                                                                        🏷️ Sticker
-                                                                    </span>
-                                                                )}
+                                                            <div className="flex flex-col gap-1">
+                                                                <span className="line-clamp-1" title={it.product_name}>{it.product_name}</span>
+                                                                <div className="flex items-center gap-2">
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => handleToggleItemLabeling(it.temp_id)}
+                                                                        title="Haz clic para alternar entre UPC de fábrica y Sticker MeLi"
+                                                                        className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold transition-all hover:scale-105 ${
+                                                                            it.requires_labeling
+                                                                                ? 'bg-purple-100 text-purple-900 border border-purple-300 dark:bg-purple-950 dark:text-purple-300'
+                                                                                : 'bg-emerald-100 text-emerald-900 border border-emerald-300 dark:bg-emerald-950 dark:text-emerald-300'
+                                                                        }`}
+                                                                    >
+                                                                        {it.requires_labeling ? (
+                                                                            <>🏷️ Requiere Sticker MeLi</>
+                                                                        ) : (
+                                                                            <>✓ UPC Fábrica: <span className="font-mono">{it.upc || it.sku}</span></>
+                                                                        )}
+                                                                        <span className="text-[9px] opacity-60">⇄</span>
+                                                                    </button>
+                                                                </div>
                                                             </div>
                                                         </td>
                                                         <td className="py-2.5 px-3 text-center font-bold text-slate-900 dark:text-white">
@@ -1629,6 +1889,13 @@ export default function MeliFullShipmentsPackStation({
                                                         >
                                                             <span>🖨️</span> Rótulo
                                                         </a>
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => openStep3Modal(box)}
+                                                            className="inline-flex items-center gap-1 rounded-lg border border-amber-300 bg-amber-50 px-2 py-0.5 text-[10px] font-bold text-amber-900 hover:bg-amber-100 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-200"
+                                                        >
+                                                            <span>🏷️</span> Paso 3 UPC/Stickers
+                                                        </button>
                                                         <button
                                                             type="button"
                                                             onClick={() => handleUnpackBox(box)}
@@ -1908,6 +2175,348 @@ export default function MeliFullShipmentsPackStation({
                                 </button>
                             </div>
                         </form>
+                    </div>
+                </div>
+            )}
+
+            {/* MODAL 3: PASO 3 DE MERCADO LIBRE (REVISIÓN DE ETIQUETADO Y CÓDIGOS UPC) */}
+            {step3ModalOpen && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
+                    <div className="w-full max-w-4xl max-h-[92vh] flex flex-col rounded-3xl bg-white shadow-2xl dark:bg-neutral-900 border border-slate-200 dark:border-neutral-800 overflow-hidden">
+                        {/* TOP MERCADO LIBRE YELLOW BANNER */}
+                        <div className="bg-[#ffe600] px-6 py-3.5 border-b border-amber-300 text-slate-900 flex items-center justify-between">
+                            <div className="flex items-center gap-3">
+                                <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-slate-900 text-amber-300 font-black text-sm">
+                                    ⚡
+                                </span>
+                                <div>
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-[10px] font-black uppercase tracking-wider bg-slate-900 text-white px-2 py-0.5 rounded-full">
+                                            MERCADO LIBRE FULL
+                                        </span>
+                                        <span className="text-xs font-black text-slate-800">
+                                            PASO 3 DE 4: REVISIÓN DE ETIQUETADO Y UPCs
+                                        </span>
+                                    </div>
+                                    <h2 className="text-sm font-black text-slate-900">
+                                        Caja #{activeBoxForStep3.boxNumber} ({activeBoxForStep3.unitsCount} unidades en total)
+                                    </h2>
+                                </div>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => setStep3ModalOpen(false)}
+                                className="text-slate-700 hover:text-black font-black text-lg p-1"
+                            >
+                                ✕
+                            </button>
+                        </div>
+
+                        {/* STEP NAVIGATION TABS (FASE 1 vs FASE 2) */}
+                        <div className="flex border-b border-slate-200 bg-slate-50 dark:border-neutral-800 dark:bg-neutral-950">
+                            <button
+                                type="button"
+                                onClick={() => setStep3Phase(1)}
+                                className={`flex-1 flex items-center justify-center gap-2 py-3 px-4 text-xs font-black transition-all border-b-2 ${
+                                    step3Phase === 1
+                                        ? 'border-indigo-600 bg-white text-indigo-600 dark:bg-neutral-900 dark:text-indigo-400'
+                                        : 'border-transparent text-slate-500 hover:text-slate-800 dark:text-slate-400'
+                                }`}
+                            >
+                                <span className={`flex h-5 w-5 items-center justify-center rounded-full text-[10px] ${
+                                    step3Phase === 1 ? 'bg-indigo-600 text-white' : 'bg-slate-200 text-slate-700 dark:bg-neutral-800 dark:text-slate-300'
+                                }`}>
+                                    1
+                                </span>
+                                <span>Sin etiquetado MeLi (Revisar UPCs de fábrica)</span>
+                                <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-black text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300">
+                                    {step3ItemsWithoutLabel.reduce((acc, it) => acc + (parseInt(it.quantity_sent, 10) || 0), 0)} uds
+                                </span>
+                            </button>
+
+                            <button
+                                type="button"
+                                onClick={() => setStep3Phase(2)}
+                                className={`flex-1 flex items-center justify-center gap-2 py-3 px-4 text-xs font-black transition-all border-b-2 ${
+                                    step3Phase === 2
+                                        ? 'border-indigo-600 bg-white text-indigo-600 dark:bg-neutral-900 dark:text-indigo-400'
+                                        : 'border-transparent text-slate-500 hover:text-slate-800 dark:text-slate-400'
+                                }`}
+                            >
+                                <span className={`flex h-5 w-5 items-center justify-center rounded-full text-[10px] ${
+                                    step3Phase === 2 ? 'bg-indigo-600 text-white' : 'bg-slate-200 text-slate-700 dark:bg-neutral-800 dark:text-slate-300'
+                                }`}>
+                                    2
+                                </span>
+                                <span>Con etiquetado MeLi (Imprimir Stickers)</span>
+                                <span className="rounded-full bg-purple-100 px-2 py-0.5 text-[10px] font-black text-purple-800 dark:bg-purple-950 dark:text-purple-300">
+                                    {step3ItemsWithLabel.reduce((acc, it) => acc + (parseInt(it.quantity_sent, 10) || 0), 0)} uds
+                                </span>
+                            </button>
+                        </div>
+
+                        {/* MODAL BODY (SCROLLABLE) */}
+                        <div className="flex-1 overflow-y-auto p-6 space-y-4">
+                            {step3Phase === 1 && (
+                                <div>
+                                    {/* PHASE 1 INFO BANNER */}
+                                    <div className="rounded-2xl border border-emerald-200 bg-emerald-50/70 p-4 dark:border-emerald-900/60 dark:bg-emerald-950/40">
+                                        <div className="flex items-start gap-3">
+                                            <span className="text-xl">✅</span>
+                                            <div>
+                                                <h4 className="text-xs font-black text-emerald-950 dark:text-emerald-200">
+                                                    Mercado Libre indica: Productos con código de barras de fábrica
+                                                </h4>
+                                                <p className="text-xs text-emerald-800 dark:text-emerald-300 mt-0.5 leading-relaxed">
+                                                    Revisa que el código de barras (UPC / EAN) de los siguientes productos coincida exactamente con el de su empaque físico.
+                                                    <strong> Estos productos NO necesitan sticker impreso</strong> porque el personal del centro FULL escaneará su código original.
+                                                </p>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {/* ITEMS LIST PHASE 1 */}
+                                    {step3ItemsWithoutLabel.length === 0 ? (
+                                        <div className="mt-4 rounded-2xl border-2 border-dashed border-slate-200 p-8 text-center dark:border-neutral-800">
+                                            <span className="text-3xl block mb-2">🏷️</span>
+                                            <h4 className="text-xs font-black text-slate-800 dark:text-slate-200">
+                                                Todos los productos de esta caja requieren sticker impreso MeLi
+                                            </h4>
+                                            <p className="text-xs text-slate-500 mt-1">
+                                                Pasa a la Fase 2 para imprimir los stickers individuales de los productos.
+                                            </p>
+                                            <button
+                                                type="button"
+                                                onClick={() => setStep3Phase(2)}
+                                                className="mt-3 rounded-xl bg-indigo-600 px-4 py-2 text-xs font-black text-white hover:bg-indigo-700 shadow-sm"
+                                            >
+                                                Ir a Fase 2: Imprimir Stickers ➜
+                                            </button>
+                                        </div>
+                                    ) : (
+                                        <div className="mt-4 space-y-3">
+                                            {step3ItemsWithoutLabel.map((it) => {
+                                                const isVerified = verifiedUpcIds.has(it.id)
+                                                return (
+                                                    <div
+                                                        key={it.id}
+                                                        className={`rounded-2xl border p-4 transition-all ${
+                                                            isVerified
+                                                                ? 'border-emerald-300 bg-emerald-50/40 dark:border-emerald-900/50 dark:bg-emerald-950/20'
+                                                                : 'border-slate-200 bg-white hover:shadow-sm dark:border-neutral-800 dark:bg-neutral-900'
+                                                        }`}
+                                                    >
+                                                        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                                                            <div className="flex items-start gap-3 min-w-0">
+                                                                {it.thumbnail ? (
+                                                                    <img
+                                                                        src={it.thumbnail}
+                                                                        alt=""
+                                                                        className="h-12 w-12 rounded-xl object-cover border border-slate-200 flex-shrink-0"
+                                                                    />
+                                                                ) : (
+                                                                    <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-emerald-50 text-xl font-bold text-emerald-600 dark:bg-neutral-800 flex-shrink-0">
+                                                                        📦
+                                                                    </div>
+                                                                )}
+                                                                <div className="min-w-0">
+                                                                    <h4 className="text-xs font-black text-slate-900 dark:text-white line-clamp-1" title={it.product_name}>
+                                                                        {it.product_name}
+                                                                    </h4>
+                                                                    <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-500 mt-1">
+                                                                        {it.brand && <span>Marca: <strong>{it.brand}</strong> ·</span>}
+                                                                        <span>Cantidad en caja: <strong className="text-slate-900 dark:text-white font-mono">{it.quantity_sent} uds</strong></span>
+                                                                    </div>
+
+                                                                    {/* LARGE UPC NUMBER VISUAL */}
+                                                                    <div className="mt-2 inline-flex items-center gap-2 rounded-xl bg-slate-100 px-3 py-1.5 dark:bg-neutral-800 border border-slate-200 dark:border-neutral-700">
+                                                                        <span className="text-xs">🏷️</span>
+                                                                        <span className="text-[10px] font-bold uppercase text-slate-500">
+                                                                            CÓDIGO UPC / EAN:
+                                                                        </span>
+                                                                        <span className="font-mono text-sm font-black text-slate-900 dark:text-white tracking-widest">
+                                                                            {it.upc || it.sku}
+                                                                        </span>
+                                                                    </div>
+                                                                </div>
+                                                            </div>
+
+                                                            {/* ACTION / VERIFY BUTTONS */}
+                                                            <div className="flex flex-col sm:items-end gap-1.5 flex-shrink-0">
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => toggleVerifyUpc(it.id)}
+                                                                    className={`inline-flex items-center justify-center gap-1.5 rounded-xl px-4 py-2 text-xs font-black transition-all ${
+                                                                        isVerified
+                                                                            ? 'bg-emerald-600 text-white shadow-sm'
+                                                                            : 'bg-slate-100 text-slate-700 hover:bg-slate-200 border border-slate-200 dark:bg-neutral-800 dark:text-slate-200 dark:border-neutral-700'
+                                                                    }`}
+                                                                >
+                                                                    <span>{isVerified ? '✓' : '⚪'}</span>
+                                                                    <span>{isVerified ? 'UPC Confirmado' : 'Cotejar UPC'}</span>
+                                                                </button>
+
+                                                                {!step3TargetBox && (
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => handleToggleItemLabeling(it.temp_id)}
+                                                                        className="text-[10px] text-purple-600 dark:text-purple-400 hover:underline font-semibold"
+                                                                    >
+                                                                        ⚠️ ¿Código dañado? Cambiar a Requiere Sticker
+                                                                    </button>
+                                                                )}
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                )
+                                            })}
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
+                            {step3Phase === 2 && (
+                                <div>
+                                    {/* PHASE 2 INFO BANNER */}
+                                    <div className="rounded-2xl border border-purple-200 bg-purple-50/70 p-4 dark:border-purple-900/60 dark:bg-purple-950/40">
+                                        <div className="flex items-start gap-3">
+                                            <span className="text-xl">🏷️</span>
+                                            <div>
+                                                <h4 className="text-xs font-black text-purple-950 dark:text-purple-200">
+                                                    Mercado Libre indica: Productos que SÍ ocupan etiquetado MeLi
+                                                </h4>
+                                                <p className="text-xs text-purple-800 dark:text-purple-300 mt-0.5 leading-relaxed">
+                                                    Estos productos (kits o artículos sin UPC legible) necesitan etiqueta de Mercado Libre. Imprime las etiquetas y pégalas cubriendo cualquier código anterior antes de cerrar la caja.
+                                                </p>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {/* ITEMS LIST PHASE 2 */}
+                                    {step3ItemsWithLabel.length === 0 ? (
+                                        <div className="mt-4 rounded-2xl border-2 border-dashed border-emerald-200 bg-emerald-50/30 p-8 text-center dark:border-emerald-900/50">
+                                            <span className="text-3xl block mb-2">🎉</span>
+                                            <h4 className="text-xs font-black text-emerald-950 dark:text-emerald-200">
+                                                ¡Excelente! Ningún producto de esta caja requiere sticker MeLi
+                                            </h4>
+                                            <p className="text-xs text-emerald-700 dark:text-emerald-400 mt-1">
+                                                Todos los productos ingresarán al CEDIS FULL escaneando su UPC original de fábrica.
+                                            </p>
+                                        </div>
+                                    ) : (
+                                        <div className="mt-4 space-y-3">
+                                            {step3ItemsWithLabel.map((it) => (
+                                                <div
+                                                    key={it.id}
+                                                    className="rounded-2xl border border-purple-200 bg-white p-4 shadow-sm dark:border-neutral-800 dark:bg-neutral-900"
+                                                >
+                                                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                                                        <div className="flex items-start gap-3 min-w-0">
+                                                            {it.thumbnail ? (
+                                                                <img
+                                                                    src={it.thumbnail}
+                                                                    alt=""
+                                                                    className="h-12 w-12 rounded-xl object-cover border border-slate-200 flex-shrink-0"
+                                                                />
+                                                            ) : (
+                                                                <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-purple-50 text-xl font-bold text-purple-600 dark:bg-neutral-800 flex-shrink-0">
+                                                                    🏷️
+                                                                </div>
+                                                            )}
+                                                            <div className="min-w-0">
+                                                                <div className="flex items-center gap-2">
+                                                                    <span className="rounded bg-purple-100 px-2 py-0.5 text-[9px] font-black text-purple-900 dark:bg-purple-950 dark:text-purple-300">
+                                                                        STICKER OBLIGATORIO
+                                                                    </span>
+                                                                    <span className="font-mono text-xs font-bold text-slate-500">
+                                                                        {it.sku}
+                                                                    </span>
+                                                                </div>
+                                                                <h4 className="mt-1 text-xs font-black text-slate-900 dark:text-white line-clamp-1" title={it.product_name}>
+                                                                    {it.product_name}
+                                                                </h4>
+                                                                <p className="text-xs text-purple-700 dark:text-purple-400 mt-0.5 font-bold">
+                                                                    Total etiquetas necesarias: <strong>{it.quantity_sent} stickers</strong>
+                                                                </p>
+                                                            </div>
+                                                        </div>
+
+                                                        {/* ACTIONS PHASE 2 */}
+                                                        <div className="flex flex-col sm:items-end gap-1.5 flex-shrink-0">
+                                                            <a
+                                                                href={`/meli/full/envios/${currentShipment.id}/etiquetas-productos${step3TargetBox?.id ? '?box_id=' + step3TargetBox.id : ''}`}
+                                                                target="_blank"
+                                                                rel="noreferrer"
+                                                                className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-purple-600 px-4 py-2 text-xs font-black text-white hover:bg-purple-700 shadow-sm"
+                                                            >
+                                                                <span>🖨️</span>
+                                                                <span>Imprimir {it.quantity_sent} Stickers</span>
+                                                            </a>
+
+                                                            {!step3TargetBox && (
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => handleToggleItemLabeling(it.temp_id)}
+                                                                    className="text-[10px] text-emerald-600 dark:text-emerald-400 hover:underline font-semibold"
+                                                                >
+                                                                    ✓ Cambiar a: Tiene UPC de fábrica (No ocupa sticker)
+                                                                </button>
+                                                            )}
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+
+                        {/* MODAL FOOTER */}
+                        <div className="border-t border-slate-200 bg-slate-50 p-4 dark:border-neutral-800 dark:bg-neutral-950 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                            {step3Phase === 1 ? (
+                                <>
+                                    <button
+                                        type="button"
+                                        onClick={verifyAllUpcs}
+                                        className="rounded-xl border border-slate-300 bg-white px-3.5 py-2 text-xs font-bold text-slate-700 hover:bg-slate-100 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-200"
+                                    >
+                                        ✓ Marcar todos los UPCs como verificados
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => setStep3Phase(2)}
+                                        className="inline-flex items-center justify-center gap-2 rounded-xl bg-amber-400 hover:bg-amber-300 text-amber-950 font-black px-6 py-2.5 text-xs shadow-md transition-all"
+                                    >
+                                        <span>Confirmar UPCs y Continuar a Productos con Etiqueta</span>
+                                        <span>➜</span>
+                                    </button>
+                                </>
+                            ) : (
+                                <>
+                                    <button
+                                        type="button"
+                                        onClick={() => setStep3Phase(1)}
+                                        className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-xs font-bold text-slate-700 hover:bg-slate-100 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-200"
+                                    >
+                                        ⬅ Volver a Revisar UPCs
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            setStep3ModalOpen(false)
+                                            setActionFeedback({
+                                                type: 'success',
+                                                message: `¡Paso 3 completado con éxito! Se revisaron los códigos UPC y etiquetas de la Caja #${activeBoxForStep3.boxNumber}.`,
+                                            })
+                                        }}
+                                        className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-black px-6 py-2.5 text-xs shadow-md transition-all"
+                                    >
+                                        <span>✓ Finalizar Revisión de Etiquetado y Regresar</span>
+                                    </button>
+                                </>
+                            )}
+                        </div>
                     </div>
                 </div>
             )}

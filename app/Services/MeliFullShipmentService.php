@@ -303,6 +303,20 @@ class MeliFullShipmentService
                     : (float) ($product?->weight_kg ?: 1.000);
 
                 $totalWeight = round($qty * $unitWeight, 3);
+                $reqLabeling = ! empty($itemData['requires_labeling']);
+
+                // Persistir el peso y requerimiento de etiquetado para que se recuerde automáticamente en futuros empaques
+                if ($unitWeight > 0) {
+                    if ($product && abs((float) $product->weight_kg - $unitWeight) > 0.001) {
+                        $product->update(['weight_kg' => $unitWeight]);
+                    }
+                    if (! empty($itemData['mlm']) && Schema::hasTable('meli_full_stocks')) {
+                        MeliFullStock::where('mlm', $itemData['mlm'])->update([
+                            'weight_kg' => $unitWeight,
+                            'requires_meli_labeling' => $reqLabeling,
+                        ]);
+                    }
+                }
 
                 MeliFullShipmentItem::create([
                     'meli_full_shipment_id' => $shipment->id,
@@ -313,7 +327,7 @@ class MeliFullShipmentService
                     'mlm' => $itemData['mlm'] ?? null,
                     'variation_id' => $itemData['variation_id'] ?? null,
                     'quantity_sent' => $qty,
-                    'requires_labeling' => ! empty($itemData['requires_labeling']),
+                    'requires_labeling' => $reqLabeling,
                     'unit_weight_kg' => $unitWeight,
                     'total_weight_kg' => $totalWeight,
                     'notes' => $itemData['notes'] ?? null,
@@ -946,7 +960,10 @@ class MeliFullShipmentService
             }
 
             $localAvailable = $localProd ? ($localProd->available_stock ?? $stockSvc->availableStock($localProd)) : 0;
-            $unitWeight = (float) ($localProd?->weight_kg ?: 1.000);
+            $unitWeight = (float) ((isset($st->weight_kg) ? $st->weight_kg : null) ?: ($localProd?->weight_kg ?: 1.000));
+            $reqLabeling = isset($st->requires_meli_labeling) && $st->requires_meli_labeling !== null
+                ? (bool) $st->requires_meli_labeling
+                : ($localProd?->requires_meli_labeling ?? false);
 
             $priority = null;
             $reason = null;
@@ -994,6 +1011,7 @@ class MeliFullShipmentService
                     'linked_name' => $localProd?->name ?? null,
                     'local_stock_available' => $localAvailable,
                     'weight_kg' => $unitWeight,
+                    'requires_meli_labeling' => $reqLabeling,
                     'suggested_quantity' => $suggested,
                     'priority' => $priority,
                     'badge' => $badge,

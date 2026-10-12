@@ -323,10 +323,14 @@ class MeliFullShipmentController extends Controller
     /**
      * Vista de impresión de etiquetas térmicas individuales de producto para MeLi FULL
      */
-    public function printProductLabels(MeliFullShipment $shipment): \Illuminate\View\View
+    public function printProductLabels(Request $request, MeliFullShipment $shipment): \Illuminate\View\View
     {
-        $shipment->load(['items.inventoryProduct']);
-        $items = $shipment->items->where('requires_labeling', true);
+        $boxId = $request->query('box_id');
+        $query = $shipment->items()->where('requires_labeling', true)->with('inventoryProduct');
+        if ($boxId) {
+            $query->where('meli_full_shipment_box_id', $boxId);
+        }
+        $items = $query->get();
 
         return view('labels.meli_full_product', [
             'shipment' => $shipment,
@@ -355,7 +359,7 @@ class MeliFullShipmentController extends Controller
         $meliFullStocks = [];
         if (Schema::hasTable('meli_full_stocks')) {
             $meliFullStocks = MeliFullStock::query()
-                ->select(['id', 'mlm', 'variation_id', 'sku', 'title', 'full_available_quantity', 'thumbnail', 'permalink'])
+                ->select(['id', 'mlm', 'variation_id', 'sku', 'title', 'full_available_quantity', 'thumbnail', 'permalink', 'weight_kg', 'requires_meli_labeling'])
                 ->orderBy('title')
                 ->get();
         }
@@ -396,6 +400,8 @@ class MeliFullShipmentController extends Controller
             }
 
             $stock->linked_product_id = $linkedId;
+            $stock->weight_kg = $stock->weight_kg !== null ? (float) $stock->weight_kg : null;
+            $stock->requires_meli_labeling = $stock->requires_meli_labeling !== null ? (bool) $stock->requires_meli_labeling : null;
             return $stock;
         });
 
@@ -587,5 +593,73 @@ class MeliFullShipmentController extends Controller
         } catch (Throwable $e) {
             return response()->json(['success' => false, 'error' => $e->getMessage()], 422);
         }
+    }
+
+    /**
+     * Guardar de forma permanente el peso de un producto y su requerimiento de etiquetado
+     */
+    public function saveProductWeight(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'weight_kg' => ['required', 'numeric', 'min:0.001'],
+            'inventory_product_id' => ['nullable', 'integer'],
+            'mlm' => ['nullable', 'string', 'max:50'],
+            'sku' => ['nullable', 'string', 'max:100'],
+            'requires_meli_labeling' => ['nullable', 'boolean'],
+        ]);
+
+        $weight = round((float) $validated['weight_kg'], 3);
+        $requiresLabeling = isset($validated['requires_meli_labeling']) ? (bool) $validated['requires_meli_labeling'] : null;
+
+        $updatedLocal = 0;
+        $updatedMeli = 0;
+
+        // 1. Actualizar por inventory_product_id
+        if (! empty($validated['inventory_product_id'])) {
+            $product = InventoryProduct::find($validated['inventory_product_id']);
+            if ($product) {
+                $updateData = ['weight_kg' => $weight];
+                if ($requiresLabeling !== null) {
+                    $updateData['requires_meli_labeling'] = $requiresLabeling;
+                }
+                $product->update($updateData);
+                $updatedLocal++;
+            }
+        }
+
+        // 2. Actualizar en meli_full_stocks por mlm
+        if (! empty($validated['mlm']) && Schema::hasTable('meli_full_stocks')) {
+            $updateData = ['weight_kg' => $weight];
+            if ($requiresLabeling !== null) {
+                $updateData['requires_meli_labeling'] = $requiresLabeling;
+            }
+            $updatedMeli += MeliFullStock::where('mlm', $validated['mlm'])->update($updateData);
+        }
+
+        // 3. Fallback por SKU si no se actualizó alguno
+        if (! empty($validated['sku'])) {
+            $sku = trim((string) $validated['sku']);
+            if ($updatedLocal === 0) {
+                $updateData = ['weight_kg' => $weight];
+                if ($requiresLabeling !== null) {
+                    $updateData['requires_meli_labeling'] = $requiresLabeling;
+                }
+                $updatedLocal += InventoryProduct::where('sku', $sku)->orWhere('barcode', $sku)->update($updateData);
+            }
+            if ($updatedMeli === 0 && Schema::hasTable('meli_full_stocks')) {
+                $updateData = ['weight_kg' => $weight];
+                if ($requiresLabeling !== null) {
+                    $updateData['requires_meli_labeling'] = $requiresLabeling;
+                }
+                $updatedMeli += MeliFullStock::where('sku', $sku)->update($updateData);
+            }
+        }
+
+        return response()->json([
+            'success' => true,
+            'weight_kg' => $weight,
+            'requires_meli_labeling' => $requiresLabeling,
+            'message' => "Peso guardado permanentemente ({$weight} kg).",
+        ]);
     }
 }

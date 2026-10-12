@@ -871,4 +871,96 @@ class MeliFullShipmentTest extends TestCase
         $this->assertEquals('OUT_OF_STOCK_NO_LOCAL', $recommendations[2]['priority']);
         $this->assertEquals('MLM102', $recommendations[2]['mlm']);
     }
+
+    public function test_can_save_product_weight_permanently(): void
+    {
+        $account = \App\Models\MeliAccount::create([
+            'user_id' => $this->user->id,
+            'meli_user_id' => '11223344',
+            'nickname' => 'TestAccount1',
+            'is_default' => true,
+        ]);
+
+        $meliStock = MeliFullStock::create([
+            'user_id' => $this->user->id,
+            'meli_account_id' => $account->id,
+            'stock_key' => 'MLM999888',
+            'mlm' => 'MLM999888',
+            'sku' => '681131094443',
+            'title' => 'Melatonina Kids 120 Gomitas',
+            'full_available_quantity' => 15,
+            'weight_kg' => 1.0,
+            'requires_meli_labeling' => true,
+        ]);
+
+        $response = $this->actingAs($this->user)->postJson(route('meli-full-shipments.save-weight'), [
+            'inventory_product_id' => $this->product1->id,
+            'mlm' => 'MLM999888',
+            'sku' => '681131094443',
+            'weight_kg' => 0.340,
+            'requires_meli_labeling' => false,
+        ]);
+
+        $response->assertOk()
+            ->assertJson([
+                'success' => true,
+                'weight_kg' => 0.340,
+                'requires_meli_labeling' => false,
+            ]);
+
+        $this->assertEquals(0.340, (float) $this->product1->fresh()->weight_kg);
+        $this->assertFalse((bool) $this->product1->fresh()->requires_meli_labeling);
+        $this->assertEquals(0.340, (float) $meliStock->fresh()->weight_kg);
+        $this->assertFalse((bool) $meliStock->fresh()->requires_meli_labeling);
+    }
+
+    public function test_pack_box_persists_weight_to_database(): void
+    {
+        $shipmentService = app(MeliFullShipmentService::class);
+        $shipment = $shipmentService->createShipment([
+            'shipment_code' => 'FULL-PERSIST-001',
+            'meli_warehouse_code' => 'MXCD06',
+            'boxes' => [],
+        ], $this->user);
+
+        $account = \App\Models\MeliAccount::create([
+            'user_id' => $this->user->id,
+            'meli_user_id' => '22334455',
+            'nickname' => 'TestAccount2',
+            'is_default' => true,
+        ]);
+
+        $meliStock = MeliFullStock::create([
+            'user_id' => $this->user->id,
+            'meli_account_id' => $account->id,
+            'stock_key' => 'MLM777666',
+            'mlm' => 'MLM777666',
+            'sku' => '009531112817',
+            'title' => 'Super Skinny Paul Mitchell',
+            'full_available_quantity' => 20,
+            'weight_kg' => 1.0,
+        ]);
+
+        $boxData = [
+            'box_number' => 1,
+            'items' => [
+                [
+                    'inventory_product_id' => $this->product2->id,
+                    'sku' => '009531112817',
+                    'product_name' => 'Super Skinny Paul Mitchell',
+                    'mlm' => 'MLM777666',
+                    'quantity_sent' => 12,
+                    'unit_weight_kg' => 0.340,
+                    'requires_labeling' => false,
+                ],
+            ],
+        ];
+
+        $box = $shipmentService->packBox($shipment, $boxData, $this->user);
+
+        $this->assertNotNull($box);
+        $this->assertEquals(0.340, (float) $this->product2->fresh()->weight_kg);
+        $this->assertEquals(0.340, (float) $meliStock->fresh()->weight_kg);
+        $this->assertFalse((bool) $meliStock->fresh()->requires_meli_labeling);
+    }
 }

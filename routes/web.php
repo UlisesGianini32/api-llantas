@@ -599,6 +599,7 @@ Route::middleware(['auth', 'role'])->group(function () {
     Route::delete('/meli/full/envios/{shipment}/cajas/{box}', [MeliFullShipmentController::class, 'destroyBox'])->name('meli-full-shipments.destroy-box');
     Route::post('/meli/full/vincular-producto', [MeliFullShipmentController::class, 'linkProduct'])->name('meli-full-shipments.link-product');
     Route::post('/meli/full/alta-rapida-producto', [MeliFullShipmentController::class, 'quickCreateProduct'])->name('meli-full-shipments.quick-product');
+    Route::post('/meli/full/guardar-peso', [MeliFullShipmentController::class, 'saveProductWeight'])->name('meli-full-shipments.save-weight');
     Route::post('/meli/full/envios/{shipment}/despachar', [MeliFullShipmentController::class, 'dispatch'])->name('meli-full-shipments.dispatch');
     Route::post('/meli/full/envios/{shipment}/revertir', [MeliFullShipmentController::class, 'revert'])->name('meli-full-shipments.revert');
     Route::post('/meli/full/envios/{shipment}/recibir', [MeliFullShipmentController::class, 'receive'])->name('meli-full-shipments.receive');

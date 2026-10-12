@@ -30,6 +30,8 @@ class MeliFullStock extends Model
         'full_total_quantity',
         'not_available_detail',
         'raw_stock',
+        'weight_kg',
+        'requires_meli_labeling',
         'last_error',
         'synced_at',
     ];
@@ -40,6 +42,8 @@ class MeliFullStock extends Model
             'full_available_quantity' => 'integer',
             'full_not_available_quantity' => 'integer',
             'full_total_quantity' => 'integer',
+            'weight_kg' => 'float',
+            'requires_meli_labeling' => 'boolean',
             'not_available_detail' => 'array',
             'raw_stock' => 'array',
             'publication_sub_status' => 'array',
