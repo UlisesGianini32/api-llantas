@@ -41,6 +41,7 @@ export default function MeliFullShipmentsPackStation({
     products = [],
     meliFullStocks = [],
     warehouses = {},
+    warehouseProfiles = {},
     carriers = [],
     nextShipmentCode = 'FULL-ENV-2026-0001',
     recommendations = [],
@@ -48,6 +49,44 @@ export default function MeliFullShipmentsPackStation({
     // Current Active Shipment
     const [currentShipment, setCurrentShipment] = useState(shipment || {})
     const [boxesList, setBoxesList] = useState(shipment?.boxes || [])
+
+    // Warehouse Profile Details
+    const activeWarehouseProfile = useMemo(() => {
+        const code = currentShipment?.meli_warehouse_code || 'MXCD06'
+        return warehouseProfiles?.[code] || {
+            name: warehouses?.[code] || 'Centro logístico Panorama MX06',
+            state: 'Estado de México',
+            address: 'Carretera Cuautitlan - Tultepec lote 8 no. 2 y lote C1, Colonia Terremoto, Cuautitlan, Estado De Mexico. C.P.: 54803',
+            product_types: 'Productos pequeños y medianos (Belleza, cosméticos, cuidado personal, suplementos alimenticios y consumo masivo).',
+            restrictions: 'Tus productos únicamente se pueden enviar en bultos (cajas de hasta 30 kg), no podrás agruparlos en pallets. Destinatario: Mercado Libre.',
+            recommended_carriers: ['Estafeta', 'DHL', 'FedEx', 'UPS'],
+        }
+    }, [currentShipment, warehouseProfiles, warehouses])
+
+    // Modals: Edit Shipment Metadata, Warehouse Info, Copy Meli List
+    const [editShipmentModalOpen, setEditShipmentModalOpen] = useState(false)
+    const [warehouseInfoModalOpen, setWarehouseInfoModalOpen] = useState(false)
+    const [copyMeliModalOpen, setCopyMeliModalOpen] = useState(false)
+    const [copiedNotification, setCopiedNotification] = useState(false)
+
+    const [shipmentFormData, setShipmentFormData] = useState({
+        meli_shipment_id: currentShipment?.meli_shipment_id || '',
+        meli_warehouse_code: currentShipment?.meli_warehouse_code || 'MXCD06',
+        meli_warehouse_name: currentShipment?.meli_warehouse_name || '',
+        envia_carrier: currentShipment?.envia_carrier || 'Estafeta',
+        envia_tracking_number: currentShipment?.envia_tracking_number || '',
+    })
+    const [savingShipmentMeta, setSavingShipmentMeta] = useState(false)
+
+    useEffect(() => {
+        setShipmentFormData({
+            meli_shipment_id: currentShipment?.meli_shipment_id || '',
+            meli_warehouse_code: currentShipment?.meli_warehouse_code || 'MXCD06',
+            meli_warehouse_name: currentShipment?.meli_warehouse_name || '',
+            envia_carrier: currentShipment?.envia_carrier || 'Estafeta',
+            envia_tracking_number: currentShipment?.envia_tracking_number || '',
+        })
+    }, [currentShipment])
 
     // Camera Barcode Scanner
     const [isCameraOpen, setIsCameraOpen] = useState(false)
@@ -355,6 +394,129 @@ export default function MeliFullShipmentsPackStation({
             console.error('Error saving weight:', err)
         } finally {
             setSavingWeight(false)
+        }
+    }
+
+    // Save shipment metadata (Folio MeLi, Warehouse, Carrier, Tracking)
+    const handleSaveShipmentMetadata = async (e) => {
+        if (e && e.preventDefault) e.preventDefault()
+        setSavingShipmentMeta(true)
+        try {
+            const csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content')
+            const res = await fetch(`/meli/full/envios/${currentShipment.id}`, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                    'X-CSRF-TOKEN': csrfToken || '',
+                },
+                body: JSON.stringify(shipmentFormData),
+            })
+            const data = await res.json()
+            if (res.ok && data.success) {
+                setCurrentShipment(data.shipment || { ...currentShipment, ...shipmentFormData })
+                setEditShipmentModalOpen(false)
+                setActionFeedback({
+                    type: 'success',
+                    message: `Datos del envío guardados con éxito (Folio MeLi: #${shipmentFormData.meli_shipment_id || 'N/A'}, Bodega: ${shipmentFormData.meli_warehouse_code}).`,
+                })
+            } else {
+                alert(data.error || 'Error al guardar los datos del envío.')
+            }
+        } catch (err) {
+            console.error('Error saving shipment metadata:', err)
+            alert('Error al conectar con el servidor para actualizar el envío.')
+        } finally {
+            setSavingShipmentMeta(false)
+        }
+    }
+
+    // Items list for copying to MeLi (/units screen)
+    const meliExportItems = useMemo(() => {
+        const packedMap = new Map()
+
+        // 1. Packed in sealed boxes
+        boxesList.forEach((b) => {
+            (b.items || []).forEach((it) => {
+                const key = it.mlm || it.sku
+                const q = parseInt(it.quantity_sent, 10) || 0
+                if (packedMap.has(key)) {
+                    packedMap.get(key).quantity += q
+                } else {
+                    packedMap.set(key, {
+                        sku: it.sku,
+                        mlm: it.mlm,
+                        name: it.product_name,
+                        thumbnail: it.thumbnail,
+                        quantity: q,
+                        unit_weight: parseFloat(it.unit_weight_kg) || 1.0,
+                    })
+                }
+            })
+        })
+
+        // 2. In active box
+        currentBoxItems.forEach((it) => {
+            const key = it.mlm || it.sku
+            const q = parseInt(it.quantity_sent, 10) || 0
+            if (packedMap.has(key)) {
+                packedMap.get(key).quantity += q
+            } else {
+                packedMap.set(key, {
+                    sku: it.sku,
+                    mlm: it.mlm,
+                    name: it.product_name,
+                    thumbnail: it.thumbnail,
+                    quantity: q,
+                    unit_weight: parseFloat(it.unit_weight_kg) || 1.0,
+                })
+            }
+        })
+
+        const result = Array.from(packedMap.values())
+        if (result.length > 0) return result
+
+        // 3. Fallback: top suggestions with local stock
+        return recommendations
+            .filter((r) => (r.suggested_quantity || 0) > 0 && (r.local_stock_available || 0) > 0)
+            .slice(0, 30)
+            .map((r) => ({
+                sku: r.sku,
+                mlm: r.mlm,
+                name: r.title || r.name,
+                thumbnail: r.thumbnail,
+                quantity: r.suggested_quantity,
+                unit_weight: parseFloat(r.weight_kg) || 1.0,
+            }))
+    }, [boxesList, currentBoxItems, recommendations])
+
+    const totalExportUnits = useMemo(() => {
+        return meliExportItems.reduce((acc, it) => acc + (it.quantity || 0), 0)
+    }, [meliExportItems])
+
+    const totalExportVolumeM3 = useMemo(() => {
+        return (totalExportUnits * 0.00032).toFixed(2)
+    }, [totalExportUnits])
+
+    const handleCopyMeliText = () => {
+        const lines = [
+            `MERCADO LIBRE FULL - RESUMEN DE ENVÍO ${currentShipment.meli_shipment_id ? `#${currentShipment.meli_shipment_id}` : ''}`,
+            `Bodega Asignada: ${currentShipment.meli_warehouse_code || 'MXCD06'} (${activeWarehouseProfile.name})`,
+            `Total Unidades: ${totalExportUnits} u. | Volumen Estimado: ${totalExportVolumeM3} m³`,
+            `----------------------------------------------------`,
+        ]
+
+        meliExportItems.forEach((it, idx) => {
+            const code = it.mlm ? `${it.mlm} (${it.sku})` : it.sku
+            lines.push(`${idx + 1}. [${code}] ${it.name} ➜ ${it.quantity} unidades`)
+        })
+
+        const text = lines.join('\n')
+        if (navigator?.clipboard?.writeText) {
+            navigator.clipboard.writeText(text).then(() => {
+                setCopiedNotification(true)
+                setTimeout(() => setCopiedNotification(false), 3000)
+            })
         }
     }
 
@@ -907,6 +1069,29 @@ export default function MeliFullShipmentsPackStation({
                             <span className="text-xs text-slate-500">
                                 Envío: <strong className="text-slate-800 dark:text-white font-mono">{currentShipment.shipment_code}</strong>
                             </span>
+
+                            {/* FOLIO MELI BADGE */}
+                            <button
+                                type="button"
+                                onClick={() => setEditShipmentModalOpen(true)}
+                                className="inline-flex items-center gap-1.5 rounded-xl bg-yellow-100 border border-yellow-300 px-3 py-1 text-xs font-black text-yellow-950 hover:bg-yellow-200 transition-all shadow-sm dark:bg-yellow-950/70 dark:border-yellow-700 dark:text-yellow-200"
+                                title="Clic para editar o ingresar el folio oficial de Mercado Libre"
+                            >
+                                <span>🤝 Folio MeLi:</span>
+                                <span className="font-mono underline">{currentShipment.meli_shipment_id ? `#${currentShipment.meli_shipment_id}` : 'Ingresar Folio MeLi ✎'}</span>
+                            </button>
+
+                            {/* WAREHOUSE BADGE */}
+                            <button
+                                type="button"
+                                onClick={() => setWarehouseInfoModalOpen(true)}
+                                className="inline-flex items-center gap-1.5 rounded-xl bg-sky-100 border border-sky-300 px-3 py-1 text-xs font-black text-sky-950 hover:bg-sky-200 transition-all shadow-sm dark:bg-sky-950/70 dark:border-sky-700 dark:text-sky-200"
+                                title="Ver dirección oficial y reglas del CEDIS asignado"
+                            >
+                                <span>🏭 Bodega:</span>
+                                <span>{currentShipment.meli_warehouse_code || 'MXCD06'}</span>
+                                <span className="text-[11px] opacity-75">ℹ️</span>
+                            </button>
                         </div>
                         <h1 className="mt-1 text-2xl font-black text-slate-900 dark:text-white">
                             Armado de Cajas de 30 kg — Mercado Libre FULL
@@ -939,20 +1124,42 @@ export default function MeliFullShipmentsPackStation({
                             </select>
                         )}
 
-                        <Link
-                            href={`/meli/full/envios/${currentShipment.id}`}
-                            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-300 bg-white px-3.5 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-200"
+                        {/* COPIAR LISTA PARA MELI */}
+                        <button
+                            type="button"
+                            onClick={() => setCopyMeliModalOpen(true)}
+                            className="inline-flex items-center gap-1.5 rounded-xl border border-indigo-300 bg-indigo-50 px-3.5 py-2 text-xs font-black text-indigo-900 hover:bg-indigo-100 transition-all shadow-sm dark:border-indigo-800 dark:bg-indigo-950/60 dark:text-indigo-200"
                         >
-                            <span>📋</span> Ver Resumen del Envío
-                        </Link>
+                            <span>📋</span> Copiar Lista para MeLi
+                        </button>
 
+                        {/* CONFIGURAR FOLIO Y BODEGA */}
+                        <button
+                            type="button"
+                            onClick={() => setEditShipmentModalOpen(true)}
+                            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-300 bg-white px-3.5 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 transition-all dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-200"
+                        >
+                            <span>⚙️</span> Folio & Bodega
+                        </button>
+
+                        {/* ROTULOS BULTO */}
                         <a
                             href={`/meli/full/envios/${currentShipment.id}/rotulos`}
                             target="_blank"
                             rel="noreferrer"
-                            className="inline-flex items-center gap-1.5 rounded-xl bg-slate-800 px-3.5 py-2 text-xs font-bold text-white hover:bg-slate-900 dark:bg-slate-700 dark:hover:bg-slate-600"
+                            className="inline-flex items-center gap-1.5 rounded-xl bg-slate-800 px-3.5 py-2 text-xs font-bold text-white hover:bg-slate-900 transition-all shadow-sm dark:bg-slate-700 dark:hover:bg-slate-600"
                         >
-                            <span>🖨️</span> Rótulos Cajas MeLi
+                            <span>⚡</span> Rótulos Bulto MeLi
+                        </a>
+
+                        {/* ROTULOS FRAGIL */}
+                        <a
+                            href={`/meli/full/envios/${currentShipment.id}/rotulos?mode=fragile`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex items-center gap-1.5 rounded-xl border border-rose-300 bg-rose-50 px-3.5 py-2 text-xs font-black text-rose-900 hover:bg-rose-100 transition-all shadow-sm dark:border-rose-900 dark:bg-rose-950/60 dark:text-rose-200"
+                        >
+                            <span>⚠️</span> Rótulo Frágil
                         </a>
                     </div>
                 </div>
@@ -1881,14 +2088,24 @@ export default function MeliFullShipmentsPackStation({
                                                     </div>
 
                                                     <div className="flex flex-col gap-1 items-end">
-                                                        <a
-                                                            href={`/meli/full/envios/${currentShipment.id}/cajas/${box.id}/rotulo`}
-                                                            target="_blank"
-                                                            rel="noreferrer"
-                                                            className="inline-flex items-center gap-1 rounded-lg border border-slate-300 bg-white px-2 py-1 text-[11px] font-bold text-slate-700 hover:bg-slate-50 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-200"
-                                                        >
-                                                            <span>🖨️</span> Rótulo
-                                                        </a>
+                                                        <div className="flex items-center gap-1">
+                                                            <a
+                                                                href={`/meli/full/envios/${currentShipment.id}/cajas/${box.id}/rotulo`}
+                                                                target="_blank"
+                                                                rel="noreferrer"
+                                                                className="inline-flex items-center gap-1 rounded-lg border border-slate-300 bg-white px-2 py-1 text-[11px] font-bold text-slate-700 hover:bg-slate-50 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-200"
+                                                            >
+                                                                <span>🖨️</span> Rótulo
+                                                            </a>
+                                                            <a
+                                                                href={`/meli/full/envios/${currentShipment.id}/cajas/${box.id}/rotulo?mode=fragile`}
+                                                                target="_blank"
+                                                                rel="noreferrer"
+                                                                className="inline-flex items-center gap-1 rounded-lg border border-rose-300 bg-rose-50 px-2 py-1 text-[11px] font-bold text-rose-800 hover:bg-rose-100 dark:border-rose-900 dark:bg-rose-950 dark:text-rose-200"
+                                                            >
+                                                                <span>⚠️</span> Frágil
+                                                            </a>
+                                                        </div>
                                                         <button
                                                             type="button"
                                                             onClick={() => openStep3Modal(box)}
@@ -2516,6 +2733,344 @@ export default function MeliFullShipmentsPackStation({
                                     </button>
                                 </>
                             )}
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* MODAL 1: EDIT SHIPMENT METADATA (FOLIO MELI, BODEGA, GUIA) */}
+            {editShipmentModalOpen && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
+                    <div className="w-full max-w-lg rounded-3xl bg-white p-6 shadow-2xl dark:bg-neutral-900 border border-slate-200 dark:border-neutral-800">
+                        <div className="flex items-center justify-between border-b border-slate-100 pb-3 dark:border-neutral-800">
+                            <div className="flex items-center gap-2">
+                                <span className="flex h-10 w-10 items-center justify-center rounded-2xl bg-yellow-100 text-xl font-black text-yellow-800 dark:bg-yellow-950 dark:text-yellow-300">
+                                    ⚙️
+                                </span>
+                                <div>
+                                    <h3 className="text-base font-black text-slate-900 dark:text-white">
+                                        Datos de Cita & Bodega MeLi
+                                    </h3>
+                                    <p className="text-xs text-slate-500">
+                                        Envío {currentShipment.shipment_code}
+                                    </p>
+                                </div>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => setEditShipmentModalOpen(false)}
+                                className="text-slate-400 hover:text-slate-600 font-black text-lg p-1"
+                            >
+                                ✕
+                            </button>
+                        </div>
+
+                        <form onSubmit={handleSaveShipmentMetadata} className="mt-4 space-y-4">
+                            <div>
+                                <label className="block text-xs font-black uppercase tracking-wider text-slate-600 dark:text-slate-300 mb-1">
+                                    Folio Oficial de Mercado Libre (#)
+                                </label>
+                                <div className="relative">
+                                    <span className="absolute inset-y-0 left-0 flex items-center pl-3 text-slate-400 font-mono font-bold">
+                                        #
+                                    </span>
+                                    <input
+                                        type="text"
+                                        placeholder="Ej: 79340544"
+                                        value={shipmentFormData.meli_shipment_id}
+                                        onChange={(e) =>
+                                            setShipmentFormData({
+                                                ...shipmentFormData,
+                                                meli_shipment_id: e.target.value.replace(/[^0-9a-zA-Z_-]/g, ''),
+                                            })
+                                        }
+                                        className="w-full rounded-xl border border-slate-300 bg-slate-50 pl-8 pr-3 py-2.5 text-sm font-bold text-slate-900 dark:border-neutral-700 dark:bg-neutral-800 dark:text-white focus:bg-white"
+                                    />
+                                </div>
+                                <span className="text-[11px] text-slate-400 mt-0.5 block">
+                                    El folio que te asignó Mercado Libre al crear el envío en Seller Central.
+                                </span>
+                            </div>
+
+                            <div>
+                                <label className="block text-xs font-black uppercase tracking-wider text-slate-600 dark:text-slate-300 mb-1">
+                                    Bodega MeLi Destino (CEDIS)
+                                </label>
+                                <select
+                                    value={shipmentFormData.meli_warehouse_code}
+                                    onChange={(e) => {
+                                        const code = e.target.value
+                                        const prof = warehouseProfiles?.[code]
+                                        setShipmentFormData({
+                                            ...shipmentFormData,
+                                            meli_warehouse_code: code,
+                                            meli_warehouse_name: prof?.name || warehouses?.[code] || code,
+                                        })
+                                    }}
+                                    className="w-full rounded-xl border border-slate-300 bg-slate-50 px-3 py-2.5 text-xs font-bold text-slate-900 dark:border-neutral-700 dark:bg-neutral-800 dark:text-white focus:bg-white"
+                                >
+                                    {Object.entries(warehouses).map(([code, name]) => (
+                                        <option key={code} value={code}>
+                                            {code} — {name}
+                                        </option>
+                                    ))}
+                                </select>
+
+                                {/* Mini preview of selected warehouse */}
+                                {warehouseProfiles?.[shipmentFormData.meli_warehouse_code] && (
+                                    <div className="mt-2 rounded-xl bg-sky-50 border border-sky-200 p-2.5 text-[11px] text-sky-950 dark:bg-sky-950/40 dark:border-sky-800 dark:text-sky-200">
+                                        <div className="font-bold">📍 {warehouseProfiles[shipmentFormData.meli_warehouse_code].address}</div>
+                                        <div className="mt-1 text-slate-600 dark:text-slate-400">
+                                            ℹ️ {warehouseProfiles[shipmentFormData.meli_warehouse_code].product_types}
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-3">
+                                <div>
+                                    <label className="block text-xs font-black uppercase tracking-wider text-slate-600 dark:text-slate-300 mb-1">
+                                        Paquetería
+                                    </label>
+                                    <select
+                                        value={shipmentFormData.envia_carrier}
+                                        onChange={(e) => setShipmentFormData({ ...shipmentFormData, envia_carrier: e.target.value })}
+                                        className="w-full rounded-xl border border-slate-300 bg-slate-50 px-3 py-2 text-xs font-bold text-slate-900 dark:border-neutral-700 dark:bg-neutral-800 dark:text-white"
+                                    >
+                                        {(carriers || []).map((c) => (
+                                            <option key={c} value={c}>
+                                                {c}
+                                            </option>
+                                        ))}
+                                    </select>
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-black uppercase tracking-wider text-slate-600 dark:text-slate-300 mb-1">
+                                        Guía de Rastreo
+                                    </label>
+                                    <input
+                                        type="text"
+                                        placeholder="Ej: EST-99887766"
+                                        value={shipmentFormData.envia_tracking_number}
+                                        onChange={(e) => setShipmentFormData({ ...shipmentFormData, envia_tracking_number: e.target.value })}
+                                        className="w-full rounded-xl border border-slate-300 bg-slate-50 px-3 py-2 text-xs font-bold text-slate-900 dark:border-neutral-700 dark:bg-neutral-800 dark:text-white"
+                                    />
+                                </div>
+                            </div>
+
+                            <div className="flex justify-end gap-2 border-t border-slate-100 pt-4 dark:border-neutral-800">
+                                <button
+                                    type="button"
+                                    onClick={() => setEditShipmentModalOpen(false)}
+                                    className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-200"
+                                >
+                                    Cancelar
+                                </button>
+                                <button
+                                    type="submit"
+                                    disabled={savingShipmentMeta}
+                                    className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-5 py-2 text-xs font-black text-white hover:bg-indigo-700 shadow-sm disabled:opacity-50"
+                                >
+                                    {savingShipmentMeta ? 'Guardando...' : '💾 Guardar Datos'}
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+
+            {/* MODAL 2: WAREHOUSE INFO & ADMISSION RULES */}
+            {warehouseInfoModalOpen && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
+                    <div className="w-full max-w-lg rounded-3xl bg-white p-6 shadow-2xl dark:bg-neutral-900 border border-slate-200 dark:border-neutral-800">
+                        <div className="flex items-center justify-between border-b border-slate-100 pb-3 dark:border-neutral-800">
+                            <div className="flex items-center gap-2">
+                                <span className="flex h-10 w-10 items-center justify-center rounded-2xl bg-sky-100 text-xl font-black text-sky-800 dark:bg-sky-950 dark:text-sky-300">
+                                    🏭
+                                </span>
+                                <div>
+                                    <h3 className="text-base font-black text-slate-900 dark:text-white">
+                                        {activeWarehouseProfile.name}
+                                    </h3>
+                                    <p className="text-xs text-slate-500">
+                                        Código MeLi: <strong className="text-indigo-600 font-mono">{currentShipment.meli_warehouse_code || 'MXCD06'}</strong>
+                                    </p>
+                                </div>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => setWarehouseInfoModalOpen(false)}
+                                className="text-slate-400 hover:text-slate-600 font-black text-lg p-1"
+                            >
+                                ✕
+                            </button>
+                        </div>
+
+                        <div className="mt-4 space-y-3.5 text-xs">
+                            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3.5 dark:border-neutral-800 dark:bg-neutral-800/40">
+                                <span className="text-[10px] font-black uppercase text-slate-500 block">
+                                    Dirección Oficial de Entrega
+                                </span>
+                                <p className="mt-1 font-bold text-slate-900 dark:text-white leading-relaxed">
+                                    {activeWarehouseProfile.address}
+                                </p>
+                            </div>
+
+                            <div className="rounded-2xl border border-indigo-200 bg-indigo-50/70 p-3.5 dark:border-indigo-900/60 dark:bg-indigo-950/40">
+                                <span className="text-[10px] font-black uppercase text-indigo-700 dark:text-indigo-300 block">
+                                    Tipo de Productos Admitidos
+                                </span>
+                                <p className="mt-1 text-slate-800 dark:text-slate-200 font-medium leading-relaxed">
+                                    {activeWarehouseProfile.product_types}
+                                </p>
+                            </div>
+
+                            <div className="rounded-2xl border border-amber-200 bg-amber-50/70 p-3.5 dark:border-amber-900/60 dark:bg-amber-950/40">
+                                <span className="text-[10px] font-black uppercase text-amber-800 dark:text-amber-300 block">
+                                    Reglas de Embalaje & Envío MeLi
+                                </span>
+                                <p className="mt-1 text-slate-800 dark:text-slate-200 leading-relaxed">
+                                    {activeWarehouseProfile.restrictions || 'Tus productos únicamente se pueden enviar en bultos (cajas de hasta 30 kg). Destinatario: Mercado Libre.'}
+                                </p>
+                            </div>
+
+                            <div className="rounded-2xl border border-emerald-200 bg-emerald-50/70 p-3.5 dark:border-emerald-900/60 dark:bg-emerald-950/40">
+                                <span className="text-[10px] font-black uppercase text-emerald-800 dark:text-emerald-300 block">
+                                    Paqueterías Recomendadas por MeLi
+                                </span>
+                                <div className="mt-1.5 flex flex-wrap gap-1.5">
+                                    {(activeWarehouseProfile.recommended_carriers || ['Estafeta', 'DHL', 'FedEx', 'UPS']).map((c) => (
+                                        <span
+                                            key={c}
+                                            className="rounded-lg bg-white border border-emerald-300 px-2 py-0.5 text-[11px] font-bold text-emerald-900 dark:bg-neutral-800 dark:border-neutral-700 dark:text-emerald-300"
+                                        >
+                                            ✓ {c}
+                                        </span>
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="mt-5 flex justify-end">
+                            <button
+                                type="button"
+                                onClick={() => setWarehouseInfoModalOpen(false)}
+                                className="rounded-xl bg-slate-900 px-5 py-2 text-xs font-black text-white hover:bg-slate-800 dark:bg-slate-700"
+                            >
+                                Entendido
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* MODAL 3: COPIAR LISTA PARA MERCADO LIBRE (/units) */}
+            {copyMeliModalOpen && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
+                    <div className="w-full max-w-2xl max-h-[88vh] flex flex-col rounded-3xl bg-white p-6 shadow-2xl dark:bg-neutral-900 border border-slate-200 dark:border-neutral-800">
+                        <div className="flex items-center justify-between border-b border-slate-100 pb-3 dark:border-neutral-800">
+                            <div className="flex items-center gap-2">
+                                <span className="flex h-10 w-10 items-center justify-center rounded-2xl bg-indigo-100 text-xl font-black text-indigo-800 dark:bg-indigo-950 dark:text-indigo-300">
+                                    📋
+                                </span>
+                                <div>
+                                    <h3 className="text-base font-black text-slate-900 dark:text-white">
+                                        Resumen de Unidades para Mercado Libre (/units)
+                                    </h3>
+                                    <p className="text-xs text-slate-500">
+                                        Usa este listado para cargar exactamente las cantidades en el paso de unidades de MeLi.
+                                    </p>
+                                </div>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => setCopyMeliModalOpen(false)}
+                                className="text-slate-400 hover:text-slate-600 font-black text-lg p-1"
+                            >
+                                ✕
+                            </button>
+                        </div>
+
+                        {/* STATS BANNER */}
+                        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-indigo-50 border border-indigo-200 p-3.5 dark:bg-indigo-950/40 dark:border-indigo-800">
+                            <div className="flex items-center gap-4 text-xs font-bold text-indigo-950 dark:text-indigo-200">
+                                <span>📦 <strong>{totalExportUnits}</strong> unidades a enviar</span>
+                                <span>📐 Volumen est.: <strong>{totalExportVolumeM3} m³</strong></span>
+                                <span>🏭 Bodega: <strong>{currentShipment.meli_warehouse_code || 'MXCD06'}</strong></span>
+                            </div>
+
+                            <button
+                                type="button"
+                                onClick={handleCopyMeliText}
+                                className={`inline-flex items-center gap-1.5 rounded-xl px-4 py-2 text-xs font-black shadow-sm transition-all ${
+                                    copiedNotification
+                                        ? 'bg-emerald-600 text-white'
+                                        : 'bg-indigo-600 hover:bg-indigo-700 text-white'
+                                }`}
+                            >
+                                <span>{copiedNotification ? '✓' : '📋'}</span>
+                                <span>{copiedNotification ? '¡Copiado al Portapapeles!' : 'Copiar Listado'}</span>
+                            </button>
+                        </div>
+
+                        {/* ITEMS LIST */}
+                        <div className="mt-4 flex-1 overflow-y-auto space-y-2 max-h-[46vh] pr-1">
+                            {meliExportItems.map((it, idx) => (
+                                <div
+                                    key={idx}
+                                    className="flex items-center justify-between rounded-xl border border-slate-200 bg-white p-2.5 text-xs dark:border-neutral-800 dark:bg-neutral-800/60"
+                                >
+                                    <div className="flex items-center gap-2.5 min-w-0">
+                                        <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-slate-100 font-mono text-[10px] font-black text-slate-600 dark:bg-neutral-700 dark:text-slate-300 flex-shrink-0">
+                                            {idx + 1}
+                                        </span>
+                                        {it.thumbnail ? (
+                                            <img
+                                                src={it.thumbnail}
+                                                alt=""
+                                                className="h-9 w-9 rounded-lg object-cover border border-slate-200 flex-shrink-0"
+                                            />
+                                        ) : (
+                                            <div className="h-9 w-9 rounded-lg bg-slate-100 flex items-center justify-center text-sm flex-shrink-0">
+                                                📦
+                                            </div>
+                                        )}
+                                        <div className="min-w-0">
+                                            <div className="font-bold text-slate-900 dark:text-white truncate max-w-[320px]">
+                                                {it.name}
+                                            </div>
+                                            <div className="font-mono text-[11px] text-slate-400">
+                                                {it.mlm ? `${it.mlm} · ${it.sku}` : it.sku}
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div className="flex items-center gap-3 flex-shrink-0 text-right">
+                                        <div>
+                                            <span className="block font-mono text-sm font-black text-indigo-600 dark:text-indigo-400">
+                                                {it.quantity} uds
+                                            </span>
+                                            <span className="text-[10px] text-slate-400">
+                                                ~{round3(it.quantity * it.unit_weight)} kg
+                                            </span>
+                                        </div>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+
+                        {/* FOOTER */}
+                        <div className="mt-4 border-t border-slate-100 pt-3 flex items-center justify-between dark:border-neutral-800">
+                            <span className="text-[11px] text-slate-400">
+                                Tip: Pega esta lista en una nota o pantalla dividida mientras capturas en MeLi.
+                            </span>
+                            <button
+                                type="button"
+                                onClick={() => setCopyMeliModalOpen(false)}
+                                className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-200"
+                            >
+                                Cerrar
+                            </button>
                         </div>
                     </div>
                 </div>

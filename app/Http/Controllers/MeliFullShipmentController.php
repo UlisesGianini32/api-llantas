@@ -95,6 +95,7 @@ class MeliFullShipmentController extends Controller
         return Inertia::render('MeliFullShipments/Create', [
             'nextShipmentCode' => $this->shipmentService->generateShipmentCode(),
             'warehouses' => MeliFullShipment::WAREHOUSES,
+            'warehouseProfiles' => MeliFullShipment::WAREHOUSE_PROFILES,
             'carriers' => MeliFullShipment::CARRIERS,
             'products' => $products,
             'recommendations' => $recommendations,
@@ -198,6 +199,7 @@ class MeliFullShipmentController extends Controller
         return Inertia::render('MeliFullShipments/Edit', [
             'shipment' => $shipment,
             'warehouses' => MeliFullShipment::WAREHOUSES,
+            'warehouseProfiles' => MeliFullShipment::WAREHOUSE_PROFILES,
             'carriers' => MeliFullShipment::CARRIERS,
             'products' => $products,
             'recommendations' => $recommendations,
@@ -207,7 +209,7 @@ class MeliFullShipmentController extends Controller
     /**
      * Actualizar envío existente
      */
-    public function update(Request $request, MeliFullShipment $shipment): RedirectResponse
+    public function update(Request $request, MeliFullShipment $shipment): JsonResponse|RedirectResponse
     {
         $validated = $request->validate([
             'meli_warehouse_code' => ['required', 'string', 'max:20'],
@@ -237,9 +239,20 @@ class MeliFullShipmentController extends Controller
         try {
             $updated = $this->shipmentService->updateShipment($shipment, $validated, $request->user());
 
+            if ($request->wantsJson()) {
+                return response()->json([
+                    'success' => true,
+                    'message' => 'Envío actualizado correctamente.',
+                    'shipment' => $updated->fresh(['boxes.items.inventoryProduct']),
+                ]);
+            }
+
             return redirect()->route('meli-full-shipments.show', $updated->id)
                 ->with('success', 'Envío actualizado correctamente.');
         } catch (Throwable $e) {
+            if ($request->wantsJson()) {
+                return response()->json(['success' => false, 'error' => $e->getMessage()], 422);
+            }
             return back()->withInput()->with('error', 'Error al actualizar el envío: ' . $e->getMessage());
         }
     }
@@ -450,6 +463,7 @@ class MeliFullShipmentController extends Controller
             'meliFullStocks' => $mappedFullStocks,
             'recommendations' => $recommendations,
             'warehouses' => MeliFullShipment::WAREHOUSES,
+            'warehouseProfiles' => MeliFullShipment::WAREHOUSE_PROFILES,
             'carriers' => MeliFullShipment::CARRIERS,
             'nextShipmentCode' => $this->shipmentService->generateShipmentCode(),
         ]);

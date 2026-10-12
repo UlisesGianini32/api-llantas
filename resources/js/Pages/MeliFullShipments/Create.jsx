@@ -5,6 +5,7 @@ import AppShell from '@/Components/layout/AppShell'
 export default function MeliFullShipmentsCreate({
     nextShipmentCode = 'FULL-ENV-2026-0001',
     warehouses = {},
+    warehouseProfiles = {},
     carriers = [],
     products = [],
     recommendations = [],
@@ -14,10 +15,10 @@ export default function MeliFullShipmentsCreate({
 
     // Form Header / Logistics State
     const [shipmentCode, setShipmentCode] = useState(nextShipmentCode)
-    const [warehouseCode, setWarehouseCode] = useState('MXCD01')
-    const [warehouseName, setWarehouseName] = useState(warehouses['MXCD01'] || '')
+    const [warehouseCode, setWarehouseCode] = useState('MXCD06')
+    const [warehouseName, setWarehouseName] = useState(warehouses['MXCD06'] || 'Centro logístico Panorama MX06')
     const [meliShipmentId, setMeliShipmentId] = useState('')
-    const [carrier, setCarrier] = useState('Paquetexpress')
+    const [carrier, setCarrier] = useState('Estafeta')
     const [trackingNumber, setTrackingNumber] = useState('')
     const [enviaCost, setEnviaCost] = useState('')
     const [notes, setNotes] = useState('')
@@ -1574,6 +1575,22 @@ export default function MeliFullShipmentsCreate({
                                             </option>
                                         ))}
                                     </select>
+
+                                    {/* WAREHOUSE PROFILE PREVIEW */}
+                                    {warehouseProfiles?.[warehouseCode] && (
+                                        <div className="mt-2 rounded-xl border border-sky-200 bg-sky-50/80 p-3 text-[11px] text-sky-950">
+                                            <div className="font-bold flex items-center gap-1.5 text-sky-900">
+                                                <span>📍</span>
+                                                <span>{warehouseProfiles[warehouseCode].address}</span>
+                                            </div>
+                                            <div className="mt-1 text-slate-600">
+                                                ℹ️ {warehouseProfiles[warehouseCode].product_types}
+                                            </div>
+                                            <div className="mt-1 font-semibold text-amber-900">
+                                                ⚠️ {warehouseProfiles[warehouseCode].restrictions}
+                                            </div>
+                                        </div>
+                                    )}
                                 </div>
 
                                 <div>

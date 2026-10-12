@@ -34,6 +34,73 @@ class MeliFullShipment extends Model
         'OTRO'   => 'Otra bodega / Por asignar',
     ];
 
+    public const WAREHOUSE_PROFILES = [
+        'MXCD06' => [
+            'name' => 'Centro logístico Panorama MX06 - MXCD06',
+            'state' => 'Estado de México',
+            'address' => 'Carretera Cuautitlan - Tultepec lote 8 no. 2 y lote C1, Colonia Terremoto, Cuautitlan, Estado De Mexico. C.P.: 54803',
+            'product_types' => 'Productos pequeños y medianos (Belleza, cosméticos, cuidado personal, suplementos alimenticios y consumo masivo).',
+            'restrictions' => 'Tus productos únicamente se pueden enviar en bultos (cajas de hasta 30 kg), no podrás agruparlos en pallets. Destinatario: Mercado Libre.',
+            'accepts_pallets' => false,
+            'accepts_bultos' => true,
+            'recommended_carriers' => ['Estafeta', 'DHL', 'FedEx', 'UPS'],
+        ],
+        'MXCD01' => [
+            'name' => 'CEDIS Cuautitlán Izcalli I - MXCD01',
+            'state' => 'Estado de México',
+            'address' => 'Autopista México-Querétaro Km 37.5, Parque Industrial Cuautitlán Izcalli, Edo. Méx. C.P. 54730',
+            'product_types' => 'Carga general, productos medianos y surtido multivariante.',
+            'restrictions' => 'Acepta bultos (máx 30 kg) y pallets agrupados.',
+            'accepts_pallets' => true,
+            'accepts_bultos' => true,
+            'recommended_carriers' => ['Estafeta', 'Paquetexpress', 'FedEx', 'DHL'],
+        ],
+        'MXRC01' => [
+            'name' => 'CEDIS Tepotzotlán I - MXRC01',
+            'state' => 'Estado de México',
+            'address' => 'Parque Industrial Tepotzotlán, Libramiento Norte, Tepotzotlán, Edo. Méx.',
+            'product_types' => 'Artículos voluminosos, pesados, llantas y carga sobredimensionada.',
+            'restrictions' => 'Especializado en artículos de gran tamaño o peso elevado.',
+            'accepts_pallets' => true,
+            'accepts_bultos' => true,
+            'recommended_carriers' => ['Paquetexpress', 'Castores', 'Tres Guerras', 'Estafeta'],
+        ],
+        'MXNL01' => [
+            'name' => 'CEDIS Apodaca - MXNL01',
+            'state' => 'Nuevo León',
+            'address' => 'Parque Industrial Apodaca, Apodaca, Nuevo León',
+            'product_types' => 'Zona Norte: Carga general y consumo masivo.',
+            'restrictions' => 'Acepta bultos (máx 30 kg) y pallets.',
+            'accepts_pallets' => true,
+            'accepts_bultos' => true,
+            'recommended_carriers' => ['Estafeta', 'Paquetexpress', 'FedEx', 'DHL'],
+        ],
+        'MXJA01' => [
+            'name' => 'CEDIS El Salto - MXJA01',
+            'state' => 'Jalisco',
+            'address' => 'Corredor Industrial El Salto, Jalisco',
+            'product_types' => 'Zona Occidente: Carga general y paquetería.',
+            'restrictions' => 'Acepta bultos (máx 30 kg) y pallets.',
+            'accepts_pallets' => true,
+            'accepts_bultos' => true,
+            'recommended_carriers' => ['Estafeta', 'Paquetexpress', 'FedEx', 'DHL'],
+        ],
+    ];
+
+    public static function getWarehouseProfile(string $code): array
+    {
+        return self::WAREHOUSE_PROFILES[$code] ?? [
+            'name' => self::WAREHOUSES[$code] ?? $code,
+            'state' => 'México',
+            'address' => 'Almacén Central Mercado Libre Full',
+            'product_types' => 'Mercancía general.',
+            'restrictions' => 'Bultos de hasta 30 kg.',
+            'accepts_pallets' => true,
+            'accepts_bultos' => true,
+            'recommended_carriers' => ['Estafeta', 'DHL', 'FedEx'],
+        ];
+    }
+
     public const CARRIERS = [
         'Estafeta',
         'Paquetexpress',

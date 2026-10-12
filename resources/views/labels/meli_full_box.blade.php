@@ -273,6 +273,82 @@
             border: 1px solid #e2e8f0;
         }
 
+        /* ----------------------------------------------------
+           FORMATO 3: RÓTULO TÉRMICO DE STOCK FRÁGIL (100x150 mm)
+           ---------------------------------------------------- */
+        .fragile-wrapper {
+            display: none;
+            flex-direction: column;
+            align-items: center;
+            gap: 30px;
+        }
+        .fragile-label {
+            width: 100mm;
+            min-height: 150mm;
+            height: 150mm;
+            background: #ffffff;
+            border: 4px solid #000;
+            padding: 8mm 6mm;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.06);
+            page-break-after: always;
+            position: relative;
+            text-align: center;
+        }
+        .fragile-label:last-child {
+            page-break-after: avoid;
+        }
+        .fr-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 2px solid #000;
+            padding-bottom: 4px;
+        }
+        .fr-title-box {
+            background: #000;
+            color: #fff;
+            padding: 8px 4px;
+            margin: 6px 0;
+            border-radius: 4px;
+        }
+        .fr-title-main {
+            font-size: 32px;
+            font-weight: 900;
+            letter-spacing: 2px;
+            line-height: 1.1;
+        }
+        .fr-title-sub {
+            font-size: 13px;
+            font-weight: 800;
+            letter-spacing: 1px;
+            margin-top: 4px;
+            color: #ffe600;
+        }
+        .fr-icon-box {
+            margin: 4mm 0;
+            font-size: 52px;
+            line-height: 1;
+        }
+        .fr-instructions {
+            border: 2px dashed #000;
+            padding: 6px;
+            margin: 3mm 0;
+            font-size: 10.5px;
+            font-weight: 800;
+            line-height: 1.35;
+        }
+        .fr-footer-details {
+            border-top: 2px solid #000;
+            padding-top: 4px;
+            text-align: left;
+            font-size: 10px;
+            font-weight: 700;
+            line-height: 1.3;
+        }
+
         /* MEDIA PRINT */
         @media print {
             body {
@@ -282,15 +358,25 @@
             .print-toolbar {
                 display: none !important;
             }
-            body.show-thermal .packing-wrapper {
+            body.show-thermal .packing-wrapper,
+            body.show-thermal .fragile-wrapper {
                 display: none !important;
             }
-            body.show-packing .thermal-wrapper {
+            body.show-packing .thermal-wrapper,
+            body.show-packing .fragile-wrapper {
                 display: none !important;
+            }
+            body.show-fragile .thermal-wrapper,
+            body.show-fragile .packing-wrapper {
+                display: none !important;
+            }
+            body.show-fragile .fragile-wrapper {
+                display: flex !important;
             }
 
             /* For Thermal Printing (100mm x 150mm) */
-            body.show-thermal {
+            body.show-thermal,
+            body.show-fragile {
                 margin: 0;
             }
             body.show-thermal .thermal-label {
@@ -301,6 +387,16 @@
                 page-break-after: always;
             }
             body.show-thermal .thermal-label:last-child {
+                page-break-after: avoid;
+            }
+            body.show-fragile .fragile-label {
+                border: 4px solid #000;
+                box-shadow: none;
+                margin: 0;
+                padding: 6mm 5mm;
+                page-break-after: always;
+            }
+            body.show-fragile .fragile-label:last-child {
                 page-break-after: avoid;
             }
             @page {
@@ -326,7 +422,10 @@
 
         <div class="btn-group">
             <button type="button" class="mode-btn active" id="btnModeThermal" onclick="setMode('thermal')">
-                ⚡ Rótulo Térmico MeLi (100x150 mm)
+                ⚡ Rótulo Bulto MeLi (100x150 mm)
+            </button>
+            <button type="button" class="mode-btn" id="btnModeFragile" onclick="setMode('fragile')">
+                ⚠️ Rótulo Frágil (100x150 mm)
             </button>
             <button type="button" class="mode-btn" id="btnModePacking" onclick="setMode('packing')">
                 📋 Packing List Detallado (Carta)
@@ -479,27 +578,102 @@
         @endforeach
     </div>
 
+    <!-- 3. FORMATO RÓTULO TÉRMICO DE STOCK FRÁGIL (100x150 mm / 4x6 pulg) -->
+    <div class="fragile-wrapper" id="fragileWrapper" style="display: none;">
+        @foreach($boxes as $box)
+            @php
+                $bultoCode = "{$inboundId}/{$box->box_number}";
+                $warehouseCode = $shipment->meli_warehouse_code ?: 'MXCD06';
+                $warehouseName = $shipment->meli_warehouse_name ?: \App\Models\MeliFullShipment::WAREHOUSES[$warehouseCode] ?? 'Centro logístico Panorama MX06';
+            @endphp
+            <div class="fragile-label">
+                <!-- TOP HEADER -->
+                <div>
+                    <div class="fr-header">
+                        <div style="font-size: 13px; font-weight: 900; letter-spacing: 0.5px;">
+                            ⚡ MERCADO LIBRE FULL
+                        </div>
+                        <div style="font-size: 11px; font-weight: 800; font-family: monospace;">
+                            #{{ $inboundId }}
+                        </div>
+                    </div>
+
+                    <div class="fr-title-box">
+                        <div class="fr-title-main">⚠️ FRÁGIL ⚠️</div>
+                        <div class="fr-title-sub">MANEJAR CON CUIDADO</div>
+                    </div>
+
+                    <div class="fr-icon-box">
+                        🍷 📦
+                    </div>
+
+                    <div class="fr-instructions">
+                        ESTE BULTO CONTIENE PRODUCTOS FRÁGILES.<br>
+                        <strong>NO GOLPEAR · NO ESTIBAR PESO EXCESIVO</strong><br>
+                        PEGAR JUNTO A LA ETIQUETA DE BULTO
+                    </div>
+                </div>
+
+                <!-- BOTTOM INFO -->
+                <div>
+                    <div class="fr-footer-details">
+                        <div style="font-size: 14px; font-weight: 900; color: #000; margin-bottom: 2px;">
+                            BULTO #{{ $box->box_number }} DE {{ $shipment->total_boxes ?: $boxes->count() }}
+                        </div>
+                        <div><strong>Destino:</strong> {{ $warehouseCode }} · {{ $warehouseName }}</div>
+                        <div><strong>Código Bulto:</strong> {{ $bultoCode }}</div>
+                        @if($shipment->envia_tracking_number)
+                            <div><strong>Guía {{ $shipment->envia_carrier ?: 'Estafeta' }}:</strong> {{ $shipment->envia_tracking_number }}</div>
+                        @endif
+                        <div style="margin-top: 4px; font-size: 9px; color: #475569; text-transform: uppercase;">
+                            Mercado Envíos Fulfillment · Identificación Oficial de Stock Frágil
+                        </div>
+                    </div>
+                </div>
+            </div>
+        @endforeach
+    </div>
+
     <script>
         function setMode(mode) {
             const body = document.body;
             const btnThermal = document.getElementById('btnModeThermal');
             const btnPacking = document.getElementById('btnModePacking');
+            const btnFragile = document.getElementById('btnModeFragile');
             const thermalWrapper = document.getElementById('thermalWrapper');
             const packingWrapper = document.getElementById('packingWrapper');
+            const fragileWrapper = document.getElementById('fragileWrapper');
+
+            btnThermal.className = 'mode-btn';
+            btnPacking.className = 'mode-btn';
+            btnFragile.className = 'mode-btn';
 
             if (mode === 'thermal') {
                 body.className = 'show-thermal';
                 btnThermal.className = 'mode-btn active';
-                btnPacking.className = 'mode-btn';
                 thermalWrapper.style.display = 'flex';
                 packingWrapper.style.display = 'none';
+                fragileWrapper.style.display = 'none';
+            } else if (mode === 'fragile') {
+                body.className = 'show-fragile';
+                btnFragile.className = 'mode-btn active';
+                thermalWrapper.style.display = 'none';
+                packingWrapper.style.display = 'none';
+                fragileWrapper.style.display = 'flex';
             } else {
                 body.className = 'show-packing';
-                btnThermal.className = 'mode-btn';
                 btnPacking.className = 'mode-btn active';
                 thermalWrapper.style.display = 'none';
                 packingWrapper.style.display = 'block';
+                fragileWrapper.style.display = 'none';
             }
+        }
+
+        const urlParams = new URLSearchParams(window.location.search);
+        if (urlParams.get('mode') === 'fragile') {
+            setMode('fragile');
+        } else if (urlParams.get('mode') === 'packing') {
+            setMode('packing');
         }
     </script>
 </body>

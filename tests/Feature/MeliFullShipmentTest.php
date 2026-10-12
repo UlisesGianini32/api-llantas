@@ -963,4 +963,71 @@ class MeliFullShipmentTest extends TestCase
         $this->assertEquals(0.340, (float) $meliStock->fresh()->weight_kg);
         $this->assertFalse((bool) $meliStock->fresh()->requires_meli_labeling);
     }
+
+    public function test_can_update_shipment_metadata_asynchronously(): void
+    {
+        $shipment = MeliFullShipment::create([
+            'user_id' => $this->user->id,
+            'shipment_code' => 'FULL-UPDATE-001',
+            'status' => MeliFullShipment::STATUS_DRAFT,
+            'meli_warehouse_code' => 'MXCD01',
+        ]);
+
+        $response = $this->actingAs($this->user)->putJson(route('meli-full-shipments.update', $shipment->id), [
+            'meli_warehouse_code' => 'MXCD06',
+            'meli_shipment_id' => '79340544',
+            'envia_carrier' => 'Estafeta',
+            'envia_tracking_number' => 'EST-12345678',
+        ]);
+
+        $response->assertOk()
+            ->assertJson([
+                'success' => true,
+            ]);
+
+        $shipment->refresh();
+        $this->assertEquals('MXCD06', $shipment->meli_warehouse_code);
+        $this->assertEquals('79340544', $shipment->meli_shipment_id);
+        $this->assertEquals('Estafeta', $shipment->envia_carrier);
+        $this->assertEquals('EST-12345678', $shipment->envia_tracking_number);
+    }
+
+    public function test_can_render_fragile_box_label(): void
+    {
+        $shipment = MeliFullShipment::create([
+            'user_id' => $this->user->id,
+            'shipment_code' => 'FULL-FRAGILE-001',
+            'status' => MeliFullShipment::STATUS_DRAFT,
+            'meli_warehouse_code' => 'MXCD06',
+            'meli_shipment_id' => '79340544',
+            'envia_carrier' => 'Estafeta',
+            'envia_tracking_number' => 'EST-12345678',
+        ]);
+
+        $box = MeliFullShipmentBox::create([
+            'meli_full_shipment_id' => $shipment->id,
+            'box_number' => 1,
+            'capacity' => 30,
+            'capacity_kg' => 30.00,
+            'weight_kg' => 18.5,
+        ]);
+
+        $response = $this->actingAs($this->user)->get(route('meli-full-shipments.labels', $shipment->id) . '?mode=fragile');
+
+        $response->assertOk();
+        $response->assertSee('FRÁGIL');
+        $response->assertSee('79340544');
+        $response->assertSee('MXCD06');
+    }
+
+    public function test_warehouse_profiles_contains_panorama_mxcd06_details(): void
+    {
+        $profile = MeliFullShipment::getWarehouseProfile('MXCD06');
+
+        $this->assertNotEmpty($profile);
+        $this->assertStringContainsString('Panorama', $profile['name']);
+        $this->assertStringContainsString('Cuautitlan', $profile['address']);
+        $this->assertStringContainsString('pequeños y medianos', $profile['product_types']);
+        $this->assertContains('Estafeta', $profile['recommended_carriers']);
+    }
 }
