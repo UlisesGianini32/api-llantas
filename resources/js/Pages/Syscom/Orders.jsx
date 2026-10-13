@@ -1,5 +1,5 @@
 import { Head, Link, router } from '@inertiajs/react'
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import AppShell from '@/Components/layout/AppShell'
 import Pagination from '@/Components/ui/Pagination'
 
@@ -24,7 +24,30 @@ function StatCard({ title, value, subtitle, colorClass, badge }) {
 }
 
 export default function SyscomOrders({ orders, filters, stats }) {
+    const [ordersList, setOrdersList] = useState(orders?.data || [])
     const [copiedFolio, setCopiedFolio] = useState(null)
+    const [notification, setNotification] = useState(null)
+    const [processingOrderId, setProcessingOrderId] = useState(null)
+
+    // Edit Folio Modal
+    const [editModalOpen, setEditModalOpen] = useState(false)
+    const [selectedOrder, setSelectedOrder] = useState(null)
+    const [folioInput, setFolioInput] = useState('')
+    const [savingFolio, setSavingFolio] = useState(false)
+
+    // Raw JSON Modal
+    const [rawModalOpen, setRawModalOpen] = useState(false)
+    const [rawModalOrder, setRawModalOrder] = useState(null)
+    const [copiedRaw, setCopiedRaw] = useState(false)
+
+    useEffect(() => {
+        setOrdersList(orders?.data || [])
+    }, [orders])
+
+    const showNotice = (msg, type = 'success') => {
+        setNotification({ type, message: msg })
+        setTimeout(() => setNotification(null), 5000)
+    }
 
     const copyText = async (text) => {
         const t = String(text || '')
@@ -35,6 +58,128 @@ export default function SyscomOrders({ orders, filters, stats }) {
             setTimeout(() => setCopiedFolio(null), 2000)
         } catch {
             window.prompt('Copiar:', t)
+        }
+    }
+
+    const openEditFolio = (order) => {
+        setSelectedOrder(order)
+        setFolioInput(order.syscom_order_folio || '')
+        setEditModalOpen(true)
+    }
+
+    const handleSaveFolio = async (e) => {
+        if (e && e.preventDefault) e.preventDefault()
+        if (!selectedOrder || !folioInput.trim()) return
+
+        setSavingFolio(true)
+        try {
+            const csrf = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || ''
+            const res = await fetch(`/syscom-ml/pedidos/${selectedOrder.id}/folio`, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                    'X-CSRF-TOKEN': csrf,
+                },
+                body: JSON.stringify({ syscom_order_folio: folioInput.trim() }),
+            })
+            const data = await res.json()
+            if (res.ok && data.success) {
+                const newFolio = data.syscom_order_folio
+                setOrdersList((prev) =>
+                    prev.map((o) => (o.id === selectedOrder.id ? { ...o, syscom_order_folio: newFolio, syscom_order_error: '' } : o))
+                )
+                setEditModalOpen(false)
+                showNotice(`✓ Folio guardado: ${newFolio}`)
+                copyText(newFolio)
+            } else {
+                alert(data.error || 'Error al guardar el folio.')
+            }
+        } catch (err) {
+            console.error('Error saving folio:', err)
+            alert('Error de conexión al guardar el folio.')
+        } finally {
+            setSavingFolio(false)
+        }
+    }
+
+    const handleExtractFolio = async (order) => {
+        setProcessingOrderId(order.id)
+        try {
+            const csrf = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || ''
+            const res = await fetch(`/syscom-ml/pedidos/${order.id}/extraer-folio`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                    'X-CSRF-TOKEN': csrf,
+                },
+            })
+            const data = await res.json()
+            if (res.ok && data.success) {
+                const newFolio = data.syscom_order_folio
+                setOrdersList((prev) =>
+                    prev.map((o) => (o.id === order.id ? { ...o, syscom_order_folio: newFolio, syscom_order_error: '' } : o))
+                )
+                showNotice(`✓ ¡Folio recuperado exitosamente!: ${newFolio}`)
+                copyText(newFolio)
+            } else {
+                showNotice(data.error || 'No se encontró folio en la respuesta de SYSCOM.', 'error')
+                openEditFolio(order)
+            }
+        } catch (err) {
+            console.error('Error extracting folio:', err)
+            showNotice('Error al intentar extraer el folio.', 'error')
+        } finally {
+            setProcessingOrderId(null)
+        }
+    }
+
+    const handleRetrySync = async (order) => {
+        if (!confirm(`¿Reintentar enviar la orden ${order.order_id} a SYSCOM para generar el pedido?`)) return
+        setProcessingOrderId(order.id)
+        try {
+            const csrf = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || ''
+            const res = await fetch(`/syscom-ml/pedidos/${order.id}/reintentar`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                    'X-CSRF-TOKEN': csrf,
+                },
+            })
+            const data = await res.json()
+            if (res.ok && data.success) {
+                const newFolio = data.syscom_order_folio
+                setOrdersList((prev) =>
+                    prev.map((o) => (o.id === order.id ? { ...o, syscom_order_folio: newFolio, syscom_order_error: '', syscom_order_raw: data.raw, has_raw: true } : o))
+                )
+                showNotice(`✓ Pedido generado en SYSCOM con folio: ${newFolio}`)
+                copyText(newFolio)
+            } else {
+                showNotice(data.error || 'SYSCOM no generó folio al reintentar.', 'error')
+            }
+        } catch (err) {
+            console.error('Error retrying sync:', err)
+            showNotice('Error al reintentar generar el pedido.', 'error')
+        } finally {
+            setProcessingOrderId(null)
+        }
+    }
+
+    const handleViewRaw = (order) => {
+        setRawModalOrder(order)
+        setRawModalOpen(true)
+    }
+
+    const copyRawJson = async () => {
+        if (!rawModalOrder?.syscom_order_raw) return
+        try {
+            await navigator.clipboard.writeText(JSON.stringify(rawModalOrder.syscom_order_raw, null, 2))
+            setCopiedRaw(true)
+            setTimeout(() => setCopiedRaw(false), 2000)
+        } catch {
+            // ignore
         }
     }
 
@@ -221,6 +366,22 @@ export default function SyscomOrders({ orders, filters, stats }) {
                     </div>
                 </div>
 
+                {/* Notificación Flotante / Toast */}
+                {notification && (
+                    <div
+                        className={`flex items-center justify-between rounded-xl p-4 text-xs font-bold shadow-md transition-all ${
+                            notification.type === 'error'
+                                ? 'bg-rose-50 text-rose-800 border border-rose-200 dark:bg-rose-950 dark:text-rose-200'
+                                : 'bg-emerald-50 text-emerald-800 border border-emerald-200 dark:bg-emerald-950 dark:text-emerald-200'
+                        }`}
+                    >
+                        <span>{notification.message}</span>
+                        <button type="button" onClick={() => setNotification(null)} className="ml-4 opacity-70 hover:opacity-100">
+                            ✕
+                        </button>
+                    </div>
+                )}
+
                 {/* Tabla de Folios */}
                 <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xs dark:border-neutral-800 dark:bg-neutral-900">
                     <div className="overflow-x-auto">
@@ -232,21 +393,22 @@ export default function SyscomOrders({ orders, filters, stats }) {
                                     <th className="px-5 py-3.5">Folio SYSCOM</th>
                                     <th className="px-5 py-3.5">Sincronización</th>
                                     <th className="px-5 py-3.5">Estado / Error</th>
-                                    <th className="px-5 py-3.5 text-right">Acción</th>
+                                    <th className="px-5 py-3.5 text-right">Acciones</th>
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-slate-100 dark:divide-neutral-800">
-                                {orders.data.length === 0 ? (
+                                {ordersList.length === 0 ? (
                                     <tr>
                                         <td colSpan="6" className="px-5 py-12 text-center text-sm text-slate-500 dark:text-neutral-400">
                                             No se encontraron pedidos de SYSCOM con los filtros seleccionados.
                                         </td>
                                     </tr>
                                 ) : (
-                                    orders.data.map((row) => {
+                                    ordersList.map((row) => {
                                         const mlCancelled = Boolean(row.ml_cancelled)
                                         const syscomCancelled = Boolean(row.syscom_cancelled)
                                         const strike = mlCancelled ? 'line-through text-slate-400 dark:text-slate-500' : ''
+                                        const isProcessing = processingOrderId === row.id
 
                                         return (
                                             <tr key={row.id || row.order_id} className="transition hover:bg-slate-50 dark:hover:bg-neutral-800/50">
@@ -258,19 +420,40 @@ export default function SyscomOrders({ orders, filters, stats }) {
                                                 </td>
                                                 <td className="px-5 py-3.5 font-mono text-xs font-bold">
                                                     {row.syscom_order_folio ? (
-                                                        <span
-                                                            className={`inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 ${
-                                                                syscomCancelled
-                                                                    ? 'bg-slate-100 text-slate-400 line-through dark:bg-neutral-800'
-                                                                    : mlCancelled
-                                                                      ? 'bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300'
-                                                                      : 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300'
-                                                            }`}
-                                                        >
-                                                            {row.syscom_order_folio}
-                                                        </span>
+                                                        <div className="flex items-center gap-1.5 flex-wrap">
+                                                            <span
+                                                                className={`inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 ${
+                                                                    syscomCancelled
+                                                                        ? 'bg-slate-100 text-slate-400 line-through dark:bg-neutral-800'
+                                                                        : mlCancelled
+                                                                          ? 'bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300'
+                                                                          : 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300'
+                                                                }`}
+                                                            >
+                                                                {row.syscom_order_folio}
+                                                            </span>
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => openEditFolio(row)}
+                                                                className="text-slate-400 hover:text-indigo-600 transition"
+                                                                title="Editar este folio"
+                                                            >
+                                                                ✎
+                                                            </button>
+                                                        </div>
                                                     ) : (
-                                                        <span className="text-slate-400 italic">Sin folio</span>
+                                                        <div>
+                                                            <span className="inline-flex items-center gap-1 rounded-md bg-amber-100 border border-amber-300 px-2 py-0.5 text-xs font-bold text-amber-900 dark:bg-amber-950/60 dark:border-amber-700 dark:text-amber-300">
+                                                                ⚠️ Sin folio
+                                                            </span>
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => openEditFolio(row)}
+                                                                className="mt-1 block text-[11px] font-bold text-indigo-600 hover:text-indigo-800 hover:underline dark:text-indigo-400"
+                                                            >
+                                                                ✎ Asignar Folio
+                                                            </button>
+                                                        </div>
                                                     )}
 
                                                     {mlCancelled && !syscomCancelled && (
@@ -296,26 +479,76 @@ export default function SyscomOrders({ orders, filters, stats }) {
                                                         }`} title={row.syscom_order_error}>
                                                             {row.syscom_order_error}
                                                         </span>
-                                                    ) : (
+                                                    ) : row.syscom_order_folio ? (
                                                         <span className="text-emerald-600 dark:text-emerald-400 font-medium">
                                                             Sincronizado OK
                                                         </span>
+                                                    ) : (
+                                                        <span className="text-amber-600 dark:text-amber-400 font-medium">
+                                                            ⚠️ Requiere Folio
+                                                        </span>
                                                     )}
                                                 </td>
-                                                <td className="px-5 py-3.5 text-right">
-                                                    {row.syscom_order_folio && (
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => copyText(row.syscom_order_folio)}
-                                                            className={`rounded-lg border px-2.5 py-1 text-xs font-semibold transition ${
-                                                                copiedFolio === row.syscom_order_folio
-                                                                    ? 'border-emerald-500 bg-emerald-50 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-300'
-                                                                    : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-200'
-                                                            }`}
-                                                        >
-                                                            {copiedFolio === row.syscom_order_folio ? '✓ Copiado' : 'Copiar'}
-                                                        </button>
-                                                    )}
+                                                <td className="px-5 py-3.5 text-right whitespace-nowrap">
+                                                    <div className="flex items-center justify-end gap-1.5">
+                                                        {row.syscom_order_folio && (
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => copyText(row.syscom_order_folio)}
+                                                                className={`rounded-lg border px-2.5 py-1 text-xs font-semibold transition ${
+                                                                    copiedFolio === row.syscom_order_folio
+                                                                        ? 'border-emerald-500 bg-emerald-50 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-300'
+                                                                        : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-200'
+                                                                }`}
+                                                            >
+                                                                {copiedFolio === row.syscom_order_folio ? '✓ Copiado' : 'Copiar'}
+                                                            </button>
+                                                        )}
+
+                                                        {!row.syscom_order_folio && (
+                                                            <>
+                                                                {row.has_raw && (
+                                                                    <button
+                                                                        type="button"
+                                                                        disabled={isProcessing}
+                                                                        onClick={() => handleExtractFolio(row)}
+                                                                        className="rounded-lg border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-xs font-bold text-indigo-700 hover:bg-indigo-100 disabled:opacity-50 dark:border-indigo-900 dark:bg-indigo-950/50 dark:text-indigo-300"
+                                                                        title="Re-analizar la respuesta de SYSCOM para buscar el folio"
+                                                                    >
+                                                                        {isProcessing ? '⏳ Buscando...' : '🔍 Extraer Folio'}
+                                                                    </button>
+                                                                )}
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => openEditFolio(row)}
+                                                                    className="rounded-lg border border-emerald-300 bg-emerald-50 px-2.5 py-1 text-xs font-bold text-emerald-800 hover:bg-emerald-100 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-300"
+                                                                    title="Ingresar folio manualmente"
+                                                                >
+                                                                    ✎ Asignar
+                                                                </button>
+                                                                <button
+                                                                    type="button"
+                                                                    disabled={isProcessing}
+                                                                    onClick={() => handleRetrySync(row)}
+                                                                    className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-300"
+                                                                    title="Reintentar llamada para generar pedido en SYSCOM"
+                                                                >
+                                                                    🔄
+                                                                </button>
+                                                            </>
+                                                        )}
+
+                                                        {row.has_raw && (
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => handleViewRaw(row)}
+                                                                className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-slate-500 hover:bg-slate-50 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-400"
+                                                                title="Ver respuesta JSON cruda de SYSCOM"
+                                                            >
+                                                                👁️ JSON
+                                                            </button>
+                                                        )}
+                                                    </div>
                                                 </td>
                                             </tr>
                                         )
@@ -329,6 +562,129 @@ export default function SyscomOrders({ orders, filters, stats }) {
                         <Pagination links={orders.links || []} />
                     </div>
                 </div>
+
+                {/* MODAL: EDITAR / ASIGNAR FOLIO SYSCOM */}
+                {editModalOpen && selectedOrder && (
+                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-xs">
+                        <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl dark:border-neutral-800 dark:bg-neutral-900">
+                            <div className="flex items-center justify-between border-b border-slate-100 pb-3 dark:border-neutral-800">
+                                <h3 className="text-base font-black text-slate-900 dark:text-white">
+                                    Asignar Folio de Pedido SYSCOM
+                                </h3>
+                                <button
+                                    type="button"
+                                    onClick={() => setEditModalOpen(false)}
+                                    className="text-slate-400 hover:text-slate-600"
+                                >
+                                    ✕
+                                </button>
+                            </div>
+
+                            <form onSubmit={handleSaveFolio} className="mt-4 space-y-4">
+                                <div>
+                                    <label className="text-xs font-semibold text-slate-500 dark:text-neutral-400">
+                                        Orden Mercado Libre
+                                    </label>
+                                    <p className="font-mono text-sm font-bold text-slate-800 dark:text-slate-200">
+                                        {selectedOrder.referencia_ml} ({selectedOrder.order_id})
+                                    </p>
+                                </div>
+
+                                <div>
+                                    <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 dark:text-slate-300">
+                                        Folio SYSCOM <span className="text-rose-500">*</span>
+                                    </label>
+                                    <input
+                                        type="text"
+                                        required
+                                        autoFocus
+                                        value={folioInput}
+                                        onChange={(e) => setFolioInput(e.target.value)}
+                                        placeholder="Ej. 576-5934968/26-API"
+                                        className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 font-mono text-sm font-bold text-slate-900 placeholder-slate-400 outline-none focus:border-indigo-600 focus:ring-1 focus:ring-indigo-600 dark:border-neutral-700 dark:bg-neutral-800 dark:text-white"
+                                    />
+                                    <p className="mt-1.5 text-[11px] text-slate-500 dark:text-neutral-400">
+                                        Pega el folio asignado por SYSCOM en tu portal o factura. Al guardar, quedará registrado permanentemente para recolección y auditoría.
+                                    </p>
+                                </div>
+
+                                <div className="flex items-center justify-end gap-2 pt-2">
+                                    <button
+                                        type="button"
+                                        onClick={() => setEditModalOpen(false)}
+                                        className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-50 dark:border-neutral-700 dark:text-slate-300"
+                                    >
+                                        Cancelar
+                                    </button>
+                                    <button
+                                        type="submit"
+                                        disabled={savingFolio || !folioInput.trim()}
+                                        className="rounded-xl bg-indigo-600 px-5 py-2 text-xs font-bold text-white shadow-sm hover:bg-indigo-700 disabled:opacity-50"
+                                    >
+                                        {savingFolio ? 'Guardando...' : 'Guardar Folio'}
+                                    </button>
+                                </div>
+                            </form>
+                        </div>
+                    </div>
+                )}
+
+                {/* MODAL: VER RESPUESTA CRUDA SYSCOM (JSON) */}
+                {rawModalOpen && rawModalOrder && (
+                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-xs">
+                        <div className="w-full max-w-2xl max-h-[85vh] flex flex-col rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl dark:border-neutral-800 dark:bg-neutral-900">
+                            <div className="flex items-center justify-between border-b border-slate-100 pb-3 dark:border-neutral-800">
+                                <div>
+                                    <h3 className="text-base font-black text-slate-900 dark:text-white">
+                                        Respuesta Cruda de SYSCOM (API)
+                                    </h3>
+                                    <p className="font-mono text-xs text-slate-500">
+                                        {rawModalOrder.referencia_ml}
+                                    </p>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={() => setRawModalOpen(false)}
+                                    className="text-slate-400 hover:text-slate-600"
+                                >
+                                    ✕
+                                </button>
+                            </div>
+
+                            <div className="mt-4 flex-1 overflow-y-auto rounded-xl bg-slate-900 p-4 font-mono text-xs text-emerald-400 scrollbar-thin">
+                                <pre className="whitespace-pre-wrap">
+                                    {rawModalOrder.syscom_order_raw
+                                        ? JSON.stringify(rawModalOrder.syscom_order_raw, null, 2)
+                                        : '// No hay datos JSON registrados para esta orden.'}
+                                </pre>
+                            </div>
+
+                            <div className="mt-4 flex items-center justify-between pt-2">
+                                <span className="text-[11px] text-slate-400">
+                                    {rawModalOrder.syscom_order_folio
+                                        ? `Folio activo: ${rawModalOrder.syscom_order_folio}`
+                                        : 'Sin folio extraído de esta respuesta'}
+                                </span>
+                                <div className="flex items-center gap-2">
+                                    <button
+                                        type="button"
+                                        onClick={copyRawJson}
+                                        className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 dark:border-neutral-700 dark:text-slate-200"
+                                    >
+                                        {copiedRaw ? '✓ Copiado' : '📋 Copiar JSON'}
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => setRawModalOpen(false)}
+                                        className="rounded-xl bg-slate-900 px-5 py-2 text-xs font-bold text-white hover:bg-slate-800 dark:bg-white dark:text-slate-900"
+                                    >
+                                        Cerrar
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                )}
             </div>
         </AppShell>
     )

@@ -454,7 +454,7 @@ class MeliFullShipmentController extends Controller
             $draftShipments = collect([$selectedShipment]);
         }
 
-        $recommendations = $this->shipmentService->getPackStationRecommendations($mappedFullStocks, $products, 100);
+        $recommendations = $this->shipmentService->getPackStationRecommendations($mappedFullStocks, $products, 1000);
 
         return Inertia::render('MeliFullShipments/PackStation', [
             'shipment' => $selectedShipment,

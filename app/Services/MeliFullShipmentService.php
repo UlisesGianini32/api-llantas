@@ -936,7 +936,7 @@ class MeliFullShipmentService
      *
      * @return array<int, array<string, mixed>>
      */
-    public function getPackStationRecommendations(Collection $mappedFullStocks, Collection $products, int $limit = 80): array
+    public function getPackStationRecommendations(Collection $mappedFullStocks, Collection $products, int $limit = 1000): array
     {
         $stockSvc = $this->stockService ?? app(InventoryStockService::class);
         $productsById = $products->keyBy('id');
@@ -1037,6 +1037,6 @@ class MeliFullShipmentService
             return $b['local_stock_available'] <=> $a['local_stock_available'];
         });
 
-        return array_slice($suggestions, 0, $limit);
+        return $limit > 0 ? array_slice($suggestions, 0, $limit) : $suggestions;
     }
 }

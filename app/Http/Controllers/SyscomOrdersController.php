@@ -3,6 +3,9 @@
 namespace App\Http\Controllers;
 
 use App\Models\MeliOrder;
+use App\Models\User;
+use App\Services\SyscomOrderFromMeliService;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
 use Inertia\Response;
@@ -82,6 +85,18 @@ class SyscomOrdersController extends Controller
                 $mlCancelled = in_array($status, ['cancelled', 'canceled', 'invalid', 'expired'], true);
                 $syscomCancelled = $o->syscom_order_cancelled_at !== null;
 
+                // Auto-reparación inteligente: si la orden no tiene folio pero tiene respuesta cruda guardada, reintentar extraerlo
+                if (empty($o->syscom_order_folio) && ! empty($o->syscom_order_raw)) {
+                    $extracted = SyscomOrderFromMeliService::extractFolioFromSyscomResponse($o->syscom_order_raw);
+                    if ($extracted) {
+                        $o->syscom_order_folio = $extracted;
+                        if ($o->syscom_order_error && str_contains($o->syscom_order_error, 'no devolvió folio')) {
+                            $o->syscom_order_error = null;
+                        }
+                        $o->save();
+                    }
+                }
+
                 return [
                     'id' => $o->id,
                     'order_id' => (string) $o->order_id,
@@ -96,6 +111,8 @@ class SyscomOrdersController extends Controller
                     'syscom_order_cancel_error' => $syscomCancelled
                         ? null
                         : ($mlCancelled ? (string) ($o->syscom_order_cancel_error ?? '') : null),
+                    'has_raw' => ! empty($o->syscom_order_raw),
+                    'syscom_order_raw' => $o->syscom_order_raw,
                 ];
             });
 
@@ -114,4 +131,103 @@ class SyscomOrdersController extends Controller
             ],
         ]);
     }
+
+    /**
+     * Permite asignar o editar manualmente el folio SYSCOM de un pedido.
+     */
+    public function updateFolio(Request $request, MeliOrder $order): JsonResponse
+    {
+        $validated = $request->validate([
+            'syscom_order_folio' => ['required', 'string', 'max:100'],
+        ]);
+
+        $newFolio = trim($validated['syscom_order_folio']);
+        $order->syscom_order_folio = $newFolio;
+
+        if ($order->syscom_order_error && str_contains($order->syscom_order_error, 'no devolvió folio')) {
+            $order->syscom_order_error = null;
+        }
+
+        $order->save();
+
+        return response()->json([
+            'success' => true,
+            'message' => "Folio SYSCOM guardado exitosamente: {$newFolio}",
+            'syscom_order_folio' => $newFolio,
+        ]);
+    }
+
+    /**
+     * Re-analiza la respuesta cruda de SYSCOM para extraer el folio si no se capturó inicialmente.
+     */
+    public function extractFolio(MeliOrder $order): JsonResponse
+    {
+        if (empty($order->syscom_order_raw)) {
+            return response()->json([
+                'success' => false,
+                'error' => 'No hay respuesta cruda guardada de SYSCOM para este pedido.',
+            ], 422);
+        }
+
+        $extracted = SyscomOrderFromMeliService::extractFolioFromSyscomResponse($order->syscom_order_raw);
+
+        if ($extracted) {
+            $order->syscom_order_folio = $extracted;
+            if ($order->syscom_order_error && str_contains($order->syscom_order_error, 'no devolvió folio')) {
+                $order->syscom_order_error = null;
+            }
+            $order->save();
+
+            return response()->json([
+                'success' => true,
+                'message' => "¡Folio encontrado y asignado exitosamente!: {$extracted}",
+                'syscom_order_folio' => $extracted,
+            ]);
+        }
+
+        return response()->json([
+            'success' => false,
+            'error' => 'No se detectó ningún folio en el JSON de SYSCOM. Puedes asignarlo manualmente o reintentar.',
+            'raw' => $order->syscom_order_raw,
+        ], 404);
+    }
+
+    /**
+     * Reintenta la sincronización con SYSCOM para un pedido que no obtuvo folio o falló.
+     */
+    public function retrySync(Request $request, MeliOrder $order, SyscomOrderFromMeliService $service): JsonResponse
+    {
+        $user = $request->user() ?? User::query()->whereNotNull('access_token')->first();
+
+        if (! $user) {
+            return response()->json([
+                'success' => false,
+                'error' => 'No se encontró un usuario con token de acceso para ejecutar la sincronización.',
+            ], 401);
+        }
+
+        // Restablecer campos para permitir reintento
+        $order->syscom_order_synced_at = null;
+        $order->syscom_order_folio = null;
+        $order->syscom_order_error = null;
+        $order->save();
+
+        $service->syncIfEligible($user, $order);
+        $order->refresh();
+
+        if (! empty($order->syscom_order_folio)) {
+            return response()->json([
+                'success' => true,
+                'message' => "Pedido generado en SYSCOM con folio: {$order->syscom_order_folio}",
+                'syscom_order_folio' => $order->syscom_order_folio,
+            ]);
+        }
+
+        return response()->json([
+            'success' => false,
+            'error' => $order->syscom_order_error ?: 'No se generó folio en SYSCOM.',
+            'raw' => $order->syscom_order_raw,
+        ]);
+    }
 }
+

@@ -104,6 +104,17 @@ export default function MeliFullShipmentsPackStation({
     const [inputWeight, setInputWeight] = useState(1.000)
     const [requiresLabeling, setRequiresLabeling] = useState(false)
     const [showSuggestionsCarousel, setShowSuggestionsCarousel] = useState(true)
+    const [visibleCount, setVisibleCount] = useState(50)
+
+    // Modal: Nuevo Envío Secundario para Otra Bodega
+    const [newShipmentModalOpen, setNewShipmentModalOpen] = useState(false)
+    const [newShipmentWarehouse, setNewShipmentWarehouse] = useState('MXCD01')
+    const [creatingNewShipment, setCreatingNewShipment] = useState(false)
+
+    // Reset visible count when tab or search query changes
+    useEffect(() => {
+        setVisibleCount(50)
+    }, [searchTab, searchQuery])
 
     // Weight persistence state
     const [savingWeight, setSavingWeight] = useState(false)
@@ -239,7 +250,7 @@ export default function MeliFullShipmentsPackStation({
             requires_meli_labeling: p.requires_meli_labeling !== undefined && p.requires_meli_labeling !== null ? Boolean(p.requires_meli_labeling) : null,
         })
 
-        // Tab: AGOTADOS EN FULL
+        // Tab: AGOTADOS EN FULL (Todos los 303 productos sin stock en MeLi)
         if (searchTab === 'OUT_OF_STOCK') {
             const outOfStock = localFullStocks.filter((st) => (st.full_available_quantity ?? 0) === 0)
             const filtered = q
@@ -249,7 +260,7 @@ export default function MeliFullShipmentsPackStation({
                       (st.sku && st.sku.toLowerCase().includes(q))
                   )
                 : outOfStock
-            return filtered.slice(0, 30).map((st) =>
+            return filtered.map((st) =>
                 formatFullItem(st, {
                     badge: '🔴 AGOTADO EN FULL',
                     priority: 'CRITICAL',
@@ -258,7 +269,7 @@ export default function MeliFullShipmentsPackStation({
             )
         }
 
-        // Tab: POR AGOTARSE EN FULL (1 a 5 unidades)
+        // Tab: POR AGOTARSE EN FULL (1 a 5 unidades restantes)
         if (searchTab === 'LOW_STOCK') {
             const lowStock = localFullStocks.filter((st) => {
                 const qty = st.full_available_quantity ?? 0
@@ -271,7 +282,7 @@ export default function MeliFullShipmentsPackStation({
                       (st.sku && st.sku.toLowerCase().includes(q))
                   )
                 : lowStock
-            return filtered.slice(0, 30).map((st) =>
+            return filtered.map((st) =>
                 formatFullItem(st, {
                     badge: '🟡 POR AGOTARSE',
                     priority: 'HIGH',
@@ -290,7 +301,7 @@ export default function MeliFullShipmentsPackStation({
                       (r.linked_sku && r.linked_sku.toLowerCase().includes(q))
                   )
                 : recommendations
-            return filtered.slice(0, 35).map((r) =>
+            return filtered.map((r) =>
                 formatFullItem(
                     {
                         id: r.id,
@@ -317,37 +328,85 @@ export default function MeliFullShipmentsPackStation({
             )
         }
 
-        // Si la búsqueda está vacía en los tabs generales, no mostrar dropdown
-        if (!q) return []
+        // Tab: SOLO FULL (Todos los 639 productos de FULL sin recorte)
+        if (searchTab === 'FULL') {
+            const filtered = q
+                ? localFullStocks.filter((st) =>
+                      (st.mlm && st.mlm.toLowerCase().includes(q)) ||
+                      (st.title && st.title.toLowerCase().includes(q)) ||
+                      (st.sku && st.sku.toLowerCase().includes(q))
+                  )
+                : localFullStocks
+            return filtered.map((st) => formatFullItem(st))
+        }
+
+        // Tab: SOLO ALMACÉN (Todos los 332 productos del almacén local)
+        if (searchTab === 'LOCAL') {
+            const filtered = q
+                ? localProducts.filter((p) =>
+                      (p.sku && p.sku.toLowerCase().includes(q)) ||
+                      (p.name && p.name.toLowerCase().includes(q)) ||
+                      (p.barcode && p.barcode.toLowerCase().includes(q)) ||
+                      (p.barcode_secondary && p.barcode_secondary.toLowerCase().includes(q))
+                  )
+                : localProducts
+            return filtered.map((p) => formatLocalItem(p))
+        }
+
+        // Tab: ALL (Todos)
+        if (!q) {
+            // Si la búsqueda está vacía en "Todos", mostrar sugerencias prioritarias
+            return recommendations.map((r) =>
+                formatFullItem(
+                    {
+                        id: r.id,
+                        mlm: r.mlm,
+                        variation_id: r.variation_id,
+                        sku: r.meli_sku,
+                        title: r.title,
+                        thumbnail: r.thumbnail,
+                        full_available_quantity: r.full_available,
+                        linked_product_id: r.linked_product_id,
+                        weight_kg: r.weight_kg,
+                        requires_meli_labeling: r.requires_meli_labeling,
+                    },
+                    {
+                        meli_sku: r.meli_sku,
+                        weight_kg: r.weight_kg,
+                        requires_meli_labeling: r.requires_meli_labeling,
+                        suggested_quantity: r.suggested_quantity,
+                        priority: r.priority,
+                        badge: r.badge,
+                        reason: r.reason,
+                    }
+                )
+            )
+        }
 
         const fullMatches = []
-        if (searchTab === 'ALL' || searchTab === 'FULL') {
-            localFullStocks.forEach((st) => {
-                const matchMlm = st.mlm && st.mlm.toLowerCase().includes(q)
-                const matchTitle = st.title && st.title.toLowerCase().includes(q)
-                const matchSku = st.sku && st.sku.toLowerCase().includes(q)
+        localFullStocks.forEach((st) => {
+            const matchMlm = st.mlm && st.mlm.toLowerCase().includes(q)
+            const matchTitle = st.title && st.title.toLowerCase().includes(q)
+            const matchSku = st.sku && st.sku.toLowerCase().includes(q)
 
-                if (matchMlm || matchTitle || matchSku) {
-                    fullMatches.push(formatFullItem(st))
-                }
-            })
-        }
+            if (matchMlm || matchTitle || matchSku) {
+                fullMatches.push(formatFullItem(st))
+            }
+        })
 
         const localMatches = []
-        if (searchTab === 'ALL' || searchTab === 'LOCAL') {
-            localProducts.forEach((p) => {
-                const matchSku = p.sku && p.sku.toLowerCase().includes(q)
-                const matchName = p.name && p.name.toLowerCase().includes(q)
-                const matchBarcode = p.barcode && p.barcode.toLowerCase().includes(q)
-                const matchBarcodeSec = p.barcode_secondary && p.barcode_secondary.toLowerCase().includes(q)
+        localProducts.forEach((p) => {
+            const matchSku = p.sku && p.sku.toLowerCase().includes(q)
+            const matchName = p.name && p.name.toLowerCase().includes(q)
+            const matchBarcode = p.barcode && p.barcode.toLowerCase().includes(q)
+            const matchBarcodeSec = p.barcode_secondary && p.barcode_secondary.toLowerCase().includes(q)
 
-                if (matchSku || matchName || matchBarcode || matchBarcodeSec) {
-                    localMatches.push(formatLocalItem(p))
-                }
-            })
-        }
+            if (matchSku || matchName || matchBarcode || matchBarcodeSec) {
+                localMatches.push(formatLocalItem(p))
+            }
+        })
 
-        return [...fullMatches.slice(0, 15), ...localMatches.slice(0, 15)]
+        return [...fullMatches, ...localMatches]
     }, [searchQuery, searchTab, localFullStocks, localProducts, productsMap, recommendations])
 
     // Save product weight and labeling permanently to server and local cache
@@ -1103,26 +1162,34 @@ export default function MeliFullShipmentsPackStation({
 
                     {/* ACTIONS & SHIPMENT SELECTOR */}
                     <div className="flex flex-wrap items-center gap-2">
-                        {draftShipments.length > 1 && (
-                            <select
-                                value={currentShipment.id}
-                                onChange={(e) => {
-                                    const nextId = parseInt(e.target.value, 10)
-                                    const found = draftShipments.find((s) => s.id === nextId)
-                                    if (found) {
-                                        setCurrentShipment(found)
-                                        setBoxesList(found.boxes || [])
-                                    }
-                                }}
-                                className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-200"
-                            >
-                                {draftShipments.map((s) => (
-                                    <option key={s.id} value={s.id}>
-                                        {s.shipment_code} ({s.meli_warehouse_code}) · {s.boxes?.length || 0} cajas
-                                    </option>
-                                ))}
-                            </select>
-                        )}
+                        <select
+                            value={currentShipment.id}
+                            onChange={(e) => {
+                                const nextId = parseInt(e.target.value, 10)
+                                const found = draftShipments.find((s) => s.id === nextId)
+                                if (found) {
+                                    setCurrentShipment(found)
+                                    setBoxesList(found.boxes || [])
+                                }
+                            }}
+                            className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-200"
+                        >
+                            {draftShipments.map((s) => (
+                                <option key={s.id} value={s.id}>
+                                    {s.shipment_code} ({s.meli_warehouse_code}) · {s.boxes?.length || 0} cajas
+                                </option>
+                            ))}
+                        </select>
+
+                        {/* NUEVO ENVÍO PARA OTRA BODEGA */}
+                        <button
+                            type="button"
+                            onClick={() => setNewShipmentModalOpen(true)}
+                            className="inline-flex items-center gap-1.5 rounded-xl border border-sky-300 bg-sky-50 px-3 py-2 text-xs font-black text-sky-900 hover:bg-sky-100 transition-all shadow-sm dark:border-sky-800 dark:bg-sky-950/60 dark:text-sky-200"
+                            title="Crear un envío secundario si MeLi asigna ciertos productos a otra bodega"
+                        >
+                            <span>➕</span> Otra Bodega / Envío
+                        </button>
 
                         {/* COPIAR LISTA PARA MELI */}
                         <button
@@ -1607,7 +1674,7 @@ export default function MeliFullShipmentsPackStation({
                                         )}
 
                                         <div className="divide-y divide-slate-100 text-xs dark:divide-neutral-800">
-                                            {searchResults.map((it) => (
+                                            {searchResults.slice(0, visibleCount).map((it) => (
                                                 <div
                                                     key={it.id}
                                                     onClick={() => handleSelectItem(it)}
@@ -1704,6 +1771,31 @@ export default function MeliFullShipmentsPackStation({
                                                     </button>
                                                 </div>
                                             ))}
+
+                                            {/* BARRA DE PAGINACIÓN / CARGAR MÁS */}
+                                            {searchResults.length > visibleCount && (
+                                                <div className="flex flex-col sm:flex-row items-center justify-between gap-2 border-t border-slate-100 bg-slate-50 p-3 text-xs dark:border-neutral-800 dark:bg-neutral-850">
+                                                    <span className="text-slate-500 font-medium">
+                                                        Mostrando <strong>{Math.min(visibleCount, searchResults.length)}</strong> de <strong>{searchResults.length}</strong> productos
+                                                    </span>
+                                                    <div className="flex items-center gap-2">
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => setVisibleCount((prev) => prev + 50)}
+                                                            className="rounded-xl bg-indigo-600 px-3.5 py-1.5 text-xs font-bold text-white shadow-sm hover:bg-indigo-700"
+                                                        >
+                                                            Mostrar 50 más (+50)
+                                                        </button>
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => setVisibleCount(searchResults.length)}
+                                                            className="rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-50 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-200"
+                                                        >
+                                                            Ver todos ({searchResults.length})
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            )}
                                         </div>
                                     </div>
                                 )}
@@ -3072,6 +3164,111 @@ export default function MeliFullShipmentsPackStation({
                                 Cerrar
                             </button>
                         </div>
+                    </div>
+                </div>
+            )}
+
+            {/* MODAL: CREAR ENVÍO SECUNDARIO PARA OTRA BODEGA */}
+            {newShipmentModalOpen && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-xs">
+                    <div className="w-full max-w-lg rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl dark:border-neutral-800 dark:bg-neutral-900">
+                        <div className="flex items-center justify-between border-b border-slate-100 pb-3 dark:border-neutral-800">
+                            <div>
+                                <h3 className="text-base font-black text-slate-900 dark:text-white">
+                                    Iniciar Envío para Otra Bodega (CEDIS MeLi)
+                                </h3>
+                                <p className="text-xs text-slate-500">
+                                    Crea un envío paralelo para los productos que MeLi no permite enviar a la bodega actual.
+                                </p>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => setNewShipmentModalOpen(false)}
+                                className="text-slate-400 hover:text-slate-600 font-bold"
+                            >
+                                ✕
+                            </button>
+                        </div>
+
+                        <form
+                            onSubmit={async (e) => {
+                                e.preventDefault()
+                                setCreatingNewShipment(true)
+                                try {
+                                    const csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || ''
+                                    const res = await fetch('/meli/full/envios', {
+                                        method: 'POST',
+                                        headers: {
+                                            'Content-Type': 'application/json',
+                                            'Accept': 'application/json',
+                                            'X-CSRF-TOKEN': csrfToken,
+                                        },
+                                        body: JSON.stringify({
+                                            shipment_code: nextShipmentCode,
+                                            meli_warehouse_code: newShipmentWarehouse,
+                                            envia_carrier: 'Estafeta',
+                                            notes: `Envío secundario hacia bodega ${newShipmentWarehouse}`,
+                                            boxes: [],
+                                        }),
+                                    })
+                                    if (res.ok) {
+                                        window.location.href = '/meli/full/envios/empaque'
+                                    } else {
+                                        router.visit('/meli/full/envios/empaque')
+                                    }
+                                } catch {
+                                    router.visit('/meli/full/envios/empaque')
+                                } finally {
+                                    setCreatingNewShipment(false)
+                                }
+                            }}
+                            className="mt-4 space-y-4 text-xs"
+                        >
+                            <div>
+                                <label className="block font-bold text-slate-700 dark:text-slate-300">
+                                    Bodega Destino Asignada por Mercado Libre <span className="text-rose-500">*</span>
+                                </label>
+                                <select
+                                    value={newShipmentWarehouse}
+                                    onChange={(e) => setNewShipmentWarehouse(e.target.value)}
+                                    className="mt-1 w-full rounded-xl border border-slate-300 bg-white p-2.5 font-bold text-slate-800 dark:border-neutral-700 dark:bg-neutral-800 dark:text-white"
+                                >
+                                    {Object.entries(warehouses).map(([code, name]) => (
+                                        <option key={code} value={code}>
+                                            {code} — {name}
+                                        </option>
+                                    ))}
+                                </select>
+                                <p className="mt-1 text-[11px] text-slate-500">
+                                    {warehouseProfiles[newShipmentWarehouse]?.product_types || 'Mercancía general'}
+                                </p>
+                            </div>
+
+                            <div className="rounded-xl bg-amber-50 border border-amber-200 p-3 text-amber-900 dark:bg-amber-950/40 dark:border-amber-800 dark:text-amber-200 text-[11px] space-y-1">
+                                <p className="font-bold">💡 Multi-Bodega en MeLi:</p>
+                                <p>
+                                    Mercado Libre suele requerir envíos separados cuando mezclas ciertas categorías (como cosméticos individuales vs kits o artículos voluminosos).
+                                    Podrás alternar entre ambos envíos desde el selector superior de la mesa de empaque.
+                                </p>
+                            </div>
+
+                            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100 dark:border-neutral-800">
+                                <button
+                                    type="button"
+                                    onClick={() => setNewShipmentModalOpen(false)}
+                                    className="rounded-xl border border-slate-300 bg-white px-4 py-2 font-bold text-slate-700 hover:bg-slate-50 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-200"
+                                >
+                                    Cancelar
+                                </button>
+                                <button
+                                    type="submit"
+                                    disabled={creatingNewShipment}
+                                    className="rounded-xl bg-indigo-600 px-5 py-2 font-bold text-white shadow-sm hover:bg-indigo-700 disabled:opacity-50"
+                                >
+                                    {creatingNewShipment ? 'Creando Envío...' : 'Crear y Abrir Envío'}
+                                </button>
+                            </div>
+                        </form>
                     </div>
                 </div>
             )}

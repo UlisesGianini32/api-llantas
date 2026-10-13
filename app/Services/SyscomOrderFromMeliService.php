@@ -243,6 +243,95 @@ class SyscomOrderFromMeliService
     }
 
     /**
+     * Extrae de forma inteligente y resiliente el folio del pedido desde cualquier estructura
+     * devuelta por SYSCOM (resumen, raíz, datos, resultado o búsqueda recursiva por regex).
+     */
+    public static function extractFolioFromSyscomResponse(mixed $json): ?string
+    {
+        if (! is_array($json)) {
+            return null;
+        }
+
+        // 1. Candidatos directos conocidos por orden de prioridad
+        $candidates = [
+            data_get($json, 'resumen.folio_pedido'),
+            data_get($json, 'resumen.folio'),
+            data_get($json, 'resumen.pedido'),
+            data_get($json, 'resumen.orden'),
+            data_get($json, 'folio_pedido'),
+            data_get($json, 'folio'),
+            data_get($json, 'pedido'),
+            data_get($json, 'orden'),
+            data_get($json, 'orden_compra'),
+            data_get($json, 'datos.folio_pedido'),
+            data_get($json, 'datos.folio'),
+            data_get($json, 'data.folio_pedido'),
+            data_get($json, 'data.folio'),
+            data_get($json, 'data.resumen.folio_pedido'),
+            data_get($json, 'data.resumen.folio'),
+            data_get($json, 'resultado.folio_pedido'),
+            data_get($json, 'resultado.folio'),
+            data_get($json, 'pedidos.0.folio_pedido'),
+            data_get($json, 'pedidos.0.folio'),
+            data_get($json, 'pedidos.0.id'),
+            data_get($json, 'pedido.folio_pedido'),
+            data_get($json, 'pedido.folio'),
+            data_get($json, 'numero_pedido'),
+            data_get($json, 'numero_orden'),
+        ];
+
+        foreach ($candidates as $c) {
+            if (is_scalar($c)) {
+                $str = trim((string) $c);
+                if ($str !== '' && ! in_array(mb_strtolower($str), ['null', 'false', '0', 'undefined'], true)) {
+                    return $str;
+                }
+            }
+        }
+
+        // 2. Búsqueda recursiva por patrón oficial de folios SYSCOM (ej. "576-5934968/26-API", "576-5929910/26-API", o "576-5934968")
+        $regex = '/\b(\d{2,4}-\d{5,10}(?:\/\d{2}-[A-Za-z0-9]+)?)\b/i';
+        $foundByRegex = null;
+
+        array_walk_recursive($json, function ($val) use (&$foundByRegex, $regex) {
+            if ($foundByRegex !== null) {
+                return;
+            }
+            if (is_string($val) && preg_match($regex, $val, $matches)) {
+                $foundByRegex = trim($matches[1]);
+            }
+        });
+
+        if ($foundByRegex !== null && $foundByRegex !== '') {
+            return $foundByRegex;
+        }
+
+        // 3. Búsqueda recursiva por claves que contengan 'folio' o 'pedido'
+        $foundByKey = null;
+        $searchKeys = function ($arr) use (&$searchKeys, &$foundByKey) {
+            if ($foundByKey !== null || ! is_array($arr)) {
+                return;
+            }
+            foreach ($arr as $key => $val) {
+                $keyStr = mb_strtolower((string) $key);
+                if ((str_contains($keyStr, 'folio') || str_contains($keyStr, 'pedido')) && is_scalar($val)) {
+                    $s = trim((string) $val);
+                    if (strlen($s) >= 4 && ! in_array(mb_strtolower($s), ['null', 'false', 'undefined'], true)) {
+                        $foundByKey = $s;
+                        return;
+                    }
+                }
+                if (is_array($val)) {
+                    $searchKeys($val);
+                }
+            }
+        };
+        $searchKeys($json);
+
+        return $foundByKey;
+    }
+
+    /**
      * Crea un pedido en SYSCOM a partir de una orden pagada de ML.
      *
      * Anti-duplicado por orden: si ya hay `syscom_order_synced_at` o `syscom_order_folio`, no vuelve a llamar
@@ -355,21 +444,30 @@ class SyscomOrderFromMeliService
             }
 
             $json = $resp->json();
-            $folio = trim((string) (data_get($json, 'resumen.folio_pedido') ?? data_get($json, 'resumen.folio') ?? ''));
+            $folio = self::extractFolioFromSyscomResponse($json);
 
-            $order->syscom_order_folio = $folio !== '' ? $folio : null;
+            $order->syscom_order_folio = $folio;
             $order->syscom_order_synced_at = now();
-            $order->syscom_order_error = null;
             $order->syscom_order_raw = is_array($json) ? $json : null;
-            $order->save();
 
-            Log::info('ML->SYSCOM pedido creado', [
-                'meli_order_id' => $order->order_id,
-                'syscom_folio' => $order->syscom_order_folio,
-                'items' => count($productos),
-                'syscom_forma_pago' => data_get($json, 'resumen.forma_pago'),
-                'syscom_codigo_pago' => data_get($json, 'resumen.codigo_pago'),
-            ]);
+            if ($folio) {
+                $order->syscom_order_error = null;
+                Log::info('ML->SYSCOM pedido creado exitosamente con folio', [
+                    'meli_order_id' => $order->order_id,
+                    'syscom_folio' => $order->syscom_order_folio,
+                    'items' => count($productos),
+                    'syscom_forma_pago' => data_get($json, 'resumen.forma_pago'),
+                    'syscom_codigo_pago' => data_get($json, 'resumen.codigo_pago'),
+                ]);
+            } else {
+                $order->syscom_order_error = 'SYSCOM respondió pero no devolvió folio detectable en la respuesta. Verifica en el portal SYSCOM o asigna el folio manualmente.';
+                Log::warning('ML->SYSCOM pedido generado pero sin folio detectable', [
+                    'meli_order_id' => $order->order_id,
+                    'json_response' => $json,
+                ]);
+            }
+
+            $order->save();
         } finally {
             $lock?->release();
         }

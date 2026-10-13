@@ -698,6 +698,9 @@ Route::middleware(['auth', 'role'])->group(function () {
     // SYSCOM → MERCADO LIBRE
     Route::get('/syscom-ml', [SyscomMeliController::class, 'index'])->name('syscom.meli.index');
     Route::get('/syscom-ml/pedidos', [SyscomOrdersController::class, 'index'])->name('syscom.meli.pedidos');
+    Route::put('/syscom-ml/pedidos/{order}/folio', [SyscomOrdersController::class, 'updateFolio'])->name('syscom.meli.pedidos.update_folio');
+    Route::post('/syscom-ml/pedidos/{order}/extraer-folio', [SyscomOrdersController::class, 'extractFolio'])->name('syscom.meli.pedidos.extract_folio');
+    Route::post('/syscom-ml/pedidos/{order}/reintentar', [SyscomOrdersController::class, 'retrySync'])->name('syscom.meli.pedidos.retry');
     Route::get('/syscom-ml/{id}/editar', [SyscomMeliController::class, 'editWeb'])->name('syscom.meli.edit');
     Route::put('/syscom-ml/{id}', [SyscomMeliController::class, 'updateWeb'])->name('syscom.meli.update');
 
