@@ -105,6 +105,16 @@ Schedule::command('meli:sync-stock')
     ->everyFifteenMinutes()
     ->withoutOverlapping();
 
+// Sincronizar catálogo e inventario de bodegas FULL de Mercado Libre.
+// Corre dos veces al día (04:00 y 14:00) en segundo plano para mantener actualizado el stock
+// disponible en FULL sin saturar los límites de peticiones (100 RPM) de Mercado Libre.
+Schedule::command('meli:sync-full-stock')
+    ->twiceDaily(4, 14)
+    ->withoutOverlapping()
+    ->runInBackground()
+    ->appendOutputTo(storage_path('logs/meli-full-stock-sync.log'));
+
+
 $meliSyncOrdersUserId = (int) config('services.meli.sync_orders_user_id');
 if ($meliSyncOrdersUserId > 0) {
     Schedule::command('meli:sync-orders --all-accounts --today')
