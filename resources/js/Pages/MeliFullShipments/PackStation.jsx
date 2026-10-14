@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useRef } from 'react'
+import { useState, useMemo, useEffect, useRef, useCallback } from 'react'
 import { Head, Link, router } from '@inertiajs/react'
 import AppShell from '@/Components/layout/AppShell'
 import CameraBarcodeScanner from '@/Components/CameraBarcodeScanner'
@@ -198,6 +198,25 @@ export default function MeliFullShipmentsPackStation({
         return map
     }, [localProducts])
 
+    // Helper to get available stock in local warehouse for any item (FULL or LOCAL)
+    const getLocalStockForItem = useCallback((item) => {
+        if (!item) return null
+        if (item.type === 'LOCAL') {
+            return item.available_stock !== undefined ? parseInt(item.available_stock, 10) : 0
+        }
+        if (item.type === 'FULL') {
+            const linkedId = item.linked_product_id
+            if (linkedId && productsMap.has(linkedId)) {
+                return parseInt(productsMap.get(linkedId).available_stock, 10) || 0
+            }
+            if (item.linked_product && item.linked_product.available_stock !== undefined) {
+                return parseInt(item.linked_product.available_stock, 10) || 0
+            }
+            return null
+        }
+        return null
+    }, [productsMap])
+
     // Filtered items in search
     const searchResults = useMemo(() => {
         const q = searchQuery.trim().toLowerCase()
@@ -217,6 +236,16 @@ export default function MeliFullShipmentsPackStation({
                         ? Boolean(linkedProd.requires_meli_labeling)
                         : null))
 
+            const linkedStock = linkedProd && linkedProd.available_stock !== undefined ? parseInt(linkedProd.available_stock, 10) : null
+            let defaultSug = 10
+            if (linkedStock !== null) {
+                defaultSug = Math.max(0, Math.min(linkedStock, 10))
+            }
+
+            const finalSuggested = extra.suggested_quantity !== undefined
+                ? (linkedStock !== null ? Math.min(extra.suggested_quantity, Math.max(0, linkedStock)) : extra.suggested_quantity)
+                : defaultSug
+
             return {
                 type: 'FULL',
                 id: `full_${st.id}`,
@@ -230,7 +259,7 @@ export default function MeliFullShipmentsPackStation({
                 linked_product: linkedProd,
                 weight_kg: itemWeight,
                 requires_meli_labeling: reqLabeling,
-                suggested_quantity: extra.suggested_quantity || (linkedProd?.available_stock ? Math.min(linkedProd.available_stock, 10) : 10),
+                suggested_quantity: finalSuggested,
                 priority: extra.priority,
                 badge: extra.badge,
                 reason: extra.reason,
@@ -586,10 +615,21 @@ export default function MeliFullShipmentsPackStation({
         const savedWeight = item.weight_kg !== undefined && item.weight_kg !== null ? parseFloat(item.weight_kg) : 1.000
         setInputWeight(savedWeight > 0 ? savedWeight : 1.000)
         setRequiresLabeling(checkItemRequiresLabeling(item))
-        if (item.suggested_quantity && item.suggested_quantity > 0) {
-            setInputQty(item.suggested_quantity)
+
+        const localStock = getLocalStockForItem(item)
+        if (localStock !== null) {
+            if (localStock <= 0) {
+                setInputQty(0)
+            } else {
+                const suggested = item.suggested_quantity && item.suggested_quantity > 0 ? item.suggested_quantity : 10
+                setInputQty(Math.min(suggested, localStock))
+            }
         } else {
-            setInputQty(10)
+            if (item.suggested_quantity && item.suggested_quantity > 0) {
+                setInputQty(item.suggested_quantity)
+            } else {
+                setInputQty(10)
+            }
         }
         setSearchQuery('')
     }
@@ -597,6 +637,19 @@ export default function MeliFullShipmentsPackStation({
     // Direct 1-click loading from recommendation card
     const handleLoadSuggestion = (sug) => {
         const linkedProd = sug.linked_product_id ? productsMap.get(sug.linked_product_id) : null
+        const localStock = sug.local_stock_available !== undefined
+            ? parseInt(sug.local_stock_available, 10)
+            : (linkedProd && linkedProd.available_stock !== undefined ? parseInt(linkedProd.available_stock, 10) : null)
+
+        if (localStock !== null && localStock <= 0) {
+            alert(`❌ Stock local agotado: "${sug.title || sug.meli_sku || 'Este producto'}" tiene 0 unidades disponibles en el almacén local. Por regla de negocio estricta, no se permite generar stock negativo.`)
+            return
+        }
+
+        const calculatedSugQty = sug.suggested_quantity > 0
+            ? (localStock !== null ? Math.min(sug.suggested_quantity, Math.max(0, localStock)) : sug.suggested_quantity)
+            : (localStock !== null ? Math.min(10, Math.max(0, localStock)) : 10)
+
         handleSelectItem({
             type: 'FULL',
             id: `full_${sug.id}`,
@@ -610,7 +663,7 @@ export default function MeliFullShipmentsPackStation({
             linked_product: linkedProd,
             weight_kg: sug.weight_kg || linkedProd?.weight_kg || 1.0,
             requires_meli_labeling: sug.requires_meli_labeling,
-            suggested_quantity: sug.suggested_quantity > 0 ? sug.suggested_quantity : 10,
+            suggested_quantity: calculatedSugQty,
             priority: sug.priority,
             badge: sug.badge,
             reason: sug.reason,
@@ -682,7 +735,43 @@ export default function MeliFullShipmentsPackStation({
     const handleAddItemToCurrentBox = () => {
         if (!selectedItem) return
         const qty = parseInt(inputQty, 10)
-        if (isNaN(qty) || qty <= 0) return
+        if (isNaN(qty) || qty <= 0) {
+            alert('Por favor ingresa una cantidad válida mayor a 0.')
+            return
+        }
+
+        const localStock = getLocalStockForItem(selectedItem)
+        const targetProdId = selectedItem.type === 'LOCAL' ? selectedItem.inventory_product_id : selectedItem.linked_product_id
+        const targetSku = selectedItem.sku || selectedItem.meli_sku
+
+        // BLOQUEO ESTRICTO DE STOCK NEGATIVO
+        if (localStock !== null) {
+            if (localStock <= 0) {
+                alert(`❌ Stock agotado: No hay existencias de "${selectedItem.name || selectedItem.title}" en el almacén local (0 uds disponibles). Por regla estricta de negocio, no se permite generar stock negativo.`)
+                return
+            }
+
+            // Sumar lo que ya se agregó de este mismo producto a la caja actual
+            const alreadyInBox = currentBoxItems
+                .filter((it) => (targetProdId && it.inventory_product_id === targetProdId) || (it.sku && it.sku === targetSku))
+                .reduce((sum, it) => sum + (parseInt(it.quantity_sent, 10) || 0), 0)
+
+            const totalAfterAdd = alreadyInBox + qty
+
+            if (totalAfterAdd > localStock) {
+                const maxAllowed = Math.max(0, localStock - alreadyInBox)
+                alert(
+                    `❌ Stock insuficiente en almacén local:\n\n` +
+                    `• Stock disponible en almacén: ${localStock} uds\n` +
+                    `• Ya empacado en esta caja: ${alreadyInBox} uds\n` +
+                    `• Intentas agregar: ${qty} uds\n\n` +
+                    (maxAllowed > 0
+                        ? `Solo puedes agregar hasta ${maxAllowed} uds más a esta caja para no quedar en números negativos.`
+                        : `Ya empacaste todo el stock disponible (${alreadyInBox} uds).`)
+                )
+                return
+            }
+        }
 
         const w = parseFloat(inputWeight) || 1.0
 
@@ -909,11 +998,13 @@ export default function MeliFullShipmentsPackStation({
                 // Deduct stock in local products state immediately
                 setLocalProducts((prev) =>
                     prev.map((p) => {
-                        const itemInBox = currentBoxItems.find((it) => it.inventory_product_id === p.id)
-                        if (itemInBox) {
+                        const totalDeducted = currentBoxItems
+                            .filter((it) => it.inventory_product_id === p.id)
+                            .reduce((sum, it) => sum + (parseInt(it.quantity_sent, 10) || 0), 0)
+                        if (totalDeducted > 0) {
                             return {
                                 ...p,
-                                available_stock: Math.max(0, (p.available_stock || 0) - itemInBox.quantity_sent),
+                                available_stock: Math.max(0, (p.available_stock || 0) - totalDeducted),
                             }
                         }
                         return p
@@ -1681,103 +1772,120 @@ export default function MeliFullShipmentsPackStation({
                                         )}
 
                                         <div className="divide-y divide-slate-100 text-xs dark:divide-neutral-800">
-                                            {searchResults.slice(0, visibleCount).map((it) => (
-                                                <div
-                                                    key={it.id}
-                                                    onClick={() => handleSelectItem(it)}
-                                                    className="flex cursor-pointer items-center justify-between p-3 hover:bg-indigo-50/60 dark:hover:bg-neutral-800"
-                                                >
-                                                    <div className="flex items-center gap-3">
-                                                        {it.thumbnail ? (
-                                                            <img
-                                                                src={it.thumbnail}
-                                                                alt=""
-                                                                className="h-10 w-10 rounded-lg object-cover border border-slate-200"
-                                                            />
-                                                        ) : (
-                                                            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-slate-100 text-base dark:bg-neutral-800">
-                                                                {it.type === 'FULL' ? '⚡' : '📦'}
-                                                            </div>
-                                                        )}
-                                                        <div>
-                                                            <div className="flex flex-wrap items-center gap-1.5">
-                                                                {it.type === 'FULL' ? (
-                                                                    <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[9px] font-black text-amber-900 dark:bg-amber-950 dark:text-amber-300">
-                                                                        ⚡ FULL ({it.mlm})
-                                                                    </span>
-                                                                ) : (
-                                                                    <span className="rounded bg-blue-100 px-1.5 py-0.5 text-[9px] font-black text-blue-900 dark:bg-blue-950 dark:text-blue-300">
-                                                                        📦 ALMACÉN
-                                                                    </span>
-                                                                )}
-                                                                <span className="font-mono font-bold text-indigo-600 dark:text-indigo-400">
-                                                                    {it.sku || it.meli_sku || it.barcode}
-                                                                </span>
-                                                                {it.badge && (
-                                                                    <span
-                                                                        className={`rounded px-1.5 py-0.5 text-[9px] font-black ${
-                                                                            it.badge.includes('AGOTADO')
-                                                                                ? 'bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300'
-                                                                                : 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
-                                                                        }`}
-                                                                    >
-                                                                        {it.badge}
-                                                                    </span>
-                                                                )}
-                                                            </div>
-                                                            <p className="font-semibold text-slate-800 dark:text-slate-200 line-clamp-1">
-                                                                {it.title || it.name}
-                                                            </p>
-                                                            {it.type === 'FULL' && (
-                                                                <div className="flex flex-wrap items-center gap-2 text-[10px] text-slate-400 mt-0.5">
-                                                                    <span
-                                                                        className={`font-bold ${
-                                                                            it.full_available === 0
-                                                                                ? 'text-rose-600 dark:text-rose-400'
-                                                                                : it.full_available <= 5
-                                                                                  ? 'text-amber-600 dark:text-amber-400'
-                                                                                  : 'text-slate-500'
-                                                                        }`}
-                                                                    >
-                                                                        {it.full_available === 0 ? '🔴 Stock MeLi: 0 uds' : `Stock MeLi: ${it.full_available} uds`}
-                                                                    </span>
-                                                                    <span>·</span>
-                                                                    {it.linked_product ? (
-                                                                        <span className="text-emerald-600 font-bold dark:text-emerald-400">
-                                                                            ✓ Almacén: {it.linked_product.sku} ({it.linked_product.available_stock} uds)
-                                                                        </span>
-                                                                    ) : (
-                                                                        <span className="text-amber-600 font-bold dark:text-amber-400">
-                                                                            ⚠️ Sin vincular a catálogo local
-                                                                        </span>
-                                                                    )}
-                                                                    {it.suggested_quantity > 0 && (
-                                                                        <span className="rounded bg-indigo-50 px-1.5 py-0.5 text-[9px] font-bold text-indigo-700 dark:bg-neutral-800 dark:text-indigo-300">
-                                                                            Sugerido: +{it.suggested_quantity} uds
-                                                                        </span>
-                                                                    )}
-                                                                </div>
-                                                            )}
-                                                            {it.type === 'LOCAL' && (
-                                                                <div className="text-[10px] text-slate-400 mt-0.5">
-                                                                    Stock Almacén: <strong className="text-slate-700 dark:text-slate-300">{it.available_stock} uds</strong> · Peso: {it.weight_kg} kg
-                                                                </div>
-                                                            )}
-                                                        </div>
-                                                    </div>
+                                            {searchResults.slice(0, visibleCount).map((it) => {
+                                                const itemLocalStock = getLocalStockForItem(it)
+                                                const isOutOfLocalStock = itemLocalStock !== null && itemLocalStock <= 0
 
-                                                    <button
-                                                        type="button"
-                                                        className={`rounded-lg px-2.5 py-1 text-xs font-bold transition-colors ${
-                                                            it.suggested_quantity > 0
-                                                                ? 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm'
-                                                                : 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100 dark:bg-neutral-800 dark:text-indigo-300'
+                                                return (
+                                                    <div
+                                                        key={it.id}
+                                                        onClick={() => handleSelectItem(it)}
+                                                        className={`flex cursor-pointer items-center justify-between p-3 transition-colors ${
+                                                            isOutOfLocalStock
+                                                                ? 'bg-rose-50/20 hover:bg-rose-50/50 dark:hover:bg-neutral-800'
+                                                                : 'hover:bg-indigo-50/60 dark:hover:bg-neutral-800'
                                                         }`}
                                                     >
-                                                        {it.suggested_quantity > 0 ? '➕ Cargar en Caja' : 'Seleccionar'}
-                                                    </button>
-                                                </div>
-                                            ))}
+                                                        <div className="flex items-center gap-3">
+                                                            {it.thumbnail ? (
+                                                                <img
+                                                                    src={it.thumbnail}
+                                                                    alt=""
+                                                                    className="h-10 w-10 rounded-lg object-cover border border-slate-200"
+                                                                />
+                                                            ) : (
+                                                                <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-slate-100 text-base dark:bg-neutral-800">
+                                                                    {it.type === 'FULL' ? '⚡' : '📦'}
+                                                                </div>
+                                                            )}
+                                                            <div>
+                                                                <div className="flex flex-wrap items-center gap-1.5">
+                                                                    {it.type === 'FULL' ? (
+                                                                        <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[9px] font-black text-amber-900 dark:bg-amber-950 dark:text-amber-300">
+                                                                            ⚡ FULL ({it.mlm})
+                                                                        </span>
+                                                                    ) : (
+                                                                        <span className="rounded bg-blue-100 px-1.5 py-0.5 text-[9px] font-black text-blue-900 dark:bg-blue-950 dark:text-blue-300">
+                                                                            📦 ALMACÉN
+                                                                        </span>
+                                                                    )}
+                                                                    <span className="font-mono font-bold text-indigo-600 dark:text-indigo-400">
+                                                                        {it.sku || it.meli_sku || it.barcode}
+                                                                    </span>
+                                                                    {isOutOfLocalStock ? (
+                                                                        <span className="rounded bg-rose-100 px-1.5 py-0.5 text-[9px] font-black text-rose-800 dark:bg-rose-950 dark:text-rose-300">
+                                                                            🚫 SIN STOCK LOCAL (0)
+                                                                        </span>
+                                                                    ) : (
+                                                                        it.badge && (
+                                                                            <span
+                                                                                className={`rounded px-1.5 py-0.5 text-[9px] font-black ${
+                                                                                    it.badge.includes('AGOTADO')
+                                                                                        ? 'bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300'
+                                                                                        : 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
+                                                                                }`}
+                                                                            >
+                                                                                {it.badge}
+                                                                            </span>
+                                                                        )
+                                                                    )}
+                                                                </div>
+                                                                <p className="font-semibold text-slate-800 dark:text-slate-200 line-clamp-1">
+                                                                    {it.title || it.name}
+                                                                </p>
+                                                                {it.type === 'FULL' && (
+                                                                    <div className="flex flex-wrap items-center gap-2 text-[10px] text-slate-400 mt-0.5">
+                                                                        <span
+                                                                            className={`font-bold ${
+                                                                                it.full_available === 0
+                                                                                    ? 'text-rose-600 dark:text-rose-400'
+                                                                                    : it.full_available <= 5
+                                                                                      ? 'text-amber-600 dark:text-amber-400'
+                                                                                      : 'text-slate-500'
+                                                                            }`}
+                                                                        >
+                                                                            {it.full_available === 0 ? '🔴 Stock MeLi: 0 uds' : `Stock MeLi: ${it.full_available} uds`}
+                                                                        </span>
+                                                                        <span>·</span>
+                                                                        {it.linked_product ? (
+                                                                            <span className={`font-bold ${itemLocalStock <= 0 ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600 dark:text-emerald-400'}`}>
+                                                                                {itemLocalStock <= 0 ? '❌' : '✓'} Almacén: {it.linked_product.sku} ({itemLocalStock ?? 0} uds)
+                                                                            </span>
+                                                                        ) : (
+                                                                            <span className="text-amber-600 font-bold dark:text-amber-400">
+                                                                                ⚠️ Sin vincular a catálogo local
+                                                                            </span>
+                                                                        )}
+                                                                        {it.suggested_quantity > 0 && (
+                                                                            <span className="rounded bg-indigo-50 px-1.5 py-0.5 text-[9px] font-bold text-indigo-700 dark:bg-neutral-800 dark:text-indigo-300">
+                                                                                Sugerido: +{it.suggested_quantity} uds
+                                                                            </span>
+                                                                        )}
+                                                                    </div>
+                                                                )}
+                                                                {it.type === 'LOCAL' && (
+                                                                    <div className="text-[10px] text-slate-400 mt-0.5">
+                                                                        Stock Almacén: <strong className={itemLocalStock <= 0 ? 'text-rose-600 font-bold' : 'text-slate-700 dark:text-slate-300'}>{it.available_stock} uds</strong> · Peso: {it.weight_kg} kg
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        </div>
+
+                                                        <button
+                                                            type="button"
+                                                            className={`rounded-lg px-2.5 py-1 text-xs font-bold transition-colors ${
+                                                                isOutOfLocalStock
+                                                                    ? 'bg-rose-50 text-rose-600 dark:bg-rose-950/40 dark:text-rose-300'
+                                                                    : it.suggested_quantity > 0
+                                                                        ? 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm'
+                                                                        : 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100 dark:bg-neutral-800 dark:text-indigo-300'
+                                                            }`}
+                                                        >
+                                                            {isOutOfLocalStock ? '🚫 0 en almacén' : (it.suggested_quantity > 0 ? '➕ Cargar en Caja' : 'Seleccionar')}
+                                                        </button>
+                                                    </div>
+                                                )
+                                            })}
 
                                             {/* BARRA DE PAGINACIÓN / CARGAR MÁS */}
                                             {searchResults.length > visibleCount && (
@@ -1840,8 +1948,12 @@ export default function MeliFullShipmentsPackStation({
                                                     {selectedItem.type === 'FULL' && (
                                                         <div className="mt-2">
                                                             {selectedItem.linked_product ? (
-                                                                <div className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-50 px-2.5 py-1 text-xs font-bold text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300">
-                                                                    <span>✓</span> Descuenta de almacén:{' '}
+                                                                <div className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-bold ${
+                                                                    (selectedItem.linked_product.available_stock ?? 0) <= 0
+                                                                        ? 'bg-red-50 text-red-800 border border-red-200 dark:bg-red-950/60 dark:text-red-300'
+                                                                        : 'bg-emerald-50 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300'
+                                                                }`}>
+                                                                    <span>{(selectedItem.linked_product.available_stock ?? 0) > 0 ? '✓' : '❌'}</span> Descuenta de almacén:{' '}
                                                                     <strong className="underline font-mono">{selectedItem.linked_product.sku}</strong>{' '}
                                                                     ({selectedItem.linked_product.name}) · Disp: {selectedItem.linked_product.available_stock} uds
                                                                 </div>
@@ -1868,6 +1980,38 @@ export default function MeliFullShipmentsPackStation({
                                                             )}
                                                         </div>
                                                     )}
+
+                                                    {selectedItem.type === 'LOCAL' && (
+                                                        <div className="mt-2">
+                                                            <div className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-bold ${
+                                                                (selectedItem.available_stock ?? 0) <= 0
+                                                                    ? 'bg-red-50 text-red-800 border border-red-200 dark:bg-red-950/60 dark:text-red-300'
+                                                                    : 'bg-emerald-50 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300'
+                                                            }`}>
+                                                                <span>{(selectedItem.available_stock ?? 0) > 0 ? '✓' : '❌'}</span> Stock disponible en almacén:{' '}
+                                                                <strong className="font-mono">{selectedItem.available_stock ?? 0} uds</strong>
+                                                            </div>
+                                                        </div>
+                                                    )}
+
+                                                    {/* BANNER DE BLOQUEO SI TIENE 0 UDS */}
+                                                    {(() => {
+                                                        const localStock = getLocalStockForItem(selectedItem)
+                                                        if (localStock !== null && localStock <= 0) {
+                                                            return (
+                                                                <div className="mt-3 rounded-xl border border-red-300 bg-red-50 p-2.5 text-xs text-red-900 dark:border-red-800 dark:bg-red-950/60 dark:text-red-200 flex items-center gap-2">
+                                                                    <span className="text-base">🚫</span>
+                                                                    <div>
+                                                                        <strong className="font-bold">¡PRODUCTO SIN EXISTENCIAS EN ALMACÉN LOCAL (0 UDS)!</strong>
+                                                                        <p className="text-[11px] text-red-700 dark:text-red-300">
+                                                                            Por regla estricta de negocio, no se permite armar cajas con stock negativo. Registra una entrada o ajuste de inventario antes de empacar.
+                                                                        </p>
+                                                                    </div>
+                                                                </div>
+                                                            )
+                                                        }
+                                                        return null
+                                                    })()}
                                                 </div>
                                             </div>
 
@@ -1881,101 +2025,124 @@ export default function MeliFullShipmentsPackStation({
                                         </div>
 
                                         {/* INPUTS: QTY & WEIGHT & ACTION */}
-                                        <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-4 border-t border-slate-100 pt-3 dark:border-neutral-800">
-                                            <div>
-                                                <label className="text-[11px] font-bold uppercase text-slate-500 block mb-1">
-                                                    Cantidad a meter
-                                                </label>
-                                                <div className="flex items-center gap-1">
-                                                    <input
-                                                        type="number"
-                                                        min="1"
-                                                        value={inputQty}
-                                                        onChange={(e) => setInputQty(e.target.value)}
-                                                        className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-bold text-slate-900 dark:border-neutral-700 dark:bg-neutral-800 dark:text-white"
-                                                    />
-                                                </div>
-                                                <div className="flex gap-1 mt-1">
-                                                    {[5, 10, 15, 20].map((n) => (
-                                                        <button
-                                                            key={n}
-                                                            type="button"
-                                                            onClick={() => setInputQty(n)}
-                                                            className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-bold text-slate-600 hover:bg-slate-200 dark:bg-neutral-800 dark:text-slate-300"
-                                                        >
-                                                            +{n}
-                                                        </button>
-                                                    ))}
-                                                </div>
-                                            </div>
+                                        {(() => {
+                                            const localStock = getLocalStockForItem(selectedItem)
+                                            const isOutOfStock = localStock !== null && localStock <= 0
 
-                                            <div>
-                                                <div className="flex items-center justify-between mb-1">
-                                                    <label className="text-[11px] font-bold uppercase text-slate-500">
-                                                        Peso unitario (kg)
-                                                    </label>
-                                                    {selectedItem?.weight_kg && parseFloat(selectedItem.weight_kg) > 0 && (
-                                                        <span className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400">
-                                                            ✓ Guardado
+                                            return (
+                                                <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-4 border-t border-slate-100 pt-3 dark:border-neutral-800">
+                                                    <div>
+                                                        <label className="text-[11px] font-bold uppercase text-slate-500 block mb-1">
+                                                            Cantidad a meter
+                                                        </label>
+                                                        <div className="flex items-center gap-1">
+                                                            <input
+                                                                type="number"
+                                                                min="1"
+                                                                max={localStock !== null && localStock > 0 ? localStock : undefined}
+                                                                disabled={isOutOfStock}
+                                                                value={inputQty}
+                                                                onChange={(e) => setInputQty(e.target.value)}
+                                                                className={`w-full rounded-xl border px-3 py-2 text-sm font-bold ${
+                                                                    isOutOfStock
+                                                                        ? 'bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed dark:bg-neutral-800 dark:border-neutral-700'
+                                                                        : 'bg-white border-slate-300 text-slate-900 dark:border-neutral-700 dark:bg-neutral-800 dark:text-white'
+                                                                }`}
+                                                            />
+                                                        </div>
+                                                        <div className="flex gap-1 mt-1">
+                                                            {[5, 10, 15, 20].map((n) => (
+                                                                <button
+                                                                    key={n}
+                                                                    type="button"
+                                                                    disabled={isOutOfStock}
+                                                                    onClick={() => setInputQty(localStock !== null ? Math.min(n, Math.max(0, localStock)) : n)}
+                                                                    className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${
+                                                                        isOutOfStock
+                                                                            ? 'bg-slate-100 text-slate-400 cursor-not-allowed dark:bg-neutral-800'
+                                                                            : 'bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-neutral-800 dark:text-slate-300'
+                                                                    }`}
+                                                                >
+                                                                    +{n}
+                                                                </button>
+                                                            ))}
+                                                        </div>
+                                                    </div>
+
+                                                    <div>
+                                                        <div className="flex items-center justify-between mb-1">
+                                                            <label className="text-[11px] font-bold uppercase text-slate-500">
+                                                                Peso unitario (kg)
+                                                            </label>
+                                                            {selectedItem?.weight_kg && parseFloat(selectedItem.weight_kg) > 0 && (
+                                                                <span className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400">
+                                                                    ✓ Guardado
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                        <div className="flex items-center gap-1.5">
+                                                            <input
+                                                                type="number"
+                                                                step="0.01"
+                                                                min="0.001"
+                                                                value={inputWeight}
+                                                                onChange={(e) => setInputWeight(e.target.value)}
+                                                                className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-bold text-slate-900 dark:border-neutral-700 dark:bg-neutral-800 dark:text-white"
+                                                            />
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => handleSaveWeight(selectedItem, inputWeight, requiresLabeling)}
+                                                                disabled={savingWeight}
+                                                                title="Guardar peso en la base de datos para no volver a pedirlo"
+                                                                className="rounded-xl border border-slate-300 bg-slate-100 hover:bg-slate-200 p-2 text-xs font-bold text-slate-700 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-300"
+                                                            >
+                                                                💾
+                                                            </button>
+                                                        </div>
+                                                        <span className="text-[10px] text-slate-400 mt-1 block">
+                                                            Suma a la caja: +{(parseFloat(inputQty || 0) * parseFloat(inputWeight || 0)).toFixed(2)} kg
                                                         </span>
-                                                    )}
-                                                </div>
-                                                <div className="flex items-center gap-1.5">
-                                                    <input
-                                                        type="number"
-                                                        step="0.01"
-                                                        min="0.001"
-                                                        value={inputWeight}
-                                                        onChange={(e) => setInputWeight(e.target.value)}
-                                                        className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-bold text-slate-900 dark:border-neutral-700 dark:bg-neutral-800 dark:text-white"
-                                                    />
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => handleSaveWeight(selectedItem, inputWeight, requiresLabeling)}
-                                                        disabled={savingWeight}
-                                                        title="Guardar peso en la base de datos para no volver a pedirlo"
-                                                        className="rounded-xl border border-slate-300 bg-slate-100 hover:bg-slate-200 p-2 text-xs font-bold text-slate-700 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-300"
-                                                    >
-                                                        💾
-                                                    </button>
-                                                </div>
-                                                <span className="text-[10px] text-slate-400 mt-1 block">
-                                                    Suma a la caja: +{(parseFloat(inputQty || 0) * parseFloat(inputWeight || 0)).toFixed(2)} kg
-                                                </span>
-                                            </div>
+                                                    </div>
 
-                                            <div className="flex flex-col justify-center">
-                                                <label className="text-[11px] font-bold uppercase text-slate-500 block mb-1">
-                                                    Etiquetado MeLi
-                                                </label>
-                                                <label className="flex items-center gap-2 cursor-pointer">
-                                                    <input
-                                                        type="checkbox"
-                                                        checked={requiresLabeling}
-                                                        onChange={(e) => setRequiresLabeling(e.target.checked)}
-                                                        className="rounded text-indigo-600 focus:ring-indigo-500"
-                                                    />
-                                                    <span className="text-xs font-bold text-slate-700 dark:text-slate-300">
-                                                        {requiresLabeling ? '🏷️ Requiere Sticker MeLi' : '✓ UPC de Fábrica (Sin sticker)'}
-                                                    </span>
-                                                </label>
-                                                <span className="text-[10px] text-slate-400 mt-1">
-                                                    {requiresLabeling
-                                                        ? 'Para kits o productos sin código de fábrica'
-                                                        : `Usa código físico (${getItemUpc(selectedItem) || 'UPC original'})`}
-                                                </span>
-                                            </div>
+                                                    <div className="flex flex-col justify-center">
+                                                        <label className="text-[11px] font-bold uppercase text-slate-500 block mb-1">
+                                                            Etiquetado MeLi
+                                                        </label>
+                                                        <label className="flex items-center gap-2 cursor-pointer">
+                                                            <input
+                                                                type="checkbox"
+                                                                checked={requiresLabeling}
+                                                                onChange={(e) => setRequiresLabeling(e.target.checked)}
+                                                                className="rounded text-indigo-600 focus:ring-indigo-500"
+                                                            />
+                                                            <span className="text-xs font-bold text-slate-700 dark:text-slate-300">
+                                                                {requiresLabeling ? '🏷️ Requiere Sticker MeLi' : '✓ UPC de Fábrica (Sin sticker)'}
+                                                            </span>
+                                                        </label>
+                                                        <span className="text-[10px] text-slate-400 mt-1">
+                                                            {requiresLabeling
+                                                                ? 'Para kits o productos sin código de fábrica'
+                                                                : `Usa código físico (${getItemUpc(selectedItem) || 'UPC original'})`}
+                                                        </span>
+                                                    </div>
 
-                                            <div className="flex items-end">
-                                                <button
-                                                    type="button"
-                                                    onClick={handleAddItemToCurrentBox}
-                                                    className="w-full rounded-xl bg-indigo-600 px-4 py-2.5 text-xs font-black text-white shadow-sm hover:bg-indigo-700 transition-colors"
-                                                >
-                                                    ➕ Poner en la Caja #{boxNumber}
-                                                </button>
-                                            </div>
-                                        </div>
+                                                    <div className="flex items-end">
+                                                        <button
+                                                            type="button"
+                                                            onClick={handleAddItemToCurrentBox}
+                                                            disabled={isOutOfStock}
+                                                            className={`w-full rounded-xl px-4 py-2.5 text-xs font-black shadow-sm transition-colors ${
+                                                                isOutOfStock
+                                                                    ? 'bg-slate-300 text-slate-500 cursor-not-allowed dark:bg-neutral-800 dark:text-neutral-500'
+                                                                    : 'bg-indigo-600 text-white hover:bg-indigo-700'
+                                                            }`}
+                                                        >
+                                                            {isOutOfStock ? '🚫 Sin Stock en Almacén' : `➕ Poner en la Caja #${boxNumber}`}
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            )
+                                        })()}
                                     </div>
                                 )}
                             </div>

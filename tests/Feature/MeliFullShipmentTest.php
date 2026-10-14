@@ -702,6 +702,14 @@ class MeliFullShipmentTest extends TestCase
             'product_type' => InventoryProduct::SIMPLE,
         ]);
 
+        InventoryMovement::create([
+            'inventory_product_id' => $productWithOfficialLoc->id,
+            'inventory_location_id' => $officialLocation->id,
+            'type' => InventoryMovement::INITIAL,
+            'quantity' => 20,
+            'occurred_at' => now(),
+        ]);
+
         $shipment = MeliFullShipment::create([
             'user_id' => $this->user->id,
             'shipment_code' => 'FULL-ENV-2026-0099',
@@ -1085,4 +1093,70 @@ class MeliFullShipmentTest extends TestCase
         $this->assertStringContainsString('pequeños y medianos', $profile['product_types']);
         $this->assertContains('Estafeta', $profile['recommended_carriers']);
     }
+
+    public function test_pack_box_blocks_insufficient_stock_and_prevents_negative_inventory(): void
+    {
+        $location = InventoryLocation::firstOrCreate(
+            ['code' => 'LOC-TEST-NEG'],
+            ['name' => 'Ubicación Test', 'is_active' => true]
+        );
+
+        // Producto con solo 6 piezas en stock disponible
+        $product = InventoryProduct::create([
+            'sku' => 'SKU-LIMITED-001',
+            'name' => 'Producto con Stock Limitado',
+            'primary_location_id' => $location->id,
+            'is_active' => true,
+            'product_type' => InventoryProduct::SIMPLE,
+        ]);
+
+        InventoryMovement::create([
+            'inventory_product_id' => $product->id,
+            'inventory_location_id' => $location->id,
+            'type' => InventoryMovement::INITIAL,
+            'quantity' => 6,
+            'occurred_at' => now(),
+        ]);
+
+        $shipment = MeliFullShipment::create([
+            'user_id' => $this->user->id,
+            'shipment_code' => 'FULL-ENV-2026-NEG',
+            'status' => MeliFullShipment::STATUS_DRAFT,
+            'meli_warehouse_code' => 'MXCD06',
+        ]);
+
+        // Intentar empacar 9 piezas (supera las 6 disponibles) vía API
+        $response = $this->actingAs($this->user)->postJson(
+            route('meli-full-shipments.store-box', $shipment->id),
+            [
+                'box_number' => 1,
+                'capacity_kg' => 30.00,
+                'items' => [
+                    [
+                        'inventory_product_id' => $product->id,
+                        'sku' => $product->sku,
+                        'product_name' => $product->name,
+                        'quantity_sent' => 9,
+                        'unit_weight_kg' => 1.0,
+                    ],
+                ],
+            ]
+        );
+
+        // Debe ser rechazado con 422
+        $response->assertStatus(422);
+        $response->assertJson([
+            'success' => false,
+        ]);
+        $this->assertStringContainsString('Stock insuficiente', $response->json('error'));
+
+        // Verificar que NO se creó la caja y el stock sigue intacto en 6 (nunca negativo)
+        $this->assertDatabaseMissing('meli_full_shipment_boxes', [
+            'meli_full_shipment_id' => $shipment->id,
+        ]);
+
+        $stockAfter = app(\App\Services\InventoryStockService::class)->availableStock($product);
+        $this->assertEquals(6, $stockAfter);
+    }
 }
+

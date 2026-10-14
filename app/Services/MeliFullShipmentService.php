@@ -19,9 +19,13 @@ use InvalidArgumentException;
 
 class MeliFullShipmentService
 {
+    private InventoryStockService $stockService;
+
     public function __construct(
-        private readonly ?InventoryStockService $stockService = null
-    ) {}
+        ?InventoryStockService $stockService = null
+    ) {
+        $this->stockService = $stockService ?? app(InventoryStockService::class);
+    }
 
     /**
      * Generate unique sequential shipment code, e.g., FULL-ENV-2026-0001
@@ -266,6 +270,35 @@ class MeliFullShipmentService
 
             $boxCode = "ML-" . ($boxesInBulto > 1 ? "BULTO-{$bultoNumber}-(" . $boxesInBulto . "CAJAS)-" : "CAJA-{$boxNumber}-") . substr($shipment->shipment_code, -4);
 
+            $items = $data['items'] ?? [];
+
+            // Validación estricta: No permitir generar stock negativo en el almacén local
+            $productQuantities = [];
+            foreach ($items as $itemData) {
+                $qty = (int) ($itemData['quantity_sent'] ?? 0);
+                if ($qty <= 0) {
+                    continue;
+                }
+                $productId = ! empty($itemData['inventory_product_id']) ? (int) $itemData['inventory_product_id'] : null;
+                if ($productId) {
+                    $productQuantities[$productId] = ($productQuantities[$productId] ?? 0) + $qty;
+                }
+            }
+
+            foreach ($productQuantities as $productId => $totalQty) {
+                $product = InventoryProduct::find($productId);
+                if ($product) {
+                    $available = $this->stockService->availableStock($product);
+                    if ($totalQty > $available) {
+                        throw new InvalidArgumentException(
+                            "Stock insuficiente para {$product->name} (SKU: {$product->sku}). " .
+                            "Stock disponible en almacén: {$available} uds, intentaste empacar: {$totalQty} uds. " .
+                            "Por política de almacén, no se permite generar stock negativo."
+                        );
+                    }
+                }
+            }
+
             $box = MeliFullShipmentBox::create([
                 'meli_full_shipment_id' => $shipment->id,
                 'box_number' => $boxNumber,
@@ -279,7 +312,6 @@ class MeliFullShipmentService
                 'status' => MeliFullShipmentBox::STATUS_PACKED,
             ]);
 
-            $items = $data['items'] ?? [];
             foreach ($items as $itemData) {
                 $qty = (int) ($itemData['quantity_sent'] ?? 0);
                 if ($qty <= 0) {
@@ -550,6 +582,18 @@ class MeliFullShipmentService
 
                 if (in_array($item->meli_full_shipment_box_id, $alreadyDeductedBoxIds, true)) {
                     continue;
+                }
+
+                $prod = $item->inventoryProduct ?? InventoryProduct::find($item->inventory_product_id);
+                if ($prod) {
+                    $available = $this->stockService->availableStock($prod);
+                    if ($item->quantity_sent > $available) {
+                        throw new InvalidArgumentException(
+                            "Stock insuficiente para despachar {$prod->name} (SKU: {$prod->sku}). " .
+                            "Disponible en almacén: {$available} uds, requerido: {$item->quantity_sent} uds. " .
+                            "No se permite generar stock negativo."
+                        );
+                    }
                 }
 
                 $locId = $this->resolveLocationForProduct($item->inventory_product_id);
