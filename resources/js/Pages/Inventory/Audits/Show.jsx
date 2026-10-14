@@ -2,12 +2,14 @@ import AppShell from '@/Components/layout/AppShell'
 import { Head, Link, router, usePage } from '@inertiajs/react'
 import { useState } from 'react'
 
-export default function ShelfAuditShow({ audit }) {
+export default function ShelfAuditShow({ audit, shelf }) {
     const { flash = {} } = usePage().props
     const [isApplying, setIsApplying] = useState(false)
     const [applyNotes, setApplyNotes] = useState('')
     const [showApplyModal, setShowApplyModal] = useState(false)
-    const [filterTab, setFilterTab] = useState('all') // 'all' | 'diff' | 'over' | 'short' | 'exact'
+    const [filterTab, setFilterTab] = useState('all')
+
+    const displayShelf = audit.shelf_code || audit.location?.code
 
     const formatDate = (dateStr) => {
         if (!dateStr) return '—'
@@ -44,7 +46,7 @@ export default function ShelfAuditShow({ audit }) {
     }
 
     const filteredItems = (audit.items || []).filter((item) => {
-        const diff = item.difference_quantity
+        const diff = item.difference ?? item.difference_quantity
         if (filterTab === 'diff') return diff !== 0
         if (filterTab === 'over') return diff > 0
         if (filterTab === 'short') return diff < 0
@@ -53,8 +55,8 @@ export default function ShelfAuditShow({ audit }) {
     })
 
     return (
-        <AppShell title={`Auditoría ${audit.audit_number}`}>
-            <Head title={`Auditoría ${audit.audit_number}`} />
+        <AppShell title={`Auditoría Anaquel ${displayShelf}`}>
+            <Head title={`Auditoría Anaquel ${displayShelf} - ${audit.audit_number}`} />
 
             <div className="space-y-6">
                 {/* Header */}
@@ -74,11 +76,8 @@ export default function ShelfAuditShow({ audit }) {
                         </div>
                         <div className="mt-1 flex flex-wrap items-center gap-3">
                             <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-white sm:text-3xl">
-                                Anaquel: {audit.location?.code}
+                                Anaquel: {displayShelf}
                             </h1>
-                            <span className="text-lg text-slate-400 dark:text-neutral-500">
-                                ({audit.location?.name})
-                            </span>
                             {audit.status === 'applied' && (
                                 <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-3 py-1 text-xs font-bold text-emerald-700 ring-1 ring-emerald-600/20 dark:bg-emerald-950/40 dark:text-emerald-300">
                                     <span className="h-2 w-2 rounded-full bg-emerald-500" />
@@ -92,6 +91,15 @@ export default function ShelfAuditShow({ audit }) {
                                 </span>
                             )}
                         </div>
+
+                        {shelf?.sub_locations?.length > 1 && (
+                            <p className="mt-1 text-xs font-medium text-slate-500 dark:text-slate-400">
+                                Casillas auditadas ({shelf.sub_locations_count}):{' '}
+                                <strong className="text-indigo-600 dark:text-indigo-400">
+                                    {shelf.sub_locations.join(', ')}
+                                </strong>
+                            </p>
+                        )}
                     </div>
 
                     <div className="flex flex-wrap items-center gap-2">
@@ -151,7 +159,7 @@ export default function ShelfAuditShow({ audit }) {
                                         Esta auditoría está guardada como Borrador
                                     </h3>
                                     <p className="text-xs text-amber-800 dark:text-amber-300">
-                                        Las cantidades físicas ya fueron contadas, pero el stock del anaquel aún no ha sido modificado. Haz clic en "Aplicar Ajustes de Stock Ahora" para cuadrar el inventario oficial.
+                                        Las cantidades físicas del anaquel {displayShelf} ya fueron contadas, pero el stock oficial aún no ha sido modificado. Haz clic en "Aplicar Ajustes de Stock Ahora" para cuadrar el inventario oficial.
                                     </p>
                                 </div>
                             </div>
@@ -171,10 +179,10 @@ export default function ShelfAuditShow({ audit }) {
                     <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-xs dark:border-neutral-800 dark:bg-neutral-900">
                         <span className="text-xs font-bold uppercase text-slate-400">Anaquel Auditado</span>
                         <p className="mt-1 text-base font-black text-slate-900 dark:text-white">
-                            📍 {audit.location?.code} — {audit.location?.name}
+                            📍 Anaquel {displayShelf}
                         </p>
                         <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                            ID Ubicación: #{audit.location?.id}
+                            {shelf?.sub_locations_count > 1 ? `${shelf.sub_locations_count} casillas integradas` : (audit.location?.name || 'Ubicación única')}
                         </p>
                     </div>
 
@@ -221,37 +229,37 @@ export default function ShelfAuditShow({ audit }) {
                     <div className="rounded-2xl border border-slate-200 bg-white p-3.5 shadow-2xs dark:border-neutral-800 dark:bg-neutral-900">
                         <span className="text-[11px] font-semibold uppercase text-slate-500 dark:text-neutral-400">Productos</span>
                         <p className="mt-0.5 text-xl font-black text-slate-900 dark:text-white">
-                            {audit.total_products_count}
+                            {audit.total_expected_products || audit.total_products_count || 0}
                         </p>
                     </div>
                     <div className="rounded-2xl border border-emerald-200 bg-emerald-50/50 p-3.5 shadow-2xs dark:border-emerald-900/40 dark:bg-emerald-950/20">
                         <span className="text-[11px] font-semibold uppercase text-emerald-700 dark:text-emerald-400">Exactos</span>
                         <p className="mt-0.5 text-xl font-black text-emerald-700 dark:text-emerald-300">
-                            {audit.exact_matches_count}
+                            {audit.matched_items_count ?? audit.exact_matches_count ?? 0}
                         </p>
                     </div>
                     <div className="rounded-2xl border border-blue-200 bg-blue-50/50 p-3.5 shadow-2xs dark:border-blue-900/40 dark:bg-blue-950/20">
                         <span className="text-[11px] font-semibold uppercase text-blue-700 dark:text-blue-400">Sobrantes (+)</span>
                         <p className="mt-0.5 text-xl font-black text-blue-700 dark:text-blue-300">
-                            {audit.over_stock_count}
+                            {audit.surplus_items_count ?? audit.over_stock_count ?? 0}
                         </p>
                     </div>
                     <div className="rounded-2xl border border-rose-200 bg-rose-50/50 p-3.5 shadow-2xs dark:border-rose-900/40 dark:bg-rose-950/20">
                         <span className="text-[11px] font-semibold uppercase text-rose-700 dark:text-rose-400">Faltantes (-)</span>
                         <p className="mt-0.5 text-xl font-black text-rose-700 dark:text-rose-300">
-                            {audit.short_stock_count}
+                            {audit.missing_items_count ?? audit.short_stock_count ?? 0}
                         </p>
                     </div>
                     <div className="rounded-2xl border border-slate-200 bg-white p-3.5 shadow-2xs dark:border-neutral-800 dark:bg-neutral-900">
-                        <span className="text-[11px] font-semibold uppercase text-slate-500 dark:text-neutral-400">Ajuste Entrada</span>
-                        <p className="mt-0.5 text-xl font-black text-blue-600">
-                            +{audit.total_units_in || 0}
+                        <span className="text-[11px] font-semibold uppercase text-slate-500 dark:text-neutral-400">Total Físico</span>
+                        <p className="mt-0.5 text-xl font-black text-slate-900 dark:text-white">
+                            {audit.total_counted_units ?? 0}
                         </p>
                     </div>
                     <div className="rounded-2xl border border-slate-200 bg-white p-3.5 shadow-2xs dark:border-neutral-800 dark:bg-neutral-900">
-                        <span className="text-[11px] font-semibold uppercase text-slate-500 dark:text-neutral-400">Ajuste Salida</span>
-                        <p className="mt-0.5 text-xl font-black text-rose-600">
-                            -{audit.total_units_out || 0}
+                        <span className="text-[11px] font-semibold uppercase text-slate-500 dark:text-neutral-400">Dif. Neta</span>
+                        <p className={`mt-0.5 text-xl font-black ${audit.total_difference_units > 0 ? 'text-blue-600' : audit.total_difference_units < 0 ? 'text-rose-600' : 'text-slate-800 dark:text-slate-200'}`}>
+                            {audit.total_difference_units > 0 ? `+${audit.total_difference_units}` : audit.total_difference_units} uds
                         </p>
                     </div>
                 </div>
@@ -279,7 +287,7 @@ export default function ShelfAuditShow({ audit }) {
                                     : 'bg-amber-50 text-amber-700 hover:bg-amber-100 dark:bg-amber-950/40 dark:text-amber-300'
                             }`}
                         >
-                            Con Diferencia ({(audit.over_stock_count || 0) + (audit.short_stock_count || 0)})
+                            Con Diferencia ({((audit.surplus_items_count ?? audit.over_stock_count) || 0) + ((audit.missing_items_count ?? audit.short_stock_count) || 0)})
                         </button>
                         <button
                             type="button"
@@ -290,7 +298,7 @@ export default function ShelfAuditShow({ audit }) {
                                     : 'bg-blue-50 text-blue-700 hover:bg-blue-100 dark:bg-blue-950/40 dark:text-blue-300'
                             }`}
                         >
-                            Sobrantes (+{audit.over_stock_count || 0})
+                            Sobrantes (+{audit.surplus_items_count ?? audit.over_stock_count ?? 0})
                         </button>
                         <button
                             type="button"
@@ -301,7 +309,7 @@ export default function ShelfAuditShow({ audit }) {
                                     : 'bg-rose-50 text-rose-700 hover:bg-rose-100 dark:bg-rose-950/40 dark:text-rose-300'
                             }`}
                         >
-                            Faltantes (-{audit.short_stock_count || 0})
+                            Faltantes (-{audit.missing_items_count ?? audit.short_stock_count ?? 0})
                         </button>
                         <button
                             type="button"
@@ -312,7 +320,7 @@ export default function ShelfAuditShow({ audit }) {
                                     : 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:bg-emerald-950/40 dark:text-emerald-300'
                             }`}
                         >
-                            Exactos ({audit.exact_matches_count || 0})
+                            Exactos ({audit.matched_items_count ?? audit.exact_matches_count ?? 0})
                         </button>
                     </div>
 
@@ -321,7 +329,7 @@ export default function ShelfAuditShow({ audit }) {
                             <thead className="bg-slate-50 text-left text-xs font-semibold uppercase tracking-wide text-slate-500 dark:bg-neutral-950 dark:text-slate-400">
                                 <tr>
                                     <th className="px-5 py-3.5">Producto / SKU</th>
-                                    <th className="px-5 py-3.5 text-center">Stock Anterior</th>
+                                    <th className="px-5 py-3.5 text-center">Stock Anterior en Anaquel</th>
                                     <th className="px-5 py-3.5 text-center">Físico Contado</th>
                                     <th className="px-5 py-3.5 text-center">Diferencia</th>
                                     <th className="px-5 py-3.5 text-center">Movimiento de Ajuste</th>
@@ -330,7 +338,7 @@ export default function ShelfAuditShow({ audit }) {
                             </thead>
                             <tbody className="divide-y divide-slate-100 dark:divide-neutral-800">
                                 {filteredItems.map((item) => {
-                                    const diff = item.difference_quantity
+                                    const diff = item.difference ?? item.difference_quantity
 
                                     return (
                                         <tr key={item.id} className="hover:bg-slate-50/50 dark:hover:bg-neutral-800/40">
@@ -359,8 +367,15 @@ export default function ShelfAuditShow({ audit }) {
                                                 </div>
                                             </td>
 
-                                            <td className="px-5 py-3.5 text-center font-mono font-bold text-slate-600 dark:text-slate-300">
-                                                {item.system_quantity}
+                                            <td className="px-5 py-3.5 text-center">
+                                                <span className="font-mono text-base font-bold text-slate-700 dark:text-slate-300">
+                                                    {item.system_quantity}
+                                                </span>
+                                                {item.location_breakdown && (
+                                                    <span className="block text-[11px] font-medium text-slate-500 dark:text-slate-400">
+                                                        {item.location_breakdown}
+                                                    </span>
+                                                )}
                                             </td>
 
                                             <td className="px-5 py-3.5 text-center font-mono text-base font-black text-slate-900 dark:text-white">
@@ -431,10 +446,10 @@ export default function ShelfAuditShow({ audit }) {
                             </div>
                             <div>
                                 <h3 className="text-lg font-bold text-slate-900 dark:text-white">
-                                    Aplicar Ajustes al Anaquel {audit.location?.code}
+                                    Aplicar Ajustes al Anaquel {displayShelf}
                                 </h3>
                                 <p className="text-xs text-slate-500 dark:text-slate-400">
-                                    Esta acción actualizará el stock físico en el ledger para que coincida exactamente con lo contado.
+                                    Esta acción actualizará el stock físico en el ledger para que coincida exactamente con lo contado en este anaquel.
                                 </p>
                             </div>
                         </div>
@@ -443,19 +458,19 @@ export default function ShelfAuditShow({ audit }) {
                             <div className="flex justify-between">
                                 <span className="text-slate-600 dark:text-slate-400">Productos a ajustar:</span>
                                 <span className="font-bold text-slate-900 dark:text-white">
-                                    {(audit.over_stock_count || 0) + (audit.short_stock_count || 0)}
+                                    {((audit.surplus_items_count ?? audit.over_stock_count) || 0) + ((audit.missing_items_count ?? audit.short_stock_count) || 0)}
                                 </span>
                             </div>
                             <div className="flex justify-between">
                                 <span className="text-slate-600 dark:text-slate-400">Total sobrantes (+):</span>
                                 <span className="font-bold text-blue-600">
-                                    +{audit.total_units_in || 0} unidades
+                                    +{audit.total_units_in ?? audit.surplus_items_count ?? 0} unidades
                                 </span>
                             </div>
                             <div className="flex justify-between">
                                 <span className="text-slate-600 dark:text-slate-400">Total faltantes (-):</span>
                                 <span className="font-bold text-rose-600">
-                                    -{audit.total_units_out || 0} unidades
+                                    -{audit.total_units_out ?? audit.missing_items_count ?? 0} unidades
                                 </span>
                             </div>
                             <div className="flex justify-between border-t border-slate-200 pt-2 dark:border-neutral-800">

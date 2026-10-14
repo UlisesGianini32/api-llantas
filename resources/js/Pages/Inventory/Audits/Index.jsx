@@ -2,24 +2,24 @@ import AppShell from '@/Components/layout/AppShell'
 import { Head, Link, router, usePage } from '@inertiajs/react'
 import { useState } from 'react'
 
-export default function ShelfAuditIndex({ audits, summary, locations, filters }) {
+export default function ShelfAuditIndex({ audits, summary, shelves, filters }) {
     const { flash = {} } = usePage().props
     const [search, setSearch] = useState(filters?.search || '')
-    const [locationId, setLocationId] = useState(filters?.location_id || '')
+    const [shelfCode, setShelfCode] = useState(filters?.shelf_code || '')
     const [status, setStatus] = useState(filters?.status || '')
 
     const submitSearch = (event) => {
         event.preventDefault()
         router.get(
             '/almacen/auditorias',
-            { search, location_id: locationId, status },
+            { search, shelf_code: shelfCode, status },
             { preserveState: true, replace: true }
         )
     }
 
     const resetFilters = () => {
         setSearch('')
-        setLocationId('')
+        setShelfCode('')
         setStatus('')
         router.get('/almacen/auditorias', {}, { preserveState: true, replace: true })
     }
@@ -57,7 +57,7 @@ export default function ShelfAuditIndex({ audits, summary, locations, filters })
                             Inventario por Anaquel
                         </h1>
                         <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-                            Audita estantes específicos, compara tu conteo físico contra el sistema y ajusta discrepancias al instante.
+                            Audita anaqueles completos (ej. I4 incluye I4-1, I4-2, etc.), compara lo contado físicamente contra el sistema y ajusta discrepancias al instante.
                         </p>
                     </div>
 
@@ -113,7 +113,7 @@ export default function ShelfAuditIndex({ audits, summary, locations, filters })
                     <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-xs dark:border-neutral-800 dark:bg-neutral-900">
                         <span className="text-xs font-semibold uppercase text-slate-500 dark:text-neutral-400">Anaqueles Auditados</span>
                         <p className="mt-1 text-2xl font-black text-slate-900 dark:text-white">
-                            {summary.locations_audited_count || 0}
+                            {summary.shelves_audited_count || 0}
                         </p>
                     </div>
                     <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-xs dark:border-neutral-800 dark:bg-neutral-900">
@@ -135,16 +135,16 @@ export default function ShelfAuditIndex({ audits, summary, locations, filters })
                             className="w-full rounded-xl border border-slate-300 px-3.5 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-indigo-500 focus:outline-none dark:border-neutral-700 dark:bg-neutral-950 dark:text-white"
                         />
                     </div>
-                    <div className="w-full sm:w-56">
+                    <div className="w-full sm:w-64">
                         <select
-                            value={locationId}
-                            onChange={(e) => setLocationId(e.target.value)}
+                            value={shelfCode}
+                            onChange={(e) => setShelfCode(e.target.value)}
                             className="w-full rounded-xl border border-slate-300 px-3.5 py-2 text-sm text-slate-900 focus:border-indigo-500 focus:outline-none dark:border-neutral-700 dark:bg-neutral-950 dark:text-white"
                         >
                             <option value="">Todos los anaqueles</option>
-                            {locations.map((loc) => (
-                                <option key={loc.id} value={loc.id}>
-                                    {loc.code} — {loc.name}
+                            {shelves.map((sh) => (
+                                <option key={sh.shelf_code} value={sh.shelf_code}>
+                                    📍 {sh.display_label}
                                 </option>
                             ))}
                         </select>
@@ -168,7 +168,7 @@ export default function ShelfAuditIndex({ audits, summary, locations, filters })
                         >
                             Filtrar
                         </button>
-                        {(search || locationId || status) && (
+                        {(search || shelfCode || status) && (
                             <button
                                 type="button"
                                 onClick={resetFilters}
@@ -208,7 +208,7 @@ export default function ShelfAuditIndex({ audits, summary, locations, filters })
                                                 No hay auditorías registradas
                                             </p>
                                             <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                                                Comienza auditando tu primer anaquel para cuadrar el inventario físico.
+                                                Comienza auditando tu primer anaquel (ej. I4, A1, F10) para cuadrar el inventario físico.
                                             </p>
                                             <Link
                                                 href="/almacen/auditorias/crear"
@@ -219,102 +219,106 @@ export default function ShelfAuditIndex({ audits, summary, locations, filters })
                                         </td>
                                     </tr>
                                 ) : (
-                                    audits.data.map((audit) => (
-                                        <tr key={audit.id} className="transition hover:bg-slate-50/50 dark:hover:bg-neutral-800/40">
-                                            <td className="px-5 py-4 font-mono">
-                                                <Link
-                                                    href={`/almacen/auditorias/${audit.id}`}
-                                                    className="font-bold text-indigo-600 hover:underline dark:text-indigo-400"
-                                                >
-                                                    {audit.audit_number}
-                                                </Link>
-                                                {audit.notes && (
-                                                    <p className="mt-0.5 line-clamp-1 font-sans text-xs text-slate-500 dark:text-neutral-400">
-                                                        {audit.notes}
-                                                    </p>
-                                                )}
-                                            </td>
-                                            <td className="px-5 py-4">
-                                                <span className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 font-mono text-xs font-bold text-slate-800 dark:border-neutral-700 dark:bg-neutral-800 dark:text-neutral-200">
-                                                    📍 {audit.location?.code}
-                                                </span>
-                                                <div className="mt-0.5 text-xs text-slate-500 dark:text-neutral-400">
-                                                    {audit.location?.name}
-                                                </div>
-                                            </td>
-                                            <td className="px-5 py-4">
-                                                {audit.status === 'applied' && (
-                                                    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-700 ring-1 ring-emerald-600/20 dark:bg-emerald-950/40 dark:text-emerald-300">
-                                                        <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
-                                                        Ajuste Aplicado
-                                                    </span>
-                                                )}
-                                                {audit.status === 'in_progress' && (
-                                                    <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-700 ring-1 ring-amber-600/20 dark:bg-amber-950/40 dark:text-amber-300">
-                                                        <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
-                                                        Borrador
-                                                    </span>
-                                                )}
-                                                {audit.status === 'cancelled' && (
-                                                    <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-600 dark:bg-neutral-800 dark:text-slate-400">
-                                                        Cancelado
-                                                    </span>
-                                                )}
-                                            </td>
-                                            <td className="px-5 py-4 text-center font-bold text-slate-700 dark:text-slate-300">
-                                                {audit.total_products_count}
-                                            </td>
-                                            <td className="px-5 py-4 text-center">
-                                                <div className="flex items-center justify-center gap-1.5 text-xs">
-                                                    <span
-                                                        title="Productos con conteo exacto"
-                                                        className="rounded-md bg-emerald-50 px-2 py-0.5 font-bold text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300"
+                                    audits.data.map((audit) => {
+                                        const displayShelf = audit.shelf_code || audit.location?.code
+
+                                        return (
+                                            <tr key={audit.id} className="transition hover:bg-slate-50/50 dark:hover:bg-neutral-800/40">
+                                                <td className="px-5 py-4 font-mono">
+                                                    <Link
+                                                        href={`/almacen/auditorias/${audit.id}`}
+                                                        className="font-bold text-indigo-600 hover:underline dark:text-indigo-400"
                                                     >
-                                                        ✓ {audit.exact_matches_count}
+                                                        {audit.audit_number}
+                                                    </Link>
+                                                    {audit.notes && (
+                                                        <p className="mt-0.5 line-clamp-1 font-sans text-xs text-slate-500 dark:text-neutral-400">
+                                                            {audit.notes}
+                                                        </p>
+                                                    )}
+                                                </td>
+                                                <td className="px-5 py-4">
+                                                    <span className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-200 bg-indigo-50 px-2.5 py-1 font-mono text-xs font-black text-indigo-900 dark:border-indigo-900/60 dark:bg-indigo-950/40 dark:text-indigo-300">
+                                                        📍 Anaquel {displayShelf}
                                                     </span>
-                                                    {audit.over_stock_count > 0 && (
-                                                        <span
-                                                            title="Productos sobrantes (+)"
-                                                            className="rounded-md bg-blue-50 px-2 py-0.5 font-bold text-blue-700 dark:bg-blue-950/40 dark:text-blue-300"
-                                                        >
-                                                            +{audit.over_stock_count}
+                                                    <div className="mt-0.5 text-xs text-slate-500 dark:text-neutral-400 truncate max-w-xs">
+                                                        {audit.location?.name}
+                                                    </div>
+                                                </td>
+                                                <td className="px-5 py-4">
+                                                    {audit.status === 'applied' && (
+                                                        <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-700 ring-1 ring-emerald-600/20 dark:bg-emerald-950/40 dark:text-emerald-300">
+                                                            <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                                                            Ajuste Aplicado
                                                         </span>
                                                     )}
-                                                    {audit.short_stock_count > 0 && (
-                                                        <span
-                                                            title="Productos faltantes (-)"
-                                                            className="rounded-md bg-rose-50 px-2 py-0.5 font-bold text-rose-700 dark:bg-rose-950/40 dark:text-rose-300"
-                                                        >
-                                                            -{audit.short_stock_count}
+                                                    {audit.status === 'in_progress' && (
+                                                        <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-700 ring-1 ring-amber-600/20 dark:bg-amber-950/40 dark:text-amber-300">
+                                                            <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
+                                                            Borrador
                                                         </span>
                                                     )}
-                                                </div>
-                                                <div className="mt-1 text-[11px] font-semibold text-slate-500 dark:text-slate-400">
-                                                    Dif. neta:{' '}
-                                                    <span className={audit.total_difference_units > 0 ? 'text-blue-600 font-bold' : audit.total_difference_units < 0 ? 'text-rose-600 font-bold' : 'text-slate-600'}>
-                                                        {audit.total_difference_units > 0 ? `+${audit.total_difference_units}` : audit.total_difference_units} uds
-                                                    </span>
-                                                </div>
-                                            </td>
-                                            <td className="whitespace-nowrap px-5 py-4 text-xs text-slate-500 dark:text-slate-400">
-                                                <div className="font-medium text-slate-700 dark:text-slate-300">
-                                                    {audit.user?.name || 'Sistema'}
-                                                </div>
-                                                <div className="text-[11px]">{formatDate(audit.created_at)}</div>
-                                            </td>
-                                            <td className="whitespace-nowrap px-5 py-4 text-right">
-                                                <Link
-                                                    href={`/almacen/auditorias/${audit.id}`}
-                                                    className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 shadow-2xs transition hover:border-slate-300 hover:bg-slate-50 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-200 dark:hover:bg-neutral-700"
-                                                >
-                                                    <span>{audit.status === 'in_progress' ? 'Revisar / Aplicar' : 'Ver Detalle'}</span>
-                                                    <svg className="h-3.5 w-3.5 text-slate-400" viewBox="0 0 20 20" fill="currentColor">
-                                                        <path fillRule="evenodd" d="M7.21 14.77a.75.75 0 01.02-1.06L11.168 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.25 4.5a.75.75 0 01-1.06.02z" clipRule="evenodd" />
-                                                    </svg>
-                                                </Link>
-                                            </td>
-                                        </tr>
-                                    ))
+                                                    {audit.status === 'cancelled' && (
+                                                        <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-600 dark:bg-neutral-800 dark:text-slate-400">
+                                                            Cancelado
+                                                        </span>
+                                                    )}
+                                                </td>
+                                                <td className="px-5 py-4 text-center font-bold text-slate-700 dark:text-slate-300">
+                                                    {audit.total_expected_products || audit.total_products_count || 0}
+                                                </td>
+                                                <td className="px-5 py-4 text-center">
+                                                    <div className="flex items-center justify-center gap-1.5 text-xs">
+                                                        <span
+                                                            title="Productos con conteo exacto"
+                                                            className="rounded-md bg-emerald-50 px-2 py-0.5 font-bold text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300"
+                                                        >
+                                                            ✓ {audit.matched_items_count ?? audit.exact_matches_count ?? 0}
+                                                        </span>
+                                                        {(audit.surplus_items_count > 0 || audit.over_stock_count > 0) && (
+                                                            <span
+                                                                title="Productos sobrantes (+)"
+                                                                className="rounded-md bg-blue-50 px-2 py-0.5 font-bold text-blue-700 dark:bg-blue-950/40 dark:text-blue-300"
+                                                            >
+                                                                +{(audit.surplus_items_count ?? audit.over_stock_count ?? 0)}
+                                                            </span>
+                                                        )}
+                                                        {(audit.missing_items_count > 0 || audit.short_stock_count > 0) && (
+                                                            <span
+                                                                title="Productos faltantes (-)"
+                                                                className="rounded-md bg-rose-50 px-2 py-0.5 font-bold text-rose-700 dark:bg-rose-950/40 dark:text-rose-300"
+                                                            >
+                                                                -{(audit.missing_items_count ?? audit.short_stock_count ?? 0)}
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                    <div className="mt-1 text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+                                                        Dif. neta:{' '}
+                                                        <span className={audit.total_difference_units > 0 ? 'text-blue-600 font-bold' : audit.total_difference_units < 0 ? 'text-rose-600 font-bold' : 'text-slate-600'}>
+                                                            {audit.total_difference_units > 0 ? `+${audit.total_difference_units}` : audit.total_difference_units} uds
+                                                        </span>
+                                                    </div>
+                                                </td>
+                                                <td className="whitespace-nowrap px-5 py-4 text-xs text-slate-500 dark:text-slate-400">
+                                                    <div className="font-medium text-slate-700 dark:text-slate-300">
+                                                        {audit.user?.name || 'Sistema'}
+                                                    </div>
+                                                    <div className="text-[11px]">{formatDate(audit.created_at)}</div>
+                                                </td>
+                                                <td className="whitespace-nowrap px-5 py-4 text-right">
+                                                    <Link
+                                                        href={`/almacen/auditorias/${audit.id}`}
+                                                        className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 shadow-2xs transition hover:border-slate-300 hover:bg-slate-50 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-200 dark:hover:bg-neutral-700"
+                                                    >
+                                                        <span>{audit.status === 'in_progress' ? 'Revisar / Aplicar' : 'Ver Detalle'}</span>
+                                                        <svg className="h-3.5 w-3.5 text-slate-400" viewBox="0 0 20 20" fill="currentColor">
+                                                            <path fillRule="evenodd" d="M7.21 14.77a.75.75 0 01.02-1.06L11.168 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.25 4.5a.75.75 0 01-1.06.02z" clipRule="evenodd" />
+                                                        </svg>
+                                                    </Link>
+                                                </td>
+                                            </tr>
+                                        )
+                                    })
                                 )}
                             </tbody>
                         </table>

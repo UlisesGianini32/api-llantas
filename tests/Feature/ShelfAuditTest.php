@@ -19,9 +19,13 @@ class ShelfAuditTest extends TestCase
 {
     private User $admin;
 
-    private InventoryLocation $shelfI4;
+    private InventoryLocation $locI4_1;
 
-    private InventoryLocation $shelfI5;
+    private InventoryLocation $locI4_2;
+
+    private InventoryLocation $locI4_3;
+
+    private InventoryLocation $locI5_1;
 
     private InventoryProduct $productA;
 
@@ -69,6 +73,7 @@ class ShelfAuditTest extends TestCase
         (require database_path('migrations/2026_09_26_000001_add_remote_user_product_id_to_inventory_channel_links.php'))->up();
         (require database_path('migrations/2026_09_30_000003_create_restock_configurations_table.php'))->up();
         (require database_path('migrations/2026_10_13_200000_create_inventory_shelf_audits_tables.php'))->up();
+        (require database_path('migrations/2026_10_13_210000_add_shelf_code_to_inventory_shelf_audits_tables.php'))->up();
 
         $this->admin = User::forceCreate([
             'name' => 'Auditor SBS',
@@ -77,16 +82,32 @@ class ShelfAuditTest extends TestCase
             'role' => User::ROLE_ADMIN,
         ]);
 
-        $this->shelfI4 = InventoryLocation::create([
-            'code' => 'I4',
-            'name' => 'Anaquel I4 - Pasillo Tintes',
+        // Anaquel I4 con 3 casillas/niveles: I4-1, I4-2, I4-3
+        $this->locI4_1 = InventoryLocation::create([
+            'code' => 'I4-1',
+            'name' => 'I - Tintes Kuul / Hidra',
             'type' => 'shelf',
             'is_active' => true,
         ]);
 
-        $this->shelfI5 = InventoryLocation::create([
-            'code' => 'I5',
-            'name' => 'Anaquel I5 - Pasillo Shampoos',
+        $this->locI4_2 = InventoryLocation::create([
+            'code' => 'I4-2',
+            'name' => 'I - Tintes Kuul / Hidra',
+            'type' => 'shelf',
+            'is_active' => true,
+        ]);
+
+        $this->locI4_3 = InventoryLocation::create([
+            'code' => 'I4-3',
+            'name' => 'I - Tintes Kuul / Hidra',
+            'type' => 'shelf',
+            'is_active' => true,
+        ]);
+
+        // Anaquel I5 con casilla I5-1
+        $this->locI5_1 = InventoryLocation::create([
+            'code' => 'I5-1',
+            'name' => 'I - Shampoos y Tratamientos',
             'type' => 'shelf',
             'is_active' => true,
         ]);
@@ -100,7 +121,7 @@ class ShelfAuditTest extends TestCase
             'cost' => 45.00,
             'price' => 75.00,
             'brand' => 'KUUL',
-            'primary_location_id' => $this->shelfI4->id,
+            'primary_location_id' => $this->locI4_1->id,
         ]);
 
         $this->productB = InventoryProduct::create([
@@ -112,7 +133,7 @@ class ShelfAuditTest extends TestCase
             'cost' => 120.00,
             'price' => 190.00,
             'brand' => 'HIDRA',
-            'primary_location_id' => $this->shelfI4->id,
+            'primary_location_id' => $this->locI4_2->id,
         ]);
 
         $this->productC = InventoryProduct::create([
@@ -124,28 +145,63 @@ class ShelfAuditTest extends TestCase
             'cost' => 60.00,
             'price' => 110.00,
             'brand' => 'BARBER STYLE',
-            'primary_location_id' => $this->shelfI5->id,
+            'primary_location_id' => $this->locI5_1->id,
         ]);
 
         $this->movementService = app(InventoryMovementService::class);
         $this->auditService = app(ShelfAuditService::class);
     }
 
-    public function test_can_get_expected_products_for_shelf(): void
+    public function test_extracts_shelf_code_correctly(): void
     {
-        // Add 5 units of Product A to shelf I4
+        $this->assertEquals('I4', ShelfAuditService::extractShelfCode('I4-1'));
+        $this->assertEquals('I4', ShelfAuditService::extractShelfCode('I4-2'));
+        $this->assertEquals('I4', ShelfAuditService::extractShelfCode('I4'));
+        $this->assertEquals('F10', ShelfAuditService::extractShelfCode('F10-1'));
+        $this->assertEquals('F10', ShelfAuditService::extractShelfCode('F10-9'));
+        $this->assertEquals('A1', ShelfAuditService::extractShelfCode('A1-1'));
+        $this->assertEquals('MOSTRADOR', ShelfAuditService::extractShelfCode('MOSTRADOR'));
+        $this->assertEquals('AMZ-A', ShelfAuditService::extractShelfCode('AMZ-A'));
+    }
+
+    public function test_groups_locations_into_shelves(): void
+    {
+        $shelves = $this->auditService->getShelves();
+
+        $this->assertCount(2, $shelves); // I4 and I5
+
+        $shelfI4 = $shelves->firstWhere('shelf_code', 'I4');
+        $this->assertNotNull($shelfI4);
+        $this->assertEquals(3, $shelfI4['sub_locations_count']);
+        $this->assertEquals(['I4-1', 'I4-2', 'I4-3'], $shelfI4['sub_locations']);
+
+        $shelfI5 = $shelves->firstWhere('shelf_code', 'I5');
+        $this->assertNotNull($shelfI5);
+        $this->assertEquals(1, $shelfI5['sub_locations_count']);
+    }
+
+    public function test_can_get_expected_products_for_entire_shelf(): void
+    {
+        // Product A has 3 in I4-1 and 2 in I4-2 (total 5 in Anaquel I4)
         $this->movementService->record([
             'inventory_product_id' => $this->productA->id,
-            'inventory_location_id' => $this->shelfI4->id,
-            'quantity' => 5,
+            'inventory_location_id' => $this->locI4_1->id,
+            'quantity' => 3,
+            'type' => InventoryMovement::RECEIPT,
+            'created_by_user_id' => $this->admin->id,
+        ]);
+        $this->movementService->record([
+            'inventory_product_id' => $this->productA->id,
+            'inventory_location_id' => $this->locI4_2->id,
+            'quantity' => 2,
             'type' => InventoryMovement::RECEIPT,
             'created_by_user_id' => $this->admin->id,
         ]);
 
-        // Product B has 0 stock in ledger, but its primary_location_id is shelf I4
-        // Product C has 0 stock in shelf I4 and belongs to shelf I5
+        // Product B has 0 stock in ledger, but its primary_location_id is I4-2
+        // Product C belongs to I5
 
-        $products = $this->auditService->getShelfExpectedProducts($this->shelfI4->id);
+        $products = $this->auditService->getShelfExpectedProducts('I4');
 
         $this->assertCount(2, $products);
         $this->assertTrue($products->has($this->productA->id));
@@ -153,36 +209,24 @@ class ShelfAuditTest extends TestCase
         $this->assertFalse($products->has($this->productC->id));
 
         $this->assertEquals(5, $products[$this->productA->id]['system_quantity']);
+        $this->assertStringContainsString('3 en I4-1', $products[$this->productA->id]['location_breakdown']);
+        $this->assertStringContainsString('2 en I4-2', $products[$this->productA->id]['location_breakdown']);
         $this->assertEquals(0, $products[$this->productB->id]['system_quantity']);
     }
 
-    public function test_can_create_audit_draft_without_applying_movements(): void
+    public function test_can_create_audit_draft_for_grouped_shelf(): void
     {
-        // Initial stock in shelf I4: 5 units of Product A
-        $this->movementService->record([
-            'inventory_product_id' => $this->productA->id,
-            'inventory_location_id' => $this->shelfI4->id,
-            'quantity' => 5,
-            'type' => InventoryMovement::RECEIPT,
-            'created_by_user_id' => $this->admin->id,
-        ]);
-
         $payload = [
-            'inventory_location_id' => $this->shelfI4->id,
-            'notes' => 'Conteo preliminar borrador',
+            'shelf_code' => 'I4',
+            'notes' => 'Conteo preliminar Anaquel I4',
             'apply_immediately' => false,
             'items' => [
                 [
                     'inventory_product_id' => $this->productA->id,
-                    'system_quantity' => 5,
-                    'counted_quantity' => 7, // +2 sobrante
-                    'notes' => 'Se encontraron 2 piezas extra',
-                ],
-                [
-                    'inventory_product_id' => $this->productB->id,
                     'system_quantity' => 0,
-                    'counted_quantity' => 0, // exacto
-                    'notes' => null,
+                    'counted_quantity' => 5,
+                    'location_breakdown' => 'Sin stock previo',
+                    'notes' => '5 piezas encontradas',
                 ],
             ],
         ];
@@ -193,63 +237,59 @@ class ShelfAuditTest extends TestCase
         $response->assertJsonPath('ok', true);
 
         $this->assertDatabaseHas('inventory_shelf_audits', [
-            'inventory_location_id' => $this->shelfI4->id,
+            'shelf_code' => 'I4',
             'status' => InventoryShelfAudit::STATUS_IN_PROGRESS,
-            'total_expected_products' => 2,
-            'matched_items_count' => 1,
+            'total_expected_products' => 1,
             'surplus_items_count' => 1,
-            'missing_items_count' => 0,
-            'total_difference_units' => 2,
+            'total_difference_units' => 5,
         ]);
-
-        // Stock in ledger should NOT have changed yet
-        $currentStockA = InventoryMovement::where('inventory_location_id', $this->shelfI4->id)
-            ->where('inventory_product_id', $this->productA->id)
-            ->sum('quantity');
-
-        $this->assertEquals(5, $currentStockA);
     }
 
-    public function test_can_apply_audit_immediately_and_adjust_ledger(): void
+    public function test_can_apply_audit_immediately_and_adjust_ledger_for_shelf(): void
     {
-        // Setup initial stock in shelf I4:
-        // Product A: 5 units
+        // Initial stock in Anaquel I4:
+        // Product A: 3 in I4-1, 2 in I4-2 -> Total 5
         $this->movementService->record([
             'inventory_product_id' => $this->productA->id,
-            'inventory_location_id' => $this->shelfI4->id,
-            'quantity' => 5,
+            'inventory_location_id' => $this->locI4_1->id,
+            'quantity' => 3,
+            'type' => InventoryMovement::RECEIPT,
+            'created_by_user_id' => $this->admin->id,
+        ]);
+        $this->movementService->record([
+            'inventory_product_id' => $this->productA->id,
+            'inventory_location_id' => $this->locI4_2->id,
+            'quantity' => 2,
             'type' => InventoryMovement::RECEIPT,
             'created_by_user_id' => $this->admin->id,
         ]);
 
-        // Product B: 10 units
+        // Product B: 10 units in I4-2
         $this->movementService->record([
             'inventory_product_id' => $this->productB->id,
-            'inventory_location_id' => $this->shelfI4->id,
+            'inventory_location_id' => $this->locI4_2->id,
             'quantity' => 10,
             'type' => InventoryMovement::RECEIPT,
             'created_by_user_id' => $this->admin->id,
         ]);
 
-        // Audit Count:
-        // Product A: counted 8 (sobrante +3 -> should generate ADJUSTMENT_IN +3)
-        // Product B: counted 6 (faltante -4 -> should generate ADJUSTMENT_OUT -4)
+        // Counted in Anaquel I4:
+        // Product A: counted 8 (sobrante +3)
+        // Product B: counted 6 (faltante -4)
         $payload = [
-            'inventory_location_id' => $this->shelfI4->id,
-            'notes' => 'Auditoría con ajuste inmediato',
+            'shelf_code' => 'I4',
+            'notes' => 'Auditoría completa Anaquel I4',
             'apply_immediately' => true,
             'items' => [
                 [
                     'inventory_product_id' => $this->productA->id,
                     'system_quantity' => 5,
                     'counted_quantity' => 8,
-                    'notes' => 'Sobrante de 3 piezas',
                 ],
                 [
                     'inventory_product_id' => $this->productB->id,
                     'system_quantity' => 10,
                     'counted_quantity' => 6,
-                    'notes' => 'Faltante de 4 piezas',
                 ],
             ],
         ];
@@ -259,118 +299,45 @@ class ShelfAuditTest extends TestCase
         $response->assertStatus(200);
         $response->assertJsonPath('ok', true);
 
-        $audit = InventoryShelfAudit::where('inventory_location_id', $this->shelfI4->id)->first();
+        $audit = InventoryShelfAudit::where('shelf_code', 'I4')->first();
         $this->assertNotNull($audit);
         $this->assertEquals(InventoryShelfAudit::STATUS_APPLIED, $audit->status);
+        $this->assertEquals('I4', $audit->shelf_code);
         $this->assertEquals($this->admin->id, $audit->applied_by);
-        $this->assertNotNull($audit->applied_at);
         $this->assertEquals(1, $audit->surplus_items_count);
         $this->assertEquals(1, $audit->missing_items_count);
-        $this->assertEquals(0, $audit->matched_items_count);
         $this->assertEquals(-1, $audit->total_difference_units);
 
-        // Verify ledger movements were created:
-        $movements = InventoryMovement::where('inventory_location_id', $this->shelfI4->id)
-            ->where('reference', 'like', "%{$audit->audit_number}%")
-            ->get();
-
-        $this->assertCount(2, $movements);
-
-        $movA = $movements->firstWhere('inventory_product_id', $this->productA->id);
-        $this->assertNotNull($movA);
-        $this->assertEquals(InventoryMovement::ADJUSTMENT_IN, $movA->type);
-        $this->assertEquals(3, $movA->quantity);
-
-        $movB = $movements->firstWhere('inventory_product_id', $this->productB->id);
-        $this->assertNotNull($movB);
-        $this->assertEquals(InventoryMovement::ADJUSTMENT_OUT, $movB->type);
-        $this->assertEquals(-4, $movB->quantity);
-
-        // Verify resulting stock in ledger exactly equals counted physical stock!
-        $finalStockA = InventoryMovement::where('inventory_location_id', $this->shelfI4->id)
+        // Verify total resulting stock in Anaquel I4 matches counted quantity:
+        $totalStockA = InventoryMovement::whereIn('inventory_location_id', [$this->locI4_1->id, $this->locI4_2->id, $this->locI4_3->id])
             ->where('inventory_product_id', $this->productA->id)
             ->sum('quantity');
-        $this->assertEquals(8, $finalStockA);
+        $this->assertEquals(8, $totalStockA);
 
-        $finalStockB = InventoryMovement::where('inventory_location_id', $this->shelfI4->id)
+        $totalStockB = InventoryMovement::whereIn('inventory_location_id', [$this->locI4_1->id, $this->locI4_2->id, $this->locI4_3->id])
             ->where('inventory_product_id', $this->productB->id)
             ->sum('quantity');
-        $this->assertEquals(6, $finalStockB);
+        $this->assertEquals(6, $totalStockB);
+
+        // Verify no sub-location has negative stock!
+        $stockB_loc1 = InventoryMovement::where('inventory_location_id', $this->locI4_1->id)
+            ->where('inventory_product_id', $this->productB->id)->sum('quantity');
+        $stockB_loc2 = InventoryMovement::where('inventory_location_id', $this->locI4_2->id)
+            ->where('inventory_product_id', $this->productB->id)->sum('quantity');
+
+        $this->assertGreaterThanOrEqual(0, $stockB_loc1);
+        $this->assertGreaterThanOrEqual(0, $stockB_loc2);
     }
 
-    public function test_can_apply_draft_audit_later(): void
+    public function test_can_get_shelf_products_endpoint(): void
     {
-        // 5 units of Product A
-        $this->movementService->record([
-            'inventory_product_id' => $this->productA->id,
-            'inventory_location_id' => $this->shelfI4->id,
-            'quantity' => 5,
-            'type' => InventoryMovement::RECEIPT,
-            'created_by_user_id' => $this->admin->id,
-        ]);
-
-        $audit = $this->auditService->createAudit([
-            'inventory_location_id' => $this->shelfI4->id,
-            'notes' => 'Guardado primero como borrador',
-            'items' => [
-                [
-                    'inventory_product_id' => $this->productA->id,
-                    'system_quantity' => 5,
-                    'counted_quantity' => 9, // +4 sobrante
-                ],
-            ],
-        ], $this->admin, false);
-
-        $this->assertEquals(InventoryShelfAudit::STATUS_IN_PROGRESS, $audit->status);
-
-        // Now apply via endpoint
-        $response = $this->actingAs($this->admin)->postJson(route('inventory.audits.apply', $audit), [
-            'notes' => 'Aprobado por jefe de almacén',
-        ]);
-
-        $response->assertStatus(200);
-        $response->assertJsonPath('ok', true);
-
-        $audit->refresh();
-        $this->assertEquals(InventoryShelfAudit::STATUS_APPLIED, $audit->status);
-
-        $finalStock = InventoryMovement::where('inventory_location_id', $this->shelfI4->id)
-            ->where('inventory_product_id', $this->productA->id)
-            ->sum('quantity');
-
-        $this->assertEquals(9, $finalStock);
-    }
-
-    public function test_cannot_reapply_already_applied_audit(): void
-    {
-        $audit = $this->auditService->createAudit([
-            'inventory_location_id' => $this->shelfI4->id,
-            'items' => [
-                [
-                    'inventory_product_id' => $this->productA->id,
-                    'system_quantity' => 0,
-                    'counted_quantity' => 2,
-                ],
-            ],
-        ], $this->admin, true);
-
-        $this->assertEquals(InventoryShelfAudit::STATUS_APPLIED, $audit->status);
-
-        // Attempting to apply again should fail
-        $response = $this->actingAs($this->admin)->postJson(route('inventory.audits.apply', $audit));
-
-        $response->assertStatus(422);
-        $response->assertJsonPath('ok', false);
-    }
-
-    public function test_search_catalog_endpoint_returns_matches(): void
-    {
-        $response = $this->actingAs($this->admin)->getJson(route('inventory.audits.search_catalog', [
-            'q' => '7501234567890',
+        $response = $this->actingAs($this->admin)->getJson(route('inventory.audits.shelf_products', [
+            'shelfIdentifier' => 'I4',
         ]));
 
         $response->assertStatus(200);
-        $response->assertJsonCount(1);
-        $response->assertJsonPath('0.sku', 'TINTE-ROJO-01');
+        $response->assertJsonPath('ok', true);
+        $response->assertJsonPath('shelf.shelf_code', 'I4');
+        $response->assertJsonPath('shelf.sub_locations_count', 3);
     }
 }

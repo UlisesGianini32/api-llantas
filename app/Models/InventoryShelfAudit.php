@@ -17,6 +17,7 @@ class InventoryShelfAudit extends Model
 
     protected $fillable = [
         'audit_number',
+        'shelf_code',
         'inventory_location_id',
         'user_id',
         'status',

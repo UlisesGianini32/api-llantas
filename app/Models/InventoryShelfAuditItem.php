@@ -16,6 +16,7 @@ class InventoryShelfAuditItem extends Model
         'system_quantity',
         'counted_quantity',
         'difference',
+        'location_breakdown',
         'is_assigned_location',
         'notes',
         'adjusted',

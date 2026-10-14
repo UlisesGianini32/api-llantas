@@ -4,31 +4,33 @@ import { Head, Link, router } from '@inertiajs/react'
 import axios from 'axios'
 import { useEffect, useMemo, useRef, useState } from 'react'
 
-export default function ShelfAuditCreate({ locations, preselectedLocationId, initialProducts }) {
-    const [selectedLocationId, setSelectedLocationId] = useState(preselectedLocationId || (locations[0]?.id ?? ''))
+export default function ShelfAuditCreate({ shelves = [], preselectedShelfCode, initialProducts = [] }) {
+    const [selectedShelfCode, setSelectedShelfCode] = useState(
+        preselectedShelfCode || (shelves[0]?.shelf_code ?? '')
+    )
     const [isLoadingProducts, setIsLoadingProducts] = useState(false)
     const [auditNotes, setAuditNotes] = useState('')
     const [isSubmitting, setIsSubmitting] = useState(false)
 
     // Items list for the audit
-    // Each item: { product_id, sku, barcode, barcode_secondary, name, brand, primary_location, system_quantity, counted_quantity, notes, is_extra }
     const [items, setItems] = useState(() => {
         return (initialProducts || []).map((p) => ({
-            product_id: p.product_id,
+            product_id: p.product_id || p.id,
             sku: p.sku,
             barcode: p.barcode,
             barcode_secondary: p.barcode_secondary,
             name: p.name,
             brand: p.brand,
-            primary_location: p.primary_location,
-            system_quantity: Number(p.system_quantity || 0),
+            primary_location: p.primary_location || p.primary_location_code,
+            system_quantity: Number(p.system_quantity || p.system_stock || 0),
+            location_breakdown: p.location_breakdown || '',
             counted_quantity: 0,
             notes: '',
             is_extra: false,
         }))
     })
 
-    // Feedback message / sound alert
+    // Feedback message
     const [scanFeedback, setScanFeedback] = useState(null)
     const [highlightedProductId, setHighlightedProductId] = useState(null)
 
@@ -39,7 +41,7 @@ export default function ShelfAuditCreate({ locations, preselectedLocationId, ini
     // Camera scanner modal
     const [isCameraOpen, setIsCameraOpen] = useState(false)
 
-    // Manual search catalog modal / dropdown
+    // Manual search catalog
     const [catalogSearch, setCatalogSearch] = useState('')
     const [catalogResults, setCatalogResults] = useState([])
     const [isSearchingCatalog, setIsSearchingCatalog] = useState(false)
@@ -49,39 +51,44 @@ export default function ShelfAuditCreate({ locations, preselectedLocationId, ini
     const [tableFilter, setTableFilter] = useState('all')
     const [itemSearch, setItemSearch] = useState('')
 
+    // Find current selected shelf details
+    const currentShelf = useMemo(() => {
+        return shelves.find((sh) => sh.shelf_code === selectedShelfCode) || shelves[0] || null
+    }, [shelves, selectedShelfCode])
+
     // Auto-focus barcode input
     useEffect(() => {
         gunInputRef.current?.focus()
-    }, [selectedLocationId])
+    }, [selectedShelfCode])
 
-    // Load products when location changes
-    const handleLocationChange = async (newLocationId) => {
-        const locId = Number(newLocationId)
-        setSelectedLocationId(locId)
-        if (!locId) {
+    // Load products when shelf selection changes
+    const handleShelfChange = async (newShelfCode) => {
+        setSelectedShelfCode(newShelfCode)
+        if (!newShelfCode) {
             setItems([])
             return
         }
 
         setIsLoadingProducts(true)
         try {
-            const resp = await axios.get(`/almacen/auditorias/anaquel/${locId}/productos`)
+            const resp = await axios.get(`/almacen/auditorias/anaquel/${encodeURIComponent(newShelfCode)}/productos`)
             if (resp.data?.ok && resp.data?.products) {
                 const mapped = resp.data.products.map((p) => ({
-                    product_id: p.product_id,
+                    product_id: p.product_id || p.id,
                     sku: p.sku,
                     barcode: p.barcode,
                     barcode_secondary: p.barcode_secondary,
                     name: p.name,
                     brand: p.brand,
-                    primary_location: p.primary_location,
-                    system_quantity: Number(p.system_quantity || 0),
+                    primary_location: p.primary_location || p.primary_location_code,
+                    system_quantity: Number(p.system_quantity || p.system_stock || 0),
+                    location_breakdown: p.location_breakdown || '',
                     counted_quantity: 0,
                     notes: '',
                     is_extra: false,
                 }))
                 setItems(mapped)
-                setScanFeedback({ type: 'info', text: `Cargados ${mapped.length} productos del anaquel.` })
+                setScanFeedback({ type: 'info', text: `Cargados ${mapped.length} productos del anaquel ${newShelfCode}.` })
             }
         } catch (err) {
             console.error('Error al cargar productos del anaquel:', err)
@@ -119,7 +126,7 @@ export default function ShelfAuditCreate({ locations, preselectedLocationId, ini
             setHighlightedProductId(target.product_id)
             setScanFeedback({
                 type: 'success',
-                text: `+1 a "${target.name}" (Conteo: ${target.counted_quantity + 1})`,
+                text: `+1 a "${target.name}" (Conteo en ${selectedShelfCode}: ${target.counted_quantity + 1})`,
             })
             setTimeout(() => setHighlightedProductId(null), 2500)
             return
@@ -127,7 +134,7 @@ export default function ShelfAuditCreate({ locations, preselectedLocationId, ini
 
         // 2. Not found in current shelf items -> search catalog in DB
         try {
-            setScanFeedback({ type: 'info', text: `Buscando código "${code}" en el catálogo SBS...` })
+            setScanFeedback({ type: 'info', text: `Buscando código "${code}" en el catálogo...` })
             const resp = await axios.get('/almacen/auditorias/buscar-catalogo', {
                 params: { q: code },
             })
@@ -141,7 +148,6 @@ export default function ShelfAuditCreate({ locations, preselectedLocationId, ini
             }) || catalogList[0]
 
             if (matched) {
-                // Add product to items with system_quantity = 0 and counted_quantity = 1
                 const newItem = {
                     product_id: matched.id,
                     sku: matched.sku,
@@ -151,8 +157,9 @@ export default function ShelfAuditCreate({ locations, preselectedLocationId, ini
                     brand: matched.brand,
                     primary_location: matched.primary_location?.code || null,
                     system_quantity: 0,
+                    location_breakdown: 'Sin stock previo en este anaquel',
                     counted_quantity: 1,
-                    notes: `Encontrado en este anaquel (Ubicación oficial: ${matched.primary_location?.code || 'Sin asignar'})`,
+                    notes: `Encontrado físicamente en anaquel ${selectedShelfCode} (Ubicación oficial: ${matched.primary_location?.code || 'Sin asignar'})`,
                     is_extra: true,
                 }
                 setItems((prev) => [newItem, ...prev])
@@ -220,8 +227,9 @@ export default function ShelfAuditCreate({ locations, preselectedLocationId, ini
             brand: product.brand,
             primary_location: product.primary_location?.code || null,
             system_quantity: 0,
+            location_breakdown: 'Sin stock previo en este anaquel',
             counted_quantity: 1,
-            notes: `Agregado manualmente al anaquel`,
+            notes: `Agregado manualmente al anaquel ${selectedShelfCode}`,
             is_extra: true,
         }
         setItems((prev) => [newItem, ...prev])
@@ -248,7 +256,7 @@ export default function ShelfAuditCreate({ locations, preselectedLocationId, ini
     }
 
     const matchAllSystem = () => {
-        if (confirm('¿Deseas marcar todos los productos del anaquel como coincidentes con el sistema?')) {
+        if (confirm(`¿Deseas marcar todos los productos del anaquel ${selectedShelfCode} como coincidentes con el sistema?`)) {
             setItems((prev) => prev.map((it) => ({ ...it, counted_quantity: it.system_quantity })))
         }
     }
@@ -305,7 +313,6 @@ export default function ShelfAuditCreate({ locations, preselectedLocationId, ini
     // Filtered items
     const filteredItems = useMemo(() => {
         return items.filter((it) => {
-            // Text search
             if (itemSearch.trim()) {
                 const q = itemSearch.toLowerCase()
                 const matchName = it.name?.toLowerCase().includes(q)
@@ -314,7 +321,6 @@ export default function ShelfAuditCreate({ locations, preselectedLocationId, ini
                 if (!matchName && !matchSku && !matchBar) return false
             }
 
-            // Tab filter
             const diff = it.counted_quantity - it.system_quantity
             if (tableFilter === 'diff') return diff !== 0
             if (tableFilter === 'over') return diff > 0
@@ -326,7 +332,7 @@ export default function ShelfAuditCreate({ locations, preselectedLocationId, ini
 
     // Submit handler
     const handleSubmit = (applyImmediately) => {
-        if (!selectedLocationId) {
+        if (!selectedShelfCode) {
             alert('Por favor selecciona un anaquel a auditar.')
             return
         }
@@ -337,21 +343,22 @@ export default function ShelfAuditCreate({ locations, preselectedLocationId, ini
         }
 
         const confirmMsg = applyImmediately
-            ? `¿Confirmas aplicar el ajuste de inventario al anaquel ahora mismo?\n\n• Productos a ajustar: ${metrics.overCount + metrics.shortCount}\n• Diferencia neta: ${metrics.netDifferenceUnits > 0 ? '+' : ''}${metrics.netDifferenceUnits} unidades\n\nEl stock en el sistema quedará exactamente igual a lo que contaste físicamente.`
-            : '¿Guardar esta auditoría como borrador sin aplicar ajustes todavía?'
+            ? `¿Confirmas aplicar el ajuste de inventario al Anaquel ${selectedShelfCode} ahora mismo?\n\n• Productos a ajustar: ${metrics.overCount + metrics.shortCount}\n• Diferencia neta: ${metrics.netDifferenceUnits > 0 ? '+' : ''}${metrics.netDifferenceUnits} unidades\n\nEl stock en el sistema del anaquel ${selectedShelfCode} quedará exactamente igual a lo que contaste físicamente.`
+            : `¿Guardar la auditoría del anaquel ${selectedShelfCode} como borrador sin aplicar ajustes todavía?`
 
         if (!confirm(confirmMsg)) return
 
         setIsSubmitting(true)
 
         const payload = {
-            inventory_location_id: Number(selectedLocationId),
+            shelf_code: selectedShelfCode,
             notes: auditNotes,
             apply_immediately: applyImmediately,
             items: items.map((it) => ({
                 inventory_product_id: it.product_id,
                 system_quantity: it.system_quantity,
                 counted_quantity: it.counted_quantity,
+                location_breakdown: it.location_breakdown,
                 notes: it.notes,
             })),
         }
@@ -364,8 +371,6 @@ export default function ShelfAuditCreate({ locations, preselectedLocationId, ini
             },
         })
     }
-
-    const currentLocation = locations.find((l) => l.id === Number(selectedLocationId))
 
     return (
         <AppShell title="Nuevo Conteo de Anaquel">
@@ -388,10 +393,19 @@ export default function ShelfAuditCreate({ locations, preselectedLocationId, ini
                             </span>
                         </div>
                         <h1 className="mt-1.5 text-2xl font-bold tracking-tight text-slate-900 dark:text-white sm:text-3xl">
-                            Auditar Anaquel: {currentLocation ? `${currentLocation.code} - ${currentLocation.name}` : 'Seleccionar'}
+                            Auditar Anaquel: {selectedShelfCode}
                         </h1>
                         <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-                            Pasa los productos por el escáner o anota las cantidades contadas para cuadrar este anaquel.
+                            {currentShelf?.sub_locations_count > 1 ? (
+                                <span>
+                                    Incluye todas las casillas de este anaquel:{' '}
+                                    <strong className="text-indigo-600 dark:text-indigo-400">
+                                        {currentShelf.sub_locations.join(', ')}
+                                    </strong>
+                                </span>
+                            ) : (
+                                <span>{currentShelf?.name || 'Ubicación completa'}</span>
+                            )}
                         </p>
                     </div>
 
@@ -425,29 +439,37 @@ export default function ShelfAuditCreate({ locations, preselectedLocationId, ini
                 {/* Anaquel Selector & Scan Command Bar */}
                 <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
                     {/* Shelf Selector Card */}
-                    <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-xs dark:border-neutral-800 dark:bg-neutral-900 lg:col-span-4">
+                    <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-xs dark:border-neutral-800 dark:bg-neutral-900 lg:col-span-5">
                         <label className="block text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-neutral-400">
-                            1. Anaquel o Ubicación a Contar:
+                            1. Anaquel a Contar:
                         </label>
                         <select
-                            value={selectedLocationId}
-                            onChange={(e) => handleLocationChange(e.target.value)}
+                            value={selectedShelfCode}
+                            onChange={(e) => handleShelfChange(e.target.value)}
                             disabled={isLoadingProducts}
-                            className="mt-2 w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-base font-bold text-slate-900 focus:border-indigo-500 focus:outline-none dark:border-neutral-700 dark:bg-neutral-950 dark:text-white"
+                            className="mt-2 w-full rounded-xl border border-indigo-300 bg-white px-3.5 py-2.5 text-base font-bold text-slate-900 focus:border-indigo-600 focus:outline-none dark:border-neutral-700 dark:bg-neutral-950 dark:text-white"
                         >
-                            {locations.map((loc) => (
-                                <option key={loc.id} value={loc.id}>
-                                    📍 {loc.code} — {loc.name}
+                            {shelves.map((sh) => (
+                                <option key={sh.shelf_code} value={sh.shelf_code}>
+                                    📍 Anaquel {sh.display_label}
                                 </option>
                             ))}
                         </select>
-                        <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
-                            Al cambiar de anaquel se cargarán automáticamente los productos y existencias teóricas registradas.
-                        </p>
+
+                        {currentShelf?.sub_locations_count > 1 ? (
+                            <div className="mt-2.5 rounded-xl bg-indigo-50/70 p-2.5 text-xs text-indigo-900 dark:bg-indigo-950/40 dark:text-indigo-300">
+                                <span className="font-bold">✓ Agrupa {currentShelf.sub_locations_count} casillas:</span>{' '}
+                                {currentShelf.sub_locations.join(', ')}
+                            </div>
+                        ) : (
+                            <div className="mt-2.5 text-xs text-slate-500 dark:text-slate-400">
+                                Anaquel individual: {currentShelf?.name || selectedShelfCode}
+                            </div>
+                        )}
                     </div>
 
                     {/* Barcode Gun & Camera Scanner Card */}
-                    <div className="rounded-2xl border-2 border-indigo-500/40 bg-gradient-to-br from-indigo-50/60 to-white p-4 shadow-xs dark:border-indigo-600/40 dark:from-indigo-950/20 dark:to-neutral-900 lg:col-span-8">
+                    <div className="rounded-2xl border-2 border-indigo-500/40 bg-gradient-to-br from-indigo-50/60 to-white p-4 shadow-xs dark:border-indigo-600/40 dark:from-indigo-950/20 dark:to-neutral-900 lg:col-span-7">
                         <div className="flex items-center justify-between">
                             <label className="text-xs font-bold uppercase tracking-wider text-indigo-900 dark:text-indigo-300">
                                 2. Escáner de Código de Barras (Pistola USB / Bluetooth o Cámara):
@@ -484,7 +506,7 @@ export default function ShelfAuditCreate({ locations, preselectedLocationId, ini
                                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
                                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
                                 </svg>
-                                <span>Cámara Móvil</span>
+                                <span>Cámara</span>
                             </button>
 
                             <button
@@ -530,7 +552,7 @@ export default function ShelfAuditCreate({ locations, preselectedLocationId, ini
                     <div className="rounded-2xl border border-indigo-200 bg-white p-4 shadow-md dark:border-neutral-700 dark:bg-neutral-900">
                         <div className="flex items-center justify-between">
                             <h3 className="text-sm font-bold text-slate-900 dark:text-white">
-                                Buscar producto del catálogo para agregar a este anaquel:
+                                Buscar producto del catálogo para agregar al Anaquel {selectedShelfCode}:
                             </h3>
                             <button
                                 type="button"
@@ -717,7 +739,7 @@ export default function ShelfAuditCreate({ locations, preselectedLocationId, ini
                             <thead className="bg-slate-50 text-left text-xs font-semibold uppercase tracking-wide text-slate-500 dark:bg-neutral-950 dark:text-slate-400">
                                 <tr>
                                     <th className="px-5 py-3.5">Producto / SKU / Código</th>
-                                    <th className="px-5 py-3.5 text-center">Stock Esperado</th>
+                                    <th className="px-5 py-3.5 text-center">Stock en Anaquel {selectedShelfCode}</th>
                                     <th className="px-5 py-3.5 text-center">Físico Contado</th>
                                     <th className="px-5 py-3.5 text-center">Diferencia</th>
                                     <th className="px-5 py-3.5">Observaciones</th>
@@ -728,13 +750,13 @@ export default function ShelfAuditCreate({ locations, preselectedLocationId, ini
                                 {isLoadingProducts ? (
                                     <tr>
                                         <td colSpan="6" className="px-5 py-12 text-center text-slate-500">
-                                            Cargando productos del anaquel...
+                                            Cargando productos del anaquel {selectedShelfCode}...
                                         </td>
                                     </tr>
                                 ) : filteredItems.length === 0 ? (
                                     <tr>
                                         <td colSpan="6" className="px-5 py-12 text-center text-slate-500 dark:text-neutral-400">
-                                            No hay productos que coincidan con el filtro en este anaquel.
+                                            No hay productos que coincidan con el filtro en el anaquel {selectedShelfCode}.
                                         </td>
                                     </tr>
                                 ) : (
@@ -773,9 +795,9 @@ export default function ShelfAuditCreate({ locations, preselectedLocationId, ini
                                                                 [{item.brand}]
                                                             </span>
                                                         )}
-                                                        {item.primary_location && item.primary_location !== currentLocation?.code && (
-                                                            <span className="rounded bg-amber-100 px-1.5 py-0.2 font-sans text-[10px] font-bold text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">
-                                                                Oficial: {item.primary_location}
+                                                        {item.primary_location && (
+                                                            <span className="rounded bg-slate-100 px-1.5 py-0.2 font-sans text-[10px] font-bold text-slate-700 dark:bg-neutral-800 dark:text-slate-300">
+                                                                Ubicación oficial: {item.primary_location}
                                                             </span>
                                                         )}
                                                         {item.is_extra && (
@@ -786,12 +808,14 @@ export default function ShelfAuditCreate({ locations, preselectedLocationId, ini
                                                     </div>
                                                 </td>
 
-                                                {/* System Expected */}
+                                                {/* System Expected in this Shelf */}
                                                 <td className="px-5 py-3.5 text-center">
-                                                    <span className="font-mono text-base font-bold text-slate-700 dark:text-slate-300">
+                                                    <span className="font-mono text-base font-bold text-slate-800 dark:text-white">
                                                         {item.system_quantity}
                                                     </span>
-                                                    <span className="block text-[10px] text-slate-400">uds teóricas</span>
+                                                    <span className="block text-[10px] font-medium text-slate-500 dark:text-slate-400">
+                                                        {item.location_breakdown || 'uds teóricas'}
+                                                    </span>
                                                 </td>
 
                                                 {/* Counted Quantity Counter */}
@@ -887,19 +911,19 @@ export default function ShelfAuditCreate({ locations, preselectedLocationId, ini
                 {/* Audit General Notes & Final Submit Bar */}
                 <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs dark:border-neutral-800 dark:bg-neutral-900">
                     <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 dark:text-neutral-300">
-                        Observaciones generales de la auditoría (opcional):
+                        Observaciones generales de la auditoría en Anaquel {selectedShelfCode} (opcional):
                     </label>
                     <textarea
                         value={auditNotes}
                         onChange={(e) => setAuditNotes(e.target.value)}
                         rows={2}
-                        placeholder="Ej: Conteo físico quincenal de anaquel I4. Se encontraron productos desacomodados."
+                        placeholder={`Ej: Conteo físico quincenal de anaquel ${selectedShelfCode}.`}
                         className="mt-2 w-full rounded-xl border border-slate-300 px-3.5 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-indigo-500 focus:outline-none dark:border-neutral-700 dark:bg-neutral-950 dark:text-white"
                     />
 
                     <div className="mt-5 flex flex-col justify-between gap-4 border-t border-slate-100 pt-4 dark:border-neutral-800 sm:flex-row sm:items-center">
                         <div className="text-xs text-slate-500 dark:text-slate-400">
-                            <span className="font-bold text-slate-900 dark:text-white">Resumen:</span>{' '}
+                            <span className="font-bold text-slate-900 dark:text-white">Resumen Anaquel {selectedShelfCode}:</span>{' '}
                             {metrics.totalProducts} productos • {metrics.exactCount} exactos • {metrics.overCount} sobrantes • {metrics.shortCount} faltantes.
                         </div>
 
@@ -939,7 +963,7 @@ export default function ShelfAuditCreate({ locations, preselectedLocationId, ini
                     processBarcode(code)
                     setIsCameraOpen(false)
                 }}
-                title="Escanear Código de Barras con Cámara"
+                title={`Escanear Código de Barras (Anaquel ${selectedShelfCode})`}
             />
         </AppShell>
     )

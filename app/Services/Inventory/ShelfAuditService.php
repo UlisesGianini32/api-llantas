@@ -21,35 +21,169 @@ class ShelfAuditService
     ) {}
 
     /**
-     * Devuelve la lista de productos esperados en una ubicación (anaquel)
-     * basándose en:
-     * 1. Productos con stock físico actual registrado en esa ubicación.
-     * 2. Productos que tienen asignado ese anaquel como su ubicación oficial en el catálogo.
+     * Extrae el código base del Anaquel a partir de un código de ubicación.
+     * Ejemplo:
+     * - 'I4-1', 'I4-2', 'I4-3' -> 'I4'
+     * - 'F10-1', 'F10-9'       -> 'F10'
+     * - 'A1-1', 'A1-9'         -> 'A1'
+     * - 'G1-1'                 -> 'G1'
+     * - 'MOSTRADOR'            -> 'MOSTRADOR'
+     * - 'AMZ-A'                -> 'AMZ-A'
+     */
+    public static function extractShelfCode(string $locationCode): string
+    {
+        $code = trim($locationCode);
+        if ($code === '') {
+            return 'GENERAL';
+        }
+
+        // Detecta letra(s) seguidas de número(s), ej. I4-1 -> I4, F10-2 -> F10, A1-1 -> A1
+        if (preg_match('/^([A-Za-z]+)-?([0-9]+)(?:-.*)?$/i', $code, $m)) {
+            return strtoupper($m[1] . $m[2]);
+        }
+
+        return strtoupper($code);
+    }
+
+    /**
+     * Devuelve la lista de Anaqueles únicos agrupados por su código base (ej: I4, F10, A1, MOSTRADOR).
      *
      * @return Collection<int, array<string, mixed>>
      */
-    public function getShelfExpectedProducts(int $locationId): Collection
+    public function getShelves(): Collection
     {
-        $location = InventoryLocation::findOrFail($locationId);
+        $locations = InventoryLocation::query()
+            ->where('is_active', true)
+            ->orderBy('sort_order')
+            ->orderBy('code')
+            ->get();
 
-        // 1. Stock agrupado por producto en esta ubicación según el ledger
-        /** @var array<int, int> $stockByProduct */
-        $stockByProduct = InventoryMovement::query()
-            ->select('inventory_product_id')
+        $grouped = $locations->groupBy(fn (InventoryLocation $loc) => self::extractShelfCode($loc->code));
+
+        $shelves = [];
+
+        foreach ($grouped as $shelfCode => $shelfLocations) {
+            /** @var Collection<int, InventoryLocation> $shelfLocations */
+            $primaryLoc = $shelfLocations->first();
+            $subCodes = $shelfLocations->pluck('code')->all();
+            $subCount = count($subCodes);
+
+            // Generar etiqueta descriptiva
+            if ($subCount > 1) {
+                $firstCode = $subCodes[0];
+                $lastCode = end($subCodes);
+                $range = "{$firstCode} al {$lastCode}";
+                $label = "{$shelfCode} — {$primaryLoc->name} ({$subCount} casillas: {$range})";
+            } else {
+                $label = "{$shelfCode} — {$primaryLoc->name}";
+            }
+
+            $shelves[] = [
+                'shelf_code' => $shelfCode,
+                'name' => $primaryLoc->name,
+                'display_label' => $label,
+                'primary_location_id' => $primaryLoc->id,
+                'sub_locations_count' => $subCount,
+                'sub_locations' => $subCodes,
+                'location_ids' => $shelfLocations->pluck('id')->all(),
+            ];
+        }
+
+        // Ordenamiento natural (A1, A2, ..., A10, B1, ..., F9, F10, ..., I4, I5)
+        usort($shelves, function ($a, $b) {
+            return strnatcasecmp($a['shelf_code'], $b['shelf_code']);
+        });
+
+        return collect($shelves);
+    }
+
+    /**
+     * Obtiene todas las sub-ubicaciones que pertenecen a un Anaquel.
+     *
+     * @return Collection<int, InventoryLocation>
+     */
+    public function getLocationsForShelf(string|int $shelfIdentifier): Collection
+    {
+        $locations = InventoryLocation::query()
+            ->where('is_active', true)
+            ->get();
+
+        if (is_numeric($shelfIdentifier)) {
+            $targetLoc = $locations->firstWhere('id', (int) $shelfIdentifier);
+            $shelfCode = $targetLoc ? self::extractShelfCode($targetLoc->code) : (string) $shelfIdentifier;
+        } else {
+            $shelfCode = self::extractShelfCode((string) $shelfIdentifier);
+        }
+
+        $matched = $locations->filter(function (InventoryLocation $loc) use ($shelfCode) {
+            return self::extractShelfCode($loc->code) === $shelfCode;
+        });
+
+        if ($matched->isEmpty()) {
+            // Intentar por coincidencia exacta de código o ID
+            $fallback = $locations->filter(function (InventoryLocation $loc) use ($shelfIdentifier) {
+                return (string) $loc->id === (string) $shelfIdentifier || strtoupper($loc->code) === strtoupper((string) $shelfIdentifier);
+            });
+
+            if ($fallback->isNotEmpty()) {
+                return $fallback;
+            }
+
+            if (is_numeric($shelfIdentifier)) {
+                return collect([InventoryLocation::findOrFail((int) $shelfIdentifier)]);
+            }
+        }
+
+        return $matched->sortBy('code', SORT_NATURAL);
+    }
+
+    /**
+     * Devuelve la lista de productos esperados en un Anaquel completo (incluyendo todas sus sub-casillas: I4-1, I4-2, etc.)
+     *
+     * @return Collection<int, array<string, mixed>>
+     */
+    public function getShelfExpectedProducts(string|int $shelfIdentifier): Collection
+    {
+        $locations = $this->getLocationsForShelf($shelfIdentifier);
+        if ($locations->isEmpty()) {
+            return collect([]);
+        }
+
+        $locationIds = $locations->pluck('id')->all();
+        $locationMap = $locations->keyBy('id');
+        $shelfCode = self::extractShelfCode($locations->first()->code);
+
+        // 1. Stock desglosado por producto y ubicación en este anaquel según el ledger
+        $movementRows = InventoryMovement::query()
+            ->select(['inventory_product_id', 'inventory_location_id'])
             ->selectRaw('COALESCE(SUM(quantity), 0) as stock')
-            ->where('inventory_location_id', $location->id)
-            ->groupBy('inventory_product_id')
-            ->pluck('stock', 'inventory_product_id')
-            ->map(fn ($val) => (int) $val)
-            ->toArray();
+            ->whereIn('inventory_location_id', $locationIds)
+            ->groupBy('inventory_product_id', 'inventory_location_id')
+            ->get();
 
-        // 2. Productos que tienen esta ubicación como estante asignado en el catálogo
+        $stockByProduct = [];
+        $breakdownByProduct = [];
+
+        foreach ($movementRows as $row) {
+            $pId = (int) $row->inventory_product_id;
+            $locId = (int) $row->inventory_location_id;
+            $stock = (int) $row->stock;
+
+            $stockByProduct[$pId] = ($stockByProduct[$pId] ?? 0) + $stock;
+
+            if ($stock > 0) {
+                $locCode = $locationMap[$locId]?->code ?? "Ubic #{$locId}";
+                $breakdownByProduct[$pId][] = "{$stock} en {$locCode}";
+            }
+        }
+
+        // 2. Productos que tienen asignada alguna de las sub-ubicaciones de este anaquel como oficial
         $assignedProductIds = InventoryProduct::query()
             ->where('is_active', true)
             ->where('product_type', InventoryProduct::SIMPLE)
-            ->where('primary_location_id', $location->id)
+            ->whereIn('primary_location_id', $locationIds)
             ->pluck('id')
-            ->toArray();
+            ->all();
 
         // 3. Unir IDs de ambos orígenes
         $allProductIds = array_values(array_unique(array_merge(array_keys($stockByProduct), $assignedProductIds)));
@@ -63,9 +197,12 @@ class ShelfAuditService
             ->whereIn('id', $allProductIds)
             ->orderBy('name')
             ->get(['id', 'sku', 'barcode', 'barcode_secondary', 'name', 'brand', 'cost', 'primary_location_id'])
-            ->map(function (InventoryProduct $product) use ($stockByProduct, $location) {
-                $stock = (int) ($stockByProduct[$product->id] ?? 0);
-                $isAssigned = (int) $product->primary_location_id === (int) $location->id;
+            ->map(function (InventoryProduct $product) use ($stockByProduct, $breakdownByProduct, $locationIds, $shelfCode) {
+                $totalStock = (int) ($stockByProduct[$product->id] ?? 0);
+                $isAssigned = in_array((int) $product->primary_location_id, $locationIds, true);
+                $breakdown = ! empty($breakdownByProduct[$product->id])
+                    ? implode(', ', $breakdownByProduct[$product->id])
+                    : ($totalStock > 0 ? "{$totalStock} en {$shelfCode}" : 'Sin stock previo');
 
                 return [
                     'id' => $product->id,
@@ -76,12 +213,14 @@ class ShelfAuditService
                     'name' => $product->name,
                     'brand' => $product->brand,
                     'cost' => (float) ($product->cost ?? 0),
+                    'shelf_code' => $shelfCode,
+                    'system_stock' => $totalStock,
+                    'system_quantity' => $totalStock,
+                    'location_breakdown' => $breakdown,
                     'primary_location_id' => $product->primary_location_id,
                     'primary_location' => $product->primaryLocation?->code,
                     'primary_location_code' => $product->primaryLocation?->code,
                     'is_assigned_location' => $isAssigned,
-                    'system_stock' => $stock,
-                    'system_quantity' => $stock,
                 ];
             })
             ->keyBy('id');
@@ -94,16 +233,27 @@ class ShelfAuditService
      */
     public function createAudit(array $data, User $user, bool $applyImmediately = false): InventoryShelfAudit
     {
-        $locationId = (int) ($data['inventory_location_id'] ?? 0);
-        $location = InventoryLocation::findOrFail($locationId);
+        $shelfIdentifier = $data['shelf_code'] ?? ($data['inventory_location_id'] ?? null);
+        if (! $shelfIdentifier) {
+            throw new InvalidArgumentException('Debes indicar el anaquel a auditar.');
+        }
+
+        $locations = $this->getLocationsForShelf($shelfIdentifier);
+        if ($locations->isEmpty()) {
+            throw new InvalidArgumentException("No se encontraron ubicaciones para el anaquel '{$shelfIdentifier}'.");
+        }
+
+        $primaryLocation = $locations->first();
+        $shelfCode = self::extractShelfCode($primaryLocation->code);
 
         $items = $data['items'] ?? [];
         if (empty($items) || ! is_array($items)) {
             throw new InvalidArgumentException('Debes indicar al menos un producto a auditar.');
         }
 
-        return DB::transaction(function () use ($location, $items, $data, $user, $applyImmediately) {
-            $auditNumber = $this->generateAuditNumber($location);
+        return DB::transaction(function () use ($locations, $primaryLocation, $shelfCode, $items, $data, $user, $applyImmediately) {
+            $auditNumber = $this->generateAuditNumber($shelfCode);
+            $locationIds = $locations->pluck('id')->all();
 
             $totalExpected = 0;
             $totalCountedProducts = 0;
@@ -144,13 +294,14 @@ class ShelfAuditService
                     $missingCount++;
                 }
 
-                $isAssigned = (int) $product->primary_location_id === (int) $location->id;
+                $isAssigned = in_array((int) $product->primary_location_id, $locationIds, true);
 
                 $preparedItems[] = [
                     'inventory_product_id' => $product->id,
                     'system_quantity' => $systemQty,
                     'counted_quantity' => $countedQty,
                     'difference' => $diff,
+                    'location_breakdown' => ! empty($item['location_breakdown']) ? trim((string) $item['location_breakdown']) : null,
                     'is_assigned_location' => $isAssigned,
                     'notes' => ! empty($item['notes']) ? trim((string) $item['notes']) : null,
                     'adjusted' => false,
@@ -159,7 +310,8 @@ class ShelfAuditService
 
             $audit = InventoryShelfAudit::create([
                 'audit_number' => $auditNumber,
-                'inventory_location_id' => $location->id,
+                'shelf_code' => $shelfCode,
+                'inventory_location_id' => $primaryLocation->id,
                 'user_id' => $user->id,
                 'status' => InventoryShelfAudit::STATUS_IN_PROGRESS,
                 'total_expected_products' => $totalExpected,
@@ -186,19 +338,25 @@ class ShelfAuditService
     }
 
     /**
-     * Aplica los movimientos de ajuste físico en el inventario para cuadrar el anaquel
-     * exactamente con lo que el usuario contó.
+     * Aplica los movimientos de ajuste físico en el ledger para el anaquel auditado.
+     * Maneja la distribución inteligente en las sub-casillas:
+     * - Sobrante (+): Se suma en la casilla oficial del producto o en la principal del anaquel.
+     * - Faltante (-): Se descuenta de las casillas del anaquel que tienen stock positivo (evitando saldos negativos).
      */
     public function applyAuditAdjustment(InventoryShelfAudit $audit, User $user, ?string $notes = null): InventoryShelfAudit
     {
-        if ($audit->isApplied()) {
+        if ($audit->status === InventoryShelfAudit::STATUS_APPLIED) {
             throw new InvalidArgumentException("La auditoría {$audit->audit_number} ya fue aplicada previamente.");
         }
 
         return DB::transaction(function () use ($audit, $user, $notes) {
-            $location = $audit->location ?? InventoryLocation::findOrFail($audit->inventory_location_id);
-            $items = $audit->items()->with('product')->get();
+            $shelfIdentifier = $audit->shelf_code ?: $audit->inventory_location_id;
+            $locations = $this->getLocationsForShelf($shelfIdentifier);
+            $locationIds = $locations->pluck('id')->all();
+            $primaryLocation = $locations->first();
+            $shelfCode = $audit->shelf_code ?: self::extractShelfCode($primaryLocation->code);
 
+            $items = $audit->items()->with('product')->get();
             $auditNotes = $notes ? trim($notes) : ($audit->notes ?: '');
 
             foreach ($items as $item) {
@@ -213,18 +371,23 @@ class ShelfAuditService
                     continue;
                 }
 
-                $ref = "Auditoría Anaquel {$location->code} (#{$audit->audit_number})";
+                $ref = "Auditoría Anaquel {$shelfCode} (#{$audit->audit_number})";
 
                 if ($diff > 0) {
-                    // Sobrante físico: Contado > Sistema -> Entrada por ajuste
-                    $movementNotes = "Ajuste físico por auditoría (Sobrante: {$diff} pza".($diff === 1 ? '' : 's')."). Sistema: {$item->system_quantity} → Contado: {$item->counted_quantity}";
+                    // Sobrante físico: Contado > Sistema en este anaquel -> Entrada por ajuste
+                    // Ubicación destino: casilla asignada si pertenece a este anaquel, o primera casilla
+                    $targetLocationId = (in_array((int) $product->primary_location_id, $locationIds, true))
+                        ? (int) $product->primary_location_id
+                        : (int) $primaryLocation->id;
+
+                    $movementNotes = "Ajuste físico en Anaquel {$shelfCode} (Sobrante: +{$diff} pza".($diff === 1 ? '' : 's')."). Sistema: {$item->system_quantity} → Contado: {$item->counted_quantity}";
                     if ($auditNotes !== '') {
                         $movementNotes .= " | {$auditNotes}";
                     }
 
                     $this->movementService->recordManual([
                         'inventory_product_id' => $product->id,
-                        'inventory_location_id' => $location->id,
+                        'inventory_location_id' => $targetLocationId,
                         'type' => InventoryMovement::ADJUSTMENT_IN,
                         'quantity' => $diff,
                         'reference' => $ref,
@@ -232,22 +395,58 @@ class ShelfAuditService
                         'occurred_at' => now(),
                     ], $user);
                 } else {
-                    // Faltante físico: Contado < Sistema -> Salida por ajuste
+                    // Faltante físico: Contado < Sistema en este anaquel -> Salida por ajuste
+                    // Descontar ordenadamente de las sub-casillas que tengan stock positivo
                     $missingUnits = abs($diff);
-                    $movementNotes = "Ajuste físico por auditoría (Faltante: -{$missingUnits} pza".($missingUnits === 1 ? '' : 's')."). Sistema: {$item->system_quantity} → Contado: {$item->counted_quantity}";
+                    $movementNotes = "Ajuste físico en Anaquel {$shelfCode} (Faltante: -{$missingUnits} pza".($missingUnits === 1 ? '' : 's')."). Sistema: {$item->system_quantity} → Contado: {$item->counted_quantity}";
                     if ($auditNotes !== '') {
                         $movementNotes .= " | {$auditNotes}";
                     }
 
-                    $this->movementService->recordManual([
-                        'inventory_product_id' => $product->id,
-                        'inventory_location_id' => $location->id,
-                        'type' => InventoryMovement::ADJUSTMENT_OUT,
-                        'quantity' => $missingUnits,
-                        'reference' => $ref,
-                        'notes' => $movementNotes,
-                        'occurred_at' => now(),
-                    ], $user);
+                    $stockPerLoc = InventoryMovement::query()
+                        ->select('inventory_location_id')
+                        ->selectRaw('COALESCE(SUM(quantity), 0) as stock')
+                        ->whereIn('inventory_location_id', $locationIds)
+                        ->where('inventory_product_id', $product->id)
+                        ->groupBy('inventory_location_id')
+                        ->having('stock', '>', 0)
+                        ->orderByDesc('stock')
+                        ->pluck('stock', 'inventory_location_id')
+                        ->map(fn ($val) => (int) $val)
+                        ->toArray();
+
+                    foreach ($stockPerLoc as $locId => $availStock) {
+                        if ($missingUnits <= 0) {
+                            break;
+                        }
+
+                        $toDeduct = min($availStock, $missingUnits);
+
+                        $this->movementService->recordManual([
+                            'inventory_product_id' => $product->id,
+                            'inventory_location_id' => $locId,
+                            'type' => InventoryMovement::ADJUSTMENT_OUT,
+                            'quantity' => $toDeduct,
+                            'reference' => $ref,
+                            'notes' => $movementNotes,
+                            'occurred_at' => now(),
+                        ], $user);
+
+                        $missingUnits -= $toDeduct;
+                    }
+
+                    // Si aún faltan unidades por descontar
+                    if ($missingUnits > 0) {
+                        $this->movementService->recordManual([
+                            'inventory_product_id' => $product->id,
+                            'inventory_location_id' => (int) $primaryLocation->id,
+                            'type' => InventoryMovement::ADJUSTMENT_OUT,
+                            'quantity' => $missingUnits,
+                            'reference' => $ref,
+                            'notes' => $movementNotes,
+                            'occurred_at' => now(),
+                        ], $user);
+                    }
                 }
 
                 $item->update(['adjusted' => true]);
@@ -266,24 +465,27 @@ class ShelfAuditService
 
     /**
      * Genera un número de folio de auditoría único y legible:
-     * AUD-{CODIGO_UBICACION}-YYYYMMDD-0001
+     * AUD-{CODIGO_ANAQUEL}-YYYYMMDD-0001
      */
-    protected function generateAuditNumber(InventoryLocation $location): string
+    protected function generateAuditNumber(string $shelfCode): string
     {
-        $cleanCode = preg_replace('/[^A-Za-z0-9]/', '', strtoupper($location->code)) ?: 'ANAQUEL';
+        $cleanCode = preg_replace('/[^A-Za-z0-9]/', '', strtoupper($shelfCode)) ?: 'ANAQUEL';
         $prefix = 'AUD-'.$cleanCode.'-'.now()->format('Ymd');
 
-        $latestToday = InventoryShelfAudit::where('audit_number', 'like', "{$prefix}-%")
+        $latestAudit = InventoryShelfAudit::query()
+            ->where('audit_number', 'like', "{$prefix}-%")
             ->orderByDesc('id')
             ->value('audit_number');
 
-        if (! $latestToday) {
-            return "{$prefix}-0001";
+        $sequence = 1;
+        if ($latestAudit) {
+            $parts = explode('-', $latestAudit);
+            $lastSeq = (int) end($parts);
+            if ($lastSeq > 0) {
+                $sequence = $lastSeq + 1;
+            }
         }
 
-        $parts = explode('-', $latestToday);
-        $seq = (int) end($parts);
-
-        return sprintf('%s-%04d', $prefix, $seq + 1);
+        return sprintf('%s-%04d', $prefix, $sequence);
     }
 }

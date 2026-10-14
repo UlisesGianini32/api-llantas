@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Inventory;
 
 use App\Http\Controllers\Controller;
 use App\Models\InventoryLocation;
+use App\Models\InventoryProduct;
 use App\Models\InventoryShelfAudit;
 use App\Services\Inventory\ShelfAuditService;
 use Illuminate\Http\JsonResponse;
@@ -24,7 +25,9 @@ class ShelfAuditController extends Controller
         $query = InventoryShelfAudit::query()
             ->with(['location:id,code,name', 'user:id,name', 'appliedBy:id,name']);
 
-        if ($request->filled('location_id')) {
+        if ($request->filled('shelf_code')) {
+            $query->where('shelf_code', (string) $request->input('shelf_code'));
+        } elseif ($request->filled('location_id')) {
             $query->where('inventory_location_id', (int) $request->input('location_id'));
         }
 
@@ -36,6 +39,7 @@ class ShelfAuditController extends Controller
             $search = trim((string) $request->input('search'));
             $query->where(function ($q) use ($search) {
                 $q->where('audit_number', 'like', "%{$search}%")
+                    ->orWhere('shelf_code', 'like', "%{$search}%")
                     ->orWhereHas('location', function ($locQ) use ($search) {
                         $locQ->where('code', 'like', "%{$search}%")
                             ->orWhere('name', 'like', "%{$search}%");
@@ -45,62 +49,64 @@ class ShelfAuditController extends Controller
 
         $audits = $query->orderByDesc('id')->paginate(20)->withQueryString();
 
+        $shelvesCount = InventoryShelfAudit::distinct('shelf_code')->count('shelf_code');
+        if ($shelvesCount === 0) {
+            $shelvesCount = InventoryShelfAudit::distinct('inventory_location_id')->count('inventory_location_id');
+        }
+
         $summary = [
             'total_audits' => InventoryShelfAudit::count(),
             'applied_audits' => InventoryShelfAudit::where('status', InventoryShelfAudit::STATUS_APPLIED)->count(),
             'in_progress_audits' => InventoryShelfAudit::where('status', InventoryShelfAudit::STATUS_IN_PROGRESS)->count(),
-            'locations_audited_count' => InventoryShelfAudit::distinct('inventory_location_id')->count('inventory_location_id'),
+            'shelves_audited_count' => $shelvesCount,
             'net_difference_units' => (int) InventoryShelfAudit::where('status', InventoryShelfAudit::STATUS_APPLIED)->sum('total_difference_units'),
         ];
 
-        $locations = InventoryLocation::query()
-            ->where('is_active', true)
-            ->orderBy('sort_order')
-            ->orderBy('code')
-            ->get(['id', 'code', 'name']);
+        $shelves = $this->auditService->getShelves();
 
         return Inertia::render('Inventory/Audits/Index', [
             'audits' => $audits,
             'summary' => $summary,
-            'locations' => $locations,
-            'filters' => $request->only(['location_id', 'status', 'search']),
+            'shelves' => $shelves,
+            'filters' => $request->only(['shelf_code', 'location_id', 'status', 'search']),
         ]);
     }
 
     public function create(Request $request): Response
     {
-        $locations = InventoryLocation::query()
-            ->where('is_active', true)
-            ->orderBy('sort_order')
-            ->orderBy('code')
-            ->get(['id', 'code', 'name']);
+        $shelves = $this->auditService->getShelves();
 
-        $preselectedLocationId = $request->filled('location_id')
-            ? (int) $request->input('location_id')
-            : ($locations[0]->id ?? null);
+        $preselectedShelfCode = $request->filled('shelf_code')
+            ? (string) $request->input('shelf_code')
+            : ($shelves[0]['shelf_code'] ?? null);
 
         $initialProducts = [];
-        if ($preselectedLocationId) {
-            $initialProducts = $this->auditService->getShelfExpectedProducts($preselectedLocationId)->values()->all();
+        if ($preselectedShelfCode) {
+            $initialProducts = $this->auditService->getShelfExpectedProducts($preselectedShelfCode)->values()->all();
         }
 
         return Inertia::render('Inventory/Audits/Create', [
-            'locations' => $locations,
-            'preselectedLocationId' => $preselectedLocationId,
+            'shelves' => $shelves,
+            'preselectedShelfCode' => $preselectedShelfCode,
             'initialProducts' => $initialProducts,
         ]);
     }
 
-    public function getShelfProducts(InventoryLocation $inventoryLocation): JsonResponse
+    public function getShelfProducts(Request $request, string $shelfIdentifier): JsonResponse
     {
-        $products = $this->auditService->getShelfExpectedProducts($inventoryLocation->id);
+        $locations = $this->auditService->getLocationsForShelf($shelfIdentifier);
+        $primaryLoc = $locations->first();
+        $shelfCode = ShelfAuditService::extractShelfCode($primaryLoc ? $primaryLoc->code : $shelfIdentifier);
+
+        $products = $this->auditService->getShelfExpectedProducts($shelfIdentifier);
 
         return response()->json([
             'ok' => true,
-            'location' => [
-                'id' => $inventoryLocation->id,
-                'code' => $inventoryLocation->code,
-                'name' => $inventoryLocation->name,
+            'shelf' => [
+                'shelf_code' => $shelfCode,
+                'name' => $primaryLoc?->name,
+                'sub_locations_count' => $locations->count(),
+                'sub_locations' => $locations->pluck('code')->all(),
             ],
             'products' => $products->values()->all(),
         ]);
@@ -113,7 +119,7 @@ class ShelfAuditController extends Controller
             return response()->json([]);
         }
 
-        $products = \App\Models\InventoryProduct::query()
+        $products = InventoryProduct::query()
             ->with('primaryLocation:id,code,name')
             ->select(['id', 'sku', 'barcode', 'barcode_secondary', 'name', 'brand', 'cost', 'primary_location_id', 'is_active'])
             ->where('is_active', true)
@@ -133,22 +139,29 @@ class ShelfAuditController extends Controller
     public function store(Request $request): JsonResponse|RedirectResponse
     {
         $validated = $request->validate([
-            'inventory_location_id' => ['required', 'integer', 'exists:inventory_locations,id'],
+            'shelf_code' => ['nullable', 'string', 'max:50'],
+            'inventory_location_id' => ['nullable', 'integer'],
             'notes' => ['nullable', 'string', 'max:2000'],
             'apply_immediately' => ['nullable', 'boolean'],
             'items' => ['required', 'array', 'min:1'],
             'items.*.inventory_product_id' => ['required', 'integer', 'exists:inventory_products,id'],
             'items.*.system_quantity' => ['required', 'integer'],
             'items.*.counted_quantity' => ['required', 'integer', 'min:0'],
+            'items.*.location_breakdown' => ['nullable', 'string', 'max:500'],
             'items.*.notes' => ['nullable', 'string', 'max:500'],
         ]);
+
+        if (empty($validated['shelf_code']) && empty($validated['inventory_location_id'])) {
+            return back()->with('error', 'Debes seleccionar un anaquel.');
+        }
 
         try {
             $applyImmediately = ! empty($validated['apply_immediately']);
             $audit = $this->auditService->createAudit($validated, $request->user(), $applyImmediately);
 
+            $shelfLabel = $audit->shelf_code ?: ($audit->location?->code ?? 'Anaquel');
             $message = $applyImmediately
-                ? "¡Auditoría {$audit->audit_number} aplicada con éxito! El inventario del anaquel {$audit->location->code} fue ajustado a lo contado."
+                ? "¡Auditoría {$audit->audit_number} aplicada con éxito! El inventario del anaquel {$shelfLabel} fue ajustado a lo contado."
                 : "Auditoría {$audit->audit_number} guardada como borrador.";
 
             if ($request->wantsJson()) {
@@ -180,8 +193,16 @@ class ShelfAuditController extends Controller
             'items.product.primaryLocation:id,code,name',
         ]);
 
+        $shelfIdentifier = $shelfAudit->shelf_code ?: $shelfAudit->inventory_location_id;
+        $locations = $this->auditService->getLocationsForShelf($shelfIdentifier);
+
         return Inertia::render('Inventory/Audits/Show', [
             'audit' => $shelfAudit,
+            'shelf' => [
+                'shelf_code' => $shelfAudit->shelf_code ?: ShelfAuditService::extractShelfCode($shelfAudit->location?->code ?? ''),
+                'sub_locations_count' => $locations->count(),
+                'sub_locations' => $locations->pluck('code')->all(),
+            ],
         ]);
     }
 
@@ -189,8 +210,9 @@ class ShelfAuditController extends Controller
     {
         try {
             $audit = $this->auditService->applyAuditAdjustment($shelfAudit, $request->user(), $request->input('notes'));
+            $shelfLabel = $audit->shelf_code ?: ($audit->location?->code ?? 'Anaquel');
 
-            $message = "¡Ajuste aplicado exitosamente! El anaquel {$audit->location->code} ha quedado cuadrado con el conteo físico.";
+            $message = "¡Ajuste aplicado exitosamente! El anaquel {$shelfLabel} ha quedado cuadrado con el conteo físico.";
 
             if ($request->wantsJson()) {
                 return response()->json([
