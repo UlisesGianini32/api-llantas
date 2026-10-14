@@ -105,7 +105,7 @@ class MeliFullShipmentController extends Controller
     /**
      * Guardar nuevo envío con sus cajas de 30 kg y bultos
      */
-    public function store(Request $request): RedirectResponse
+    public function store(Request $request): JsonResponse|RedirectResponse
     {
         $validated = $request->validate([
             'shipment_code' => ['nullable', 'string', 'max:50'],
@@ -116,7 +116,7 @@ class MeliFullShipmentController extends Controller
             'envia_tracking_number' => ['nullable', 'string', 'max:100'],
             'envia_cost' => ['nullable', 'numeric', 'min:0'],
             'notes' => ['nullable', 'string'],
-            'boxes' => ['required', 'array', 'min:1'],
+            'boxes' => ['nullable', 'array'],
             'boxes.*.box_number' => ['required', 'integer', 'min:1'],
             'boxes.*.bulto_number' => ['nullable', 'integer', 'min:1'],
             'boxes.*.boxes_in_bulto' => ['nullable', 'integer', 'min:1'],
@@ -136,9 +136,21 @@ class MeliFullShipmentController extends Controller
         try {
             $shipment = $this->shipmentService->createShipment($validated, $request->user());
 
+            if ($request->wantsJson()) {
+                return response()->json([
+                    'success' => true,
+                    'message' => "Envío {$shipment->shipment_code} creado exitosamente.",
+                    'shipment' => $shipment->fresh(['boxes.items.inventoryProduct']),
+                    'redirect_url' => route('meli-full-shipments.pack-station', ['shipment_id' => $shipment->id]),
+                ]);
+            }
+
             return redirect()->route('meli-full-shipments.show', $shipment->id)
                 ->with('success', "Envío {$shipment->shipment_code} creado exitosamente con {$shipment->total_boxes} cajas y {$shipment->total_units} unidades.");
         } catch (Throwable $e) {
+            if ($request->wantsJson()) {
+                return response()->json(['success' => false, 'error' => $e->getMessage()], 422);
+            }
             return back()->withInput()->with('error', 'Error al crear el envío: ' . $e->getMessage());
         }
     }

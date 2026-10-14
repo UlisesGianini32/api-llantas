@@ -674,9 +674,64 @@ class MeliFullShipmentTest extends TestCase
         $this->assertNotNull($movement);
         $this->assertEquals(InventoryMovement::TRANSFER_OUT, $movement->type);
         $this->assertEquals(-15, $movement->quantity);
+        $this->assertStringStartsWith('ML-CAJA-', $movement->reference);
 
         $stockAfter = (int) InventoryMovement::where('inventory_product_id', $this->product1->id)->sum('quantity');
         $this->assertEquals(85, $stockAfter);
+    }
+
+    public function test_pack_box_uses_product_primary_location_and_ignores_prueba_location(): void
+    {
+        $pruebaLocation = InventoryLocation::create([
+            'name' => 'PRUEBA 0-1',
+            'code' => 'PRUEBA-01',
+            'is_active' => true,
+        ]);
+
+        $officialLocation = InventoryLocation::create([
+            'name' => 'Pasillo C7 Estante 3',
+            'code' => 'C7-3',
+            'is_active' => true,
+        ]);
+
+        $productWithOfficialLoc = InventoryProduct::create([
+            'sku' => 'PROD-C7-3',
+            'name' => 'Producto en C7-3',
+            'primary_location_id' => $officialLocation->id,
+            'is_active' => true,
+            'product_type' => InventoryProduct::SIMPLE,
+        ]);
+
+        $shipment = MeliFullShipment::create([
+            'user_id' => $this->user->id,
+            'shipment_code' => 'FULL-ENV-2026-0099',
+            'status' => MeliFullShipment::STATUS_DRAFT,
+            'meli_warehouse_code' => 'MXCD06',
+        ]);
+
+        $service = app(MeliFullShipmentService::class);
+        $box = $service->packBox($shipment, [
+            'box_number' => 1,
+            'items' => [
+                [
+                    'inventory_product_id' => $productWithOfficialLoc->id,
+                    'sku' => $productWithOfficialLoc->sku,
+                    'product_name' => $productWithOfficialLoc->name,
+                    'quantity_sent' => 5,
+                    'unit_weight_kg' => 1.5,
+                ],
+            ],
+        ], $this->user);
+
+        $movement = InventoryMovement::where('inventory_product_id', $productWithOfficialLoc->id)
+            ->where('reference_type', 'meli_full_box')
+            ->where('reference_id', $box->id)
+            ->first();
+
+        $this->assertNotNull($movement);
+        $this->assertEquals($officialLocation->id, $movement->inventory_location_id);
+        $this->assertNotEquals($pruebaLocation->id, $movement->inventory_location_id);
+        $this->assertStringStartsWith('ML-CAJA-', $movement->reference);
     }
 
     public function test_can_unpack_box_and_reintegrate_stock_to_warehouse(): void

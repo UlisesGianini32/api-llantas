@@ -106,10 +106,11 @@ export default function MeliFullShipmentsPackStation({
     const [showSuggestionsCarousel, setShowSuggestionsCarousel] = useState(true)
     const [visibleCount, setVisibleCount] = useState(50)
 
-    // Modal: Nuevo Envío Secundario para Otra Bodega
+    // Modal: Nuevo Envío Secundario para Otra Bodega / Cambiar Bodega
     const [newShipmentModalOpen, setNewShipmentModalOpen] = useState(false)
     const [newShipmentWarehouse, setNewShipmentWarehouse] = useState('MXCD01')
     const [creatingNewShipment, setCreatingNewShipment] = useState(false)
+    const [changingWarehouse, setChangingWarehouse] = useState(false)
 
     // Reset visible count when tab or search query changes
     useEffect(() => {
@@ -1143,13 +1144,16 @@ export default function MeliFullShipmentsPackStation({
                             {/* WAREHOUSE BADGE */}
                             <button
                                 type="button"
-                                onClick={() => setWarehouseInfoModalOpen(true)}
+                                onClick={() => {
+                                    setNewShipmentWarehouse(currentShipment.meli_warehouse_code || 'MXCD06')
+                                    setNewShipmentModalOpen(true)
+                                }}
                                 className="inline-flex items-center gap-1.5 rounded-xl bg-sky-100 border border-sky-300 px-3 py-1 text-xs font-black text-sky-950 hover:bg-sky-200 transition-all shadow-sm dark:bg-sky-950/70 dark:border-sky-700 dark:text-sky-200"
-                                title="Ver dirección oficial y reglas del CEDIS asignado"
+                                title="Clic para cambiar bodega o crear nuevo envío paralelo"
                             >
                                 <span>🏭 Bodega:</span>
-                                <span>{currentShipment.meli_warehouse_code || 'MXCD06'}</span>
-                                <span className="text-[11px] opacity-75">ℹ️</span>
+                                <span className="font-mono font-bold">{currentShipment.meli_warehouse_code || 'MXCD06'}</span>
+                                <span className="text-[11px] underline">Cambiar ✎</span>
                             </button>
                         </div>
                         <h1 className="mt-1 text-2xl font-black text-slate-900 dark:text-white">
@@ -1181,14 +1185,17 @@ export default function MeliFullShipmentsPackStation({
                             ))}
                         </select>
 
-                        {/* NUEVO ENVÍO PARA OTRA BODEGA */}
+                        {/* CAMBIAR O CREAR ENVÍO PARA OTRA BODEGA */}
                         <button
                             type="button"
-                            onClick={() => setNewShipmentModalOpen(true)}
+                            onClick={() => {
+                                setNewShipmentWarehouse(currentShipment.meli_warehouse_code || 'MXCD06')
+                                setNewShipmentModalOpen(true)
+                            }}
                             className="inline-flex items-center gap-1.5 rounded-xl border border-sky-300 bg-sky-50 px-3 py-2 text-xs font-black text-sky-900 hover:bg-sky-100 transition-all shadow-sm dark:border-sky-800 dark:bg-sky-950/60 dark:text-sky-200"
-                            title="Crear un envío secundario si MeLi asigna ciertos productos a otra bodega"
+                            title="Cambiar destino del envío actual o crear un envío paralelo para otra bodega"
                         >
-                            <span>➕</span> Otra Bodega / Envío
+                            <span>🔄</span> Cambiar Bodega / Envío
                         </button>
 
                         {/* COPIAR LISTA PARA MELI */}
@@ -3168,17 +3175,17 @@ export default function MeliFullShipmentsPackStation({
                 </div>
             )}
 
-            {/* MODAL: CREAR ENVÍO SECUNDARIO PARA OTRA BODEGA */}
+            {/* MODAL: CAMBIAR BODEGA O CREAR ENVÍO SECUNDARIO */}
             {newShipmentModalOpen && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-xs">
                     <div className="w-full max-w-lg rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl dark:border-neutral-800 dark:bg-neutral-900">
                         <div className="flex items-center justify-between border-b border-slate-100 pb-3 dark:border-neutral-800">
                             <div>
                                 <h3 className="text-base font-black text-slate-900 dark:text-white">
-                                    Iniciar Envío para Otra Bodega (CEDIS MeLi)
+                                    Bodega Destino MeLi (CEDIS)
                                 </h3>
                                 <p className="text-xs text-slate-500">
-                                    Crea un envío paralelo para los productos que MeLi no permite enviar a la bodega actual.
+                                    Envío actual: <strong className="text-slate-800 dark:text-slate-200 font-mono">{currentShipment.shipment_code}</strong> (Destino actual: <strong className="text-sky-600 font-bold">{currentShipment.meli_warehouse_code || 'MXCD06'}</strong>)
                                 </p>
                             </div>
                             <button
@@ -3190,43 +3197,10 @@ export default function MeliFullShipmentsPackStation({
                             </button>
                         </div>
 
-                        <form
-                            onSubmit={async (e) => {
-                                e.preventDefault()
-                                setCreatingNewShipment(true)
-                                try {
-                                    const csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || ''
-                                    const res = await fetch('/meli/full/envios', {
-                                        method: 'POST',
-                                        headers: {
-                                            'Content-Type': 'application/json',
-                                            'Accept': 'application/json',
-                                            'X-CSRF-TOKEN': csrfToken,
-                                        },
-                                        body: JSON.stringify({
-                                            shipment_code: nextShipmentCode,
-                                            meli_warehouse_code: newShipmentWarehouse,
-                                            envia_carrier: 'Estafeta',
-                                            notes: `Envío secundario hacia bodega ${newShipmentWarehouse}`,
-                                            boxes: [],
-                                        }),
-                                    })
-                                    if (res.ok) {
-                                        window.location.href = '/meli/full/envios/empaque'
-                                    } else {
-                                        router.visit('/meli/full/envios/empaque')
-                                    }
-                                } catch {
-                                    router.visit('/meli/full/envios/empaque')
-                                } finally {
-                                    setCreatingNewShipment(false)
-                                }
-                            }}
-                            className="mt-4 space-y-4 text-xs"
-                        >
+                        <div className="mt-4 space-y-4 text-xs">
                             <div>
                                 <label className="block font-bold text-slate-700 dark:text-slate-300">
-                                    Bodega Destino Asignada por Mercado Libre <span className="text-rose-500">*</span>
+                                    Seleccionar Bodega Asignada por Mercado Libre <span className="text-rose-500">*</span>
                                 </label>
                                 <select
                                     value={newShipmentWarehouse}
@@ -3244,31 +3218,121 @@ export default function MeliFullShipmentsPackStation({
                                 </p>
                             </div>
 
-                            <div className="rounded-xl bg-amber-50 border border-amber-200 p-3 text-amber-900 dark:bg-amber-950/40 dark:border-amber-800 dark:text-amber-200 text-[11px] space-y-1">
-                                <p className="font-bold">💡 Multi-Bodega en MeLi:</p>
-                                <p>
-                                    Mercado Libre suele requerir envíos separados cuando mezclas ciertas categorías (como cosméticos individuales vs kits o artículos voluminosos).
-                                    Podrás alternar entre ambos envíos desde el selector superior de la mesa de empaque.
-                                </p>
+                            <div className="rounded-xl bg-sky-50 border border-sky-200 p-3 text-sky-950 dark:bg-sky-950/40 dark:border-sky-800 dark:text-sky-200 text-[11px] space-y-1">
+                                <p className="font-bold">📍 Dirección del CEDIS ({newShipmentWarehouse}):</p>
+                                <p>{warehouseProfiles[newShipmentWarehouse]?.address || 'Dirección de CEDIS MeLi'}</p>
                             </div>
 
-                            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100 dark:border-neutral-800">
+                            <div className="rounded-xl bg-amber-50 border border-amber-200 p-3 text-amber-900 dark:bg-amber-950/40 dark:border-amber-800 dark:text-amber-200 text-[11px] space-y-1">
+                                <p className="font-bold">💡 ¿Qué deseas hacer con esta bodega?</p>
+                                <ul className="list-disc pl-4 space-y-0.5">
+                                    <li><strong>Opción 1 (Cambiar Destino):</strong> Cambia la bodega del envío actual <code>{currentShipment.shipment_code}</code> a <code>{newShipmentWarehouse}</code> de inmediato sin crear otro envío.</li>
+                                    <li><strong>Opción 2 (Nuevo Envío):</strong> Si MeLi te mandó productos a dos bodegas distintas y ocupas un envío separado para cada bodega.</li>
+                                </ul>
+                            </div>
+
+                            <div className="flex flex-col sm:flex-row items-center justify-end gap-2 pt-3 border-t border-slate-100 dark:border-neutral-800">
                                 <button
                                     type="button"
                                     onClick={() => setNewShipmentModalOpen(false)}
-                                    className="rounded-xl border border-slate-300 bg-white px-4 py-2 font-bold text-slate-700 hover:bg-slate-50 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-200"
+                                    className="w-full sm:w-auto rounded-xl border border-slate-300 bg-white px-3.5 py-2 font-bold text-slate-700 hover:bg-slate-50 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-200"
                                 >
                                     Cancelar
                                 </button>
                                 <button
-                                    type="submit"
-                                    disabled={creatingNewShipment}
-                                    className="rounded-xl bg-indigo-600 px-5 py-2 font-bold text-white shadow-sm hover:bg-indigo-700 disabled:opacity-50"
+                                    type="button"
+                                    disabled={changingWarehouse || creatingNewShipment || currentShipment.meli_warehouse_code === newShipmentWarehouse}
+                                    onClick={async () => {
+                                        setChangingWarehouse(true)
+                                        try {
+                                            const csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || ''
+                                            const res = await fetch(`/meli/full/envios/${currentShipment.id}`, {
+                                                method: 'PUT',
+                                                headers: {
+                                                    'Content-Type': 'application/json',
+                                                    'Accept': 'application/json',
+                                                    'X-CSRF-TOKEN': csrfToken,
+                                                },
+                                                body: JSON.stringify({
+                                                    meli_warehouse_code: newShipmentWarehouse,
+                                                    meli_warehouse_name: warehouseProfiles?.[newShipmentWarehouse]?.name || warehouses?.[newShipmentWarehouse] || newShipmentWarehouse,
+                                                    meli_shipment_id: currentShipment.meli_shipment_id || '',
+                                                    envia_carrier: currentShipment.envia_carrier || 'Estafeta',
+                                                    envia_tracking_number: currentShipment.envia_tracking_number || '',
+                                                }),
+                                            })
+                                            const data = await res.json()
+                                            if (res.ok && data.success) {
+                                                const updated = data.shipment || {
+                                                    ...currentShipment,
+                                                    meli_warehouse_code: newShipmentWarehouse,
+                                                    meli_warehouse_name: warehouses?.[newShipmentWarehouse] || newShipmentWarehouse,
+                                                }
+                                                setCurrentShipment(updated)
+                                                setDraftShipments((prev) => prev.map((s) => (s.id === updated.id ? updated : s)))
+                                                setNewShipmentModalOpen(false)
+                                                setActionFeedback({
+                                                    type: 'success',
+                                                    message: `¡Destino del envío ${currentShipment.shipment_code} cambiado a ${newShipmentWarehouse} con éxito!`,
+                                                })
+                                            } else {
+                                                alert(data.error || 'Error al cambiar la bodega del envío actual.')
+                                            }
+                                        } catch (err) {
+                                            console.error('Error changing warehouse:', err)
+                                            alert('Error de conexión al cambiar la bodega.')
+                                        } finally {
+                                            setChangingWarehouse(false)
+                                        }
+                                    }}
+                                    className="w-full sm:w-auto rounded-xl bg-indigo-600 px-4 py-2 font-bold text-white shadow-sm hover:bg-indigo-700 disabled:opacity-40"
+                                    title="Modifica la bodega de este envío actual"
                                 >
-                                    {creatingNewShipment ? 'Creando Envío...' : 'Crear y Abrir Envío'}
+                                    {changingWarehouse ? 'Cambiando...' : `🔄 Cambiar Destino a ${newShipmentWarehouse}`}
+                                </button>
+                                <button
+                                    type="button"
+                                    disabled={creatingNewShipment || changingWarehouse}
+                                    onClick={async () => {
+                                        setCreatingNewShipment(true)
+                                        try {
+                                            const csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || ''
+                                            const res = await fetch('/meli/full/envios', {
+                                                method: 'POST',
+                                                headers: {
+                                                    'Content-Type': 'application/json',
+                                                    'Accept': 'application/json',
+                                                    'X-CSRF-TOKEN': csrfToken,
+                                                },
+                                                body: JSON.stringify({
+                                                    shipment_code: nextShipmentCode,
+                                                    meli_warehouse_code: newShipmentWarehouse,
+                                                    meli_warehouse_name: warehouseProfiles?.[newShipmentWarehouse]?.name || warehouses?.[newShipmentWarehouse] || newShipmentWarehouse,
+                                                    envia_carrier: 'Estafeta',
+                                                    notes: `Envío secundario hacia bodega ${newShipmentWarehouse}`,
+                                                    boxes: [],
+                                                }),
+                                            })
+                                            const data = await res.json()
+                                            if (res.ok && data.success && data.shipment) {
+                                                window.location.href = `/meli/full/envios/empaque?shipment_id=${data.shipment.id}`
+                                            } else {
+                                                alert(data.error || data.message || 'No se pudo crear el nuevo envío.')
+                                            }
+                                        } catch (err) {
+                                            console.error('Error creating shipment:', err)
+                                            alert('Error de conexión al crear el nuevo envío.')
+                                        } finally {
+                                            setCreatingNewShipment(false)
+                                        }
+                                    }}
+                                    className="w-full sm:w-auto rounded-xl bg-emerald-600 px-4 py-2 font-bold text-white shadow-sm hover:bg-emerald-700 disabled:opacity-40"
+                                    title="Crea un segundo envío en paralelo para la otra bodega"
+                                >
+                                    {creatingNewShipment ? 'Creando Envío...' : `➕ Crear Nuevo Envío`}
                                 </button>
                             </div>
-                        </form>
+                        </div>
                     </div>
                 </div>
             )}

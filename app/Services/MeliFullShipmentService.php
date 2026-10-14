@@ -95,7 +95,7 @@ class MeliFullShipmentService
                 $capacityKg = (float) ($boxData['capacity_kg'] ?? ($boxesInBulto * 30.00));
                 $capacityUnits = (int) ($boxData['capacity'] ?? ($boxesInBulto * 30));
                 
-                $boxCode = ($boxesInBulto > 1 ? "BULTO-{$bultoNumber}-(" . $boxesInBulto . "CAJAS)-" : "CAJA-{$boxNumber}-") . substr($shipment->shipment_code, -4);
+                $boxCode = "ML-" . ($boxesInBulto > 1 ? "BULTO-{$bultoNumber}-(" . $boxesInBulto . "CAJAS)-" : "CAJA-{$boxNumber}-") . substr($shipment->shipment_code, -4);
 
                 $box = MeliFullShipmentBox::create([
                     'meli_full_shipment_id' => $shipment->id,
@@ -264,7 +264,7 @@ class MeliFullShipmentService
             $capacityKg = (float) ($data['capacity_kg'] ?? ($boxesInBulto * 30.00));
             $capacityUnits = (int) ($data['capacity'] ?? ($boxesInBulto * 30));
 
-            $boxCode = ($boxesInBulto > 1 ? "BULTO-{$bultoNumber}-(" . $boxesInBulto . "CAJAS)-" : "CAJA-{$boxNumber}-") . substr($shipment->shipment_code, -4);
+            $boxCode = "ML-" . ($boxesInBulto > 1 ? "BULTO-{$bultoNumber}-(" . $boxesInBulto . "CAJAS)-" : "CAJA-{$boxNumber}-") . substr($shipment->shipment_code, -4);
 
             $box = MeliFullShipmentBox::create([
                 'meli_full_shipment_id' => $shipment->id,
@@ -277,12 +277,6 @@ class MeliFullShipmentService
                 'dimensions' => $data['dimensions'] ?? '40x30x30',
                 'weight_kg' => 0,
                 'status' => MeliFullShipmentBox::STATUS_PACKED,
-            ]);
-
-            $location = InventoryLocation::query()->first() ?? InventoryLocation::create([
-                'name' => 'Almacén General',
-                'code' => 'ALM-GEN',
-                'is_active' => true,
             ]);
 
             $items = $data['items'] ?? [];
@@ -333,11 +327,13 @@ class MeliFullShipmentService
                     'notes' => $itemData['notes'] ?? null,
                 ]);
 
-                // Descuento inmediato de existencias físicas del almacén local
+                // Descuento inmediato de existencias físicas del almacén local en la ubicación oficial del producto
                 if ($productId) {
+                    $locationId = $this->resolveLocationForProduct($product ?: $productId);
+
                     InventoryMovement::create([
                         'inventory_product_id' => $productId,
-                        'inventory_location_id' => $location->id,
+                        'inventory_location_id' => $locationId,
                         'type' => InventoryMovement::TRANSFER_OUT,
                         'quantity' => -abs($qty),
                         'reference_type' => 'meli_full_box',
@@ -369,22 +365,22 @@ class MeliFullShipmentService
     {
         DB::transaction(function () use ($box, $user) {
             $shipment = $box->shipment;
-            $location = InventoryLocation::query()->first() ?? InventoryLocation::create([
-                'name' => 'Almacén General',
-                'code' => 'ALM-GEN',
-                'is_active' => true,
-            ]);
-
-            // Reintegrar al inventario los productos descontados al empacar esta caja
+            // Reintegrar al inventario los productos descontados al empacar esta caja en su ubicación correcta
             $items = $box->items()->whereNotNull('inventory_product_id')->get();
             foreach ($items as $item) {
                 if ($item->quantity_sent <= 0) {
                     continue;
                 }
 
+                $originalMovement = InventoryMovement::where('reference_type', 'meli_full_box')
+                    ->where('reference_id', $box->id)
+                    ->where('inventory_product_id', $item->inventory_product_id)
+                    ->first();
+                $locId = $originalMovement ? (int) $originalMovement->inventory_location_id : $this->resolveLocationForProduct($item->inventory_product_id);
+
                 InventoryMovement::create([
                     'inventory_product_id' => $item->inventory_product_id,
-                    'inventory_location_id' => $location->id,
+                    'inventory_location_id' => $locId,
                     'type' => InventoryMovement::TRANSFER_IN,
                     'quantity' => abs($item->quantity_sent),
                     'reference_type' => 'meli_full_box_revert',
@@ -538,12 +534,6 @@ class MeliFullShipmentService
         }
 
         return DB::transaction(function () use ($shipment, $user) {
-            $location = InventoryLocation::query()->first() ?? InventoryLocation::create([
-                'name' => 'Almacén General',
-                'code' => 'ALM-GEN',
-                'is_active' => true,
-            ]);
-
             // Cajas que ya descontaron inventario individualmente
             $alreadyDeductedBoxIds = InventoryMovement::query()
                 ->where('reference_type', 'meli_full_box')
@@ -562,14 +552,16 @@ class MeliFullShipmentService
                     continue;
                 }
 
+                $locId = $this->resolveLocationForProduct($item->inventory_product_id);
+
                 InventoryMovement::create([
                     'inventory_product_id' => $item->inventory_product_id,
-                    'inventory_location_id' => $location->id,
+                    'inventory_location_id' => $locId,
                     'type' => InventoryMovement::TRANSFER_OUT,
                     'quantity' => -abs($item->quantity_sent),
                     'reference_type' => 'meli_full_shipment',
                     'reference_id' => $shipment->id,
-                    'reference' => $shipment->shipment_code,
+                    'reference' => "ML-{$shipment->shipment_code}",
                     'notes' => "Salida para Mercado Libre FULL ({$shipment->meli_warehouse_code}) - Guía ENVIA {$shipment->envia_carrier} {$shipment->envia_tracking_number}",
                     'created_by' => $user?->id,
                     'occurred_at' => Carbon::now(),
@@ -597,12 +589,6 @@ class MeliFullShipmentService
         }
 
         return DB::transaction(function () use ($shipment, $user) {
-            $location = InventoryLocation::query()->first() ?? InventoryLocation::create([
-                'name' => 'Almacén General',
-                'code' => 'ALM-GEN',
-                'is_active' => true,
-            ]);
-
             // Revertir salidas a nivel de envío
             $items = $shipment->items()->whereNotNull('inventory_product_id')->get();
             foreach ($items as $item) {
@@ -610,14 +596,20 @@ class MeliFullShipmentService
                     continue;
                 }
 
+                $originalMovement = InventoryMovement::where('reference_type', 'meli_full_shipment')
+                    ->where('reference_id', $shipment->id)
+                    ->where('inventory_product_id', $item->inventory_product_id)
+                    ->first();
+                $locId = $originalMovement ? (int) $originalMovement->inventory_location_id : $this->resolveLocationForProduct($item->inventory_product_id);
+
                 InventoryMovement::create([
                     'inventory_product_id' => $item->inventory_product_id,
-                    'inventory_location_id' => $location->id,
+                    'inventory_location_id' => $locId,
                     'type' => InventoryMovement::TRANSFER_IN,
                     'quantity' => abs($item->quantity_sent),
                     'reference_type' => 'meli_full_shipment',
                     'reference_id' => $shipment->id,
-                    'reference' => $shipment->shipment_code,
+                    'reference' => "ML-{$shipment->shipment_code}",
                     'notes' => "Reversión de envío FULL ({$shipment->shipment_code}) - Retorno a almacén local",
                     'created_by' => $user?->id,
                     'occurred_at' => Carbon::now(),
@@ -1038,5 +1030,79 @@ class MeliFullShipmentService
         });
 
         return $limit > 0 ? array_slice($suggestions, 0, $limit) : $suggestions;
+    }
+
+    /**
+     * Resuelve la ubicación física oficial del producto para descontar stock local.
+     * Prioridad:
+     * 1. Ubicación principal oficial (primary_location_id) si no es 'PRUEBA'.
+     * 2. Ubicación donde el producto tiene stock físico real en inventario (excluyendo 'PRUEBA').
+     * 3. Ubicación secundaria oficial (secondary_location_id).
+     * 4. Primera ubicación activa real del almacén (excluyendo ubicaciones de prueba).
+     */
+    public function resolveLocationForProduct(InventoryProduct|int $product): int
+    {
+        $prod = $product instanceof InventoryProduct ? $product : InventoryProduct::find($product);
+
+        if ($prod?->primary_location_id) {
+            $primary = InventoryLocation::find($prod->primary_location_id);
+            if ($primary && $primary->is_active && ! str_contains(mb_strtolower($primary->name . ' ' . $primary->code), 'prueba')) {
+                return (int) $primary->id;
+            }
+        }
+
+        // Buscar ubicación donde haya saldo positivo real para este producto
+        if ($prod?->id) {
+            $locationWithStock = DB::table('inventory_movements')
+                ->join('inventory_locations', 'inventory_locations.id', '=', 'inventory_movements.inventory_location_id')
+                ->where('inventory_movements.inventory_product_id', $prod->id)
+                ->where('inventory_locations.is_active', true)
+                ->where('inventory_locations.name', 'not like', '%prueba%')
+                ->where('inventory_locations.code', 'not like', '%prueba%')
+                ->groupBy('inventory_movements.inventory_location_id')
+                ->select('inventory_movements.inventory_location_id')
+                ->selectRaw('SUM(inventory_movements.quantity) as stock')
+                ->having('stock', '>', 0)
+                ->orderByDesc('stock')
+                ->value('inventory_movements.inventory_location_id');
+
+            if ($locationWithStock) {
+                return (int) $locationWithStock;
+            }
+        }
+
+        if ($prod?->secondary_location_id) {
+            $secondary = InventoryLocation::find($prod->secondary_location_id);
+            if ($secondary && $secondary->is_active && ! str_contains(mb_strtolower($secondary->name . ' ' . $secondary->code), 'prueba')) {
+                return (int) $secondary->id;
+            }
+        }
+
+        // Si su primary_location_id existe (incluso si tuviera etiqueta prueba pero es su única asignada)
+        if ($prod?->primary_location_id) {
+            return (int) $prod->primary_location_id;
+        }
+
+        // Ubicación activa real del almacén (excluyendo pruebas)
+        $realLocation = InventoryLocation::query()
+            ->where('is_active', true)
+            ->where('name', 'not like', '%prueba%')
+            ->where('code', 'not like', '%prueba%')
+            ->orderBy('id')
+            ->first();
+
+        if ($realLocation) {
+            return (int) $realLocation->id;
+        }
+
+        $fallback = InventoryLocation::query()->where('is_active', true)->first()
+            ?? InventoryLocation::query()->first()
+            ?? InventoryLocation::create([
+                'name' => 'Almacén General',
+                'code' => 'ALM-GEN',
+                'is_active' => true,
+            ]);
+
+        return (int) $fallback->id;
     }
 }
