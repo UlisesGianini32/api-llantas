@@ -46,6 +46,14 @@ function IconLocation({ className = 'h-4 w-4' }) {
     )
 }
 
+function IconClipboardCheck({ className = 'h-4 w-4' }) {
+    return (
+        <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M11.35 3.836c-.065.21-.1.433-.1.664 0 .414.336.75.75.75h4.5a.75.75 0 00.75-.75 2.25 2.25 0 00-.1-.664m-5.8 0A2.251 2.251 0 0113.5 2.25H15c1.012 0 1.867.668 2.15 1.586m-5.8 0c-.376.023-.75.05-1.124.08C9.095 4.01 8.25 4.973 8.25 6.108V8.25m8.9-4.414c.376.023.75.05 1.124.08 1.131.09 1.976 1.052 1.976 2.188V19.5a2.25 2.25 0 01-2.25 2.25H6.75A2.25 2.25 0 014.5 19.5V6.25c0-1.136.845-2.098 1.976-2.188.374-.03.748-.057 1.124-.08M9 12.75l2.25 2.25L16.5 9.75" />
+        </svg>
+    )
+}
+
 function IconArrows({ className = 'h-4 w-4' }) {
     return (
         <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
@@ -220,6 +228,7 @@ const ALL_SEARCH_ITEMS = [
     { title: 'Clientes y Créditos', desc: 'Directorio de estilistas, plazos 7/15/30 y pagarés', href: '/pos/clientes', category: 'General', icon: IconUsers },
     { title: 'Almacén (Catálogo maestro)', desc: 'Productos, SKU, códigos de barra y stock', href: '/almacen/productos', category: 'Inventario', icon: IconBox },
     { title: 'Ubicaciones de Almacén', desc: 'Pasillos, estantes E10-1, D10-1 y bins', href: '/almacen/ubicaciones', category: 'Inventario', icon: IconLocation },
+    { title: 'Inventario por Anaquel', desc: 'Auditoría, conteo físico y ajustes por anaquel', href: '/almacen/auditorias', category: 'Inventario', icon: IconClipboardCheck },
     { title: 'Movimientos de Inventario', desc: 'Entradas, salidas y ajustes de stock', href: '/almacen/movimientos', category: 'Inventario', icon: IconArrows },
     { title: 'Reservas de Stock', desc: 'Apartados por pedidos pendientes', href: '/almacen/reservas', category: 'Inventario', icon: IconLock },
     { title: 'Kits y Ensambles', desc: 'Productos agrupados con stock derivado', href: '/almacen/kits', category: 'Inventario', icon: IconPuzzle },
@@ -618,6 +627,14 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                             onNavigate={onNavigate}
                         >
                             Ubicaciones
+                        </NavItem>
+                        <NavItem
+                            href="/almacen/auditorias"
+                            icon={IconClipboardCheck}
+                            active={currentPath.startsWith('/almacen/auditorias')}
+                            onNavigate={onNavigate}
+                        >
+                            Inventario por Anaquel
                         </NavItem>
                         <NavItem
                             href="/almacen/movimientos"

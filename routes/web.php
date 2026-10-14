@@ -14,6 +14,7 @@ use App\Http\Controllers\InventoryLocationController;
 use App\Http\Controllers\InventoryMovementController;
 use App\Http\Controllers\InventoryProductController;
 use App\Http\Controllers\InventoryReservationController;
+use App\Http\Controllers\Inventory\ShelfAuditController;
 use App\Http\Controllers\LlantaComparisonController;
 use App\Http\Controllers\LlantaController;
 use App\Http\Controllers\MeliBatchRepublishController;
@@ -253,6 +254,20 @@ Route::middleware(['auth', 'role'])->group(function () {
             ->whereNumber('inventoryLocation')->name('update');
         Route::patch('/{inventoryLocation}/estado', [InventoryLocationController::class, 'toggle'])
             ->whereNumber('inventoryLocation')->name('toggle');
+    });
+
+    // AUDITORÍAS / CONTEOS DE INVENTARIO POR ANAQUEL
+    Route::prefix('almacen/auditorias')->name('inventory.audits.')->group(function () {
+        Route::get('/', [ShelfAuditController::class, 'index'])->name('index');
+        Route::get('/crear', [ShelfAuditController::class, 'create'])->name('create');
+        Route::get('/buscar-catalogo', [ShelfAuditController::class, 'searchCatalog'])->name('search_catalog');
+        Route::post('/', [ShelfAuditController::class, 'store'])->name('store');
+        Route::get('/anaquel/{inventoryLocation}/productos', [ShelfAuditController::class, 'getShelfProducts'])
+            ->whereNumber('inventoryLocation')->name('shelf_products');
+        Route::get('/{shelfAudit}', [ShelfAuditController::class, 'show'])
+            ->whereNumber('shelfAudit')->name('show');
+        Route::post('/{shelfAudit}/aplicar', [ShelfAuditController::class, 'apply'])
+            ->whereNumber('shelfAudit')->name('apply');
     });
 
     Route::prefix('almacen/movimientos')->name('inventory.movements.')->group(function () {

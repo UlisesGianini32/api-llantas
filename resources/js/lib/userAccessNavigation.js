@@ -14,6 +14,7 @@ const sections = [
         { key: 'excel_import', label: 'Importar Excel', href: '/importar-excel' },
         { key: 'inventory_products', label: 'Almacén', href: '/almacen/productos' },
         { key: 'inventory_locations', label: 'Ubicaciones', href: '/almacen/ubicaciones' },
+        { key: 'inventory_audits', label: 'Inventario por Anaquel', href: '/almacen/auditorias' },
         { key: 'inventory_movements', label: 'Movimientos', href: '/almacen/movimientos' },
         { key: 'inventory_reservations', label: 'Reservas', href: '/almacen/reservas' },
     ] },
