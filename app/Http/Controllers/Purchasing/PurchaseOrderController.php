@@ -80,11 +80,12 @@ class PurchaseOrderController extends Controller
             ->get(['id', 'code', 'name']);
 
         $products = InventoryProduct::query()
+            ->with('primaryLocation:id,code,name')
             ->where('is_active', true)
             ->where('product_type', InventoryProduct::SIMPLE)
             ->orderBy('brand')
             ->orderBy('name')
-            ->get(['id', 'sku', 'name', 'brand', 'supplier', 'cost']);
+            ->get(['id', 'sku', 'name', 'brand', 'supplier', 'cost', 'primary_location_id']);
 
         $registeredSuppliers = Supplier::query()
             ->where('is_active', true)
@@ -106,7 +107,7 @@ class PurchaseOrderController extends Controller
         $validated = $request->validate([
             'supplier_name' => ['required', 'string', 'max:100'],
             'brand' => ['nullable', 'string', 'max:100'],
-            'inventory_location_id' => ['required', 'integer', 'exists:inventory_locations,id'],
+            'inventory_location_id' => ['nullable', 'integer', 'exists:inventory_locations,id'],
             'expected_delivery_date' => ['nullable', 'date'],
             'supplier_quote_reference' => ['nullable', 'string', 'max:100'],
             'notes' => ['nullable', 'string', 'max:2000'],
@@ -146,10 +147,12 @@ class PurchaseOrderController extends Controller
             'location:id,code,name',
             'buyer:id,name,email',
             'cancelledBy:id,name',
-            'items.product:id,sku,barcode,barcode_secondary,name,brand,cost',
+            'items.product:id,sku,barcode,barcode_secondary,name,brand,cost,primary_location_id',
+            'items.product.primaryLocation:id,code,name',
             'receipts.receivedBy:id,name',
             'receipts.location:id,code,name',
-            'receipts.items.product:id,sku,name',
+            'receipts.items.product:id,sku,name,primary_location_id',
+            'receipts.items.product.primaryLocation:id,code,name',
         ]);
 
         $locations = InventoryLocation::query()
@@ -175,7 +178,8 @@ class PurchaseOrderController extends Controller
         $purchaseOrder->load([
             'location:id,code,name',
             'buyer:id,name,email',
-            'items.product:id,sku,barcode,barcode_secondary,name,brand',
+            'items.product:id,sku,barcode,barcode_secondary,name,brand,primary_location_id',
+            'items.product.primaryLocation:id,code,name',
         ]);
 
         $supplier = null;
@@ -199,6 +203,7 @@ class PurchaseOrderController extends Controller
         }
 
         $products = InventoryProduct::query()
+            ->with('primaryLocation:id,code,name')
             ->where('is_active', true)
             ->where(function ($query) use ($q) {
                 $query->where('sku', 'like', "%{$q}%")
@@ -208,7 +213,7 @@ class PurchaseOrderController extends Controller
                     ->orWhere('brand', 'like', "%{$q}%");
             })
             ->limit(20)
-            ->get(['id', 'sku', 'barcode', 'barcode_secondary', 'name', 'brand', 'cost']);
+            ->get(['id', 'sku', 'barcode', 'barcode_secondary', 'name', 'brand', 'cost', 'primary_location_id']);
 
         return response()->json(['data' => $products]);
     }

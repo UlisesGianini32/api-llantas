@@ -91,17 +91,21 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
     const [receiveModalOpen, setReceiveModalOpen] = useState(
         typeof window !== 'undefined' && window.location.hash === '#recibir' && (order.status === 'ORDERED' || order.status === 'PARTIAL')
     )
-    const [receiveLocationId, setReceiveLocationId] = useState(order.inventory_location_id || locations[0]?.id || '')
+    const [receiveLocationId, setReceiveLocationId] = useState('')
     const [receiveCarrier, setReceiveCarrier] = useState('')
     const [receiveTracking, setReceiveTracking] = useState('')
     const [receiveNotes, setReceiveNotes] = useState('')
     const [receivingItems, setReceivingItems] = useState(
         (order.items || []).map((item) => ({
             item_id: item.id,
+            product_id: item.inventory_product_id,
             sku: item.product?.sku || item.sku || '-',
             name: item.product?.name || item.product_name || '',
             barcode: item.product?.barcode || '',
             barcode_secondary: item.product?.barcode_secondary || '',
+            primary_location_id: item.product?.primary_location_id || item.product?.primary_location?.id || null,
+            primary_location_code: item.product?.primary_location?.code || null,
+            primary_location_name: item.product?.primary_location?.name || null,
             ordered: item.quantity_ordered,
             pending: Math.max(0, item.quantity_ordered - item.quantity_received),
             quantity_received: Math.max(0, item.quantity_ordered - item.quantity_received),
@@ -348,6 +352,9 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                             name: prod.name,
                             barcode: prod.barcode,
                             barcode_secondary: prod.barcode_secondary,
+                            primary_location_id: prod.primary_location_id || prod.primary_location?.id || null,
+                            primary_location_code: prod.primary_location?.code || null,
+                            primary_location_name: prod.primary_location?.name || null,
                             ordered: 0,
                             pending: 0,
                             quantity_received: 1,
@@ -426,6 +433,9 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                     name: prod.name,
                     barcode: prod.barcode,
                     barcode_secondary: prod.barcode_secondary,
+                    primary_location_id: prod.primary_location_id || prod.primary_location?.id || null,
+                    primary_location_code: prod.primary_location?.code || null,
+                    primary_location_name: prod.primary_location?.name || null,
                     ordered: 0,
                     pending: 0,
                     quantity_received: 1,
@@ -471,7 +481,7 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
         router.post(
             `/compras/ordenes/${order.id}/recibir`,
             {
-                inventory_location_id: receiveLocationId,
+                inventory_location_id: receiveLocationId ? parseInt(receiveLocationId, 10) : null,
                 carrier: receiveCarrier,
                 tracking_number: receiveTracking,
                 notes: receiveNotes,
@@ -796,9 +806,20 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                                             </td>
                                             <td className="px-3 py-3 text-slate-800 dark:text-slate-200">
                                                 <p className="font-semibold">{item.product?.name || item.product_name || '-'}</p>
-                                                {item.product?.brand && (
-                                                    <span className="text-xs text-slate-400">Marca: {item.product.brand}</span>
-                                                )}
+                                                <div className="flex flex-wrap items-center gap-2 mt-0.5">
+                                                    {item.product?.brand && (
+                                                        <span className="text-xs text-slate-400">Marca: {item.product.brand}</span>
+                                                    )}
+                                                    {item.product?.primary_location?.code ? (
+                                                        <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] font-bold text-emerald-700 border border-emerald-200 dark:bg-emerald-950/60 dark:text-emerald-300 dark:border-emerald-800">
+                                                            📍 Estante: {item.product.primary_location.code}
+                                                        </span>
+                                                    ) : (
+                                                        <span className="text-[10px] text-slate-400">
+                                                            📍 {order.location?.code ? `Almacén: ${order.location.code}` : 'Almacén general'}
+                                                        </span>
+                                                    )}
+                                                </div>
                                             </td>
                                             <td className="px-3 py-3 text-center font-bold text-slate-900 dark:text-white text-base">
                                                 {item.quantity_ordered}
@@ -1437,12 +1458,16 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                                         onChange={(e) => setReceiveLocationId(e.target.value)}
                                         className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-1.5 text-sm text-slate-800 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-100"
                                     >
+                                        <option value="">📍 Automático por producto (Catálogo Maestro)</option>
                                         {locations.map((loc) => (
                                             <option key={loc.id} value={loc.id}>
-                                                {loc.name} ({loc.code})
+                                                Forzar todo a: {loc.name} ({loc.code})
                                             </option>
                                         ))}
                                     </select>
+                                    <p className="mt-1 text-[10px] text-slate-500 dark:text-slate-400">
+                                        💡 Por defecto, cada producto entra directamente a su propio estante oficial asignado.
+                                    </p>
                                 </div>
 
                                 <div>
@@ -1571,11 +1596,22 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                                                         </td>
                                                         <td className="px-3 py-2 text-slate-700 dark:text-slate-300">
                                                             <p className="font-medium">{item.name}</p>
-                                                            {(item.barcode || item.barcode_secondary) && (
-                                                                <p className="text-[10px] text-slate-400">
-                                                                    Cód: {item.barcode || '-'} {item.barcode_secondary ? `| Sec: ${item.barcode_secondary}` : ''}
-                                                                </p>
-                                                            )}
+                                                            <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
+                                                                {item.primary_location_code ? (
+                                                                    <span className="inline-flex items-center gap-1 rounded bg-emerald-50 px-1.5 py-0.2 text-[10px] font-bold text-emerald-700 border border-emerald-200 dark:bg-emerald-950/60 dark:text-emerald-300 dark:border-emerald-800">
+                                                                        📍 Estante: {item.primary_location_code}
+                                                                    </span>
+                                                                ) : (
+                                                                    <span className="text-[10px] text-slate-400">
+                                                                        📍 Sin estante asignado
+                                                                    </span>
+                                                                )}
+                                                                {(item.barcode || item.barcode_secondary) && (
+                                                                    <span className="text-[10px] text-slate-400">
+                                                                        • Cód: {item.barcode || '-'} {item.barcode_secondary ? `| Sec: ${item.barcode_secondary}` : ''}
+                                                                    </span>
+                                                                )}
+                                                            </div>
                                                         </td>
                                                         <td className="px-3 py-2 text-center font-bold text-slate-600 dark:text-slate-400">
                                                             {item.is_extra ? '-' : item.pending}

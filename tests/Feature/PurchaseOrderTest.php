@@ -423,4 +423,96 @@ class PurchaseOrderTest extends TestCase
         $publicResponse->assertOk();
         $publicResponse->assertSee('T.O. THE BEAUTY SHOP');
     }
+
+    public function test_can_create_order_without_explicit_location_and_routes_to_default(): void
+    {
+        $response = $this->actingAs($this->admin)->post('/compras/ordenes', [
+            'supplier_name' => 'Proveedor Joico',
+            'inventory_location_id' => null,
+            'items' => [
+                [
+                    'inventory_product_id' => $this->productA->id,
+                    'quantity_ordered' => 10,
+                    'unit_cost' => 150.0,
+                ],
+            ],
+        ]);
+
+        $response->assertRedirect();
+        $this->assertDatabaseHas('purchase_orders', [
+            'supplier_name' => 'Proveedor Joico',
+            'inventory_location_id' => $this->location->id,
+        ]);
+    }
+
+    public function test_receiving_items_automatically_routes_each_product_to_its_primary_catalog_location(): void
+    {
+        $locShelfA = InventoryLocation::create([
+            'code' => 'G1-2',
+            'name' => 'Estante Joico G1-2',
+            'type' => 'shelf',
+            'is_active' => true,
+        ]);
+
+        $locShelfB = InventoryLocation::create([
+            'code' => 'I4-1',
+            'name' => 'Estante Moroccanoil I4-1',
+            'type' => 'shelf',
+            'is_active' => true,
+        ]);
+
+        $this->productA->update(['primary_location_id' => $locShelfA->id]);
+        $this->productB->update(['primary_location_id' => $locShelfB->id]);
+
+        $order = $this->service->createOrder([
+            'supplier_name' => 'Distribuidor Belleza',
+            'inventory_location_id' => $this->location->id, // Respaldo general
+            'items' => [
+                [
+                    'inventory_product_id' => $this->productA->id,
+                    'quantity_ordered' => 12,
+                    'unit_cost' => 200.0,
+                ],
+                [
+                    'inventory_product_id' => $this->productB->id,
+                    'quantity_ordered' => 6,
+                    'unit_cost' => 300.0,
+                ],
+            ],
+        ], $this->admin);
+
+        $this->service->markAsOrdered($order);
+
+        $items = $order->fresh()->items;
+        $itemA = $items->firstWhere('inventory_product_id', $this->productA->id);
+        $itemB = $items->firstWhere('inventory_product_id', $this->productB->id);
+
+        // Recepcionar sin especificar locationId (modo automático)
+        $this->service->receiveItems($order, [
+            [
+                'item_id' => $itemA->id,
+                'quantity_received' => 12,
+            ],
+            [
+                'item_id' => $itemB->id,
+                'quantity_received' => 6,
+            ],
+        ], $this->admin, null);
+
+        // Verificar que producto A ingresó automáticamente al estante G1-2
+        $this->assertDatabaseHas('inventory_movements', [
+            'inventory_product_id' => $this->productA->id,
+            'inventory_location_id' => $locShelfA->id,
+            'type' => InventoryMovement::RECEIPT,
+            'quantity' => 12,
+        ]);
+
+        // Verificar que producto B ingresó automáticamente al estante I4-1
+        $this->assertDatabaseHas('inventory_movements', [
+            'inventory_product_id' => $this->productB->id,
+            'inventory_location_id' => $locShelfB->id,
+            'type' => InventoryMovement::RECEIPT,
+            'quantity' => 6,
+        ]);
+    }
 }

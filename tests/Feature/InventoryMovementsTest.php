@@ -521,6 +521,58 @@ class InventoryMovementsTest extends TestCase
         $this->assertSame(10, $stockService->physicalStock($product));
     }
 
+    public function test_transfer_movement_prioritizes_header_origin_over_product_primary_location(): void
+    {
+        $mostrador = InventoryLocation::create(['code' => 'MOSTRADOR']);
+        $shelfG12 = InventoryLocation::create(['code' => 'G1-2']);
+
+        $joico = InventoryProduct::create([
+            'name' => 'JOICO K-PAK Hydrator 8.5oz',
+            'sku' => 'JOICO-KPAK-HYD',
+            'barcode' => '074469484434',
+            'primary_location_id' => $shelfG12->id,
+            'is_active' => true,
+            'product_type' => InventoryProduct::SIMPLE,
+        ]);
+
+        // Stock de 24 en MOSTRADOR
+        $this->actingAs($this->admin())->post(route('inventory.movements.store'), [
+            'inventory_product_id' => $joico->id,
+            'inventory_location_id' => $mostrador->id,
+            'type' => InventoryMovement::INITIAL,
+            'quantity' => 24,
+        ])->assertRedirect(route('inventory.movements.index'));
+
+        // El usuario transfiere 24 unidades de MOSTRADOR (header origin) a G1-2 (destination)
+        // Aunque el producto tenga primary_location_id = G1-2 y se envíe en el ítem, el header origin es MOSTRADOR
+        $this->actingAs($this->admin())->post(route('inventory.movements.store'), [
+            'type' => 'TRANSFER',
+            'inventory_location_id' => $mostrador->id,
+            'destination_location_id' => $shelfG12->id,
+            'items' => [
+                [
+                    'inventory_product_id' => $joico->id,
+                    'inventory_location_id' => $shelfG12->id,
+                    'quantity' => 24,
+                ],
+            ],
+        ])->assertRedirect(route('inventory.movements.index'));
+
+        $this->assertDatabaseHas('inventory_movements', [
+            'inventory_product_id' => $joico->id,
+            'inventory_location_id' => $mostrador->id,
+            'type' => InventoryMovement::TRANSFER_OUT,
+            'quantity' => -24,
+        ]);
+
+        $this->assertDatabaseHas('inventory_movements', [
+            'inventory_product_id' => $joico->id,
+            'inventory_location_id' => $shelfG12->id,
+            'type' => InventoryMovement::TRANSFER_IN,
+            'quantity' => 24,
+        ]);
+    }
+
     /** @return array{0: InventoryProduct, 1: InventoryLocation} */
     private function productAndLocation(
         string $sku = 'SKU-MOVEMENT',

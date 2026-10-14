@@ -128,14 +128,22 @@ class InventoryMovementController extends Controller
                 $count = DB::transaction(function () use ($itemList, $validated, $user, $movements, $destLoc) {
                     $recorded = 0;
                     foreach ($itemList as $item) {
-                        $originLocationId = ! empty($item['inventory_location_id'])
-                            ? (int) $item['inventory_location_id']
-                            : (! empty($validated['inventory_location_id']) ? (int) $validated['inventory_location_id'] : null);
-
                         $product = InventoryProduct::findOrFail($item['inventory_product_id']);
+
+                        $headerOriginId = ! empty($validated['inventory_location_id']) ? (int) $validated['inventory_location_id'] : null;
+                        $itemOriginId = ! empty($item['inventory_location_id']) ? (int) $item['inventory_location_id'] : null;
+
+                        // Determinar ubicación de origen para la transferencia:
+                        // 1. Si en el encabezado general se seleccionó un origen (ej. MOSTRADOR), ese es el origen mandatorio.
+                        // 2. Si no, pero el item especificó un origen distinto al destino, se usa el del item.
+                        // 3. Fallback a la ubicación primaria del producto si es distinta al destino.
+                        $originLocationId = $headerOriginId;
                         if (! $originLocationId) {
-                            $originLocationId = $product->primary_location_id;
+                            $originLocationId = $itemOriginId ?: $product->primary_location_id;
+                        } elseif ($itemOriginId && $itemOriginId !== $destLoc->id && $itemOriginId !== $headerOriginId) {
+                            $originLocationId = $itemOriginId;
                         }
+
                         if (! $originLocationId) {
                             throw new InvalidArgumentException("El producto '{$product->name}' no tiene ubicación de origen.");
                         }

@@ -142,10 +142,10 @@ export default function InventoryMovementForm({ products = [], locations = [], t
         setModalProduct(product)
         setModalQuantity(1)
 
-        // Usar ubicación asignada al producto automáticamente, o respaldo
-        const assignedLoc = product.primary_location_id
-            ? String(product.primary_location_id)
-            : (locationId ? String(locationId) : '')
+        // Usar ubicación de origen seleccionada si es transferencia, o asignada al producto automáticamente, o respaldo
+        const assignedLoc = isTransferType && locationId
+            ? String(locationId)
+            : (product.primary_location_id ? String(product.primary_location_id) : (locationId ? String(locationId) : ''))
         setModalLocationId(assignedLoc)
         setModalNotes('')
         setIsQuantityModalOpen(true)
@@ -179,10 +179,10 @@ export default function InventoryMovementForm({ products = [], locations = [], t
     const addProductToItems = (product, qtyToAdd = 1, specificLocationId = null, notes = '') => {
         if (!product) return
 
-        // 1. Determinar ubicación: prioridad a la específica seleccionada, luego asignada al producto, luego respaldo general
+        // 1. Determinar ubicación: prioridad a la específica, si es transferencia al origen seleccionado, luego asignada al producto, luego respaldo general
         const finalLocId = specificLocationId
             ? String(specificLocationId)
-            : (product.primary_location_id ? String(product.primary_location_id) : (locationId ? String(locationId) : ''))
+            : (isTransferType && locationId ? String(locationId) : (product.primary_location_id ? String(product.primary_location_id) : (locationId ? String(locationId) : '')))
 
         const locObj = locations.find((l) => String(l.id) === String(finalLocId))
         const locCode = locObj ? locObj.code : (product.primary_location?.code || 'General')
@@ -499,7 +499,21 @@ export default function InventoryMovementForm({ products = [], locations = [], t
                                         <div className="mt-1.5">
                                             <select
                                                 value={locationId}
-                                                onChange={(e) => setLocationId(e.target.value)}
+                                                onChange={(e) => {
+                                                    const newLoc = e.target.value
+                                                    setLocationId(newLoc)
+                                                    if (newLoc && isTransferType) {
+                                                        const locObj = locations.find((l) => String(l.id) === String(newLoc))
+                                                        setItems((prev) =>
+                                                            prev.map((item) => ({
+                                                                ...item,
+                                                                location_id: parseInt(newLoc, 10),
+                                                                location_code: locObj ? locObj.code : item.location_code,
+                                                                is_primary_location: false,
+                                                            }))
+                                                        )
+                                                    }
+                                                }}
                                                 className="w-full rounded-xl border border-slate-300 bg-white px-4 py-2.5 font-medium text-slate-900 shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 dark:border-neutral-700 dark:bg-neutral-950 dark:text-white"
                                             >
                                                 <option value="">(Ubicación asignada a cada producto)</option>
@@ -836,7 +850,7 @@ export default function InventoryMovementForm({ products = [], locations = [], t
                                     <thead>
                                         <tr className="border-b border-slate-200 text-xs font-semibold text-slate-500 dark:border-neutral-800 dark:text-neutral-400">
                                             <th className="pb-3 pl-1">Producto</th>
-                                            <th className="pb-3 w-44">Ubicación</th>
+                                            <th className="pb-3 w-48">{isTransferType ? '📍 Origen (Sale de)' : 'Ubicación'}</th>
                                             <th className="pb-3 text-center w-36">Cantidad</th>
                                             <th className="pb-3 w-40">Nota / Detalle</th>
                                             <th className="pb-3 text-right pr-1 w-12">Quitar</th>
@@ -869,7 +883,7 @@ export default function InventoryMovementForm({ products = [], locations = [], t
                                                             value={item.location_id ? String(item.location_id) : ''}
                                                             onChange={(e) => updateItemLocation(idx, e.target.value)}
                                                             className={`w-full rounded-lg border px-2 py-1 text-xs font-semibold ${
-                                                                item.is_primary_location
+                                                                item.is_primary_location && !isTransferType
                                                                     ? 'border-emerald-300 bg-emerald-50/70 text-emerald-900 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300'
                                                                     : 'border-slate-300 bg-white text-slate-800 dark:border-neutral-700 dark:bg-neutral-950 dark:text-white'
                                                             }`}
@@ -881,11 +895,17 @@ export default function InventoryMovementForm({ products = [], locations = [], t
                                                                 </option>
                                                             ))}
                                                         </select>
-                                                        {item.is_primary_location && (
+                                                        {isTransferType ? (
+                                                            destinationLocationId ? (
+                                                                <span className="inline-block text-[10px] font-bold text-indigo-600 dark:text-indigo-400">
+                                                                    ➔ Destino: {locations.find((l) => String(l.id) === String(destinationLocationId))?.code || 'Destino'}
+                                                                </span>
+                                                            ) : null
+                                                        ) : item.is_primary_location ? (
                                                             <span className="inline-block text-[10px] font-bold text-emerald-600 dark:text-emerald-400">
                                                                 ✓ Ubicación asignada
                                                             </span>
-                                                        )}
+                                                        ) : null}
                                                     </div>
                                                 </td>
 

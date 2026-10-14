@@ -32,7 +32,10 @@ class PurchaseOrderService
         }
 
         $locationId = (int) ($data['inventory_location_id'] ?? 0);
-        $location = InventoryLocation::findOrFail($locationId);
+        $location = $locationId > 0 ? InventoryLocation::find($locationId) : null;
+        if (! $location) {
+            $location = InventoryLocation::where('is_active', true)->orderBy('sort_order')->orderBy('id')->firstOrFail();
+        }
 
         return DB::transaction(function () use ($data, $supplierName, $items, $location, $buyer) {
             $orderNumber = $this->generateOrderNumber();
@@ -143,13 +146,17 @@ class PurchaseOrderService
         }
 
         $targetLocationId = $locationId ?: $order->inventory_location_id;
-        $location = InventoryLocation::findOrFail($targetLocationId);
+        $location = $targetLocationId ? InventoryLocation::find($targetLocationId) : null;
+        if (! $location) {
+            $location = InventoryLocation::where('is_active', true)->orderBy('sort_order')->orderBy('id')->firstOrFail();
+        }
 
         return DB::transaction(function () use (
             $order,
             $itemsToReceive,
             $receiver,
             $location,
+            $locationId,
             $carrier,
             $tracking,
             $notes
@@ -179,11 +186,15 @@ class PurchaseOrderService
                     continue;
                 }
 
+                $product = null;
+
                 if ($itemId) {
                     $orderItem = PurchaseOrderItem::where('purchase_order_id', $order->id)
                         ->where('id', $itemId)
                         ->lockForUpdate()
                         ->firstOrFail();
+
+                    $product = $orderItem->product ?? InventoryProduct::find($orderItem->inventory_product_id);
 
                     $newTotalReceived = $orderItem->quantity_received + $qty;
                     if ($newTotalReceived > $orderItem->quantity_ordered) {
@@ -224,10 +235,23 @@ class PurchaseOrderService
                     'quantity_received' => $qty,
                 ]);
 
+                // Ubicación física de entrada:
+                // Si el usuario especificó una ubicación manual ($locationId), se usa esa.
+                // Si no (modo automático), cada producto ingresa a su estante asignado en el catálogo.
+                // Si el producto no tiene estante asignado, ingresa a la ubicación general de respaldo.
+                $itemLocationId = null;
+                if (! empty($locationId)) {
+                    $itemLocationId = (int) $locationId;
+                } elseif ($product && $product->primary_location_id) {
+                    $itemLocationId = (int) $product->primary_location_id;
+                } else {
+                    $itemLocationId = (int) $location->id;
+                }
+
                 // Generar movimiento atómico de entrada física en el ledger
                 InventoryMovement::create([
                     'inventory_product_id' => $orderItem->inventory_product_id,
-                    'inventory_location_id' => $location->id,
+                    'inventory_location_id' => $itemLocationId,
                     'type' => InventoryMovement::RECEIPT,
                     'quantity' => $qty,
                     'reference_type' => 'purchase_order',

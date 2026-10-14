@@ -22,7 +22,7 @@ export default function PurchasingCreate({
     const { data, setData, post, processing, errors } = useForm({
         supplier_name: prefillSupplier || '',
         brand: prefillBrand || '',
-        inventory_location_id: defaultLocationId,
+        inventory_location_id: '',
         expected_delivery_date: '',
         supplier_quote_reference: '',
         notes: '',
@@ -95,6 +95,9 @@ export default function PurchasingCreate({
             brand: product.brand,
             quantity_ordered: 1,
             unit_cost: parseFloat(product.cost) || 0,
+            primary_location_id: product.primary_location_id || product.primary_location?.id || null,
+            primary_location_code: product.primary_location?.code || null,
+            primary_location_name: product.primary_location?.name || null,
         }
 
         setData('items', [...data.items, newItem])
@@ -216,21 +219,23 @@ export default function PurchasingCreate({
 
                             <div>
                                 <label className="block text-xs font-semibold uppercase tracking-wider text-slate-600 dark:text-slate-400">
-                                    Almacén Destino *
+                                    Almacén / Ubicación de Respaldo
                                 </label>
                                 <select
-                                    required
                                     value={data.inventory_location_id}
                                     onChange={(e) => setData('inventory_location_id', e.target.value)}
                                     className="mt-1.5 w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2 text-sm text-slate-800 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-100"
                                 >
-                                    <option value="">Seleccione almacén...</option>
+                                    <option value="">📍 Automático por producto (Catálogo Maestro)</option>
                                     {locations.map((loc) => (
                                         <option key={loc.id} value={loc.id}>
                                             {loc.name} ({loc.code})
                                         </option>
                                     ))}
                                 </select>
+                                <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
+                                    💡 Cada producto se enviará directamente a su estante oficial asignado. Si algún producto no tiene estante asignado, irá a este almacén de respaldo.
+                                </p>
                                 {errors.inventory_location_id && (
                                     <p className="mt-1 text-xs text-rose-500">{errors.inventory_location_id}</p>
                                 )}
@@ -344,12 +349,23 @@ export default function PurchasingCreate({
                                                     className="flex cursor-pointer items-center justify-between p-2.5 transition hover:bg-indigo-50 dark:hover:bg-indigo-950/40"
                                                 >
                                                     <div>
-                                                        <span className="font-bold text-slate-900 dark:text-white">
-                                                            {prod.sku}
-                                                        </span>
-                                                        <span className="ml-2 text-xs font-medium text-slate-500 dark:text-slate-400">
-                                                            [{prod.brand || 'S/M'}]
-                                                        </span>
+                                                        <div className="flex items-center gap-2">
+                                                            <span className="font-bold text-slate-900 dark:text-white">
+                                                                {prod.sku}
+                                                            </span>
+                                                            <span className="text-xs font-medium text-slate-500 dark:text-slate-400">
+                                                                [{prod.brand || 'S/M'}]
+                                                            </span>
+                                                            {prod.primary_location?.code ? (
+                                                                <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] font-bold text-emerald-700 border border-emerald-200 dark:bg-emerald-950/60 dark:text-emerald-300 dark:border-emerald-800">
+                                                                    📍 {prod.primary_location.code}
+                                                                </span>
+                                                            ) : (
+                                                                <span className="text-[10px] text-slate-400">
+                                                                    📍 Sin estante
+                                                                </span>
+                                                            )}
+                                                        </div>
                                                         <p className="text-xs text-slate-600 dark:text-slate-300">
                                                             {prod.name}
                                                         </p>
@@ -407,6 +423,17 @@ export default function PurchasingCreate({
                                                         </div>
                                                         <div className="text-xs text-slate-500 dark:text-slate-400">
                                                             {item.name} {item.brand && `• ${item.brand}`}
+                                                        </div>
+                                                        <div className="mt-1">
+                                                            {item.primary_location_code ? (
+                                                                <span className="inline-flex items-center gap-1 rounded bg-emerald-50 px-1.5 py-0.5 text-[11px] font-bold text-emerald-700 border border-emerald-200 dark:bg-emerald-950/60 dark:text-emerald-300 dark:border-emerald-800">
+                                                                    📍 Destino: {item.primary_location_code}
+                                                                </span>
+                                                            ) : (
+                                                                <span className="inline-flex items-center gap-1 rounded bg-slate-100 px-1.5 py-0.5 text-[11px] text-slate-600 dark:bg-neutral-800 dark:text-slate-400">
+                                                                    📍 Destino: Almacén de respaldo
+                                                                </span>
+                                                            )}
                                                         </div>
                                                     </td>
 
