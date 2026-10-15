@@ -75,19 +75,29 @@ class ShelfAuditController extends Controller
     public function create(Request $request): Response
     {
         $shelves = $this->auditService->getShelves();
+        $brands = $this->auditService->getBrands();
 
+        $auditType = $request->input('audit_type', 'shelf') === 'brand' ? 'brand' : 'shelf';
         $preselectedShelfCode = $request->filled('shelf_code')
             ? (string) $request->input('shelf_code')
             : ($shelves[0]['shelf_code'] ?? null);
+        $preselectedBrand = $request->filled('brand_name')
+            ? (string) $request->input('brand_name')
+            : ($brands[0]['brand'] ?? null);
 
         $initialProducts = [];
-        if ($preselectedShelfCode) {
+        if ($auditType === 'brand' && $preselectedBrand) {
+            $initialProducts = $this->auditService->getBrandExpectedProducts($preselectedBrand)->values()->all();
+        } elseif ($preselectedShelfCode) {
             $initialProducts = $this->auditService->getShelfExpectedProducts($preselectedShelfCode)->values()->all();
         }
 
         return Inertia::render('Inventory/Audits/Create', [
             'shelves' => $shelves,
+            'brands' => $brands,
+            'initialAuditType' => $auditType,
             'preselectedShelfCode' => $preselectedShelfCode,
+            'preselectedBrand' => $preselectedBrand,
             'initialProducts' => $initialProducts,
         ]);
     }
@@ -107,6 +117,21 @@ class ShelfAuditController extends Controller
                 'name' => $primaryLoc?->name,
                 'sub_locations_count' => $locations->count(),
                 'sub_locations' => $locations->pluck('code')->all(),
+            ],
+            'products' => $products->values()->all(),
+        ]);
+    }
+
+    public function getBrandProducts(Request $request, string $brandName): JsonResponse
+    {
+        $cleanBrand = urldecode(trim($brandName));
+        $products = $this->auditService->getBrandExpectedProducts($cleanBrand);
+
+        return response()->json([
+            'ok' => true,
+            'brand' => [
+                'name' => $cleanBrand,
+                'products_count' => $products->count(),
             ],
             'products' => $products->values()->all(),
         ]);
@@ -139,7 +164,9 @@ class ShelfAuditController extends Controller
     public function store(Request $request): JsonResponse|RedirectResponse
     {
         $validated = $request->validate([
+            'audit_type' => ['nullable', 'string', 'in:shelf,brand'],
             'shelf_code' => ['nullable', 'string', 'max:50'],
+            'brand_name' => ['nullable', 'string', 'max:150'],
             'inventory_location_id' => ['nullable', 'integer'],
             'notes' => ['nullable', 'string', 'max:2000'],
             'apply_immediately' => ['nullable', 'boolean'],
@@ -151,7 +178,13 @@ class ShelfAuditController extends Controller
             'items.*.notes' => ['nullable', 'string', 'max:500'],
         ]);
 
-        if (empty($validated['shelf_code']) && empty($validated['inventory_location_id'])) {
+        $auditType = $validated['audit_type'] ?? 'shelf';
+
+        if ($auditType === 'brand' && empty($validated['brand_name'])) {
+            return back()->with('error', 'Debes seleccionar una marca a auditar.');
+        }
+
+        if ($auditType === 'shelf' && empty($validated['shelf_code']) && empty($validated['inventory_location_id'])) {
             return back()->with('error', 'Debes seleccionar un anaquel.');
         }
 
@@ -159,9 +192,12 @@ class ShelfAuditController extends Controller
             $applyImmediately = ! empty($validated['apply_immediately']);
             $audit = $this->auditService->createAudit($validated, $request->user(), $applyImmediately);
 
-            $shelfLabel = $audit->shelf_code ?: ($audit->location?->code ?? 'Anaquel');
+            $targetLabel = $audit->audit_type === 'brand'
+                ? "la Marca {$audit->brand_name}"
+                : "el Anaquel ".($audit->shelf_code ?: ($audit->location?->code ?? 'General'));
+
             $message = $applyImmediately
-                ? "¡Auditoría {$audit->audit_number} aplicada con éxito! El inventario del anaquel {$shelfLabel} fue ajustado a lo contado."
+                ? "¡Auditoría {$audit->audit_number} aplicada con éxito! El inventario de {$targetLabel} fue ajustado a lo contado."
                 : "Auditoría {$audit->audit_number} guardada como borrador.";
 
             if ($request->wantsJson()) {
@@ -193,13 +229,19 @@ class ShelfAuditController extends Controller
             'items.product.primaryLocation:id,code,name',
         ]);
 
-        $shelfIdentifier = $shelfAudit->shelf_code ?: $shelfAudit->inventory_location_id;
-        $locations = $this->auditService->getLocationsForShelf($shelfIdentifier);
+        $locations = collect([]);
+        if ($shelfAudit->audit_type !== 'brand') {
+            $shelfIdentifier = $shelfAudit->shelf_code ?: $shelfAudit->inventory_location_id;
+            $locations = $this->auditService->getLocationsForShelf($shelfIdentifier);
+        }
 
         return Inertia::render('Inventory/Audits/Show', [
             'audit' => $shelfAudit,
             'shelf' => [
                 'shelf_code' => $shelfAudit->shelf_code ?: ShelfAuditService::extractShelfCode($shelfAudit->location?->code ?? ''),
+                'brand_name' => $shelfAudit->brand_name,
+                'audit_type' => $shelfAudit->audit_type ?: 'shelf',
+                'name' => $shelfAudit->location?->name,
                 'sub_locations_count' => $locations->count(),
                 'sub_locations' => $locations->pluck('code')->all(),
             ],
@@ -210,9 +252,11 @@ class ShelfAuditController extends Controller
     {
         try {
             $audit = $this->auditService->applyAuditAdjustment($shelfAudit, $request->user(), $request->input('notes'));
-            $shelfLabel = $audit->shelf_code ?: ($audit->location?->code ?? 'Anaquel');
+            $targetLabel = $audit->audit_type === 'brand'
+                ? "la Marca {$audit->brand_name}"
+                : "el Anaquel ".($audit->shelf_code ?: ($audit->location?->code ?? 'General'));
 
-            $message = "¡Ajuste aplicado exitosamente! El anaquel {$shelfLabel} ha quedado cuadrado con el conteo físico.";
+            $message = "¡Ajuste aplicado exitosamente! {$targetLabel} ha quedado cuadrado con el conteo físico.";
 
             if ($request->wantsJson()) {
                 return response()->json([

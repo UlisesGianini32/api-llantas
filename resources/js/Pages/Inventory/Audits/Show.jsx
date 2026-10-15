@@ -54,9 +54,14 @@ export default function ShelfAuditShow({ audit, shelf }) {
         return true
     })
 
+    const isBrand = audit.audit_type === 'brand'
+    const displayTarget = isBrand
+        ? `Marca ${audit.brand_name}`
+        : `Anaquel ${audit.shelf_code || audit.location?.code || 'General'}`
+
     return (
-        <AppShell title={`Auditoría Anaquel ${displayShelf}`}>
-            <Head title={`Auditoría Anaquel ${displayShelf} - ${audit.audit_number}`} />
+        <AppShell title={`Auditoría ${displayTarget}`}>
+            <Head title={`Auditoría ${displayTarget} - ${audit.audit_number}`} />
 
             <div className="space-y-6">
                 {/* Header */}
@@ -76,7 +81,7 @@ export default function ShelfAuditShow({ audit, shelf }) {
                         </div>
                         <div className="mt-1 flex flex-wrap items-center gap-3">
                             <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-white sm:text-3xl">
-                                Anaquel: {displayShelf}
+                                {displayTarget}
                             </h1>
                             {audit.status === 'applied' && (
                                 <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-3 py-1 text-xs font-bold text-emerald-700 ring-1 ring-emerald-600/20 dark:bg-emerald-950/40 dark:text-emerald-300">
@@ -92,12 +97,17 @@ export default function ShelfAuditShow({ audit, shelf }) {
                             )}
                         </div>
 
-                        {shelf?.sub_locations?.length > 1 && (
+                        {!isBrand && shelf?.sub_locations?.length > 1 && (
                             <p className="mt-1 text-xs font-medium text-slate-500 dark:text-slate-400">
                                 Casillas auditadas ({shelf.sub_locations_count}):{' '}
                                 <strong className="text-indigo-600 dark:text-indigo-400">
                                     {shelf.sub_locations.join(', ')}
                                 </strong>
+                            </p>
+                        )}
+                        {isBrand && (
+                            <p className="mt-1 text-xs font-medium text-slate-500 dark:text-slate-400">
+                                Auditoría física de todos los productos del catálogo de la marca <strong className="text-purple-600 dark:text-purple-400">{audit.brand_name}</strong>.
                             </p>
                         )}
                     </div>

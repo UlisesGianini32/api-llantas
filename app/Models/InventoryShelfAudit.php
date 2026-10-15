@@ -15,8 +15,13 @@ class InventoryShelfAudit extends Model
     public const STATUS_APPLIED = 'APPLIED';
     public const STATUS_CANCELLED = 'CANCELLED';
 
+    public const AUDIT_TYPE_SHELF = 'shelf';
+    public const AUDIT_TYPE_BRAND = 'brand';
+
     protected $fillable = [
         'audit_number',
+        'audit_type',
+        'brand_name',
         'shelf_code',
         'inventory_location_id',
         'user_id',

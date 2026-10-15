@@ -74,6 +74,7 @@ class ShelfAuditTest extends TestCase
         (require database_path('migrations/2026_09_30_000003_create_restock_configurations_table.php'))->up();
         (require database_path('migrations/2026_10_13_200000_create_inventory_shelf_audits_tables.php'))->up();
         (require database_path('migrations/2026_10_13_210000_add_shelf_code_to_inventory_shelf_audits_tables.php'))->up();
+        (require database_path('migrations/2026_10_15_180000_add_brand_and_audit_type_to_inventory_shelf_audits.php'))->up();
 
         $this->admin = User::forceCreate([
             'name' => 'Auditor SBS',
@@ -232,7 +233,6 @@ class ShelfAuditTest extends TestCase
         ];
 
         $response = $this->actingAs($this->admin)->postJson(route('inventory.audits.store'), $payload);
-
         $response->assertStatus(200);
         $response->assertJsonPath('ok', true);
 
@@ -339,5 +339,161 @@ class ShelfAuditTest extends TestCase
         $response->assertJsonPath('ok', true);
         $response->assertJsonPath('shelf.shelf_code', 'I4');
         $response->assertJsonPath('shelf.sub_locations_count', 3);
+    }
+
+    public function test_can_get_brands_list_and_expected_products_for_brand(): void
+    {
+        $brands = $this->auditService->getBrands();
+        $this->assertCount(3, $brands);
+        $this->assertTrue($brands->contains('brand', 'KUUL'));
+        $this->assertTrue($brands->contains('brand', 'HIDRA'));
+        $this->assertTrue($brands->contains('brand', 'BARBER STYLE'));
+
+        $kuulProducts = $this->auditService->getBrandExpectedProducts('KUUL');
+        $this->assertCount(1, $kuulProducts);
+        $this->assertEquals($this->productA->id, $kuulProducts->first()['id']);
+    }
+
+    public function test_can_create_audit_draft_for_brand(): void
+    {
+        $payload = [
+            'audit_type' => InventoryShelfAudit::AUDIT_TYPE_BRAND,
+            'brand_name' => 'KUUL',
+            'notes' => 'Auditoría borrador marca KUUL',
+            'apply_immediately' => false,
+            'items' => [
+                [
+                    'inventory_product_id' => $this->productA->id,
+                    'system_quantity' => 0,
+                    'counted_quantity' => 12,
+                    'location_breakdown' => 'Bodega General',
+                    'notes' => '12 unidades encontradas',
+                ],
+            ],
+        ];
+
+        $response = $this->actingAs($this->admin)->postJson(route('inventory.audits.store'), $payload);
+        $response->assertStatus(200);
+        $response->assertJsonPath('ok', true);
+
+        $this->assertDatabaseHas('inventory_shelf_audits', [
+            'audit_type' => InventoryShelfAudit::AUDIT_TYPE_BRAND,
+            'brand_name' => 'KUUL',
+            'status' => InventoryShelfAudit::STATUS_IN_PROGRESS,
+            'total_expected_products' => 1,
+            'total_counted_products' => 1,
+            'total_counted_units' => 12,
+            'total_difference_units' => 12,
+        ]);
+    }
+
+    public function test_can_apply_audit_immediately_and_adjust_ledger_for_brand(): void
+    {
+        // Initial stock for productA (KUUL) in locI4_1
+        $this->movementService->recordManual([
+            'inventory_product_id' => $this->productA->id,
+            'inventory_location_id' => $this->locI4_1->id,
+            'type' => InventoryMovement::RECEIPT,
+            'quantity' => 10,
+            'reference' => 'Stock inicial KUUL',
+            'occurred_at' => now(),
+        ], $this->admin);
+
+        // Audit counts 15 (+5 surplus)
+        $payload = [
+            'audit_type' => InventoryShelfAudit::AUDIT_TYPE_BRAND,
+            'brand_name' => 'KUUL',
+            'notes' => 'Ajuste físico inmediato KUUL',
+            'apply_immediately' => true,
+            'items' => [
+                [
+                    'inventory_product_id' => $this->productA->id,
+                    'system_quantity' => 10,
+                    'counted_quantity' => 15,
+                    'location_breakdown' => 'I4-1: 10 pzas',
+                    'notes' => '+5 unidades sobrantes',
+                ],
+            ],
+        ];
+
+        $response = $this->actingAs($this->admin)->postJson(route('inventory.audits.store'), $payload);
+        $response->assertStatus(200);
+        $response->assertJsonPath('ok', true);
+
+        $audit = InventoryShelfAudit::where('brand_name', 'KUUL')->first();
+        $this->assertNotNull($audit);
+        $this->assertEquals(InventoryShelfAudit::STATUS_APPLIED, $audit->status);
+        $this->assertEquals(InventoryShelfAudit::AUDIT_TYPE_BRAND, $audit->audit_type);
+        $this->assertEquals(5, $audit->total_difference_units);
+
+        // Total stock must now be 15
+        $totalStockA = InventoryMovement::where('inventory_product_id', $this->productA->id)->sum('quantity');
+        $this->assertEquals(15, $totalStockA);
+    }
+
+    public function test_can_get_brand_products_endpoint(): void
+    {
+        $response = $this->actingAs($this->admin)->getJson(route('inventory.audits.brand_products', [
+            'brandName' => 'KUUL',
+        ]));
+
+        $response->assertStatus(200);
+        $response->assertJsonPath('ok', true);
+        $response->assertJsonPath('brand.name', 'KUUL');
+        $this->assertCount(1, $response->json('products'));
+    }
+
+    public function test_can_apply_audit_immediately_with_negative_discrepancy_for_brand(): void
+    {
+        // 10 in locI4_1, 5 in locI4_2 (Total 15)
+        $this->movementService->recordManual([
+            'inventory_product_id' => $this->productA->id,
+            'inventory_location_id' => $this->locI4_1->id,
+            'type' => InventoryMovement::RECEIPT,
+            'quantity' => 10,
+            'reference' => 'Lote 1 KUUL',
+            'occurred_at' => now(),
+        ], $this->admin);
+
+        $this->movementService->recordManual([
+            'inventory_product_id' => $this->productA->id,
+            'inventory_location_id' => $this->locI4_2->id,
+            'type' => InventoryMovement::RECEIPT,
+            'quantity' => 5,
+            'reference' => 'Lote 2 KUUL',
+            'occurred_at' => now(),
+        ], $this->admin);
+
+        // Count 11 (-4 missing)
+        $payload = [
+            'audit_type' => InventoryShelfAudit::AUDIT_TYPE_BRAND,
+            'brand_name' => 'KUUL',
+            'notes' => 'Ajuste faltante KUUL',
+            'apply_immediately' => true,
+            'items' => [
+                [
+                    'inventory_product_id' => $this->productA->id,
+                    'system_quantity' => 15,
+                    'counted_quantity' => 11,
+                    'notes' => '-4 unidades faltantes',
+                ],
+            ],
+        ];
+
+        $response = $this->actingAs($this->admin)->postJson(route('inventory.audits.store'), $payload);
+        $response->assertStatus(200);
+        $response->assertJsonPath('ok', true);
+
+        $audit = InventoryShelfAudit::where('brand_name', 'KUUL')->latest()->first();
+        $this->assertEquals(-4, $audit->total_difference_units);
+        $this->assertEquals(1, $audit->missing_items_count);
+
+        $totalStockA = InventoryMovement::where('inventory_product_id', $this->productA->id)->sum('quantity');
+        $this->assertEquals(11, $totalStockA);
+
+        $stockLoc1 = InventoryMovement::where('inventory_location_id', $this->locI4_1->id)->where('inventory_product_id', $this->productA->id)->sum('quantity');
+        $stockLoc2 = InventoryMovement::where('inventory_location_id', $this->locI4_2->id)->where('inventory_product_id', $this->productA->id)->sum('quantity');
+        $this->assertGreaterThanOrEqual(0, $stockLoc1);
+        $this->assertGreaterThanOrEqual(0, $stockLoc2);
     }
 }

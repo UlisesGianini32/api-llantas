@@ -264,6 +264,8 @@ Route::middleware(['auth', 'role'])->group(function () {
         Route::post('/', [ShelfAuditController::class, 'store'])->name('store');
         Route::get('/anaquel/{shelfIdentifier}/productos', [ShelfAuditController::class, 'getShelfProducts'])
             ->name('shelf_products');
+        Route::get('/marca/{brandName}/productos', [ShelfAuditController::class, 'getBrandProducts'])
+            ->name('brand_products');
         Route::get('/{shelfAudit}', [ShelfAuditController::class, 'show'])
             ->whereNumber('shelfAudit')->name('show');
         Route::post('/{shelfAudit}/aplicar', [ShelfAuditController::class, 'apply'])

@@ -238,11 +238,17 @@ export default function ShelfAuditIndex({ audits, summary, shelves, filters }) {
                                                     )}
                                                 </td>
                                                 <td className="px-5 py-4">
-                                                    <span className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-200 bg-indigo-50 px-2.5 py-1 font-mono text-xs font-black text-indigo-900 dark:border-indigo-900/60 dark:bg-indigo-950/40 dark:text-indigo-300">
-                                                        📍 Anaquel {displayShelf}
-                                                    </span>
+                                                    {audit.audit_type === 'brand' ? (
+                                                        <span className="inline-flex items-center gap-1.5 rounded-lg border border-purple-200 bg-purple-50 px-2.5 py-1 text-xs font-black text-purple-900 dark:border-purple-900/60 dark:bg-purple-950/40 dark:text-purple-300">
+                                                            🏷️ Marca {audit.brand_name}
+                                                        </span>
+                                                    ) : (
+                                                        <span className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-200 bg-indigo-50 px-2.5 py-1 font-mono text-xs font-black text-indigo-900 dark:border-indigo-900/60 dark:bg-indigo-950/40 dark:text-indigo-300">
+                                                            📍 Anaquel {displayShelf}
+                                                        </span>
+                                                    )}
                                                     <div className="mt-0.5 text-xs text-slate-500 dark:text-neutral-400 truncate max-w-xs">
-                                                        {audit.location?.name}
+                                                        {audit.audit_type === 'brand' ? 'Auditoría por Marca' : audit.location?.name}
                                                     </div>
                                                 </td>
                                                 <td className="px-5 py-4">
