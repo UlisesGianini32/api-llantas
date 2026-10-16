@@ -80,6 +80,9 @@ class HandleInertiaRequests extends Middleware
                     ->where('status', 'UNANSWERED')
                     ->count()
                 : 0,
+            'notifications_summary' => fn () => $user
+                ? app(\App\Services\NotificationCenterService::class)->getSummary($user)
+                : null,
         ];
     }
 }

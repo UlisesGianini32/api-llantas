@@ -1,4 +1,5 @@
 import FlashToasts from '@/Components/ui/FlashToasts'
+import NotificationDropdown from '@/Components/notifications/NotificationDropdown'
 import { Head, Link, router, usePage } from '@inertiajs/react'
 import { useEffect, useId, useRef, useState } from 'react'
 
@@ -168,6 +169,14 @@ function IconSun({ className = 'h-4 w-4' }) {
     )
 }
 
+function IconBellNav({ className = 'h-4 w-4' }) {
+    return (
+        <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75v-.7V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0" />
+        </svg>
+    )
+}
+
 /* =========================================================================
    NAVIGATION ITEM
    ========================================================================= */
@@ -178,6 +187,7 @@ function NavItem({
     active = false,
     danger = false,
     badge = null,
+    badgeColor = 'bg-amber-100 text-amber-800 dark:bg-amber-500/20 dark:text-amber-200',
     onNavigate,
 }) {
     return (
@@ -206,7 +216,7 @@ function NavItem({
             </div>
 
             {badge !== null && badge !== undefined && (
-                <span className="shrink-0 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-800 dark:bg-amber-500/20 dark:text-amber-200">
+                <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-bold ${badgeColor}`}>
                     {badge}
                 </span>
             )}
@@ -567,8 +577,11 @@ function SidebarBrand() {
    SIDEBAR NAVIGATION
    ========================================================================= */
 function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
+    const { notifications_summary = null } = usePage().props
     const isAdmin = role === 'admin'
     const canOperate = isAdmin || role === 'operations'
+    const totalUnreadNotifs = notifications_summary?.total_unread ?? 0
+    const hasCriticalNotifs = notifications_summary?.has_critical ?? false
 
     return (
         <nav className="space-y-5">
@@ -585,6 +598,16 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                         onNavigate={onNavigate}
                     >
                         Dashboard
+                    </NavItem>
+                    <NavItem
+                        href="/notificaciones"
+                        icon={IconBellNav}
+                        active={currentPath.startsWith('/notificaciones')}
+                        badge={totalUnreadNotifs > 0 ? (totalUnreadNotifs > 99 ? '99+' : totalUnreadNotifs) : null}
+                        badgeColor={hasCriticalNotifs ? 'bg-rose-100 text-rose-800 dark:bg-rose-500/20 dark:text-rose-300' : 'bg-indigo-100 text-indigo-800 dark:bg-indigo-500/20 dark:text-indigo-300'}
+                        onNavigate={onNavigate}
+                    >
+                        Notificaciones
                     </NavItem>
                     <NavItem
                         href="/pos"
@@ -1198,6 +1221,9 @@ export default function AppShell({ title = 'Dashboard', children }) {
                                 >
                                     <span>⚡ Nueva Venta POS</span>
                                 </Link>
+
+                                {/* Notification Bell Dropdown */}
+                                <NotificationDropdown />
 
                                 {/* Theme Switcher (Dark/Light) */}
                                 <button

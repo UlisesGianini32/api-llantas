@@ -44,6 +44,7 @@ use App\Http\Controllers\MeliPublishController;
 use App\Http\Controllers\MeliQuestionController;
 use App\Http\Controllers\MeliRepublishController;
 use App\Http\Controllers\MeliSecondaryPublicationController;
+use App\Http\Controllers\NotificationCenterController;
 use App\Http\Controllers\Pos\PosController;
 use App\Http\Controllers\Pos\PosShiftController;
 use App\Http\Controllers\PriceRulesController;
@@ -116,6 +117,15 @@ Route::middleware(['auth', 'role'])->group(function () {
 
     // DASHBOARD
     Route::get('/dashboard', [DashboardController::class, 'index'])->name('dashboard');
+
+    // CENTRO DE NOTIFICACIONES
+    Route::prefix('notificaciones')->name('notifications.')->group(function () {
+        Route::get('/', [NotificationCenterController::class, 'index'])->name('index');
+        Route::get('/feed', [NotificationCenterController::class, 'feed'])->name('feed');
+        Route::post('/leer-todas', [NotificationCenterController::class, 'markAllAsRead'])->name('read-all');
+        Route::post('/{key}/leer', [NotificationCenterController::class, 'markAsRead'])->name('read');
+        Route::post('/{key}/descartar', [NotificationCenterController::class, 'dismiss'])->name('dismiss');
+    });
 
     Route::post('/dashboard/stock/zero', [DashboardController::class, 'zeroStock'])
         ->name('dashboard.stock.zero');
