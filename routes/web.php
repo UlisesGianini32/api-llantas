@@ -250,6 +250,12 @@ Route::middleware(['auth', 'role'])->group(function () {
             ->whereNumber('inventoryProduct')->name('update');
         Route::patch('/{inventoryProduct}/estado', [InventoryProductController::class, 'toggle'])
             ->whereNumber('inventoryProduct')->name('toggle');
+        Route::post('/{inventoryProduct}/vincular-publicacion', [InventoryChannelLinkController::class, 'linkProduct'])
+            ->whereNumber('inventoryProduct')->name('link_publication');
+        Route::delete('/{inventoryProduct}/desvincular-publicacion/{inventoryChannelLink}', [InventoryChannelLinkController::class, 'unlinkProduct'])
+            ->whereNumber('inventoryProduct')->whereNumber('inventoryChannelLink')->name('unlink_publication');
+        Route::patch('/{inventoryProduct}/publicaciones/{inventoryChannelLink}', [InventoryChannelLinkController::class, 'updateLinkSettings'])
+            ->whereNumber('inventoryProduct')->whereNumber('inventoryChannelLink')->name('update_publication_settings');
     });
 
     Route::prefix('almacen/ubicaciones')->name('inventory.locations.')->group(function () {
@@ -341,6 +347,7 @@ Route::middleware(['auth', 'role'])->group(function () {
         Route::get('/mercado-libre/importar', [InventoryChannelLinkController::class, 'import'])->name('mercado-libre.import');
         Route::post('/mercado-libre/importar', [InventoryChannelLinkController::class, 'applyImport'])->name('mercado-libre.apply');
         Route::get('/buscar-productos', [InventoryChannelLinkController::class, 'searchProducts'])->name('search-products');
+        Route::get('/buscar-publicacion-meli', [InventoryChannelLinkController::class, 'searchMeliPublication'])->name('meli.search-publication');
         Route::get('/mercado-libre/buscar-productos', [InventoryChannelLinkController::class, 'searchProducts'])->name('mercado-libre.search-products');
         Route::post('/vincular-manual', [InventoryChannelLinkController::class, 'linkManual'])->name('link-manual');
         Route::post('/mercado-libre/vincular-manual', [InventoryChannelLinkController::class, 'linkManual'])->name('mercado-libre.link-manual');

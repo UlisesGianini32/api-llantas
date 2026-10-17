@@ -4,9 +4,12 @@ namespace App\Http\Controllers;
 
 use App\Http\Requests\StoreInventoryProductRequest;
 use App\Http\Requests\UpdateInventoryProductRequest;
+use App\Models\InventoryChannelLink;
 use App\Models\InventoryLocation;
 use App\Models\InventoryProduct;
 use App\Models\InventoryReservation;
+use App\Models\MeliFullStock;
+use App\Models\MeliPublication;
 use App\Models\Supplier;
 use App\Services\InventoryKitStockService;
 use App\Services\InventoryStockService;
@@ -421,13 +424,68 @@ class InventoryProductController extends Controller
         $availableStock = $isKit ? $kitStock->availableStock($inventoryProduct) : $stock->availableStock($inventoryProduct);
         $kitComponents = $isKit ? $kitStock->componentSummary($inventoryProduct) : [];
 
+        $channelLinks = $inventoryProduct->channelLinks->map(function ($link) {
+            $meta = (array) ($link->metadata ?? []);
+            $title = $meta['title'] ?? null;
+            $thumbnail = $meta['thumbnail'] ?? null;
+            $permalink = $link->external_url ?? ($meta['permalink'] ?? null);
+            $isFull = (bool) ($meta['is_full'] ?? false);
+            $fullStock = 0;
+
+            if ($link->channel === InventoryChannelLink::MERCADO_LIBRE && $link->external_listing_id) {
+                $mlm = $link->external_listing_id;
+                $fullStockRecord = MeliFullStock::query()->where('mlm', $mlm)->first();
+                if ($fullStockRecord) {
+                    $isFull = true;
+                    $fullStock = (int) $fullStockRecord->full_available_quantity;
+                    $title = $title ?: $fullStockRecord->title;
+                    $thumbnail = $thumbnail ?: $fullStockRecord->thumbnail;
+                    $permalink = $permalink ?: $fullStockRecord->permalink;
+                }
+
+                if (! $title || ! $permalink) {
+                    $pub = MeliPublication::query()->where('mlm', $mlm)->first();
+                    if ($pub) {
+                        $rawItem = MeliPublication::itemArrayFromRaw($pub->raw);
+                        $title = $title ?: ($rawItem['title'] ?? null);
+                        $permalink = $permalink ?: ($pub->permalink ?? ($rawItem['permalink'] ?? null));
+                        $thumbnail = $thumbnail ?: ($rawItem['thumbnail'] ?? null);
+                        if (! $thumbnail && isset($rawItem['pictures'][0]['secure_url'])) {
+                            $thumbnail = $rawItem['pictures'][0]['secure_url'];
+                        }
+                    }
+                }
+                if (! $permalink) {
+                    $permalink = "https://articulo.mercadolibre.com.mx/{$mlm}";
+                }
+            }
+
+            return [
+                'id' => $link->id,
+                'channel' => $link->channel,
+                'external_listing_id' => $link->external_listing_id,
+                'external_product_id' => $link->external_product_id,
+                'external_variant_id' => $link->external_variant_id,
+                'account_key' => $link->account_key,
+                'title' => $title,
+                'thumbnail' => $thumbnail,
+                'permalink' => $permalink,
+                'remote_price' => $link->remote_price,
+                'remote_currency' => $link->remote_currency ?: 'MXN',
+                'is_active' => (bool) $link->is_active,
+                'stock_sync_enabled' => (bool) $link->stock_sync_enabled,
+                'is_full' => $isFull,
+                'full_stock_available' => $fullStock,
+            ];
+        });
+
         return Inertia::render('Inventory/Products/Show', [
             'product' => $inventoryProduct,
             'physicalStock' => $physicalStock,
             'reservedStock' => $isKit ? max(0, $physicalStock - $availableStock) : $stock->reservedStock($inventoryProduct),
             'availableStock' => $availableStock,
             'kitComponents' => $kitComponents,
-            'channelLinks' => $inventoryProduct->channelLinks,
+            'channelLinks' => $channelLinks,
             'stockByLocation' => $stockByLocation,
             'movements' => $movements,
             'reservations' => $reservations,

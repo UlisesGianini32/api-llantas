@@ -79,6 +79,7 @@ class MeliFullShipmentController extends Controller
         $products = InventoryProduct::query()
             ->where('is_active', true)
             ->where('product_type', InventoryProduct::SIMPLE)
+            ->with(['channelLinks' => fn ($q) => $q->where('channel', InventoryChannelLink::MERCADO_LIBRE)])
             ->select(['id', 'sku', 'barcode', 'name', 'brand', 'weight_kg', 'requires_meli_labeling'])
             ->orderBy('brand')
             ->orderBy('name')
@@ -87,6 +88,8 @@ class MeliFullShipmentController extends Controller
                 $p->available_stock = $this->stockService->availableStock($p);
                 $p->weight_kg = (float) ($p->weight_kg ?: 1.000);
                 $p->requires_meli_labeling = (bool) $p->requires_meli_labeling;
+                $p->linked_mlms = $p->channelLinks->pluck('external_listing_id')->filter()->values()->all();
+
                 return $p;
             });
 

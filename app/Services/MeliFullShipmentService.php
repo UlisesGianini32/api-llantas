@@ -859,13 +859,34 @@ class MeliFullShipmentService
             $sku = strtoupper(trim((string) $prod->sku));
             $barcode = strtoupper(trim((string) $prod->barcode));
 
-            // 1. Stock disponible en bodegas FULL
+            $linkedMlms = InventoryChannelLink::query()
+                ->where('inventory_product_id', $prod->id)
+                ->where('channel', InventoryChannelLink::MERCADO_LIBRE)
+                ->whereNotNull('external_listing_id')
+                ->pluck('external_listing_id')
+                ->map(fn ($id) => strtoupper(trim((string) $id)))
+                ->filter()
+                ->unique()
+                ->values()
+                ->all();
+
+            // 1. Stock disponible en bodegas FULL (por SKU, código de barras y todas las publicaciones vinculadas)
             $fullStock = 0;
             if (Schema::hasTable('meli_full_stocks')) {
                 $fullStock = (int) MeliFullStock::query()
-                    ->where(function ($q) use ($sku, $barcode) {
-                        if ($sku !== '') $q->where('sku', $sku);
-                        if ($barcode !== '') $q->orWhere('sku', $barcode);
+                    ->where(function ($q) use ($sku, $barcode, $linkedMlms) {
+                        $hasCond = false;
+                        if ($sku !== '') {
+                            $q->where('sku', $sku);
+                            $hasCond = true;
+                        }
+                        if ($barcode !== '') {
+                            $hasCond ? $q->orWhere('sku', $barcode) : $q->where('sku', $barcode);
+                            $hasCond = true;
+                        }
+                        if (! empty($linkedMlms)) {
+                            $hasCond ? $q->orWhereIn('mlm', $linkedMlms) : $q->whereIn('mlm', $linkedMlms);
+                        }
                     })
                     ->sum('full_available_quantity');
             }
@@ -881,14 +902,24 @@ class MeliFullShipmentService
                     ->sum('quantity_sent');
             }
 
-            // 3. Ventas por FULL últimos 30 días
+            // 3. Ventas por FULL últimos 30 días (por SKU o por MLM de publicación vinculada)
             $salesFull30d = 0;
             if (Schema::hasTable('meli_orders') && Schema::hasTable('meli_order_items')) {
                 $salesFull30d = (int) DB::table('meli_orders as o')
                     ->join('meli_order_items as i', 'i.meli_order_id', '=', 'o.id')
-                    ->where(function ($q) use ($sku, $barcode) {
-                        if ($sku !== '') $q->whereRaw('UPPER(TRIM(i.sku)) = ?', [$sku]);
-                        if ($barcode !== '') $q->orWhereRaw('UPPER(TRIM(i.sku)) = ?', [$barcode]);
+                    ->where(function ($q) use ($sku, $barcode, $linkedMlms) {
+                        $hasCond = false;
+                        if ($sku !== '') {
+                            $q->whereRaw('UPPER(TRIM(i.sku)) = ?', [$sku]);
+                            $hasCond = true;
+                        }
+                        if ($barcode !== '') {
+                            $hasCond ? $q->orWhereRaw('UPPER(TRIM(i.sku)) = ?', [$barcode]) : $q->whereRaw('UPPER(TRIM(i.sku)) = ?', [$barcode]);
+                            $hasCond = true;
+                        }
+                        if (! empty($linkedMlms)) {
+                            $hasCond ? $q->orWhereIn('i.item_id', $linkedMlms) : $q->whereIn('i.item_id', $linkedMlms);
+                        }
                     })
                     ->whereRaw("LOWER(COALESCE(o.status, '')) NOT IN ('cancelled', 'invalid')")
                     ->where(function ($q) {
@@ -946,6 +977,8 @@ class MeliFullShipmentService
                     'suggested_total_weight' => round($suggested * $unitWeight, 2),
                     'priority' => $priority,
                     'reason' => $reason,
+                    'linked_mlms' => $linkedMlms,
+                    'linked_count' => count($linkedMlms),
                 ];
             }
         }

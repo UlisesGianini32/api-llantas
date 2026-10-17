@@ -7,6 +7,8 @@ use App\Http\Requests\UpdateInventoryChannelLinkRequest;
 use App\Models\InventoryChannelLink;
 use App\Models\InventoryProduct;
 use App\Models\MeliAccount;
+use App\Models\MeliFullStock;
+use App\Models\MeliPublication;
 use App\Services\Amazon\InventoryAmazonLinkImportService;
 use App\Services\InventoryChannelLinkService;
 use App\Services\InventoryMeliLinkImportService;
@@ -17,6 +19,7 @@ use App\Services\Shopify\InventoryShopifyLinkImportService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Http;
 use Inertia\Inertia;
 use Inertia\Response;
 use InvalidArgumentException;
@@ -569,5 +572,354 @@ class InventoryChannelLinkController extends Controller
             })
             ->orderBy('name')
             ->get(['id', 'sku', 'name', 'barcode']);
+    }
+
+    /**
+     * Buscar y previsualizar una publicación de Mercado Libre por URL, MLM o término de texto.
+     */
+    public function searchMeliPublication(Request $request): JsonResponse
+    {
+        $query = trim((string) $request->input('query', ''));
+        $currentProductId = $request->filled('current_product_id') ? (int) $request->input('current_product_id') : null;
+
+        if ($query === '') {
+            return response()->json(['success' => false, 'message' => 'Ingresa una URL, MLM o término de búsqueda.'], 422);
+        }
+
+        $mlm = self::extractMlm($query);
+
+        // Si se detectó un código MLM o URL directa con MLM
+        if ($mlm !== null) {
+            $existingLink = InventoryChannelLink::query()
+                ->where('channel', InventoryChannelLink::MERCADO_LIBRE)
+                ->where('external_listing_id', $mlm)
+                ->with('product:id,sku,name,brand')
+                ->first();
+
+            $fullStock = MeliFullStock::query()->where('mlm', $mlm)->first();
+            $pub = MeliPublication::query()->where('mlm', $mlm)->first();
+
+            $title = $fullStock?->title;
+            $thumbnail = $fullStock?->thumbnail;
+            $permalink = $fullStock?->permalink ?? $pub?->permalink;
+            $price = $pub ? MeliPublication::listPriceFromRaw($pub->raw) : null;
+            $status = $pub?->status ?? ($fullStock ? 'active' : 'unknown');
+            $logisticType = $fullStock ? 'fulfillment' : null;
+            $isFull = $fullStock !== null;
+            $fullStockQty = (int) ($fullStock?->full_available_quantity ?? 0);
+            $sellerSku = $fullStock?->sku ?? $pub?->sku;
+            $accountKey = $pub?->meliAccount?->nickname ?? $fullStock?->meliAccount?->nickname ?? null;
+
+            // Intentar enriquecer desde la API pública de Mercado Libre (sin requerir token de usuario)
+            try {
+                $response = Http::timeout(4)->get("https://api.mercadolibre.com/items/{$mlm}");
+                if ($response->successful()) {
+                    $item = $response->json();
+                    $title = $item['title'] ?? $title;
+                    $permalink = $item['permalink'] ?? $permalink;
+                    $price = isset($item['price']) && is_numeric($item['price']) ? (float) $item['price'] : $price;
+                    $status = $item['status'] ?? $status;
+                    if (isset($item['thumbnail'])) {
+                        $thumbnail = $item['thumbnail'];
+                    }
+                    if (isset($item['pictures'][0]['secure_url'])) {
+                        $thumbnail = $item['pictures'][0]['secure_url'];
+                    }
+                    if (isset($item['shipping']['logistic_type'])) {
+                        $logisticType = $item['shipping']['logistic_type'];
+                        if ($logisticType === 'fulfillment') {
+                            $isFull = true;
+                        }
+                    }
+                    if (isset($item['seller_custom_field']) && filled($item['seller_custom_field'])) {
+                        $sellerSku = $item['seller_custom_field'];
+                    }
+                }
+            } catch (\Throwable $e) {
+                // Silencioso: si falla la API de ML por red o cuota, se usan los datos de BD
+            }
+
+            if (! $permalink) {
+                $permalink = "https://articulo.mercadolibre.com.mx/{$mlm}";
+            }
+
+            $alreadyLinked = $existingLink !== null;
+            $isLinkedToCurrent = $alreadyLinked && $currentProductId !== null && $existingLink->inventory_product_id === $currentProductId;
+            $otherProduct = ($alreadyLinked && ! $isLinkedToCurrent) ? [
+                'id' => $existingLink->product?->id,
+                'name' => $existingLink->product?->name ?? 'Producto ID '.$existingLink->inventory_product_id,
+                'sku' => $existingLink->product?->sku,
+            ] : null;
+
+            return response()->json([
+                'success' => true,
+                'type' => 'single',
+                'item' => [
+                    'mlm' => $mlm,
+                    'title' => $title ?: "Publicación {$mlm}",
+                    'thumbnail' => $thumbnail,
+                    'permalink' => $permalink,
+                    'price' => $price,
+                    'status' => $status,
+                    'logistic_type' => $logisticType,
+                    'is_full' => $isFull,
+                    'full_stock_available' => $fullStockQty,
+                    'seller_sku' => $sellerSku,
+                    'account_key' => $accountKey,
+                    'already_linked' => $alreadyLinked,
+                    'is_linked_to_current' => $isLinkedToCurrent,
+                    'other_product' => $otherProduct,
+                ],
+            ]);
+        }
+
+        // Búsqueda por texto en base de datos local (MeliFullStock y MeliPublication)
+        $fullMatches = MeliFullStock::query()
+            ->where(function ($nested) use ($query): void {
+                $nested->where('title', 'like', "%{$query}%")
+                    ->orWhere('sku', 'like', "%{$query}%")
+                    ->orWhere('mlm', 'like', "%{$query}%");
+            })
+            ->limit(10)
+            ->get();
+
+        $pubMatches = MeliPublication::query()
+            ->where(function ($nested) use ($query): void {
+                $nested->where('sku', 'like', "%{$query}%")
+                    ->orWhere('mlm', 'like', "%{$query}%");
+            })
+            ->limit(10)
+            ->get();
+
+        $combined = collect();
+
+        foreach ($fullMatches as $f) {
+            $existingLink = InventoryChannelLink::query()
+                ->where('channel', InventoryChannelLink::MERCADO_LIBRE)
+                ->where('external_listing_id', $f->mlm)
+                ->with('product:id,sku,name')
+                ->first();
+
+            $combined->put($f->mlm, [
+                'mlm' => $f->mlm,
+                'title' => $f->title,
+                'thumbnail' => $f->thumbnail,
+                'permalink' => $f->permalink ?: "https://articulo.mercadolibre.com.mx/{$f->mlm}",
+                'seller_sku' => $f->sku,
+                'is_full' => true,
+                'full_stock_available' => (int) $f->full_available_quantity,
+                'already_linked' => $existingLink !== null,
+                'is_linked_to_current' => $existingLink && $currentProductId && $existingLink->inventory_product_id === $currentProductId,
+                'other_product' => ($existingLink && (! $currentProductId || $existingLink->inventory_product_id !== $currentProductId)) ? [
+                    'id' => $existingLink->product?->id,
+                    'name' => $existingLink->product?->name,
+                    'sku' => $existingLink->product?->sku,
+                ] : null,
+            ]);
+        }
+
+        foreach ($pubMatches as $p) {
+            if ($combined->has($p->mlm)) {
+                continue;
+            }
+            $rawItem = MeliPublication::itemArrayFromRaw($p->raw);
+            $existingLink = InventoryChannelLink::query()
+                ->where('channel', InventoryChannelLink::MERCADO_LIBRE)
+                ->where('external_listing_id', $p->mlm)
+                ->with('product:id,sku,name')
+                ->first();
+
+            $combined->put($p->mlm, [
+                'mlm' => $p->mlm,
+                'title' => $rawItem['title'] ?? "Publicación {$p->mlm}",
+                'thumbnail' => $rawItem['thumbnail'] ?? ($rawItem['pictures'][0]['secure_url'] ?? null),
+                'permalink' => $p->permalink ?: ($rawItem['permalink'] ?? "https://articulo.mercadolibre.com.mx/{$p->mlm}"),
+                'seller_sku' => $p->sku,
+                'is_full' => false,
+                'full_stock_available' => 0,
+                'already_linked' => $existingLink !== null,
+                'is_linked_to_current' => $existingLink && $currentProductId && $existingLink->inventory_product_id === $currentProductId,
+                'other_product' => ($existingLink && (! $currentProductId || $existingLink->inventory_product_id !== $currentProductId)) ? [
+                    'id' => $existingLink->product?->id,
+                    'name' => $existingLink->product?->name,
+                    'sku' => $existingLink->product?->sku,
+                ] : null,
+            ]);
+        }
+
+        return response()->json([
+            'success' => true,
+            'type' => 'list',
+            'items' => $combined->values()->take(10)->all(),
+        ]);
+    }
+
+    /**
+     * Extraer código MLM normalizado de una URL o cadena.
+     */
+    public static function extractMlm(?string $input): ?string
+    {
+        if (blank($input)) {
+            return null;
+        }
+        $input = trim((string) $input);
+        if (preg_match('/(MLM)[-_ ]?([0-9]+)/i', $input, $matches)) {
+            return 'MLM'.$matches[2];
+        }
+        if (preg_match('/^([0-9]{8,12})$/', $input, $matches)) {
+            return 'MLM'.$matches[1];
+        }
+
+        return null;
+    }
+
+    /**
+     * Conectar una publicación de Mercado Libre al producto de almacén.
+     */
+    public function linkProduct(Request $request, InventoryProduct $inventoryProduct): RedirectResponse|JsonResponse
+    {
+        $validated = $request->validate([
+            'mlm' => ['required', 'string'],
+            'is_full' => ['nullable', 'boolean'],
+            'force_reassign' => ['nullable', 'boolean'],
+            'title' => ['nullable', 'string', 'max:255'],
+            'thumbnail' => ['nullable', 'string', 'max:500'],
+            'permalink' => ['nullable', 'string', 'max:500'],
+            'remote_price' => ['nullable', 'numeric', 'min:0'],
+            'account_key' => ['nullable', 'string', 'max:100'],
+        ]);
+
+        $mlm = self::extractMlm($validated['mlm']) ?: strtoupper(trim($validated['mlm']));
+        $isFull = $request->boolean('is_full');
+        $forceReassign = $request->boolean('force_reassign');
+
+        $existing = InventoryChannelLink::query()
+            ->where('channel', InventoryChannelLink::MERCADO_LIBRE)
+            ->where('external_listing_id', $mlm)
+            ->first();
+
+        if ($existing) {
+            if ($existing->inventory_product_id !== $inventoryProduct->id && ! $forceReassign) {
+                $currentProd = $existing->product;
+                $msg = "La publicación {$mlm} ya está vinculada al producto '{$currentProd?->name}' (SKU: {$currentProd?->sku}). Confirma la reasignación para transferirla.";
+
+                if ($request->wantsJson()) {
+                    return response()->json(['success' => false, 'error' => $msg, 'requires_confirmation' => true], 422);
+                }
+
+                return back()->with('error', $msg);
+            }
+
+            // Reasignar o actualizar existentes
+            $existing->update([
+                'inventory_product_id' => $inventoryProduct->id,
+                'stock_sync_enabled' => ! $isFull,
+                'is_active' => true,
+                'external_url' => $validated['permalink'] ?? $existing->external_url,
+                'remote_price' => $validated['remote_price'] ?? $existing->remote_price,
+                'metadata' => array_merge((array) ($existing->metadata ?? []), [
+                    'is_full' => $isFull,
+                    'title' => $validated['title'] ?? ($existing->metadata['title'] ?? null),
+                    'thumbnail' => $validated['thumbnail'] ?? ($existing->metadata['thumbnail'] ?? null),
+                    'permalink' => $validated['permalink'] ?? ($existing->metadata['permalink'] ?? null),
+                    'source' => 'product_detail_link',
+                ]),
+            ]);
+
+            $msg = "Publicación {$mlm} conectada exitosamente al producto.";
+            if ($request->wantsJson()) {
+                return response()->json(['success' => true, 'message' => $msg]);
+            }
+
+            return back()->with('success', $msg);
+        }
+
+        // Crear nuevo enlace
+        $accountKey = (! empty($validated['account_key'])) ? $validated['account_key'] : (MeliAccount::first()?->nickname ?? 'default');
+        InventoryChannelLink::create([
+            'channel' => InventoryChannelLink::MERCADO_LIBRE,
+            'inventory_product_id' => $inventoryProduct->id,
+            'account_key' => $accountKey,
+            'external_listing_id' => $mlm,
+            'external_url' => $validated['permalink'] ?? "https://articulo.mercadolibre.com.mx/{$mlm}",
+            'remote_price' => $validated['remote_price'] ?? null,
+            'remote_currency' => 'MXN',
+            'is_active' => true,
+            'stock_sync_enabled' => ! $isFull,
+            'order_reservation_enabled' => true,
+            'identity_key' => "mercado_libre|account:{$accountKey}|listing:{$mlm}",
+            'metadata' => [
+                'is_full' => $isFull,
+                'title' => $validated['title'] ?? null,
+                'thumbnail' => $validated['thumbnail'] ?? null,
+                'permalink' => $validated['permalink'] ?? null,
+                'source' => 'product_detail_link',
+            ],
+        ]);
+
+        $msg = "Publicación {$mlm} vinculada exitosamente.";
+        if ($request->wantsJson()) {
+            return response()->json(['success' => true, 'message' => $msg]);
+        }
+
+        return back()->with('success', $msg);
+    }
+
+    /**
+     * Desvincular una publicación de un producto de almacén.
+     */
+    public function unlinkProduct(InventoryProduct $inventoryProduct, InventoryChannelLink $inventoryChannelLink): RedirectResponse|JsonResponse
+    {
+        if ($inventoryChannelLink->inventory_product_id !== $inventoryProduct->id) {
+            abort(404, 'El enlace no pertenece a este producto.');
+        }
+
+        $mlm = $inventoryChannelLink->external_listing_id ?? 'publicación';
+        $inventoryChannelLink->delete();
+
+        $msg = "Se desvinculó la publicación {$mlm} del producto.";
+        if (request()->wantsJson()) {
+            return response()->json(['success' => true, 'message' => $msg]);
+        }
+
+        return back()->with('success', $msg);
+    }
+
+    /**
+     * Modificar ajustes del vínculo (FULL vs Propio, sincronización, estado activo).
+     */
+    public function updateLinkSettings(Request $request, InventoryProduct $inventoryProduct, InventoryChannelLink $inventoryChannelLink): RedirectResponse|JsonResponse
+    {
+        if ($inventoryChannelLink->inventory_product_id !== $inventoryProduct->id) {
+            abort(404, 'El enlace no pertenece a este producto.');
+        }
+
+        $meta = (array) ($inventoryChannelLink->metadata ?? []);
+
+        if ($request->has('is_full')) {
+            $isFull = $request->boolean('is_full');
+            $meta['is_full'] = $isFull;
+            if ($isFull) {
+                $inventoryChannelLink->stock_sync_enabled = false;
+            }
+        }
+
+        if ($request->has('stock_sync_enabled')) {
+            $inventoryChannelLink->stock_sync_enabled = $request->boolean('stock_sync_enabled');
+        }
+
+        if ($request->has('is_active')) {
+            $inventoryChannelLink->is_active = $request->boolean('is_active');
+        }
+
+        $inventoryChannelLink->metadata = $meta;
+        $inventoryChannelLink->save();
+
+        $msg = 'Configuración de la publicación actualizada.';
+        if ($request->wantsJson()) {
+            return response()->json(['success' => true, 'message' => $msg]);
+        }
+
+        return back()->with('success', $msg);
     }
 }

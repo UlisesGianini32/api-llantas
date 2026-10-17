@@ -67,7 +67,8 @@ export default function MeliFullShipmentsCreate({
                 (p) =>
                     (p.sku && p.sku.toLowerCase().includes(q)) ||
                     (p.name && p.name.toLowerCase().includes(q)) ||
-                    (p.barcode && p.barcode.toLowerCase().includes(q))
+                    (p.barcode && p.barcode.toLowerCase().includes(q)) ||
+                    (p.linked_mlms && p.linked_mlms.some((m) => m && m.toLowerCase().includes(q)))
             )
             .slice(0, 20)
     }, [products, productSearch])
@@ -84,7 +85,8 @@ export default function MeliFullShipmentsCreate({
                 return (
                     (r.sku && r.sku.toLowerCase().includes(q)) ||
                     (r.name && r.name.toLowerCase().includes(q)) ||
-                    (r.brand && r.brand.toLowerCase().includes(q))
+                    (r.brand && r.brand.toLowerCase().includes(q)) ||
+                    (r.linked_mlms && r.linked_mlms.some((m) => m && m.toLowerCase().includes(q)))
                 )
             }
             return true
@@ -737,8 +739,18 @@ export default function MeliFullShipmentsCreate({
                                                 {filteredRecommendations.map((rec, idx) => (
                                                     <tr key={idx} className="hover:bg-amber-50/50">
                                                         <td className="p-2.5">
-                                                            <strong className="font-mono text-slate-900 mr-2">{rec.sku}</strong>
-                                                            <span>{rec.name}</span>
+                                                            <div className="flex items-center gap-1.5 flex-wrap">
+                                                                <strong className="font-mono text-slate-900">{rec.sku}</strong>
+                                                                {rec.linked_mlms && rec.linked_mlms.length > 0 && (
+                                                                    <span
+                                                                        className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-800 dark:bg-amber-950/60 dark:text-amber-300"
+                                                                        title={`Publicaciones conectadas: ${rec.linked_mlms.join(', ')}`}
+                                                                    >
+                                                                        🔗 {rec.linked_mlms.length} pubs MeLi ({rec.linked_mlms.slice(0, 2).join(', ')}{rec.linked_mlms.length > 2 ? '...' : ''})
+                                                                    </span>
+                                                                )}
+                                                            </div>
+                                                            <div className="text-xs text-slate-600 dark:text-slate-400">{rec.name}</div>
                                                         </td>
                                                         <td className="p-2.5 text-center font-bold text-indigo-600">
                                                             {rec.sales_full_30d || 0} uds
@@ -825,6 +837,11 @@ export default function MeliFullShipmentsCreate({
                                                             {p.sku}
                                                         </span>
                                                         <span>{p.name}</span>
+                                                        {p.linked_mlms && p.linked_mlms.length > 0 && (
+                                                            <span className="ml-2 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-800 dark:bg-amber-950/60 dark:text-amber-300">
+                                                                🔗 {p.linked_mlms.join(', ')}
+                                                            </span>
+                                                        )}
                                                     </div>
                                                     <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] font-bold text-emerald-700">
                                                         Stock: {p.available_stock ?? 0} · {(parseFloat(p.weight_kg) || 1.0).toFixed(2)} kg
