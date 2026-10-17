@@ -59,6 +59,10 @@ export default function ShelfAuditShow({ audit, shelf }) {
         ? `Marca ${audit.brand_name}`
         : `Anaquel ${audit.shelf_code || audit.location?.code || 'General'}`
 
+    const statusUpper = String(audit.status || '').toUpperCase()
+    const isInProgress = statusUpper === 'IN_PROGRESS'
+    const isApplied = statusUpper === 'APPLIED'
+
     return (
         <AppShell title={`Auditoría ${displayTarget}`}>
             <Head title={`Auditoría ${displayTarget} - ${audit.audit_number}`} />
@@ -83,13 +87,13 @@ export default function ShelfAuditShow({ audit, shelf }) {
                             <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-white sm:text-3xl">
                                 {displayTarget}
                             </h1>
-                            {audit.status === 'applied' && (
+                            {isApplied && (
                                 <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-3 py-1 text-xs font-bold text-emerald-700 ring-1 ring-emerald-600/20 dark:bg-emerald-950/40 dark:text-emerald-300">
                                     <span className="h-2 w-2 rounded-full bg-emerald-500" />
                                     Ajuste Aplicado al Inventario
                                 </span>
                             )}
-                            {audit.status === 'in_progress' && (
+                            {isInProgress && (
                                 <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-3 py-1 text-xs font-bold text-amber-700 ring-1 ring-amber-600/20 dark:bg-amber-950/40 dark:text-amber-300">
                                     <span className="h-2 w-2 rounded-full bg-amber-500" />
                                     Borrador (Pendiente de Aplicar)
@@ -113,17 +117,30 @@ export default function ShelfAuditShow({ audit, shelf }) {
                     </div>
 
                     <div className="flex flex-wrap items-center gap-2">
-                        {audit.status === 'in_progress' && (
-                            <button
-                                type="button"
-                                onClick={() => setShowApplyModal(true)}
-                                className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-5 py-2.5 text-sm font-bold text-white shadow-sm transition hover:bg-emerald-700 active:scale-95"
-                            >
-                                <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-                                </svg>
-                                <span>⚡ Aplicar Ajustes de Stock Ahora</span>
-                            </button>
+                        {isInProgress && (
+                            <>
+                                <Link
+                                    href={`/almacen/auditorias/${audit.id}/editar`}
+                                    className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-5 py-2.5 text-sm font-bold text-white shadow-sm transition hover:bg-indigo-700 active:scale-95"
+                                >
+                                    <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                    </svg>
+                                    <span>▶ Continuar Conteo / Seguir Escaneando</span>
+                                </Link>
+
+                                <button
+                                    type="button"
+                                    onClick={() => setShowApplyModal(true)}
+                                    className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-5 py-2.5 text-sm font-bold text-white shadow-sm transition hover:bg-emerald-700 active:scale-95"
+                                >
+                                    <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                                    </svg>
+                                    <span>⚡ Aplicar Ajustes de Stock Ahora</span>
+                                </button>
+                            </>
                         )}
 
                         <Link
@@ -157,29 +174,37 @@ export default function ShelfAuditShow({ audit, shelf }) {
                 )}
 
                 {/* In Progress Warning Banner */}
-                {audit.status === 'in_progress' && (
+                {isInProgress && (
                     <div className="rounded-2xl border border-amber-300 bg-gradient-to-r from-amber-50 to-orange-50 p-5 shadow-xs dark:border-amber-900/60 dark:from-amber-950/30 dark:to-orange-950/30">
                         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                             <div className="flex items-center gap-3">
-                                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-amber-500 text-white font-bold text-lg">
-                                    !
+                                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-amber-500 text-white font-bold text-lg shadow-sm">
+                                    ⏳
                                 </div>
                                 <div>
                                     <h3 className="text-sm font-bold text-amber-900 dark:text-amber-200">
                                         Esta auditoría está guardada como Borrador
                                     </h3>
                                     <p className="text-xs text-amber-800 dark:text-amber-300">
-                                        Las cantidades físicas del anaquel {displayShelf} ya fueron contadas, pero el stock oficial aún no ha sido modificado. Haz clic en "Aplicar Ajustes de Stock Ahora" para cuadrar el inventario oficial.
+                                        Puedes reanudar el conteo con tu pistola o cámara para agregar productos, o aplicar los ajustes directamente al inventario.
                                     </p>
                                 </div>
                             </div>
-                            <button
-                                type="button"
-                                onClick={() => setShowApplyModal(true)}
-                                className="rounded-xl bg-amber-600 px-4 py-2 text-xs font-bold text-white shadow-sm hover:bg-amber-700"
-                            >
-                                ⚡ Aplicar Ajustes Ahora
-                            </button>
+                            <div className="flex items-center gap-2">
+                                <Link
+                                    href={`/almacen/auditorias/${audit.id}/editar`}
+                                    className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2.5 text-xs font-bold text-white shadow-sm hover:bg-indigo-700 transition"
+                                >
+                                    <span>▶ Seguir Escaneando</span>
+                                </Link>
+                                <button
+                                    type="button"
+                                    onClick={() => setShowApplyModal(true)}
+                                    className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 px-4 py-2.5 text-xs font-bold text-white shadow-sm hover:bg-emerald-700 transition"
+                                >
+                                    <span>⚡ Aplicar Ajustes Ahora</span>
+                                </button>
+                            </div>
                         </div>
                     </div>
                 )}

@@ -278,6 +278,10 @@ Route::middleware(['auth', 'role'])->group(function () {
             ->name('brand_products');
         Route::get('/{shelfAudit}', [ShelfAuditController::class, 'show'])
             ->whereNumber('shelfAudit')->name('show');
+        Route::get('/{shelfAudit}/editar', [ShelfAuditController::class, 'edit'])
+            ->whereNumber('shelfAudit')->name('edit');
+        Route::put('/{shelfAudit}', [ShelfAuditController::class, 'update'])
+            ->whereNumber('shelfAudit')->name('update');
         Route::post('/{shelfAudit}/aplicar', [ShelfAuditController::class, 'apply'])
             ->whereNumber('shelfAudit')->name('apply');
     });

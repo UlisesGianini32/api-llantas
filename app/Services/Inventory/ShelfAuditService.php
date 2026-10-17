@@ -559,6 +559,112 @@ class ShelfAuditService
     }
 
     /**
+     * Actualiza una auditoría existente en estado Borrador (IN_PROGRESS).
+     * Permite reanudar el conteo físico, modificar cantidades y guardar o aplicar de inmediato.
+     *
+     * @param array<string, mixed> $data
+     */
+    public function updateAudit(InventoryShelfAudit $audit, array $data, User $user, bool $applyImmediately = false): InventoryShelfAudit
+    {
+        if (strtoupper((string) $audit->status) !== InventoryShelfAudit::STATUS_IN_PROGRESS) {
+            throw new InvalidArgumentException("Solo se pueden modificar auditorías en estado Borrador.");
+        }
+
+        $items = $data['items'] ?? [];
+        if (empty($items) || ! is_array($items)) {
+            throw new InvalidArgumentException('Debes indicar al menos un producto a auditar.');
+        }
+
+        $isBrand = $audit->audit_type === InventoryShelfAudit::AUDIT_TYPE_BRAND;
+        $locationIds = [];
+        if (! $isBrand) {
+            $shelfIdentifier = $audit->shelf_code ?: $audit->inventory_location_id;
+            $locations = $this->getLocationsForShelf($shelfIdentifier);
+            $locationIds = $locations->pluck('id')->all();
+        }
+
+        return DB::transaction(function () use ($audit, $items, $data, $user, $applyImmediately, $locationIds, $isBrand) {
+            $totalExpected = 0;
+            $totalCountedProducts = 0;
+            $totalSystemUnits = 0;
+            $totalCountedUnits = 0;
+            $totalDifferenceUnits = 0;
+            $matchedCount = 0;
+            $surplusCount = 0;
+            $missingCount = 0;
+
+            $preparedItems = [];
+
+            foreach ($items as $item) {
+                $productId = (int) ($item['inventory_product_id'] ?? 0);
+                if ($productId <= 0) {
+                    continue;
+                }
+
+                $product = InventoryProduct::findOrFail($productId);
+                $systemQty = (int) ($item['system_quantity'] ?? 0);
+                $countedQty = max(0, (int) ($item['counted_quantity'] ?? 0));
+                $diff = $countedQty - $systemQty;
+
+                $totalExpected++;
+                if ($countedQty > 0) {
+                    $totalCountedProducts++;
+                }
+
+                $totalSystemUnits += $systemQty;
+                $totalCountedUnits += $countedQty;
+                $totalDifferenceUnits += $diff;
+
+                if ($diff === 0) {
+                    $matchedCount++;
+                } elseif ($diff > 0) {
+                    $surplusCount++;
+                } else {
+                    $missingCount++;
+                }
+
+                $isAssigned = $isBrand ? true : in_array((int) $product->primary_location_id, $locationIds, true);
+
+                $preparedItems[] = [
+                    'inventory_product_id' => $product->id,
+                    'system_quantity' => $systemQty,
+                    'counted_quantity' => $countedQty,
+                    'difference' => $diff,
+                    'location_breakdown' => ! empty($item['location_breakdown']) ? trim((string) $item['location_breakdown']) : null,
+                    'is_assigned_location' => $isAssigned,
+                    'notes' => ! empty($item['notes']) ? trim((string) $item['notes']) : null,
+                    'adjusted' => false,
+                ];
+            }
+
+            // Actualizar campos cabecera de la auditoría
+            $audit->update([
+                'total_expected_products' => $totalExpected,
+                'total_counted_products' => $totalCountedProducts,
+                'total_system_units' => $totalSystemUnits,
+                'total_counted_units' => $totalCountedUnits,
+                'total_difference_units' => $totalDifferenceUnits,
+                'matched_items_count' => $matchedCount,
+                'surplus_items_count' => $surplusCount,
+                'missing_items_count' => $missingCount,
+                'notes' => ! empty($data['notes']) ? trim((string) $data['notes']) : $audit->notes,
+            ]);
+
+            // Reemplazar los items
+            $audit->items()->delete();
+            foreach ($preparedItems as $prepItem) {
+                $audit->items()->create($prepItem);
+            }
+
+            if ($applyImmediately) {
+                $this->applyAuditAdjustment($audit, $user, $data['notes'] ?? null);
+            }
+
+            return $audit->fresh(['location', 'user', 'appliedBy', 'items.product.primaryLocation']);
+        });
+    }
+
+    /**
      * Aplica los movimientos de ajuste físico en el ledger para el anaquel o marca auditada.
      */
     public function applyAuditAdjustment(InventoryShelfAudit $audit, User $user, ?string $notes = null): InventoryShelfAudit

@@ -29,6 +29,12 @@ const playBeep = (type = 'success') => {
     }
 }
 
+const extractShelfCode = (code) => {
+    if (!code) return ''
+    const match = String(code).trim().match(/^([A-Za-z]+[0-9]+)/)
+    return match ? match[1].toUpperCase() : String(code).trim().toUpperCase()
+}
+
 export default function ShelfAuditCreate({
     shelves = [],
     brands = [],
@@ -36,43 +42,50 @@ export default function ShelfAuditCreate({
     preselectedShelfCode,
     preselectedBrand,
     initialProducts = [],
+    resumeAudit = null,
 }) {
     // Current wizard step: 'counting' (Paso 1: Escaneo y Conteo) | 'review' (Paso 2: Lista y Revisión de Diferencias)
     const [currentStep, setCurrentStep] = useState('counting')
 
     // Mode: 'shelf' | 'brand'
-    const [auditType, setAuditType] = useState(initialAuditType || 'shelf')
+    const [auditType, setAuditType] = useState(
+        resumeAudit?.audit_type || initialAuditType || 'shelf'
+    )
 
     // Selected Shelf & Brand
     const [selectedShelfCode, setSelectedShelfCode] = useState(
-        preselectedShelfCode || (shelves[0]?.shelf_code ?? '')
+        resumeAudit?.shelf_code || preselectedShelfCode || (shelves[0]?.shelf_code ?? '')
     )
     const [selectedBrand, setSelectedBrand] = useState(
-        preselectedBrand || (brands[0]?.brand ?? '')
+        resumeAudit?.brand_name || preselectedBrand || (brands[0]?.brand ?? '')
     )
 
     const [isLoadingProducts, setIsLoadingProducts] = useState(false)
-    const [auditNotes, setAuditNotes] = useState('')
+    const [auditNotes, setAuditNotes] = useState(resumeAudit?.notes || '')
     const [isSubmitting, setIsSubmitting] = useState(false)
 
     // Items list for the audit
     const [items, setItems] = useState(() => {
-        return (initialProducts || []).map((p) => ({
-            product_id: p.product_id || p.id,
-            sku: p.sku,
-            barcode: p.barcode,
-            barcode_secondary: p.barcode_secondary,
-            name: p.name,
-            brand: p.brand,
-            primary_location: p.primary_location || p.primary_location_code,
-            system_quantity: Number(p.system_quantity || p.system_stock || 0),
-            location_breakdown: p.location_breakdown || '',
-            counted_quantity: 0,
-            scanned: false,
-            last_scanned_at: 0,
-            notes: '',
-            is_extra: false,
-        }))
+        return (initialProducts || []).map((p) => {
+            const counted = Number(p.counted_quantity || 0)
+            const wasScanned = Boolean(p.scanned || counted > 0)
+            return {
+                product_id: p.product_id || p.id,
+                sku: p.sku,
+                barcode: p.barcode,
+                barcode_secondary: p.barcode_secondary,
+                name: p.name,
+                brand: p.brand,
+                primary_location: p.primary_location || p.primary_location_code,
+                system_quantity: Number(p.system_quantity || p.system_stock || 0),
+                location_breakdown: p.location_breakdown || '',
+                counted_quantity: counted,
+                scanned: wasScanned,
+                last_scanned_at: wasScanned ? 1 : 0,
+                notes: p.notes || '',
+                is_extra: Boolean(p.is_extra),
+            }
+        })
     })
 
     // Feedback message
@@ -82,6 +95,9 @@ export default function ShelfAuditCreate({
     // Barcode scanner gun input
     const [gunBarcode, setGunBarcode] = useState('')
     const gunInputRef = useRef(null)
+
+    // Mismatch warning modal when scanning a product that does not belong to this shelf or brand
+    const [mismatchModal, setMismatchModal] = useState(null)
 
     // Camera scanner modal
     const [isCameraOpen, setIsCameraOpen] = useState(false)
@@ -237,6 +253,30 @@ export default function ShelfAuditCreate({
         setKeepCameraAfterConfirm(fromCamera)
     }
 
+    // Remove an item from the audit or reset its count if it's an expected product
+    const removeItem = (productId) => {
+        const item = items.find((it) => it.product_id === productId)
+        if (!item) return
+
+        if (item.is_extra) {
+            if (confirm(`¿Deseas eliminar "${item.name}" de esta auditoría? No pertenece a este anaquel/marca.`)) {
+                setItems((prev) => prev.filter((it) => it.product_id !== productId))
+                setScanFeedback({ type: 'info', text: `Se eliminó "${item.name}" de la lista.` })
+            }
+        } else {
+            if (confirm(`¿Deseas reiniciar a 0 el conteo físico de "${item.name}"?`)) {
+                setItems((prev) =>
+                    prev.map((it) =>
+                        it.product_id === productId
+                            ? { ...it, counted_quantity: 0, scanned: false, notes: '' }
+                            : it
+                    )
+                )
+                setScanFeedback({ type: 'info', text: `Se reinició a 0 el conteo de "${item.name}".` })
+            }
+        }
+    }
+
     // Process a scanned barcode (from gun or camera)
     const processBarcode = async (rawCode, fromCamera = false) => {
         const code = String(rawCode || '').trim()
@@ -274,6 +314,52 @@ export default function ShelfAuditCreate({
             }) || catalogList[0]
 
             if (matched) {
+                // Validación estricta: Bloquear si pertenece a otro anaquel o a otra marca
+                if (auditType === 'shelf') {
+                    const matchedLocCode = matched.primary_location?.code || ''
+                    const matchedShelfCode = extractShelfCode(matchedLocCode)
+                    const targetShelf = extractShelfCode(selectedShelfCode)
+
+                    if (matchedShelfCode && targetShelf && matchedShelfCode !== targetShelf) {
+                        playBeep('warning')
+                        setMismatchModal({
+                            title: '⛔ Producto No Pertenece a este Anaquel',
+                            product: matched,
+                            expectedTarget: `Anaquel ${targetShelf}`,
+                            actualTarget: `Anaquel ${matchedShelfCode} (Ubicación: ${matchedLocCode})`,
+                            reason: 'shelf',
+                            message: `Este producto tiene asignada la ubicación "${matchedLocCode}" (Anaquel ${matchedShelfCode}) en el catálogo. No corresponde al Anaquel ${targetShelf} que estás auditando.`,
+                        })
+                        setScanFeedback({
+                            type: 'error',
+                            text: `⛔ Bloqueado: "${matched.name}" pertenece al Anaquel ${matchedShelfCode} (${matchedLocCode}), no a ${targetShelf}.`,
+                        })
+                        return
+                    }
+                }
+
+                if (auditType === 'brand' && selectedBrand) {
+                    const matchedBrand = String(matched.brand || '').trim().toLowerCase()
+                    const targetBrand = String(selectedBrand || '').trim().toLowerCase()
+
+                    if (matchedBrand && targetBrand && matchedBrand !== targetBrand) {
+                        playBeep('warning')
+                        setMismatchModal({
+                            title: '⛔ Producto de Otra Marca',
+                            product: matched,
+                            expectedTarget: `Marca ${selectedBrand}`,
+                            actualTarget: `Marca ${matched.brand || 'Sin marca'}`,
+                            reason: 'brand',
+                            message: `Este producto pertenece a la marca "${matched.brand}", no a la marca "${selectedBrand}" que estás auditando.`,
+                        })
+                        setScanFeedback({
+                            type: 'error',
+                            text: `⛔ Bloqueado: "${matched.name}" es marca "${matched.brand}", no "${selectedBrand}".`,
+                        })
+                        return
+                    }
+                }
+
                 const newItem = {
                     product_id: matched.id,
                     sku: matched.sku,
@@ -381,6 +467,46 @@ export default function ShelfAuditCreate({
             setShowCatalogSearch(false)
             openScanModal(existing, false)
             return
+        }
+
+        // Validación estricta: Bloquear si pertenece a otro anaquel o marca
+        if (auditType === 'shelf') {
+            const matchedLocCode = product.primary_location?.code || ''
+            const matchedShelfCode = extractShelfCode(matchedLocCode)
+            const targetShelf = extractShelfCode(selectedShelfCode)
+
+            if (matchedShelfCode && targetShelf && matchedShelfCode !== targetShelf) {
+                playBeep('warning')
+                setShowCatalogSearch(false)
+                setMismatchModal({
+                    title: '⛔ Producto No Pertenece a este Anaquel',
+                    product,
+                    expectedTarget: `Anaquel ${targetShelf}`,
+                    actualTarget: `Anaquel ${matchedShelfCode} (Ubicación: ${matchedLocCode})`,
+                    reason: 'shelf',
+                    message: `Este producto tiene asignada la ubicación "${matchedLocCode}" (Anaquel ${matchedShelfCode}) en el catálogo. No corresponde al Anaquel ${targetShelf} que estás auditando.`,
+                })
+                return
+            }
+        }
+
+        if (auditType === 'brand' && selectedBrand) {
+            const matchedBrand = String(product.brand || '').trim().toLowerCase()
+            const targetBrand = String(selectedBrand || '').trim().toLowerCase()
+
+            if (matchedBrand && targetBrand && matchedBrand !== targetBrand) {
+                playBeep('warning')
+                setShowCatalogSearch(false)
+                setMismatchModal({
+                    title: '⛔ Producto de Otra Marca',
+                    product,
+                    expectedTarget: `Marca ${selectedBrand}`,
+                    actualTarget: `Marca ${product.brand || 'Sin marca'}`,
+                    reason: 'brand',
+                    message: `Este producto pertenece a la marca "${product.brand}", no a la marca "${selectedBrand}" que estás auditando.`,
+                })
+                return
+            }
         }
 
         const newItem = {
@@ -511,6 +637,20 @@ export default function ShelfAuditCreate({
             })),
         }
 
+        if (resumeAudit?.id) {
+            router.put(`/almacen/auditorias/${resumeAudit.id}`, payload, {
+                onFinish: () => {
+                    setIsSubmitting(false)
+                    setShowApplyModal(false)
+                },
+                onError: (errors) => {
+                    console.error('Error al actualizar auditoría:', errors)
+                    alert('Error al guardar: ' + (Object.values(errors)[0] || 'Verifica los campos.'))
+                },
+            })
+            return
+        }
+
         router.post('/almacen/auditorias', payload, {
             onFinish: () => {
                 setIsSubmitting(false)
@@ -523,9 +663,11 @@ export default function ShelfAuditCreate({
         })
     }
 
-    const currentTitle = auditType === 'shelf'
-        ? `Auditar Anaquel: ${selectedShelfCode || 'Seleccionar'}`
-        : `Auditar Marca: ${selectedBrand || 'Seleccionar'}`
+    const currentTitle = resumeAudit
+        ? `Reanudar Conteo - ${resumeAudit.audit_number} (${auditType === 'shelf' ? `Anaquel ${selectedShelfCode}` : `Marca ${selectedBrand}`})`
+        : (auditType === 'shelf'
+            ? `Auditar Anaquel: ${selectedShelfCode || 'Seleccionar'}`
+            : `Auditar Marca: ${selectedBrand || 'Seleccionar'}`)
 
     return (
         <AppShell title={currentTitle}>
@@ -606,22 +748,55 @@ export default function ShelfAuditCreate({
                     </div>
                 </div>
 
+                {/* Resume Audit Banner */}
+                {resumeAudit && (
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-2xl border border-indigo-200 bg-indigo-50/80 p-4 dark:border-indigo-900/60 dark:bg-indigo-950/40 shadow-xs">
+                        <div className="flex items-center gap-3">
+                            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-indigo-600 text-white font-bold text-lg shadow-sm">
+                                📝
+                            </div>
+                            <div>
+                                <h3 className="text-sm font-bold text-indigo-950 dark:text-indigo-200">
+                                    Reanudando Conteo de Borrador: <span className="font-mono text-indigo-600 dark:text-indigo-400 font-black">{resumeAudit.audit_number}</span>
+                                </h3>
+                                <p className="text-xs text-indigo-800 dark:text-indigo-300">
+                                    {auditType === 'shelf' ? `Anaquel ${selectedShelfCode}` : `Marca ${selectedBrand}`}. Se han precargado los productos y cantidades contadas previamente.
+                                </p>
+                            </div>
+                        </div>
+                        <Link
+                            href={`/almacen/auditorias/${resumeAudit.id}`}
+                            className="inline-flex items-center gap-1.5 self-start sm:self-auto rounded-xl border border-indigo-300 bg-white px-3.5 py-1.5 text-xs font-bold text-indigo-700 hover:bg-indigo-50 dark:border-indigo-800 dark:bg-neutral-900 dark:text-indigo-300 transition"
+                        >
+                            <span>Ver Ficha Detallada →</span>
+                        </Link>
+                    </div>
+                )}
+
                 {/* Audit Mode Selector & Scope Selector */}
                 <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
                     {/* Left: Mode Toggle (Por Anaquel vs Por Marca) */}
                     <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-xs dark:border-neutral-800 dark:bg-neutral-900 lg:col-span-5">
-                        <label className="block text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                            1. Modalidad de Inventario
-                        </label>
+                        <div className="flex items-center justify-between">
+                            <label className="block text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                                1. Modalidad de Inventario
+                            </label>
+                            {resumeAudit && (
+                                <span className="text-[10px] font-bold text-amber-600 dark:text-amber-400">
+                                    (Fijado por Borrador)
+                                </span>
+                            )}
+                        </div>
                         <div className="mt-2 grid grid-cols-2 gap-2">
                             <button
                                 type="button"
+                                disabled={Boolean(resumeAudit)}
                                 onClick={() => handleModeSwitch('shelf')}
                                 className={`flex items-center justify-center gap-2 rounded-xl py-2.5 text-xs font-bold transition ${
                                     auditType === 'shelf'
                                         ? 'bg-indigo-600 text-white shadow-sm'
                                         : 'border border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-300'
-                                }`}
+                                } ${resumeAudit ? 'cursor-not-allowed opacity-80' : ''}`}
                             >
                                 <span>📦 Por Anaquel</span>
                                 <span className="rounded-full bg-indigo-500/30 px-1.5 py-0.2 text-[10px]">
@@ -630,12 +805,13 @@ export default function ShelfAuditCreate({
                             </button>
                             <button
                                 type="button"
+                                disabled={Boolean(resumeAudit)}
                                 onClick={() => handleModeSwitch('brand')}
                                 className={`flex items-center justify-center gap-2 rounded-xl py-2.5 text-xs font-bold transition ${
                                     auditType === 'brand'
                                         ? 'bg-indigo-600 text-white shadow-sm'
                                         : 'border border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-300'
-                                }`}
+                                } ${resumeAudit ? 'cursor-not-allowed opacity-80' : ''}`}
                             >
                                 <span>🏷️ Por Marca</span>
                                 <span className="rounded-full bg-indigo-500/30 px-1.5 py-0.2 text-[10px]">
@@ -653,9 +829,9 @@ export default function ShelfAuditCreate({
                                     </label>
                                     <select
                                         value={selectedShelfCode}
-                                        disabled={isLoadingProducts}
+                                        disabled={isLoadingProducts || Boolean(resumeAudit)}
                                         onChange={(e) => handleShelfChange(e.target.value)}
-                                        className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-900 focus:border-indigo-500 focus:outline-none dark:border-neutral-700 dark:bg-neutral-950 dark:text-white"
+                                        className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-900 focus:border-indigo-500 focus:outline-none disabled:bg-slate-100 disabled:cursor-not-allowed dark:border-neutral-700 dark:bg-neutral-950 dark:text-white"
                                     >
                                         {shelves.map((sh) => (
                                             <option key={sh.shelf_code} value={sh.shelf_code}>
@@ -676,9 +852,9 @@ export default function ShelfAuditCreate({
                                     </label>
                                     <select
                                         value={selectedBrand}
-                                        disabled={isLoadingProducts}
+                                        disabled={isLoadingProducts || Boolean(resumeAudit)}
                                         onChange={(e) => handleBrandChange(e.target.value)}
-                                        className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-900 focus:border-indigo-500 focus:outline-none dark:border-neutral-700 dark:bg-neutral-950 dark:text-white"
+                                        className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-900 focus:border-indigo-500 focus:outline-none disabled:bg-slate-100 disabled:cursor-not-allowed dark:border-neutral-700 dark:bg-neutral-950 dark:text-white"
                                     >
                                         {brands.map((b) => (
                                             <option key={b.brand} value={b.brand}>
@@ -877,9 +1053,16 @@ export default function ShelfAuditCreate({
                                         >
                                             <div className="flex items-start justify-between gap-2">
                                                 <div className="min-w-0 flex-1">
-                                                    <p className="line-clamp-2 text-xs font-bold text-slate-900 dark:text-white">
-                                                        {it.name}
-                                                    </p>
+                                                    <div className="flex items-center gap-1.5">
+                                                        <p className="line-clamp-2 text-xs font-bold text-slate-900 dark:text-white">
+                                                            {it.name}
+                                                        </p>
+                                                        {it.is_extra && (
+                                                            <span className="shrink-0 rounded bg-amber-100 px-1.5 py-0.2 text-[10px] font-bold text-amber-800 dark:bg-amber-950 dark:text-amber-300">
+                                                                Extra
+                                                            </span>
+                                                        )}
+                                                    </div>
                                                     <div className="mt-1 flex flex-wrap items-center gap-1.5 font-mono text-[11px] text-slate-500 dark:text-slate-400">
                                                         <span>SKU: {it.sku}</span>
                                                         {it.brand && (
@@ -887,22 +1070,42 @@ export default function ShelfAuditCreate({
                                                                 {it.brand}
                                                             </span>
                                                         )}
+                                                        {it.primary_location && (
+                                                            <span className="rounded bg-slate-100 px-1 py-0.2 text-[10px] text-slate-600 dark:bg-neutral-800 dark:text-slate-400">
+                                                                📍 {it.primary_location}
+                                                            </span>
+                                                        )}
                                                     </div>
                                                 </div>
 
-                                                <button
-                                                    type="button"
-                                                    onClick={(e) => {
-                                                        e.stopPropagation()
-                                                        openScanModal(it, false)
-                                                    }}
-                                                    className="rounded-lg bg-indigo-50 p-1.5 text-indigo-600 hover:bg-indigo-100 dark:bg-indigo-950/60 dark:text-indigo-400"
-                                                    title="Modificar cantidad"
-                                                >
-                                                    <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                                                        <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" />
-                                                    </svg>
-                                                </button>
+                                                <div className="flex items-center gap-1">
+                                                    <button
+                                                        type="button"
+                                                        onClick={(e) => {
+                                                            e.stopPropagation()
+                                                            openScanModal(it, false)
+                                                        }}
+                                                        className="rounded-lg bg-indigo-50 p-1.5 text-indigo-600 hover:bg-indigo-100 dark:bg-indigo-950/60 dark:text-indigo-400"
+                                                        title="Modificar cantidad"
+                                                    >
+                                                        <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                                            <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" />
+                                                        </svg>
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={(e) => {
+                                                            e.stopPropagation()
+                                                            removeItem(it.product_id)
+                                                        }}
+                                                        className="rounded-lg bg-rose-50 p-1.5 text-rose-600 hover:bg-rose-100 dark:bg-rose-950/60 dark:text-rose-400"
+                                                        title={it.is_extra ? 'Eliminar este producto de la auditoría' : 'Reiniciar conteo a 0'}
+                                                    >
+                                                        <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                                            <path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
+                                                        </svg>
+                                                    </button>
+                                                </div>
                                             </div>
 
                                             {/* Quantities comparison */}
@@ -1217,15 +1420,30 @@ export default function ShelfAuditCreate({
                                                             />
                                                         </td>
 
-                                                        {/* Edit in modal button */}
+                                                        {/* Edit in modal button & Remove/Reset button */}
                                                         <td className="px-4 py-3 text-right">
-                                                            <button
-                                                                type="button"
-                                                                onClick={() => openScanModal(it, false)}
-                                                                className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] font-bold text-indigo-600 hover:bg-indigo-50 dark:border-neutral-700 dark:bg-neutral-800 dark:text-indigo-400"
-                                                            >
-                                                                Ventana ✏️
-                                                            </button>
+                                                            <div className="flex items-center justify-end gap-1.5">
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => openScanModal(it, false)}
+                                                                    className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] font-bold text-indigo-600 hover:bg-indigo-50 dark:border-neutral-700 dark:bg-neutral-800 dark:text-indigo-400"
+                                                                    title="Abrir ventana para ingresar conteo"
+                                                                >
+                                                                    Ventana ✏️
+                                                                </button>
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => removeItem(it.product_id)}
+                                                                    className={`rounded-lg border px-2 py-1 text-[11px] font-bold transition ${
+                                                                        it.is_extra
+                                                                            ? 'border-rose-300 bg-rose-50 text-rose-700 hover:bg-rose-100 dark:border-rose-900/60 dark:bg-rose-950/60 dark:text-rose-300'
+                                                                            : 'border-slate-200 bg-slate-50 text-slate-600 hover:bg-slate-100 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-400'
+                                                                    }`}
+                                                                    title={it.is_extra ? 'Eliminar este producto de la auditoría (no pertenece a este anaquel)' : 'Reiniciar conteo físico a 0'}
+                                                                >
+                                                                    {it.is_extra ? '🗑️ Quitar' : '↺ Reset'}
+                                                                </button>
+                                                            </div>
                                                         </td>
                                                     </tr>
                                                 )
@@ -1624,6 +1842,67 @@ export default function ShelfAuditCreate({
                                 className="rounded-xl bg-emerald-600 px-5 py-2.5 text-xs font-bold text-white hover:bg-emerald-700 active:scale-95 disabled:opacity-50"
                             >
                                 {isSubmitting ? 'Aplicando Ajuste...' : 'Sí, Ajustar Inventario Ahora'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* ========================================================================= */}
+            {/* MODAL DE ADVERTENCIA: PRODUCTO FUERA DE ANAQUEL O MARCA                   */}
+            {/* ========================================================================= */}
+            {mismatchModal && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-xs animate-in fade-in duration-150">
+                    <div className="w-full max-w-md overflow-hidden rounded-3xl border-2 border-rose-300 bg-white p-6 shadow-2xl dark:border-rose-800 dark:bg-neutral-900">
+                        <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-rose-100 text-rose-600 dark:bg-rose-950 dark:text-rose-300">
+                            <span className="text-3xl">⛔</span>
+                        </div>
+
+                        <h3 className="mt-4 text-center text-lg font-black text-rose-900 dark:text-rose-200">
+                            {mismatchModal.title}
+                        </h3>
+
+                        <p className="mt-2 text-center text-xs text-slate-600 dark:text-slate-300">
+                            {mismatchModal.message}
+                        </p>
+
+                        {/* Product Card Inside Modal */}
+                        <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-3.5 dark:border-neutral-800 dark:bg-neutral-950">
+                            <p className="text-xs font-bold text-slate-900 dark:text-white line-clamp-2">
+                                {mismatchModal.product?.name}
+                            </p>
+                            <div className="mt-1 flex flex-wrap gap-2 font-mono text-[11px] text-slate-500 dark:text-slate-400">
+                                <span>SKU: {mismatchModal.product?.sku}</span>
+                                {mismatchModal.product?.barcode && <span>• Cód: {mismatchModal.product.barcode}</span>}
+                            </div>
+
+                            <div className="mt-3 grid grid-cols-2 gap-2 border-t border-slate-200 pt-2 text-xs dark:border-neutral-800">
+                                <div className="rounded-xl bg-rose-50 p-2 dark:bg-rose-950/40">
+                                    <span className="block text-[10px] font-bold uppercase text-rose-700 dark:text-rose-400">Ubicación Actual:</span>
+                                    <span className="font-bold text-rose-900 dark:text-rose-200">{mismatchModal.actualTarget}</span>
+                                </div>
+                                <div className="rounded-xl bg-indigo-50 p-2 dark:bg-indigo-950/40">
+                                    <span className="block text-[10px] font-bold uppercase text-indigo-700 dark:text-indigo-400">Anaquel Auditado:</span>
+                                    <span className="font-bold text-indigo-900 dark:text-indigo-200">{mismatchModal.expectedTarget}</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <p className="mt-3 text-center text-[11px] font-medium text-slate-500 dark:text-slate-400">
+                            👉 Por favor regresa este producto a su lugar físico correcto para evitar desajustes de inventario.
+                        </p>
+
+                        <div className="mt-5 flex justify-center">
+                            <button
+                                type="button"
+                                autoFocus
+                                onClick={() => {
+                                    setMismatchModal(null)
+                                    setTimeout(() => gunInputRef.current?.focus(), 100)
+                                }}
+                                className="w-full rounded-xl bg-slate-900 py-3 text-xs font-bold text-white shadow-sm hover:bg-slate-800 active:scale-95 dark:bg-white dark:text-slate-900"
+                            >
+                                Entendido, no agregar este producto
                             </button>
                         </div>
                     </div>

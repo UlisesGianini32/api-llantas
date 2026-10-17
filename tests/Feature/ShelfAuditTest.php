@@ -496,4 +496,150 @@ class ShelfAuditTest extends TestCase
         $this->assertGreaterThanOrEqual(0, $stockLoc1);
         $this->assertGreaterThanOrEqual(0, $stockLoc2);
     }
+
+    public function test_can_open_edit_page_for_in_progress_audit(): void
+    {
+        $audit = $this->auditService->createAudit([
+            'audit_type' => InventoryShelfAudit::AUDIT_TYPE_SHELF,
+            'shelf_code' => 'I4',
+            'notes' => 'Borrador inicial',
+            'apply_immediately' => false,
+            'items' => [
+                [
+                    'inventory_product_id' => $this->productA->id,
+                    'system_quantity' => 10,
+                    'counted_quantity' => 8,
+                ],
+            ],
+        ], $this->admin, false);
+
+        $response = $this->actingAs($this->admin)->get(route('inventory.audits.edit', $audit));
+        $response->assertStatus(200);
+        $response->assertInertia(fn ($page) => $page
+            ->component('Inventory/Audits/Create')
+            ->has('resumeAudit')
+            ->where('resumeAudit.id', $audit->id)
+            ->where('resumeAudit.shelf_code', 'I4')
+            ->has('initialProducts')
+        );
+    }
+
+    public function test_cannot_edit_already_applied_audit(): void
+    {
+        $audit = $this->auditService->createAudit([
+            'audit_type' => InventoryShelfAudit::AUDIT_TYPE_SHELF,
+            'shelf_code' => 'I4',
+            'notes' => 'Auditoría aplicada',
+            'apply_immediately' => true,
+            'items' => [
+                [
+                    'inventory_product_id' => $this->productA->id,
+                    'system_quantity' => 10,
+                    'counted_quantity' => 10,
+                ],
+            ],
+        ], $this->admin, true);
+
+        $response = $this->actingAs($this->admin)->get(route('inventory.audits.edit', $audit));
+        $response->assertRedirect(route('inventory.audits.show', $audit));
+    }
+
+    public function test_can_update_in_progress_audit_draft_via_put(): void
+    {
+        $audit = $this->auditService->createAudit([
+            'audit_type' => InventoryShelfAudit::AUDIT_TYPE_SHELF,
+            'shelf_code' => 'I4',
+            'notes' => 'Borrador inicial',
+            'apply_immediately' => false,
+            'items' => [
+                [
+                    'inventory_product_id' => $this->productA->id,
+                    'system_quantity' => 10,
+                    'counted_quantity' => 8,
+                ],
+            ],
+        ], $this->admin, false);
+
+        $payload = [
+            'audit_type' => InventoryShelfAudit::AUDIT_TYPE_SHELF,
+            'shelf_code' => 'I4',
+            'notes' => 'Borrador actualizado con nuevo conteo',
+            'apply_immediately' => false,
+            'items' => [
+                [
+                    'inventory_product_id' => $this->productA->id,
+                    'system_quantity' => 10,
+                    'counted_quantity' => 12, // Cambió de 8 a 12
+                    'location_breakdown' => 'I4-1: 10 pzas',
+                    'notes' => 'Reconteo físico',
+                ],
+            ],
+        ];
+
+        $response = $this->actingAs($this->admin)->putJson(route('inventory.audits.update', $audit), $payload);
+        $response->assertStatus(200);
+        $response->assertJsonPath('ok', true);
+
+        $audit->refresh();
+        $this->assertEquals(InventoryShelfAudit::STATUS_IN_PROGRESS, $audit->status);
+        $this->assertEquals('Borrador actualizado con nuevo conteo', $audit->notes);
+        $this->assertEquals(2, $audit->total_difference_units); // 12 - 10 = +2
+        $this->assertEquals(1, $audit->surplus_items_count);
+
+        $item = $audit->items()->first();
+        $this->assertEquals(12, $item->counted_quantity);
+    }
+
+    public function test_can_update_and_apply_in_progress_audit_via_put(): void
+    {
+        // 10 initial stock
+        $this->movementService->recordManual([
+            'inventory_product_id' => $this->productA->id,
+            'inventory_location_id' => $this->locI4_1->id,
+            'type' => InventoryMovement::RECEIPT,
+            'quantity' => 10,
+            'reference' => 'Lote Inicial',
+            'occurred_at' => now(),
+        ], $this->admin);
+
+        $audit = $this->auditService->createAudit([
+            'audit_type' => InventoryShelfAudit::AUDIT_TYPE_SHELF,
+            'shelf_code' => 'I4',
+            'notes' => 'Borrador para aplicar luego',
+            'apply_immediately' => false,
+            'items' => [
+                [
+                    'inventory_product_id' => $this->productA->id,
+                    'system_quantity' => 10,
+                    'counted_quantity' => 10,
+                ],
+            ],
+        ], $this->admin, false);
+
+        $payload = [
+            'audit_type' => InventoryShelfAudit::AUDIT_TYPE_SHELF,
+            'shelf_code' => 'I4',
+            'notes' => 'Aplicado final',
+            'apply_immediately' => true,
+            'items' => [
+                [
+                    'inventory_product_id' => $this->productA->id,
+                    'system_quantity' => 10,
+                    'counted_quantity' => 14, // +4 surplus
+                ],
+            ],
+        ];
+
+        $response = $this->actingAs($this->admin)->putJson(route('inventory.audits.update', $audit), $payload);
+        $response->assertStatus(200);
+        $response->assertJsonPath('ok', true);
+
+        $audit->refresh();
+        $this->assertEquals(InventoryShelfAudit::STATUS_APPLIED, $audit->status);
+        $this->assertEquals(4, $audit->total_difference_units);
+
+        $stock = InventoryMovement::where('inventory_product_id', $this->productA->id)->sum('quantity');
+        $this->assertEquals(14, $stock);
+    }
 }
+

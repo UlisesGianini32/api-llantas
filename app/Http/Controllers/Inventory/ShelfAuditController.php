@@ -32,7 +32,7 @@ class ShelfAuditController extends Controller
         }
 
         if ($request->filled('status')) {
-            $query->where('status', (string) $request->input('status'));
+            $query->where('status', strtoupper(trim((string) $request->input('status'))));
         }
 
         if ($request->filled('search')) {
@@ -246,6 +246,149 @@ class ShelfAuditController extends Controller
                 'sub_locations' => $locations->pluck('code')->all(),
             ],
         ]);
+    }
+
+    public function edit(InventoryShelfAudit $shelfAudit): Response|RedirectResponse
+    {
+        if (strtoupper((string) $shelfAudit->status) !== InventoryShelfAudit::STATUS_IN_PROGRESS) {
+            return redirect()->route('inventory.audits.show', $shelfAudit)
+                ->with('warning', 'Esta auditoría ya fue aplicada y no se puede modificar.');
+        }
+
+        $shelfAudit->load([
+            'location:id,code,name',
+            'items.product:id,sku,barcode,barcode_secondary,name,brand,cost,primary_location_id',
+            'items.product.primaryLocation:id,code,name',
+        ]);
+
+        $shelves = $this->auditService->getShelves();
+        $brands = $this->auditService->getBrands();
+
+        $auditType = $shelfAudit->audit_type ?: 'shelf';
+        $shelfCode = $shelfAudit->shelf_code ?: ($shelfAudit->location?->code ? ShelfAuditService::extractShelfCode($shelfAudit->location->code) : null);
+        $brandName = $shelfAudit->brand_name;
+
+        // 1. Obtener los productos esperados del anaquel o marca
+        $expectedCollection = $auditType === 'brand' && $brandName
+            ? $this->auditService->getBrandExpectedProducts($brandName)
+            : ($shelfCode ? $this->auditService->getShelfExpectedProducts($shelfCode) : collect([]));
+
+        $expectedProducts = $expectedCollection->keyBy('id');
+
+        // 2. Mapear los items guardados en la auditoría existente
+        $existingAuditItems = [];
+        foreach ($shelfAudit->items as $item) {
+            $prod = $item->product;
+            if (! $prod) {
+                continue;
+            }
+
+            $existingAuditItems[$prod->id] = [
+                'id' => $prod->id,
+                'product_id' => $prod->id,
+                'sku' => $prod->sku,
+                'barcode' => $prod->barcode,
+                'barcode_secondary' => $prod->barcode_secondary,
+                'name' => $prod->name,
+                'brand' => $prod->brand,
+                'primary_location' => $prod->primaryLocation?->code,
+                'primary_location_id' => $prod->primary_location_id,
+                'system_stock' => $item->system_quantity,
+                'system_quantity' => $item->system_quantity,
+                'location_breakdown' => $item->location_breakdown ?: 'Sin desglose',
+                'counted_quantity' => $item->counted_quantity,
+                'notes' => $item->notes ?: '',
+                'scanned' => ($item->counted_quantity > 0),
+                'is_extra' => ! $item->is_assigned_location,
+            ];
+        }
+
+        // 3. Mezclar: Los que estaban en expected pero aún no se contaron se agregan con counted = 0
+        foreach ($expectedProducts as $pId => $expProd) {
+            if (! isset($existingAuditItems[$pId])) {
+                $existingAuditItems[$pId] = [
+                    'id' => $expProd['id'],
+                    'product_id' => $expProd['id'],
+                    'sku' => $expProd['sku'],
+                    'barcode' => $expProd['barcode'] ?? null,
+                    'barcode_secondary' => $expProd['barcode_secondary'] ?? null,
+                    'name' => $expProd['name'],
+                    'brand' => $expProd['brand'] ?? null,
+                    'primary_location' => $expProd['primary_location'] ?? null,
+                    'primary_location_id' => $expProd['primary_location_id'] ?? null,
+                    'system_stock' => $expProd['system_stock'] ?? 0,
+                    'system_quantity' => $expProd['system_quantity'] ?? 0,
+                    'location_breakdown' => $expProd['location_breakdown'] ?? 'Sin stock previo',
+                    'counted_quantity' => 0,
+                    'notes' => '',
+                    'scanned' => false,
+                    'is_extra' => false,
+                ];
+            }
+        }
+
+        $initialProducts = array_values($existingAuditItems);
+
+        return Inertia::render('Inventory/Audits/Create', [
+            'shelves' => $shelves,
+            'brands' => $brands,
+            'initialAuditType' => $auditType,
+            'preselectedShelfCode' => $shelfCode,
+            'preselectedBrand' => $brandName,
+            'initialProducts' => $initialProducts,
+            'resumeAudit' => [
+                'id' => $shelfAudit->id,
+                'audit_number' => $shelfAudit->audit_number,
+                'audit_type' => $auditType,
+                'shelf_code' => $shelfCode,
+                'brand_name' => $brandName,
+                'notes' => $shelfAudit->notes ?: '',
+            ],
+        ]);
+    }
+
+    public function update(Request $request, InventoryShelfAudit $shelfAudit): JsonResponse|RedirectResponse
+    {
+        $validated = $request->validate([
+            'notes' => ['nullable', 'string', 'max:2000'],
+            'apply_immediately' => ['nullable', 'boolean'],
+            'items' => ['required', 'array', 'min:1'],
+            'items.*.inventory_product_id' => ['required', 'integer', 'exists:inventory_products,id'],
+            'items.*.system_quantity' => ['required', 'integer'],
+            'items.*.counted_quantity' => ['required', 'integer', 'min:0'],
+            'items.*.location_breakdown' => ['nullable', 'string', 'max:500'],
+            'items.*.notes' => ['nullable', 'string', 'max:500'],
+        ]);
+
+        try {
+            $applyImmediately = ! empty($validated['apply_immediately']);
+            $audit = $this->auditService->updateAudit($shelfAudit, $validated, $request->user(), $applyImmediately);
+
+            $targetLabel = $audit->audit_type === 'brand'
+                ? "la Marca {$audit->brand_name}"
+                : "el Anaquel ".($audit->shelf_code ?: ($audit->location?->code ?? 'General'));
+
+            $message = $applyImmediately
+                ? "¡Auditoría {$audit->audit_number} aplicada con éxito! El inventario de {$targetLabel} fue ajustado a lo contado."
+                : "Auditoría {$audit->audit_number} actualizada como borrador.";
+
+            if ($request->wantsJson()) {
+                return response()->json([
+                    'ok' => true,
+                    'message' => $message,
+                    'audit' => $audit,
+                ]);
+            }
+
+            return redirect()->route('inventory.audits.show', $audit)
+                ->with('success', $message);
+        } catch (\Throwable $e) {
+            if ($request->wantsJson()) {
+                return response()->json(['ok' => false, 'error' => $e->getMessage()], 422);
+            }
+
+            return back()->with('error', $e->getMessage())->withInput();
+        }
     }
 
     public function apply(Request $request, InventoryShelfAudit $shelfAudit): JsonResponse|RedirectResponse
