@@ -14,6 +14,8 @@ class PurchaseOrder extends Model
 
     public const STATUS_PARTIAL = 'PARTIAL';
 
+    public const STATUS_PARTIAL_CLOSED = 'PARTIAL_CLOSED';
+
     public const STATUS_RECEIVED = 'RECEIVED';
 
     public const STATUS_CANCELLED = 'CANCELLED';
@@ -22,6 +24,7 @@ class PurchaseOrder extends Model
         self::STATUS_DRAFT,
         self::STATUS_ORDERED,
         self::STATUS_PARTIAL,
+        self::STATUS_PARTIAL_CLOSED,
         self::STATUS_RECEIVED,
         self::STATUS_CANCELLED,
     ];
@@ -105,6 +108,11 @@ class PurchaseOrder extends Model
     public function isPartial(): bool
     {
         return $this->status === self::STATUS_PARTIAL;
+    }
+
+    public function isPartialClosed(): bool
+    {
+        return $this->status === self::STATUS_PARTIAL_CLOSED;
     }
 
     public function isReceived(): bool

@@ -215,6 +215,10 @@ Route::middleware(['auth', 'role'])->group(function () {
             ->whereNumber('purchaseOrder')->name('receive');
         Route::post('/{purchaseOrder}/recepcionar', [PurchaseOrderController::class, 'receive'])
             ->whereNumber('purchaseOrder');
+        Route::post('/{purchaseOrder}/cerrar-parcial', [PurchaseOrderController::class, 'closePartial'])
+            ->whereNumber('purchaseOrder')->name('close-partial');
+        Route::delete('/{purchaseOrder}/recibos/{receipt}', [PurchaseOrderController::class, 'voidReceipt'])
+            ->whereNumber('purchaseOrder')->whereNumber('receipt')->name('void-receipt');
         Route::post('/{purchaseOrder}/cancelar', [PurchaseOrderController::class, 'cancel'])
             ->whereNumber('purchaseOrder')->name('cancel');
     });

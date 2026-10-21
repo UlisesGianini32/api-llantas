@@ -515,4 +515,199 @@ class PurchaseOrderTest extends TestCase
             'quantity' => 6,
         ]);
     }
+
+    public function test_prevents_duplicate_reception_when_item_already_fully_received(): void
+    {
+        $order = $this->service->createOrder([
+            'supplier_name' => 'Proveedor Belleza',
+            'inventory_location_id' => $this->location->id,
+            'items' => [
+                [
+                    'inventory_product_id' => $this->productA->id,
+                    'quantity_ordered' => 6,
+                    'unit_cost' => 100.0,
+                ],
+                [
+                    'inventory_product_id' => $this->productB->id,
+                    'quantity_ordered' => 12,
+                    'unit_cost' => 100.0,
+                ],
+            ],
+        ], $this->admin);
+
+        $this->service->markAsOrdered($order);
+        $items = $order->fresh()->items;
+        $itemA = $items->firstWhere('inventory_product_id', $this->productA->id);
+        $itemB = $items->firstWhere('inventory_product_id', $this->productB->id);
+
+        // 1ra recepción: se reciben las 6 piezas de itemA (100%) y 0 de itemB
+        $this->service->receiveItems($order, [
+            [
+                'item_id' => $itemA->id,
+                'quantity_received' => 6,
+            ],
+        ], $this->admin);
+
+        $this->assertEquals(6, $itemA->fresh()->quantity_received);
+        $this->assertEquals(0, $itemA->fresh()->quantityPending());
+        $this->assertEquals(PurchaseOrder::STATUS_PARTIAL, $order->fresh()->status);
+
+        // Intento de re-recibir itemA en una orden parcial abierta debe fallar para evitar duplicados
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage("ya fue recibido completamente");
+
+        $this->service->receiveItems($order->fresh(), [
+            [
+                'item_id' => $itemA->id,
+                'quantity_received' => 6,
+            ],
+        ], $this->admin);
+    }
+
+    public function test_can_close_partial_order_definitively_preventing_future_receipts(): void
+    {
+        $order = $this->service->createOrder([
+            'supplier_name' => 'Proveedor Belleza',
+            'inventory_location_id' => $this->location->id,
+            'items' => [
+                [
+                    'inventory_product_id' => $this->productA->id,
+                    'quantity_ordered' => 10,
+                    'unit_cost' => 100.0,
+                ],
+            ],
+        ], $this->admin);
+
+        $this->service->markAsOrdered($order);
+        $item = $order->fresh()->items->first();
+
+        // Recepción parcial: solo llegaron 4 piezas
+        $this->service->receiveItems($order, [
+            [
+                'item_id' => $item->id,
+                'quantity_received' => 4,
+            ],
+        ], $this->admin);
+
+        $this->assertEquals(PurchaseOrder::STATUS_PARTIAL, $order->fresh()->status);
+        $this->assertTrue($order->fresh()->canBeReceived());
+
+        // Cierre definitivo de la orden parcial vía HTTP endpoint
+        $response = $this->actingAs($this->admin)->post("/compras/ordenes/{$order->id}/cerrar-parcial", [
+            'reason' => 'Proveedor no cuenta con más piezas en stock.',
+        ]);
+
+        $response->assertSessionHasNoErrors();
+        $freshOrder = $order->fresh();
+
+        $this->assertEquals(PurchaseOrder::STATUS_PARTIAL_CLOSED, $freshOrder->status);
+        $this->assertTrue($freshOrder->isPartialClosed());
+        $this->assertFalse($freshOrder->canBeReceived());
+        $this->assertNotNull($freshOrder->received_at);
+        $this->assertStringContainsString('Cierre Parcial Definitivo', $freshOrder->notes);
+
+        // Si intentan recibirla nuevamente, el servicio debe bloquearlo
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage("ya fue finalizada y cerrada como recepción parcial");
+
+        $this->service->receiveItems($freshOrder, [
+            [
+                'item_id' => $item->id,
+                'quantity_received' => 2,
+            ],
+        ], $this->admin);
+    }
+
+    public function test_can_receive_with_close_order_flag_setting_partial_closed(): void
+    {
+        $order = $this->service->createOrder([
+            'supplier_name' => 'Proveedor Belleza',
+            'inventory_location_id' => $this->location->id,
+            'items' => [
+                [
+                    'inventory_product_id' => $this->productA->id,
+                    'quantity_ordered' => 12,
+                    'unit_cost' => 100.0,
+                ],
+            ],
+        ], $this->admin);
+
+        $this->service->markAsOrdered($order);
+        $item = $order->fresh()->items->first();
+
+        // Recepción con bandera close_order = true vía endpoint
+        $response = $this->actingAs($this->admin)->post("/compras/ordenes/{$order->id}/recibir", [
+            'close_order' => true,
+            'items' => [
+                [
+                    'item_id' => $item->id,
+                    'quantity_received' => 8,
+                ],
+            ],
+        ]);
+
+        $response->assertSessionHasNoErrors();
+        $freshOrder = $order->fresh();
+
+        $this->assertEquals(PurchaseOrder::STATUS_PARTIAL_CLOSED, $freshOrder->status);
+        $this->assertEquals(8, $freshOrder->total_units_received);
+        $this->assertFalse($freshOrder->canBeReceived());
+    }
+
+    public function test_can_void_receipt_and_revert_physical_inventory_stock(): void
+    {
+        $order = $this->service->createOrder([
+            'supplier_name' => 'Proveedor Belleza',
+            'inventory_location_id' => $this->location->id,
+            'items' => [
+                [
+                    'inventory_product_id' => $this->productA->id,
+                    'quantity_ordered' => 6,
+                    'unit_cost' => 150.0,
+                ],
+            ],
+        ], $this->admin);
+
+        $this->service->markAsOrdered($order);
+        $item = $order->fresh()->items->first();
+
+        // Recepción original
+        $receipt = $this->service->receiveItems($order, [
+            [
+                'item_id' => $item->id,
+                'quantity_received' => 6,
+            ],
+        ], $this->admin);
+
+        $this->assertEquals(6, $item->fresh()->quantity_received);
+        $this->assertDatabaseHas('inventory_movements', [
+            'inventory_product_id' => $this->productA->id,
+            'type' => InventoryMovement::RECEIPT,
+            'quantity' => 6,
+        ]);
+
+        // Anular el comprobante vía endpoint
+        $response = $this->actingAs($this->admin)->delete("/compras/ordenes/{$order->id}/recibos/{$receipt->id}", [
+            'reason' => 'Recepción duplicada por error',
+        ]);
+
+        $response->assertSessionHasNoErrors();
+
+        // Comprobante eliminado
+        $this->assertDatabaseMissing('purchase_order_receipts', ['id' => $receipt->id]);
+
+        // Unidades recibidas restadas del ítem
+        $this->assertEquals(0, $item->fresh()->quantity_received);
+
+        // Movimiento de reversión (ADJUSTMENT_OUT negativo) generado en inventario
+        $this->assertDatabaseHas('inventory_movements', [
+            'inventory_product_id' => $this->productA->id,
+            'type' => InventoryMovement::ADJUSTMENT_OUT,
+            'quantity' => -6,
+        ]);
+
+        // Orden de compra recalculada a estado ORDERED
+        $this->assertEquals(PurchaseOrder::STATUS_ORDERED, $order->fresh()->status);
+        $this->assertEquals(0, $order->fresh()->total_units_received);
+    }
 }

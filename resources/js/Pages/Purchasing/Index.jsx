@@ -33,6 +33,10 @@ const STATUS_BADGES = {
         label: 'Recepción Parcial',
         bg: 'bg-amber-100 text-amber-800 border-amber-300 dark:bg-amber-900/40 dark:text-amber-300 dark:border-amber-700',
     },
+    PARTIAL_CLOSED: {
+        label: 'Parcial Finalizada (Cerrada)',
+        bg: 'bg-purple-100 text-purple-800 border-purple-300 dark:bg-purple-900/40 dark:text-purple-300 dark:border-purple-700',
+    },
     RECEIVED: {
         label: 'Recibida Completa',
         bg: 'bg-emerald-100 text-emerald-800 border-emerald-300 dark:bg-emerald-900/40 dark:text-emerald-300 dark:border-emerald-700',
@@ -194,7 +198,8 @@ export default function PurchasingIndex({
                                 <option value="">Todos los Estados</option>
                                 <option value="DRAFT">Borradores</option>
                                 <option value="ORDERED">Colocadas (En tránsito)</option>
-                                <option value="PARTIAL">Recepción Parcial</option>
+                                <option value="PARTIAL">Recepción Parcial (Abierta)</option>
+                                <option value="PARTIAL_CLOSED">Parcial Finalizada (Cerrada)</option>
                                 <option value="RECEIVED">Recibidas Completo</option>
                                 <option value="CANCELLED">Canceladas</option>
                             </select>

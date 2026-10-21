@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\InventoryLocation;
 use App\Models\InventoryProduct;
 use App\Models\PurchaseOrder;
+use App\Models\PurchaseOrderReceipt;
 use App\Models\Supplier;
 use App\Services\Purchasing\PurchaseOrderService;
 use Illuminate\Http\JsonResponse;
@@ -54,7 +55,7 @@ class PurchaseOrderController extends Controller
             'total_orders' => PurchaseOrder::count(),
             'draft_count' => PurchaseOrder::where('status', PurchaseOrder::STATUS_DRAFT)->count(),
             'ordered_count' => PurchaseOrder::where('status', PurchaseOrder::STATUS_ORDERED)->count(),
-            'partial_count' => PurchaseOrder::where('status', PurchaseOrder::STATUS_PARTIAL)->count(),
+            'partial_count' => PurchaseOrder::whereIn('status', [PurchaseOrder::STATUS_PARTIAL, PurchaseOrder::STATUS_PARTIAL_CLOSED])->count(),
             'received_count' => PurchaseOrder::where('status', PurchaseOrder::STATUS_RECEIVED)->count(),
             'total_invested' => (float) PurchaseOrder::whereNotIn('status', [PurchaseOrder::STATUS_CANCELLED])->sum('total_cost'),
         ];
@@ -259,10 +260,12 @@ class PurchaseOrderController extends Controller
             'carrier' => ['nullable', 'string', 'max:100'],
             'tracking_number' => ['nullable', 'string', 'max:100'],
             'notes' => ['nullable', 'string', 'max:1000'],
+            'close_order' => ['nullable', 'boolean'],
             'items' => ['required', 'array', 'min:1'],
             'items.*.item_id' => ['nullable', 'integer'],
             'items.*.product_id' => ['nullable', 'integer', 'exists:inventory_products,id'],
             'items.*.quantity_received' => ['required', 'integer', 'min:1'],
+            'items.*.allow_over_receipt' => ['nullable', 'boolean'],
         ]);
 
         try {
@@ -273,7 +276,8 @@ class PurchaseOrderController extends Controller
                 $validated['inventory_location_id'] ?? null,
                 $validated['carrier'] ?? null,
                 $validated['tracking_number'] ?? null,
-                $validated['notes'] ?? null
+                $validated['notes'] ?? null,
+                (bool) ($validated['close_order'] ?? false)
             );
 
             if ($request->wantsJson()) {
@@ -286,6 +290,72 @@ class PurchaseOrderController extends Controller
             }
 
             return back()->with('success', "Recepción {$receipt->receipt_number} procesada correctamente.");
+        } catch (Throwable $e) {
+            if ($request->wantsJson()) {
+                return response()->json(['ok' => false, 'error' => $e->getMessage()], 422);
+            }
+
+            return back()->with('error', $e->getMessage());
+        }
+    }
+
+    public function closePartial(Request $request, PurchaseOrder $purchaseOrder): JsonResponse|RedirectResponse
+    {
+        $validated = $request->validate([
+            'reason' => ['nullable', 'string', 'max:500'],
+        ]);
+
+        try {
+            $updated = $this->poService->closePartialOrder(
+                $purchaseOrder,
+                $request->user(),
+                $validated['reason'] ?? null
+            );
+
+            if ($request->wantsJson()) {
+                return response()->json([
+                    'ok' => true,
+                    'message' => "Orden {$updated->order_number} cerrada definitivamente con recepción parcial.",
+                    'order' => $updated,
+                ]);
+            }
+
+            return back()->with('success', "Orden {$updated->order_number} cerrada definitivamente con recepción parcial.");
+        } catch (Throwable $e) {
+            if ($request->wantsJson()) {
+                return response()->json(['ok' => false, 'error' => $e->getMessage()], 422);
+            }
+
+            return back()->with('error', $e->getMessage());
+        }
+    }
+
+    public function voidReceipt(Request $request, PurchaseOrder $purchaseOrder, PurchaseOrderReceipt $receipt): JsonResponse|RedirectResponse
+    {
+        $validated = $request->validate([
+            'reason' => ['nullable', 'string', 'max:500'],
+        ]);
+
+        try {
+            if ($receipt->purchase_order_id !== $purchaseOrder->id) {
+                abort(404, 'El comprobante de recepción no pertenece a esta orden.');
+            }
+
+            $updated = $this->poService->voidReceipt(
+                $receipt,
+                $request->user(),
+                $validated['reason'] ?? null
+            );
+
+            if ($request->wantsJson()) {
+                return response()->json([
+                    'ok' => true,
+                    'message' => "Comprobante {$receipt->receipt_number} anulado e inventario revertido correctamente.",
+                    'order' => $updated,
+                ]);
+            }
+
+            return back()->with('success', "Comprobante {$receipt->receipt_number} anulado e inventario revertido correctamente.");
         } catch (Throwable $e) {
             if ($request->wantsJson()) {
                 return response()->json(['ok' => false, 'error' => $e->getMessage()], 422);

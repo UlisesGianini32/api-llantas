@@ -126,7 +126,7 @@ class PurchaseOrderService
     }
 
     /**
-     * @param  array<int, array{item_id?: int, product_id?: int, quantity_received: int}>  $itemsToReceive
+     * @param  array<int, array{item_id?: int, product_id?: int, quantity_received: int, allow_over_receipt?: bool}>  $itemsToReceive
      */
     public function receiveItems(
         PurchaseOrder $order,
@@ -135,9 +135,13 @@ class PurchaseOrderService
         ?int $locationId = null,
         ?string $carrier = null,
         ?string $tracking = null,
-        ?string $notes = null
+        ?string $notes = null,
+        bool $closeOrder = false
     ): PurchaseOrderReceipt {
         if (! $order->canBeReceived()) {
+            if ($order->isPartialClosed()) {
+                throw new InvalidArgumentException("La orden de compra {$order->order_number} ya fue finalizada y cerrada como recepción parcial. No se permiten más ingresos para evitar duplicar inventario.");
+            }
             throw new InvalidArgumentException("La orden de compra {$order->order_number} no está lista para recepción. Estado actual: {$order->status}");
         }
 
@@ -159,7 +163,8 @@ class PurchaseOrderService
             $locationId,
             $carrier,
             $tracking,
-            $notes
+            $notes,
+            $closeOrder
         ) {
             $receiptNumber = $this->generateReceiptNumber();
 
@@ -193,6 +198,25 @@ class PurchaseOrderService
                         ->where('id', $itemId)
                         ->lockForUpdate()
                         ->firstOrFail();
+
+                    $pending = $orderItem->quantityPending();
+                    $allowOverReceipt = ! empty($receivedEntry['allow_over_receipt']);
+
+                    // Protección anti-duplicados: Si la partida ya fue 100% recibida previamente y no se solicita explícitamente excedente
+                    if ($pending === 0 && ! $allowOverReceipt) {
+                        throw new InvalidArgumentException(
+                            "El producto '{$orderItem->product_name}' (SKU: {$orderItem->sku}) ya fue recibido completamente ({$orderItem->quantity_received} de {$orderItem->quantity_ordered}). " .
+                            "Para evitar ingresos duplicados en almacén, esta partida no admite más unidades."
+                        );
+                    }
+
+                    // Protección anti-duplicados: No permitir recibir más del saldo pendiente salvo excedente explícito
+                    if ($qty > $pending && ! $allowOverReceipt) {
+                        throw new InvalidArgumentException(
+                            "No se pueden recibir {$qty} unidades de '{$orderItem->product_name}'. Solo restan {$pending} unidades pendientes. " .
+                            "Verifica la cantidad para evitar duplicar entradas en almacén."
+                        );
+                    }
 
                     $product = $orderItem->product ?? InventoryProduct::find($orderItem->inventory_product_id);
 
@@ -236,9 +260,6 @@ class PurchaseOrderService
                 ]);
 
                 // Ubicación física de entrada:
-                // Si el usuario especificó una ubicación manual ($locationId), se usa esa.
-                // Si no (modo automático), cada producto ingresa a su estante asignado en el catálogo.
-                // Si el producto no tiene estante asignado, ingresa a la ubicación general de respaldo.
                 $itemLocationId = null;
                 if (! empty($locationId)) {
                     $itemLocationId = (int) $locationId;
@@ -279,17 +300,127 @@ class PurchaseOrderService
             $newOrderTotalOrdered = (int) $allItems->sum('quantity_ordered');
             $newOrderTotalCost = (float) $allItems->sum('subtotal');
 
+            $finalStatus = PurchaseOrder::STATUS_PARTIAL;
+            if ($allReceived) {
+                $finalStatus = PurchaseOrder::STATUS_RECEIVED;
+            } elseif ($closeOrder) {
+                $finalStatus = PurchaseOrder::STATUS_PARTIAL_CLOSED;
+            }
+
+            $finalNotes = $order->notes;
+            if ($closeOrder && ! $allReceived) {
+                $pendingUnits = max(0, $newOrderTotalOrdered - $newOrderTotalReceived);
+                $closeNotice = "[Cierre Parcial Definitivo]: Recepción finalizada el " . now()->format('d/m/Y H:i') . " por {$receiver->name}. Se cancelaron {$pendingUnits} unidades faltantes y se cerró la orden para evitar entradas duplicadas.";
+                $finalNotes = trim(($finalNotes ? $finalNotes . "\n" : '') . $closeNotice);
+            }
+
             $order->update([
                 'total_items_count' => $allItems->count(),
                 'total_units_ordered' => $newOrderTotalOrdered,
                 'total_units_received' => $newOrderTotalReceived,
                 'total_cost' => $newOrderTotalCost,
                 'subtotal' => $newOrderTotalCost,
-                'status' => $allReceived ? PurchaseOrder::STATUS_RECEIVED : PurchaseOrder::STATUS_PARTIAL,
-                'received_at' => $allReceived ? now() : null,
+                'status' => $finalStatus,
+                'received_at' => ($allReceived || $closeOrder) ? now() : null,
+                'notes' => $finalNotes,
             ]);
 
             return $receipt->load(['order', 'receivedBy', 'location', 'items.product', 'items.orderItem']);
+        });
+    }
+
+    /**
+     * Cerrar definitivamente una orden que tiene recepción parcial activa (evita recepciones duplicadas)
+     */
+    public function closePartialOrder(PurchaseOrder $order, User $user, ?string $reason = null): PurchaseOrder
+    {
+        if (! $order->isPartial()) {
+            throw new InvalidArgumentException("Solo se pueden cerrar órdenes en recepción parcial activa (PARTIAL). Estado actual: {$order->status}");
+        }
+
+        return DB::transaction(function () use ($order, $user, $reason) {
+            $pendingUnits = max(0, $order->total_units_ordered - $order->total_units_received);
+            $reasonText = $reason ? trim($reason) : 'Cierre de orden con faltantes para evitar ingresos duplicados.';
+            $closeNotice = "[Cierre Parcial Definitivo]: Orden finalizada el " . now()->format('d/m/Y H:i') . " por {$user->name}. {$pendingUnits} unidades no entregadas quedan canceladas. Motivo: {$reasonText}";
+
+            $order->update([
+                'status' => PurchaseOrder::STATUS_PARTIAL_CLOSED,
+                'received_at' => now(),
+                'notes' => trim(($order->notes ? $order->notes . "\n" : '') . $closeNotice),
+            ]);
+
+            return $order->fresh(['location', 'buyer', 'items.product', 'receipts']);
+        });
+    }
+
+    /**
+     * Anular y revertir un comprobante de recepción erróneo o duplicado, descontando el inventario ingresado
+     */
+    public function voidReceipt(PurchaseOrderReceipt $receipt, User $user, ?string $reason = null): PurchaseOrder
+    {
+        return DB::transaction(function () use ($receipt, $user, $reason) {
+            $order = $receipt->order()->lockForUpdate()->firstOrFail();
+            $receipt->load(['items.orderItem']);
+
+            $reasonText = $reason ? trim($reason) : 'Anulación de recepción duplicada / errónea';
+
+            foreach ($receipt->items as $rItem) {
+                $qty = (int) $rItem->quantity_received;
+                if ($qty <= 0) {
+                    continue;
+                }
+
+                $orderItem = $rItem->orderItem;
+                if ($orderItem) {
+                    $newReceived = max(0, $orderItem->quantity_received - $qty);
+                    $orderItem->update([
+                        'quantity_received' => $newReceived,
+                        'status' => $newReceived >= $orderItem->quantity_ordered
+                            ? PurchaseOrderItem::STATUS_RECEIVED
+                            : ($newReceived > 0 ? PurchaseOrderItem::STATUS_PARTIAL : PurchaseOrderItem::STATUS_PENDING),
+                    ]);
+                }
+
+                // Generar movimiento atómico de reversión de inventario físico en el ledger
+                $locId = $receipt->inventory_location_id ?: $order->inventory_location_id;
+                InventoryMovement::create([
+                    'inventory_product_id' => $rItem->inventory_product_id,
+                    'inventory_location_id' => $locId,
+                    'type' => InventoryMovement::ADJUSTMENT_OUT,
+                    'quantity' => -$qty,
+                    'reference_type' => 'purchase_order',
+                    'reference_id' => $order->id,
+                    'reference' => "Anulación Comprobante {$receipt->receipt_number} (OC #{$order->order_number})",
+                    'notes' => "Reversión por anulación de recibo duplicado por {$user->name}. Motivo: {$reasonText}",
+                    'created_by' => $user->id,
+                    'occurred_at' => now(),
+                ]);
+            }
+
+            // Eliminar recibo
+            $receiptNumber = $receipt->receipt_number;
+            $units = $receipt->total_units_received;
+            $receipt->delete();
+
+            // Recalcular orden
+            $order->refresh();
+            $allItems = $order->items;
+            $totalReceived = (int) $allItems->sum('quantity_received');
+            $allReceived = $allItems->every(fn ($it) => $it->isFullyReceived());
+
+            $newStatus = PurchaseOrder::STATUS_ORDERED;
+            if ($totalReceived > 0) {
+                $newStatus = $allReceived ? PurchaseOrder::STATUS_RECEIVED : PurchaseOrder::STATUS_PARTIAL;
+            }
+
+            $order->update([
+                'total_units_received' => $totalReceived,
+                'status' => $newStatus,
+                'received_at' => $allReceived ? now() : null,
+                'notes' => trim(($order->notes ? $order->notes . "\n" : '') . "[Anulación]: Se anuló el recibo {$receiptNumber} ({$units} pzas revertidas en almacén) el " . now()->format('d/m/Y H:i') . " por {$user->name}."),
+            ]);
+
+            return $order->fresh(['location', 'buyer', 'items.product', 'receipts.items']);
         });
     }
 

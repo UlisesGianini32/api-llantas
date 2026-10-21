@@ -55,6 +55,10 @@ const STATUS_BADGES = {
         label: 'Recepción Parcial',
         bg: 'bg-amber-100 text-amber-800 border-amber-300 dark:bg-amber-900/40 dark:text-amber-300 dark:border-amber-700',
     },
+    PARTIAL_CLOSED: {
+        label: 'Parcial Finalizada (Cerrada)',
+        bg: 'bg-purple-100 text-purple-800 border-purple-300 dark:bg-purple-900/40 dark:text-purple-300 dark:border-purple-700',
+    },
     RECEIVED: {
         label: 'Recibida Completa',
         bg: 'bg-emerald-100 text-emerald-800 border-emerald-300 dark:bg-emerald-900/40 dark:text-emerald-300 dark:border-emerald-700',
@@ -113,6 +117,7 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
         }))
     )
     const [receiveSubmitting, setReceiveSubmitting] = useState(false)
+    const [receiveCloseOrder, setReceiveCloseOrder] = useState(false)
 
     // Scanner & Camera state in reception modal
     const [scanBarcode, setScanBarcode] = useState('')
@@ -124,6 +129,17 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
     const [catalogQuery, setCatalogQuery] = useState('')
     const [catalogResults, setCatalogResults] = useState([])
     const [catalogLoading, setCatalogLoading] = useState(false)
+
+    // Modal states: Cierre definitivo de orden parcial
+    const [closePartialModalOpen, setClosePartialModalOpen] = useState(false)
+    const [closePartialReason, setClosePartialReason] = useState('')
+    const [closePartialSubmitting, setClosePartialSubmitting] = useState(false)
+
+    // Modal states: Anulación de comprobante de recepción
+    const [voidReceiptModalOpen, setVoidReceiptModalOpen] = useState(false)
+    const [receiptToVoid, setReceiptToVoid] = useState(null)
+    const [voidReceiptReason, setVoidReceiptReason] = useState('')
+    const [voidReceiptSubmitting, setVoidReceiptSubmitting] = useState(false)
 
     // Modal states: Cancelación
     const [cancelModalOpen, setCancelModalOpen] = useState(false)
@@ -485,12 +501,56 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                 carrier: receiveCarrier,
                 tracking_number: receiveTracking,
                 notes: receiveNotes,
+                close_order: receiveCloseOrder,
                 items: payloadItems,
             },
             {
                 onFinish: () => {
                     setReceiveSubmitting(false)
                     setReceiveModalOpen(false)
+                },
+            }
+        )
+    }
+
+    // Handle "Close Partial Order Definitively"
+    const handleClosePartialSubmit = (e) => {
+        e.preventDefault()
+        setClosePartialSubmitting(true)
+        router.post(
+            `/compras/ordenes/${order.id}/cerrar-parcial`,
+            { reason: closePartialReason },
+            {
+                onFinish: () => {
+                    setClosePartialSubmitting(false)
+                    setClosePartialModalOpen(false)
+                    setClosePartialReason('')
+                },
+            }
+        )
+    }
+
+    // Handle "Void Receipt & Revert Inventory"
+    const handleOpenVoidReceiptModal = (rcpt) => {
+        setReceiptToVoid(rcpt)
+        setVoidReceiptReason('Recepción duplicada / errónea')
+        setVoidReceiptModalOpen(true)
+    }
+
+    const handleVoidReceiptSubmit = (e) => {
+        e.preventDefault()
+        if (!receiptToVoid) return
+
+        setVoidReceiptSubmitting(true)
+        router.delete(
+            `/compras/ordenes/${order.id}/recibos/${receiptToVoid.id}`,
+            {
+                data: { reason: voidReceiptReason },
+                onFinish: () => {
+                    setVoidReceiptSubmitting(false)
+                    setVoidReceiptModalOpen(false)
+                    setReceiptToVoid(null)
+                    setVoidReceiptReason('')
                 },
             }
         )
@@ -649,6 +709,20 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                                     Recibir Mercancía en Almacén
                                 </button>
 
+                                {order.status === 'PARTIAL' && (
+                                    <button
+                                        type="button"
+                                        onClick={() => setClosePartialModalOpen(true)}
+                                        className="inline-flex items-center gap-2 rounded-xl border border-purple-300 bg-purple-50 px-3.5 py-2 text-sm font-semibold text-purple-700 shadow-sm transition hover:bg-purple-100 dark:border-purple-800 dark:bg-purple-950/40 dark:text-purple-300 dark:hover:bg-purple-900/60"
+                                        title="Cerrar orden definitivamente si no llegarán más piezas (evita entradas duplicadas)"
+                                    >
+                                        <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                                        </svg>
+                                        Finalizar / Cerrar Orden
+                                    </button>
+                                )}
+
                                 {order.total_units_received === 0 && (
                                     <button
                                         type="button"
@@ -662,6 +736,27 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                         )}
                     </div>
                 </div>
+
+                {/* Banner de Cierre Parcial Definitivo */}
+                {order.status === 'PARTIAL_CLOSED' && (
+                    <div className="print:hidden rounded-2xl border border-purple-200 bg-purple-50/70 p-4 dark:border-purple-900/50 dark:bg-purple-950/20">
+                        <div className="flex items-start gap-3">
+                            <div className="rounded-xl bg-purple-600 p-2 text-white">
+                                <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                                </svg>
+                            </div>
+                            <div>
+                                <h4 className="font-bold text-purple-900 dark:text-purple-200 text-sm">
+                                    Orden Finalizada con Recepción Parcial (Cierre Definitivo)
+                                </h4>
+                                <p className="mt-0.5 text-xs text-purple-700 dark:text-purple-300">
+                                    Esta orden se dio por terminada con unidades faltantes. Ya no admite nuevas recepciones físicas de inventario para proteger el almacén contra ingresos duplicados.
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+                )}
 
                 {/* Progress Summary Header (No financial costs displayed) */}
                 <div className="print:hidden rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-neutral-800 dark:bg-neutral-900">
@@ -952,6 +1047,19 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                                             <span className="font-bold text-slate-900 dark:text-white">
                                                 {rcpt.total_units_received} unidades ingresadas
                                             </span>
+                                            {order.status !== 'CANCELLED' && (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => handleOpenVoidReceiptModal(rcpt)}
+                                                    className="inline-flex items-center gap-1 rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-100 dark:border-rose-900/60 dark:bg-rose-950/40 dark:text-rose-300 transition shadow-sm"
+                                                    title="Anular comprobante y descontar las piezas del inventario"
+                                                >
+                                                    <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                                    </svg>
+                                                    Anular Recepción
+                                                </button>
+                                            )}
                                         </div>
                                     </div>
 
@@ -1617,91 +1725,105 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                                                             {item.is_extra ? '-' : item.pending}
                                                         </td>
                                                         <td className="px-3 py-2 text-center">
-                                                            <div className="flex items-center justify-center gap-1">
-                                                                <button
-                                                                    type="button"
-                                                                    onClick={() => {
-                                                                        const val = Math.max(0, (parseInt(item.quantity_received) || 0) - 1)
-                                                                        const updated = [...receivingItems]
-                                                                        updated[idx].quantity_received = val
-                                                                        setReceivingItems(updated)
-                                                                    }}
-                                                                    className="h-7 w-7 rounded border border-slate-300 bg-white font-bold text-slate-700 hover:bg-slate-100 dark:border-neutral-700 dark:bg-neutral-800 dark:text-white"
-                                                                >
-                                                                    -
-                                                                </button>
-                                                                <input
-                                                                    type="number"
-                                                                    min={0}
-                                                                    value={item.quantity_received}
-                                                                    onChange={(e) => {
-                                                                        const val = Math.max(0, parseInt(e.target.value) || 0)
-                                                                        const updated = [...receivingItems]
-                                                                        updated[idx].quantity_received = val
-                                                                        setReceivingItems(updated)
-                                                                    }}
-                                                                    className={`w-16 rounded-lg border px-1.5 py-1 text-center font-bold text-sm ${
-                                                                        isZero
-                                                                            ? 'border-rose-300 bg-rose-50 text-rose-800 dark:border-rose-900/60 dark:bg-rose-950/20 dark:text-rose-300'
-                                                                            : 'border-slate-300 bg-white text-slate-900 dark:border-neutral-700 dark:bg-neutral-800 dark:text-white'
-                                                                    }`}
-                                                                />
-                                                                <button
-                                                                    type="button"
-                                                                    onClick={() => {
-                                                                        const val = (parseInt(item.quantity_received) || 0) + 1
-                                                                        const updated = [...receivingItems]
-                                                                        updated[idx].quantity_received = val
-                                                                        setReceivingItems(updated)
-                                                                    }}
-                                                                    className="h-7 w-7 rounded border border-slate-300 bg-white font-bold text-slate-700 hover:bg-slate-100 dark:border-neutral-700 dark:bg-neutral-800 dark:text-white"
-                                                                >
-                                                                    +
-                                                                </button>
-                                                            </div>
-                                                        </td>
-                                                        <td className="px-3 py-2 text-center">
-                                                            <div className="flex items-center justify-center gap-1.5">
-                                                                <button
-                                                                    type="button"
-                                                                    title="Marcar que no llegó (0)"
-                                                                    onClick={() => {
-                                                                        const updated = [...receivingItems]
-                                                                        updated[idx].quantity_received = 0
-                                                                        setReceivingItems(updated)
-                                                                    }}
-                                                                    className={`rounded px-1.5 py-0.5 text-[10px] font-semibold border ${
-                                                                        isZero
-                                                                            ? 'border-rose-400 bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300'
-                                                                            : 'border-slate-300 text-slate-600 hover:bg-slate-100 dark:border-neutral-700 dark:text-slate-400'
-                                                                    }`}
-                                                                >
-                                                                    No llegó (0)
-                                                                </button>
-                                                                {!item.is_extra ? (
+                                                            {(!item.is_extra && item.pending === 0) ? (
+                                                                <span className="inline-flex items-center gap-1 rounded bg-slate-100 px-2 py-1 text-[11px] font-bold text-slate-500 dark:bg-neutral-800 dark:text-slate-400">
+                                                                    ✓ Ya recibido
+                                                                </span>
+                                                            ) : (
+                                                                <div className="flex items-center justify-center gap-1">
                                                                     <button
                                                                         type="button"
-                                                                        title="Recibir todo el saldo pendiente"
                                                                         onClick={() => {
+                                                                            const val = Math.max(0, (parseInt(item.quantity_received) || 0) - 1)
                                                                             const updated = [...receivingItems]
-                                                                            updated[idx].quantity_received = item.pending
+                                                                            updated[idx].quantity_received = val
                                                                             setReceivingItems(updated)
                                                                         }}
-                                                                        className="rounded border border-indigo-200 bg-indigo-50 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700 hover:bg-indigo-100 dark:border-indigo-900 dark:bg-indigo-950/40 dark:text-indigo-300"
+                                                                        className="h-7 w-7 rounded border border-slate-300 bg-white font-bold text-slate-700 hover:bg-slate-100 dark:border-neutral-700 dark:bg-neutral-800 dark:text-white"
                                                                     >
-                                                                        Todo
+                                                                        -
                                                                     </button>
-                                                                ) : (
+                                                                    <input
+                                                                        type="number"
+                                                                        min={0}
+                                                                        max={!item.is_extra ? item.pending : undefined}
+                                                                        value={item.quantity_received}
+                                                                        onChange={(e) => {
+                                                                            const rawVal = Math.max(0, parseInt(e.target.value) || 0)
+                                                                            const val = (!item.is_extra && rawVal > item.pending) ? item.pending : rawVal
+                                                                            const updated = [...receivingItems]
+                                                                            updated[idx].quantity_received = val
+                                                                            setReceivingItems(updated)
+                                                                        }}
+                                                                        className={`w-16 rounded-lg border px-1.5 py-1 text-center font-bold text-sm ${
+                                                                            isZero
+                                                                                ? 'border-rose-300 bg-rose-50 text-rose-800 dark:border-rose-900/60 dark:bg-rose-950/20 dark:text-rose-300'
+                                                                                : 'border-slate-300 bg-white text-slate-900 dark:border-neutral-700 dark:bg-neutral-800 dark:text-white'
+                                                                        }`}
+                                                                    />
                                                                     <button
                                                                         type="button"
-                                                                        title="Quitar producto extra"
-                                                                        onClick={() => handleRemoveExtraItem(idx)}
-                                                                        className="text-rose-600 hover:text-rose-800 p-0.5"
+                                                                        onClick={() => {
+                                                                            const cur = (parseInt(item.quantity_received) || 0)
+                                                                            if (!item.is_extra && cur >= item.pending) return
+                                                                            const updated = [...receivingItems]
+                                                                            updated[idx].quantity_received = cur + 1
+                                                                            setReceivingItems(updated)
+                                                                        }}
+                                                                        disabled={!item.is_extra && (parseInt(item.quantity_received) || 0) >= item.pending}
+                                                                        className="h-7 w-7 rounded border border-slate-300 bg-white font-bold text-slate-700 hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed dark:border-neutral-700 dark:bg-neutral-800 dark:text-white"
                                                                     >
-                                                                        ✕
+                                                                        +
                                                                     </button>
-                                                                )}
-                                                            </div>
+                                                                </div>
+                                                            )}
+                                                        </td>
+                                                        <td className="px-3 py-2 text-center">
+                                                            {(!item.is_extra && item.pending === 0) ? (
+                                                                <span className="text-[11px] text-slate-400 font-medium">0 pzas restan</span>
+                                                            ) : (
+                                                                <div className="flex items-center justify-center gap-1.5">
+                                                                    <button
+                                                                        type="button"
+                                                                        title="Marcar que no llegó (0)"
+                                                                        onClick={() => {
+                                                                            const updated = [...receivingItems]
+                                                                            updated[idx].quantity_received = 0
+                                                                            setReceivingItems(updated)
+                                                                        }}
+                                                                        className={`rounded px-1.5 py-0.5 text-[10px] font-semibold border ${
+                                                                            isZero
+                                                                                ? 'border-rose-400 bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300'
+                                                                                : 'border-slate-300 text-slate-600 hover:bg-slate-100 dark:border-neutral-700 dark:text-slate-400'
+                                                                        }`}
+                                                                    >
+                                                                        No llegó (0)
+                                                                    </button>
+                                                                    {!item.is_extra ? (
+                                                                        <button
+                                                                            type="button"
+                                                                            title="Recibir todo el saldo pendiente"
+                                                                            onClick={() => {
+                                                                                const updated = [...receivingItems]
+                                                                                updated[idx].quantity_received = item.pending
+                                                                                setReceivingItems(updated)
+                                                                            }}
+                                                                            className="rounded border border-indigo-200 bg-indigo-50 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700 hover:bg-indigo-100 dark:border-indigo-900 dark:bg-indigo-950/40 dark:text-indigo-300"
+                                                                        >
+                                                                            Todo
+                                                                        </button>
+                                                                    ) : (
+                                                                        <button
+                                                                            type="button"
+                                                                            title="Quitar producto extra"
+                                                                            onClick={() => handleRemoveExtraItem(idx)}
+                                                                            className="text-rose-600 hover:text-rose-800 p-0.5"
+                                                                        >
+                                                                            ✕
+                                                                        </button>
+                                                                    )}
+                                                                </div>
+                                                            )}
                                                         </td>
                                                     </tr>
                                                 )
@@ -1709,6 +1831,26 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                                         </tbody>
                                     </table>
                                 </div>
+                            </div>
+
+                            {/* Candado Anti-duplicados y Cierre Parcial Definitivo */}
+                            <div className="rounded-xl border border-indigo-200 bg-indigo-50/70 p-3.5 dark:border-indigo-900/60 dark:bg-indigo-950/30">
+                                <label className="flex items-start gap-3 cursor-pointer">
+                                    <input
+                                        type="checkbox"
+                                        checked={receiveCloseOrder}
+                                        onChange={(e) => setReceiveCloseOrder(e.target.checked)}
+                                        className="mt-0.5 h-4 w-4 rounded border-indigo-300 text-indigo-600 focus:ring-indigo-500"
+                                    />
+                                    <div>
+                                        <span className="text-xs font-bold text-indigo-950 dark:text-indigo-200">
+                                            🔒 Finalizar y cerrar la orden definitivamente (Cierre Parcial si hay faltantes)
+                                        </span>
+                                        <p className="mt-0.5 text-[11px] text-indigo-800 dark:text-indigo-300">
+                                            Si el proveedor no entregará los productos faltantes, activa esta casilla. La orden pasará a <strong>"Parcial Finalizada"</strong> y se bloqueará el botón de recibir para evitar ingresos duplicados en almacén.
+                                        </p>
+                                    </div>
+                                </label>
                             </div>
 
                             <div>
@@ -1735,9 +1877,17 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                                 <button
                                     type="submit"
                                     disabled={receiveSubmitting}
-                                    className="rounded-xl bg-emerald-600 px-5 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-50 shadow-sm"
+                                    className={`rounded-xl px-5 py-2 text-sm font-semibold text-white shadow-sm transition disabled:opacity-50 ${
+                                        receiveCloseOrder
+                                            ? 'bg-purple-600 hover:bg-purple-700 dark:bg-purple-600'
+                                            : 'bg-emerald-600 hover:bg-emerald-700'
+                                    }`}
                                 >
-                                    {receiveSubmitting ? 'Procesando Entrada...' : 'Confirmar e Ingresar a Almacén'}
+                                    {receiveSubmitting
+                                        ? 'Procesando Entrada...'
+                                        : receiveCloseOrder
+                                        ? 'Confirmar Recepción y Cerrar Orden'
+                                        : 'Confirmar e Ingresar a Almacén'}
                                 </button>
                             </div>
                         </form>
@@ -1793,6 +1943,147 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                                     className="rounded-xl bg-rose-600 px-4 py-2 text-sm font-semibold text-white hover:bg-rose-700 disabled:opacity-50"
                                 >
                                     {cancelSubmitting ? 'Cancelando...' : 'Confirmar Cancelación'}
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+            {/* Modal: Finalizar y Cerrar Orden Parcial */}
+            {closePartialModalOpen && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
+                    <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl dark:bg-neutral-900">
+                        <div className="flex items-center gap-3 text-purple-600 dark:text-purple-400">
+                            <div className="rounded-xl bg-purple-100 p-2 dark:bg-purple-950/60">
+                                <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                                </svg>
+                            </div>
+                            <h3 className="text-lg font-bold text-slate-900 dark:text-white">
+                                Finalizar Orden de Compra
+                            </h3>
+                        </div>
+                        <p className="mt-3 text-xs leading-relaxed text-slate-600 dark:text-slate-400">
+                            Al cerrar definitivamente esta orden, las unidades no entregadas por el proveedor se darán por canceladas. La orden pasará a estado <strong>"Parcial Finalizada"</strong> y ya no permitirá volver a recibir para evitar ingresos duplicados en almacén.
+                        </p>
+
+                        <form onSubmit={handleClosePartialSubmit} className="mt-4 space-y-4">
+                            <div>
+                                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-600 dark:text-slate-400">
+                                    Motivo del Cierre (Opcional)
+                                </label>
+                                <textarea
+                                    rows={2}
+                                    value={closePartialReason}
+                                    onChange={(e) => setClosePartialReason(e.target.value)}
+                                    placeholder="Ej. El proveedor no pudo surtir las piezas faltantes y se concluye el pedido."
+                                    className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm text-slate-800 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-100"
+                                />
+                            </div>
+
+                            <div className="mt-6 flex justify-end gap-3">
+                                <button
+                                    type="button"
+                                    onClick={() => setClosePartialModalOpen(false)}
+                                    className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100 dark:border-neutral-700 dark:text-slate-300 dark:hover:bg-neutral-800"
+                                >
+                                    Regresar
+                                </button>
+                                <button
+                                    type="submit"
+                                    disabled={closePartialSubmitting}
+                                    className="rounded-xl bg-purple-600 px-4 py-2 text-sm font-semibold text-white hover:bg-purple-700 disabled:opacity-50 shadow-sm"
+                                >
+                                    {closePartialSubmitting ? 'Cerrando Orden...' : 'Confirmar Cierre Definitivo'}
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+
+            {/* Modal: Anular Comprobante de Recepción (Reversión de Inventario Físico) */}
+            {voidReceiptModalOpen && receiptToVoid && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
+                    <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-xl dark:bg-neutral-900">
+                        <div className="flex items-center gap-3 text-rose-600 dark:text-rose-400">
+                            <div className="rounded-xl bg-rose-100 p-2 dark:bg-rose-950/60">
+                                <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                </svg>
+                            </div>
+                            <div>
+                                <h3 className="text-lg font-bold text-slate-900 dark:text-white">
+                                    Anular Comprobante {receiptToVoid.receipt_number}
+                                </h3>
+                                <p className="text-xs text-slate-500">
+                                    Reversión y descuento de inventario físico en almacén
+                                </p>
+                            </div>
+                        </div>
+
+                        <div className="mt-3 rounded-xl border border-rose-200 bg-rose-50/70 p-3 text-xs text-rose-800 dark:border-rose-900/60 dark:bg-rose-950/30 dark:text-rose-300">
+                            <p className="font-bold">⚠️ Atención:</p>
+                            <p className="mt-0.5">
+                                Esta acción revertirá automáticamente los movimientos de almacén generados por esta recepción ({receiptToVoid.total_units_received} piezas en total), descontándolos del stock disponible.
+                            </p>
+                        </div>
+
+                        {/* Detalle de partidas a revertir */}
+                        <div className="mt-3 max-h-48 overflow-y-auto rounded-xl border border-slate-200 dark:border-neutral-800">
+                            <table className="w-full text-left text-xs">
+                                <thead className="bg-slate-50 text-slate-600 dark:bg-neutral-950 dark:text-slate-400">
+                                    <tr>
+                                        <th className="px-3 py-2">Producto</th>
+                                        <th className="px-3 py-2 text-right">Piezas a descontar</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-100 dark:divide-neutral-900">
+                                    {(receiptToVoid.items || []).map((item) => (
+                                        <tr key={item.id}>
+                                            <td className="px-3 py-2 text-slate-800 dark:text-slate-200">
+                                                <span className="font-mono font-bold">[{item.product?.sku || '-'}]</span> {item.product?.name || '-'}
+                                            </td>
+                                            <td className="px-3 py-2 text-right font-bold text-rose-600 dark:text-rose-400">
+                                                -{item.quantity_received} pzas
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+
+                        <form onSubmit={handleVoidReceiptSubmit} className="mt-4 space-y-4">
+                            <div>
+                                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-600 dark:text-slate-400">
+                                    Motivo de la Anulación
+                                </label>
+                                <input
+                                    type="text"
+                                    value={voidReceiptReason}
+                                    onChange={(e) => setVoidReceiptReason(e.target.value)}
+                                    placeholder="Ej. Recepción duplicada por error en el sistema..."
+                                    className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm text-slate-800 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-100"
+                                />
+                            </div>
+
+                            <div className="mt-6 flex justify-end gap-3">
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        setVoidReceiptModalOpen(false)
+                                        setReceiptToVoid(null)
+                                    }}
+                                    className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100 dark:border-neutral-700 dark:text-slate-300 dark:hover:bg-neutral-800"
+                                >
+                                    Regresar
+                                </button>
+                                <button
+                                    type="submit"
+                                    disabled={voidReceiptSubmitting}
+                                    className="rounded-xl bg-rose-600 px-4 py-2 text-sm font-semibold text-white hover:bg-rose-700 disabled:opacity-50 shadow-sm"
+                                >
+                                    {voidReceiptSubmitting ? 'Revirtiendo Inventario...' : 'Confirmar Anulación y Descontar Stock'}
                                 </button>
                             </div>
                         </form>
