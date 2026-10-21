@@ -68,8 +68,18 @@ export default function MeliFullShipmentsShow({
     const [dispatchModalOpen, setDispatchModalOpen] = useState(false)
     const [dispatching, setDispatching] = useState(false)
 
+    const [deliverModalOpen, setDeliverModalOpen] = useState(false)
+    const [delivering, setDelivering] = useState(false)
+
     const [revertModalOpen, setRevertModalOpen] = useState(false)
     const [reverting, setReverting] = useState(false)
+
+    const [trackingModalOpen, setTrackingModalOpen] = useState(false)
+    const [updatingTracking, setUpdatingTracking] = useState(false)
+    const [trackingCarrier, setTrackingCarrier] = useState(shipment.envia_carrier || 'Estafeta')
+    const [trackingNumber, setTrackingNumber] = useState(shipment.envia_tracking_number || '')
+    const [trackingMeliShipmentId, setTrackingMeliShipmentId] = useState(shipment.meli_shipment_id || '')
+    const [trackingNotes, setTrackingNotes] = useState(shipment.notes || '')
 
     const [receiveModalOpen, setReceiveModalOpen] = useState(false)
     const [receptions, setReceptions] = useState(
@@ -102,6 +112,48 @@ export default function MeliFullShipmentsShow({
                 },
                 onError: () => {
                     setDispatching(false)
+                },
+            }
+        )
+    }
+
+    // Confirm and execute deliver (carrier delivered at CEDIS)
+    const handleDeliverConfirm = () => {
+        setDelivering(true)
+        router.post(
+            `/meli/full/envios/${shipment.id}/entregar`,
+            {},
+            {
+                onSuccess: () => {
+                    setDeliverModalOpen(false)
+                    setDelivering(false)
+                },
+                onError: () => {
+                    setDelivering(false)
+                },
+            }
+        )
+    }
+
+    // Update tracking info
+    const handleTrackingSubmit = (e) => {
+        e.preventDefault()
+        setUpdatingTracking(true)
+        router.post(
+            `/meli/full/envios/${shipment.id}/actualizar-guia`,
+            {
+                envia_carrier: trackingCarrier,
+                envia_tracking_number: trackingNumber,
+                meli_shipment_id: trackingMeliShipmentId,
+                notes: trackingNotes,
+            },
+            {
+                onSuccess: () => {
+                    setTrackingModalOpen(false)
+                    setUpdatingTracking(false)
+                },
+                onError: () => {
+                    setUpdatingTracking(false)
                 },
             }
         )
@@ -244,8 +296,28 @@ export default function MeliFullShipmentsShow({
                                 </button>
                             )}
 
+                            {/* MARK AS DELIVERED IN CEDIS ACTION */}
+                            {shipment.status === 'IN_TRANSIT' && (
+                                <button
+                                    type="button"
+                                    onClick={() => setDeliverModalOpen(true)}
+                                    className="inline-flex items-center gap-1.5 rounded-xl bg-purple-600 px-4 py-2 text-xs font-black text-white shadow-sm hover:bg-purple-700"
+                                >
+                                    <span>📍</span> Marcar Entregado en CEDIS
+                                </button>
+                            )}
+
+                            {/* EDIT TRACKING / GUIA ACTION */}
+                            <button
+                                type="button"
+                                onClick={() => setTrackingModalOpen(true)}
+                                className="inline-flex items-center gap-1.5 rounded-xl border border-slate-300 bg-white px-3.5 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-200"
+                            >
+                                <span>✏️</span> Guía & Rastreo
+                            </button>
+
                             {/* REVERT DISPATCH ACTION */}
-                            {['IN_TRANSIT'].includes(shipment.status) && (
+                            {['IN_TRANSIT', 'DELIVERED'].includes(shipment.status) && (
                                 <button
                                     type="button"
                                     onClick={() => setRevertModalOpen(true)}
@@ -268,6 +340,22 @@ export default function MeliFullShipmentsShow({
                         </div>
                     </div>
                 </div>
+
+                {/* DELIVERED BANNER / CEDIS STAGING NOTICE */}
+                {shipment.status === 'DELIVERED' && (
+                    <div className="rounded-2xl border border-purple-200 bg-purple-50/90 p-4 text-purple-900 shadow-sm dark:border-purple-800 dark:bg-purple-950/40 dark:text-purple-200 flex items-start gap-3">
+                        <span className="text-2xl">📦</span>
+                        <div>
+                            <h4 className="font-black text-sm">
+                                Entregado por paquetería en bahía del CEDIS MeLi ({shipment.meli_warehouse_code})
+                            </h4>
+                            <p className="text-xs text-purple-800 dark:text-purple-300 mt-0.5 leading-relaxed">
+                                {shipment.delivered_at && <>Registrado el <strong>{formatDate(shipment.delivered_at)}</strong>. </>}
+                                Los bultos físicos ya fueron entregados por la paquetería ({shipment.envia_carrier} {shipment.envia_tracking_number}). Actualmente se encuentran en espera de que el personal de Mercado Libre abra las cajas, escanee cada una de las <strong>{shipment.total_units} piezas</strong> e ingrese el stock disponible (proceso habitual de 24 a 72 horas hábiles).
+                            </p>
+                        </div>
+                    </div>
+                )}
 
                 {/* SHIPMENT SUMMARY CARDS */}
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -293,9 +381,18 @@ export default function MeliFullShipmentsShow({
 
                     {/* ENVIA LOGISTICS */}
                     <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm dark:border-neutral-800 dark:bg-neutral-900">
-                        <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
-                            🚚 Logística & Guía ENVIA
-                        </span>
+                        <div className="flex items-center justify-between">
+                            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                                🚚 Logística & Guía ENVIA
+                            </span>
+                            <button
+                                type="button"
+                                onClick={() => setTrackingModalOpen(true)}
+                                className="text-[10px] font-bold text-indigo-600 hover:underline dark:text-indigo-400"
+                            >
+                                ✏️ Editar
+                            </button>
+                        </div>
                         <div className="mt-1 flex items-center gap-2">
                             <span className="rounded bg-blue-100 px-2 py-0.5 text-xs font-bold text-blue-800 dark:bg-blue-950 dark:text-blue-300">
                                 {shipment.envia_carrier || 'ENVIA'}
@@ -311,10 +408,15 @@ export default function MeliFullShipmentsShow({
                                 rel="noreferrer"
                                 className="mt-1.5 inline-flex items-center gap-1 text-xs font-bold text-blue-600 hover:underline dark:text-blue-400"
                             >
-                                <span>🔗</span> Rastrear en ENVIA
+                                <span>🔗</span> Rastrear en {shipment.envia_carrier || 'ENVIA'}
                             </a>
                         ) : (
                             <p className="mt-1 text-[11px] text-slate-400 italic">Sin enlace de rastreo</p>
+                        )}
+                        {shipment.delivered_at && (
+                            <p className="mt-1 text-[11px] font-bold text-purple-700 dark:text-purple-400">
+                                ✓ Entregado en bahía: {formatDate(shipment.delivered_at)}
+                            </p>
                         )}
                         {shipment.envia_cost > 0 && (
                             <p className="mt-0.5 text-[11px] text-slate-500">
@@ -731,6 +833,137 @@ export default function MeliFullShipmentsShow({
                                         className="rounded-xl bg-indigo-600 px-5 py-2 text-xs font-bold text-white hover:bg-indigo-700 disabled:opacity-50"
                                     >
                                         {receiving ? 'Guardando...' : 'Guardar Inspección'}
+                                    </button>
+                                </div>
+                            </form>
+                        </div>
+                    </div>
+                )}
+
+                {/* MODAL: DELIVER CONFIRMATION */}
+                {deliverModalOpen && (
+                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
+                        <div className="w-full max-w-md rounded-3xl bg-white p-6 shadow-2xl dark:bg-neutral-900 border border-slate-200 dark:border-neutral-800">
+                            <h3 className="text-base font-black text-purple-700 dark:text-purple-300 flex items-center gap-2">
+                                <span>📍</span> Confirmar Entrega en CEDIS MeLi
+                            </h3>
+                            <p className="mt-2 text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+                                ¿Confirmas que la paquetería <strong>{shipment.envia_carrier}</strong> ya entregó las <strong>{shipment.total_boxes} cajas</strong> ({shipment.total_units} piezas) del envío <strong>{shipment.shipment_code}</strong> en el <strong>{shipment.meli_warehouse_name} ({shipment.meli_warehouse_code})</strong>?
+                            </p>
+                            <div className="mt-3 rounded-2xl bg-purple-50 p-3 text-xs font-semibold text-purple-900 dark:bg-purple-950/40 dark:text-purple-300">
+                                ℹ️ El envío pasará al estado <strong>Entregado en CEDIS MeLi</strong>. Quedará registrado que los bultos están en la bahía de recepción esperando a que Mercado Libre realice el conteo/check-in de productos.
+                            </div>
+
+                            <div className="mt-5 flex items-center justify-end gap-2">
+                                <button
+                                    type="button"
+                                    onClick={() => setDeliverModalOpen(false)}
+                                    className="rounded-xl border border-slate-300 px-4 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 dark:border-neutral-700 dark:text-slate-300"
+                                >
+                                    Cancelar
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={handleDeliverConfirm}
+                                    disabled={delivering}
+                                    className="rounded-xl bg-purple-600 px-5 py-2 text-xs font-bold text-white hover:bg-purple-700 disabled:opacity-50"
+                                >
+                                    {delivering ? 'Guardando...' : 'Confirmar Entrega en Bahía'}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {/* MODAL: EDIT TRACKING / CARRIER / CITAS */}
+                {trackingModalOpen && (
+                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
+                        <div className="w-full max-w-lg rounded-3xl bg-white p-6 shadow-2xl dark:bg-neutral-900 border border-slate-200 dark:border-neutral-800">
+                            <div className="flex items-center justify-between border-b border-slate-100 pb-3 dark:border-neutral-800">
+                                <h3 className="text-base font-black text-slate-900 dark:text-white flex items-center gap-2">
+                                    <span>✏️</span> Datos de Rastreo & Paquetería
+                                </h3>
+                                <button
+                                    type="button"
+                                    onClick={() => setTrackingModalOpen(false)}
+                                    className="text-slate-400 hover:text-slate-600 text-lg font-bold"
+                                >
+                                    ✕
+                                </button>
+                            </div>
+
+                            <form onSubmit={handleTrackingSubmit} className="mt-4 space-y-4">
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                    <div>
+                                        <label className="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">
+                                            Paquetería:
+                                        </label>
+                                        <select
+                                            value={trackingCarrier}
+                                            onChange={(e) => setTrackingCarrier(e.target.value)}
+                                            className="w-full rounded-xl border border-slate-300 bg-white p-2.5 text-xs font-semibold dark:border-neutral-700 dark:bg-neutral-800 dark:text-white"
+                                        >
+                                            {carriers.map((c) => (
+                                                <option key={c} value={c}>{c}</option>
+                                            ))}
+                                            <option value="Otro">Otro / ENVIA</option>
+                                        </select>
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">
+                                            Número de Guía / Rastreo:
+                                        </label>
+                                        <input
+                                            type="text"
+                                            placeholder="Ej: 1147590997"
+                                            value={trackingNumber}
+                                            onChange={(e) => setTrackingNumber(e.target.value)}
+                                            className="w-full rounded-xl border border-slate-300 bg-white p-2.5 font-mono text-xs font-bold dark:border-neutral-700 dark:bg-neutral-800 dark:text-white"
+                                        />
+                                    </div>
+                                </div>
+
+                                <div>
+                                    <label className="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">
+                                        ID de Envío / Cita en Mercado Libre:
+                                    </label>
+                                    <input
+                                        type="text"
+                                        placeholder="Ej: 43219876"
+                                        value={trackingMeliShipmentId}
+                                        onChange={(e) => setTrackingMeliShipmentId(e.target.value)}
+                                        className="w-full rounded-xl border border-slate-300 bg-white p-2.5 font-mono text-xs dark:border-neutral-700 dark:bg-neutral-800 dark:text-white"
+                                    />
+                                </div>
+
+                                <div>
+                                    <label className="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">
+                                        Notas del envío:
+                                    </label>
+                                    <textarea
+                                        rows={3}
+                                        placeholder="Notas internas, chofer, incidencias..."
+                                        value={trackingNotes}
+                                        onChange={(e) => setTrackingNotes(e.target.value)}
+                                        className="w-full rounded-xl border border-slate-300 bg-white p-2.5 text-xs dark:border-neutral-700 dark:bg-neutral-800 dark:text-white"
+                                    />
+                                </div>
+
+                                <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100 dark:border-neutral-800">
+                                    <button
+                                        type="button"
+                                        onClick={() => setTrackingModalOpen(false)}
+                                        className="rounded-xl border border-slate-300 px-4 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 dark:border-neutral-700 dark:text-slate-300"
+                                    >
+                                        Cancelar
+                                    </button>
+                                    <button
+                                        type="submit"
+                                        disabled={updatingTracking}
+                                        className="rounded-xl bg-indigo-600 px-5 py-2 text-xs font-bold text-white hover:bg-indigo-700 disabled:opacity-50"
+                                    >
+                                        {updatingTracking ? 'Guardando...' : 'Guardar Datos'}
                                     </button>
                                 </div>
                             </form>

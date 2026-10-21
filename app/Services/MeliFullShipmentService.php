@@ -624,12 +624,28 @@ class MeliFullShipmentService
     }
 
     /**
+     * Mark shipment as delivered at MeLi CEDIS (delivered by carrier, pending MeLi check-in / inspection)
+     */
+    public function deliverShipment(MeliFullShipment $shipment, ?User $user = null): MeliFullShipment
+    {
+        if (! in_array($shipment->status, [MeliFullShipment::STATUS_IN_TRANSIT, MeliFullShipment::STATUS_DRAFT, MeliFullShipment::STATUS_PACKED], true)) {
+            throw new InvalidArgumentException("El envío {$shipment->shipment_code} no puede marcarse como entregado desde su estado actual ({$shipment->status}).");
+        }
+
+        $shipment->status = MeliFullShipment::STATUS_DELIVERED;
+        $shipment->delivered_at = Carbon::now();
+        $shipment->save();
+
+        return $shipment->fresh(['boxes.items', 'items', 'user']);
+    }
+
+    /**
      * Revert dispatch: Re-inject inventory into local warehouse (TRANSFER_IN)
      */
     public function revertDispatch(MeliFullShipment $shipment, ?User $user = null): MeliFullShipment
     {
-        if (! in_array($shipment->status, [MeliFullShipment::STATUS_IN_TRANSIT, MeliFullShipment::STATUS_CANCELLED], true)) {
-            throw new InvalidArgumentException("Solo se pueden revertir envíos en tránsito o cancelados.");
+        if (! in_array($shipment->status, [MeliFullShipment::STATUS_IN_TRANSIT, MeliFullShipment::STATUS_DELIVERED, MeliFullShipment::STATUS_CANCELLED], true)) {
+            throw new InvalidArgumentException("Solo se pueden revertir envíos en tránsito, entregados o cancelados.");
         }
 
         return DB::transaction(function () use ($shipment, $user) {
@@ -717,7 +733,7 @@ class MeliFullShipmentService
     /**
      * Build tracking URL for ENVIA or carriers
      */
-    private function buildEnviaTrackingUrl(?string $carrier, ?string $tracking): ?string
+    public function buildEnviaTrackingUrl(?string $carrier, ?string $tracking): ?string
     {
         if (blank($tracking)) {
             return null;
@@ -739,7 +755,7 @@ class MeliFullShipmentService
         }
 
         if (str_contains($c, 'estafeta')) {
-            return "https://www.estafeta.com/Herramientas/Rastreo?rastreo={$t}";
+            return "https://www.estafeta.com/rastrear-envio?rastreo={$t}";
         }
 
         if (str_contains($c, 'redpack')) {
@@ -755,18 +771,22 @@ class MeliFullShipmentService
      */
     public function getKpiSummary(): array
     {
-        // 1. En Tránsito (hacia bodegas MeLi)
+        // 1. En Tránsito y Entregados en bahía CEDIS (esperando ingreso MeLi)
         $inTransitShipments = MeliFullShipment::query()
-            ->whereIn('status', [MeliFullShipment::STATUS_IN_TRANSIT, MeliFullShipment::STATUS_PACKED])
+            ->whereIn('status', [MeliFullShipment::STATUS_IN_TRANSIT, MeliFullShipment::STATUS_PACKED, MeliFullShipment::STATUS_DELIVERED])
             ->count();
 
         $inTransitUnits = (int) MeliFullShipment::query()
-            ->whereIn('status', [MeliFullShipment::STATUS_IN_TRANSIT, MeliFullShipment::STATUS_PACKED])
+            ->whereIn('status', [MeliFullShipment::STATUS_IN_TRANSIT, MeliFullShipment::STATUS_PACKED, MeliFullShipment::STATUS_DELIVERED])
             ->sum('total_units');
 
         $inTransitWeight = (float) MeliFullShipment::query()
-            ->whereIn('status', [MeliFullShipment::STATUS_IN_TRANSIT, MeliFullShipment::STATUS_PACKED])
+            ->whereIn('status', [MeliFullShipment::STATUS_IN_TRANSIT, MeliFullShipment::STATUS_PACKED, MeliFullShipment::STATUS_DELIVERED])
             ->sum('total_weight_kg');
+
+        $deliveredPendingCheckin = MeliFullShipment::query()
+            ->where('status', MeliFullShipment::STATUS_DELIVERED)
+            ->count();
 
         // 2. En Bodega MeLi (Disponible para venta)
         $inWarehouseAvailableUnits = 0;
@@ -814,6 +834,7 @@ class MeliFullShipmentService
         return [
             'in_transit' => [
                 'shipments_count' => $inTransitShipments,
+                'delivered_pending_checkin' => $deliveredPendingCheckin,
                 'units' => $inTransitUnits,
                 'weight_kg' => $inTransitWeight,
             ],

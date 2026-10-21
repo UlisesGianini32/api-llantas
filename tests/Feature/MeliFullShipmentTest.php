@@ -1158,5 +1158,59 @@ class MeliFullShipmentTest extends TestCase
         $stockAfter = app(\App\Services\InventoryStockService::class)->availableStock($product);
         $this->assertEquals(6, $stockAfter);
     }
+
+    public function test_can_mark_shipment_as_delivered_at_cedis(): void
+    {
+        $shipment = MeliFullShipment::create([
+            'user_id' => $this->user->id,
+            'shipment_code' => 'FULL-ENV-2026-DELIV',
+            'status' => MeliFullShipment::STATUS_IN_TRANSIT,
+            'meli_warehouse_code' => 'MXRC02',
+            'meli_warehouse_name' => 'CEDIS Tepotzotlán II',
+            'envia_carrier' => 'Estafeta',
+            'envia_tracking_number' => '1147590997',
+        ]);
+
+        $response = $this->actingAs($this->user)->post(
+            route('meli-full-shipments.deliver', $shipment->id)
+        );
+
+        $response->assertRedirect();
+        $shipment->refresh();
+
+        $this->assertEquals(MeliFullShipment::STATUS_DELIVERED, $shipment->status);
+        $this->assertNotNull($shipment->delivered_at);
+    }
+
+    public function test_can_update_shipment_tracking_and_carrier(): void
+    {
+        $shipment = MeliFullShipment::create([
+            'user_id' => $this->user->id,
+            'shipment_code' => 'FULL-ENV-2026-TRACK',
+            'status' => MeliFullShipment::STATUS_IN_TRANSIT,
+            'meli_warehouse_code' => 'MXCD06',
+            'envia_carrier' => 'Otro',
+            'envia_tracking_number' => null,
+        ]);
+
+        $response = $this->actingAs($this->user)->postJson(
+            route('meli-full-shipments.update-tracking', $shipment->id),
+            [
+                'envia_carrier' => 'Estafeta',
+                'envia_tracking_number' => '1147590997',
+                'meli_shipment_id' => '99887766',
+                'notes' => 'Entregado en bahía Tepotzotlán',
+            ]
+        );
+
+        $response->assertOk();
+        $response->assertJson(['success' => true]);
+
+        $shipment->refresh();
+        $this->assertEquals('Estafeta', $shipment->envia_carrier);
+        $this->assertEquals('1147590997', $shipment->envia_tracking_number);
+        $this->assertEquals('99887766', $shipment->meli_shipment_id);
+        $this->assertEquals('https://www.estafeta.com/rastrear-envio?rastreo=1147590997', $shipment->envia_tracking_url);
+    }
 }
 

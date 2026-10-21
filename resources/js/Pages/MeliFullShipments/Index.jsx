@@ -91,6 +91,16 @@ export default function MeliFullShipmentsIndex({
         })
     }
 
+    const handleDeliver = (shipment) => {
+        if (!confirm(`¿Confirmas que la paquetería ya entregó el envío ${shipment.shipment_code} en el CEDIS MeLi (${shipment.meli_warehouse_code})?\n\nEl estado cambiará a 'Entregado en CEDIS MeLi' en espera de que Mercado Libre abra las cajas y realice el conteo/check-in.`)) {
+            return
+        }
+
+        router.post(`/meli/full/envios/${shipment.id}/entregar`, {}, {
+            preserveScroll: true,
+        })
+    }
+
     return (
         <AppShell>
             <Head title="Envíos a Mercado Libre FULL (Cajas de 30)" />
@@ -461,9 +471,13 @@ export default function MeliFullShipmentsIndex({
                                                             </span>
                                                         )}
                                                     </div>
+                                                ) : shipment.status === 'DELIVERED' ? (
+                                                    <span className="inline-block rounded-md border border-purple-200 bg-purple-50 px-2 py-0.5 text-[10px] font-black text-purple-700 dark:border-purple-800 dark:bg-purple-950/60 dark:text-purple-300">
+                                                        📦 En bahía CEDIS (Espera conteo MeLi)
+                                                    </span>
                                                 ) : shipment.status === 'IN_TRANSIT' ? (
                                                     <span className="text-[10px] font-bold text-blue-600 dark:text-blue-400">
-                                                        En camino a CEDIS
+                                                        🚚 En camino a CEDIS
                                                     </span>
                                                 ) : (
                                                     <span className="text-slate-400 text-[10px]">-</span>
@@ -494,10 +508,21 @@ export default function MeliFullShipmentsIndex({
                                                         <button
                                                             type="button"
                                                             onClick={() => handleDispatch(shipment)}
-                                                            className="rounded-lg bg-emerald-600 px-2.5 py-1 text-xs font-bold text-white hover:bg-emerald-700"
+                                                            className="rounded-lg bg-emerald-600 px-2.5 py-1 text-xs font-bold text-white hover:bg-emerald-700 shadow-sm"
                                                             title="Despachar y registrar salida de almacén"
                                                         >
                                                             Despachar
+                                                        </button>
+                                                    )}
+
+                                                    {shipment.status === 'IN_TRANSIT' && (
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => handleDeliver(shipment)}
+                                                            className="rounded-lg bg-purple-600 px-2.5 py-1 text-xs font-black text-white hover:bg-purple-700 shadow-sm"
+                                                            title="Marcar como entregado por paquetería en la bahía del CEDIS MeLi"
+                                                        >
+                                                            📍 Entregado
                                                         </button>
                                                     )}
                                                 </div>

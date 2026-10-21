@@ -301,6 +301,61 @@ class MeliFullShipmentController extends Controller
     }
 
     /**
+     * Marcar envío como entregado en CEDIS MeLi (paquetería entregó bultos en bahía)
+     */
+    public function deliver(Request $request, MeliFullShipment $shipment): RedirectResponse
+    {
+        try {
+            $this->shipmentService->deliverShipment($shipment, $request->user());
+
+            return back()->with('success', "¡Envío {$shipment->shipment_code} marcado como entregado en CEDIS MeLi ({$shipment->meli_warehouse_code})! En espera de ingreso y conteo de piezas por Mercado Libre.");
+        } catch (Throwable $e) {
+            return back()->with('error', 'No se pudo marcar como entregado: ' . $e->getMessage());
+        }
+    }
+
+    /**
+     * Actualizar datos de rastreo/guía en cualquier momento
+     */
+    public function updateTracking(Request $request, MeliFullShipment $shipment): RedirectResponse|JsonResponse
+    {
+        $validated = $request->validate([
+            'envia_carrier' => ['nullable', 'string', 'max:50'],
+            'envia_tracking_number' => ['nullable', 'string', 'max:100'],
+            'meli_shipment_id' => ['nullable', 'string', 'max:50'],
+            'notes' => ['nullable', 'string'],
+        ]);
+
+        try {
+            $carrier = $validated['envia_carrier'] ?? $shipment->envia_carrier;
+            $tracking = $validated['envia_tracking_number'] ?? $shipment->envia_tracking_number;
+
+            $shipment->update([
+                'envia_carrier' => $carrier,
+                'envia_tracking_number' => $tracking,
+                'envia_tracking_url' => $this->shipmentService->buildEnviaTrackingUrl($carrier, $tracking),
+                'meli_shipment_id' => $validated['meli_shipment_id'] ?? $shipment->meli_shipment_id,
+                'notes' => $validated['notes'] ?? $shipment->notes,
+            ]);
+
+            if ($request->wantsJson()) {
+                return response()->json([
+                    'success' => true,
+                    'message' => 'Datos de rastreo actualizados exitosamente.',
+                    'shipment' => $shipment->fresh(),
+                ]);
+            }
+
+            return back()->with('success', 'Datos de rastreo y guía actualizados correctamente.');
+        } catch (Throwable $e) {
+            if ($request->wantsJson()) {
+                return response()->json(['success' => false, 'error' => $e->getMessage()], 422);
+            }
+            return back()->with('error', 'Error al actualizar rastreo: ' . $e->getMessage());
+        }
+    }
+
+    /**
      * Registrar recepción / inspección MeLi (unidades conformes, dañadas y faltantes)
      */
     public function receive(Request $request, MeliFullShipment $shipment): RedirectResponse
