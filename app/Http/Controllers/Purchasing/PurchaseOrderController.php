@@ -81,7 +81,10 @@ class PurchaseOrderController extends Controller
             ->get(['id', 'code', 'name']);
 
         $products = InventoryProduct::query()
-            ->with('primaryLocation:id,code,name')
+            ->with([
+                'primaryLocation:id,code,name',
+                'supplierProducts:id,inventory_product_id,supplier_id,supplier_name,supplier_sku,supplier_cost',
+            ])
             ->where('is_active', true)
             ->where('product_type', InventoryProduct::SIMPLE)
             ->orderBy('brand')
@@ -116,6 +119,7 @@ class PurchaseOrderController extends Controller
             'shipping_cost' => ['nullable', 'numeric', 'min:0'],
             'items' => ['required', 'array', 'min:1'],
             'items.*.inventory_product_id' => ['required', 'integer', 'exists:inventory_products,id'],
+            'items.*.supplier_sku' => ['nullable', 'string', 'max:100'],
             'items.*.quantity_ordered' => ['required', 'integer', 'min:1'],
             'items.*.unit_cost' => ['nullable', 'numeric', 'min:0'],
         ]);
@@ -204,19 +208,58 @@ class PurchaseOrderController extends Controller
         }
 
         $products = InventoryProduct::query()
-            ->with('primaryLocation:id,code,name')
+            ->with([
+                'primaryLocation:id,code,name',
+                'supplierProducts:id,inventory_product_id,supplier_id,supplier_name,supplier_sku,supplier_cost',
+            ])
             ->where('is_active', true)
             ->where(function ($query) use ($q) {
                 $query->where('sku', 'like', "%{$q}%")
                     ->orWhere('barcode', 'like', "%{$q}%")
                     ->orWhere('barcode_secondary', 'like', "%{$q}%")
                     ->orWhere('name', 'like', "%{$q}%")
-                    ->orWhere('brand', 'like', "%{$q}%");
+                    ->orWhere('brand', 'like', "%{$q}%")
+                    ->orWhereHas('supplierProducts', function ($spq) use ($q) {
+                        $spq->where('supplier_sku', 'like', "%{$q}%");
+                    });
             })
-            ->limit(20)
+            ->limit(25)
             ->get(['id', 'sku', 'barcode', 'barcode_secondary', 'name', 'brand', 'cost', 'primary_location_id']);
 
         return response()->json(['data' => $products]);
+    }
+
+    public function saveSupplierSku(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'inventory_product_id' => ['required', 'integer', 'exists:inventory_products,id'],
+            'supplier_name' => ['required', 'string', 'max:150'],
+            'supplier_sku' => ['required', 'string', 'max:100'],
+            'supplier_cost' => ['nullable', 'numeric', 'min:0'],
+        ]);
+
+        $product = InventoryProduct::findOrFail($validated['inventory_product_id']);
+        $supplier = Supplier::where('name', $validated['supplier_name'])->first();
+
+        $supProduct = \App\Models\SupplierProduct::updateOrCreate(
+            [
+                'supplier_name' => trim($validated['supplier_name']),
+                'inventory_product_id' => $product->id,
+                'supplier_sku' => trim($validated['supplier_sku']),
+            ],
+            [
+                'supplier_id' => $supplier?->id,
+                'supplier_product_name' => $product->name,
+                'supplier_cost' => $validated['supplier_cost'] ?? null,
+                'is_primary' => true,
+            ]
+        );
+
+        return response()->json([
+            'ok' => true,
+            'message' => 'Código de proveedor guardado correctamente.',
+            'supplier_product' => $supProduct,
+        ]);
     }
 
     public function order(Request $request, PurchaseOrder $purchaseOrder): JsonResponse|RedirectResponse

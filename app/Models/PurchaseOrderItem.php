@@ -19,6 +19,7 @@ class PurchaseOrderItem extends Model
         'purchase_order_id',
         'inventory_product_id',
         'sku',
+        'supplier_sku',
         'product_name',
         'quantity_ordered',
         'quantity_received',

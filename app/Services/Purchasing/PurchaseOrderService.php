@@ -60,9 +60,60 @@ class PurchaseOrderService
                 $subtotal += $itemSubtotal;
                 $totalUnitsOrdered += $qty;
 
+                // Resolver o guardar el código de catálogo del proveedor
+                $supplierSku = isset($item['supplier_sku']) ? trim((string) $item['supplier_sku']) : null;
+                if ($supplierSku === '') {
+                    $supplierSku = null;
+                }
+
+                if (\Illuminate\Support\Facades\Schema::hasTable('supplier_products')) {
+                    if (! $supplierSku) {
+                        // Buscar si existe un código registrado para este producto y proveedor
+                        $supProd = \App\Models\SupplierProduct::where('inventory_product_id', $product->id)
+                            ->where(function ($q) use ($supplierName) {
+                                $q->where('supplier_name', $supplierName)
+                                    ->orWhere('supplier_name', 'like', "%{$supplierName}%");
+                            })
+                            ->orderByDesc('is_primary')
+                            ->first();
+
+                        if (! $supProd) {
+                            $supProd = \App\Models\SupplierProduct::where('inventory_product_id', $product->id)
+                                ->where('is_primary', true)
+                                ->first();
+                        }
+
+                        if ($supProd) {
+                            $supplierSku = $supProd->supplier_sku;
+                        }
+                    } elseif ($supplierSku) {
+                        // Guardar / actualizar en supplier_products para futuras órdenes
+                        $supplierId = null;
+                        if (\Illuminate\Support\Facades\Schema::hasTable('suppliers')) {
+                            $supObj = \App\Models\Supplier::where('name', $supplierName)->first();
+                            $supplierId = $supObj?->id;
+                        }
+
+                        \App\Models\SupplierProduct::updateOrCreate(
+                            [
+                                'supplier_name' => $supplierName,
+                                'inventory_product_id' => $product->id,
+                                'supplier_sku' => $supplierSku,
+                            ],
+                            [
+                                'supplier_id' => $supplierId,
+                                'supplier_product_name' => $product->name,
+                                'supplier_cost' => $unitCost,
+                                'is_primary' => true,
+                            ]
+                        );
+                    }
+                }
+
                 $validatedItems[] = [
                     'inventory_product_id' => $product->id,
                     'sku' => $product->sku,
+                    'supplier_sku' => $supplierSku,
                     'product_name' => $product->name,
                     'quantity_ordered' => $qty,
                     'quantity_received' => 0,

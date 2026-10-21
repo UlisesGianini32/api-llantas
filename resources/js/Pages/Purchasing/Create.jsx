@@ -35,6 +35,24 @@ export default function PurchasingCreate({
     const [productSearch, setProductSearch] = useState('')
     const [selectedBrandFilter, setSelectedBrandFilter] = useState(prefillBrand || '')
 
+    // Helper to get supplier SKU for a product matching current supplier
+    const getSupplierSkuForProduct = (product, supplierName = data.supplier_name) => {
+        if (!product?.supplier_products || !Array.isArray(product.supplier_products) || product.supplier_products.length === 0) {
+            return ''
+        }
+        const cleanSup = (supplierName || '').toLowerCase().trim()
+        if (cleanSup) {
+            const match = product.supplier_products.find((sp) =>
+                (sp.supplier_name && sp.supplier_name.toLowerCase().trim() === cleanSup) ||
+                (sp.supplier_name && cleanSup.includes(sp.supplier_name.toLowerCase().trim())) ||
+                (sp.supplier_name && sp.supplier_name.toLowerCase().trim().includes(cleanSup))
+            )
+            if (match) return match.supplier_sku
+        }
+        const primary = product.supplier_products.find((sp) => sp.is_primary)
+        return primary?.supplier_sku || product.supplier_products[0]?.supplier_sku || ''
+    }
+
     // Filter available products
     const availableProducts = useMemo(() => {
         return products.filter((p) => {
@@ -43,7 +61,8 @@ export default function PurchasingCreate({
             const matchesSearch = !s || (
                 (p.sku && p.sku.toLowerCase().includes(s)) ||
                 (p.name && p.name.toLowerCase().includes(s)) ||
-                (p.brand && p.brand.toLowerCase().includes(s))
+                (p.brand && p.brand.toLowerCase().includes(s)) ||
+                (p.supplier_products && p.supplier_products.some((sp) => sp.supplier_sku && sp.supplier_sku.toLowerCase().includes(s)))
             )
             return matchesBrand && matchesSearch
         })
@@ -52,8 +71,9 @@ export default function PurchasingCreate({
     const handleSupplierSelect = (val) => {
         setData('supplier_name', val)
         const match = registeredSuppliers.find((s) => s.name.toLowerCase() === val.toLowerCase().trim())
+        const updates = { supplier_name: val }
+
         if (match) {
-            const updates = { supplier_name: val }
             if (match.brands && match.brands.length > 0 && !data.brand) {
                 const primaryBrand = match.brands.find((b) => b.is_primary)?.brand || match.brands[0]?.brand
                 if (primaryBrand) {
@@ -66,8 +86,19 @@ export default function PurchasingCreate({
                 date.setDate(date.getDate() + match.lead_time_days)
                 updates.expected_delivery_date = date.toISOString().split('T')[0]
             }
-            setData((prev) => ({ ...prev, ...updates }))
         }
+
+        // Auto-refresh supplier_sku on added items if empty
+        if (data.items.length > 0) {
+            updates.items = data.items.map((item) => {
+                if (item.supplier_sku) return item
+                const prod = products.find((p) => p.id === item.inventory_product_id)
+                const newSku = getSupplierSkuForProduct(prod, val)
+                return newSku ? { ...item, supplier_sku: newSku } : item
+            })
+        }
+
+        setData((prev) => ({ ...prev, ...updates }))
     }
 
     const distinctBrands = useMemo(() => {
@@ -88,9 +119,12 @@ export default function PurchasingCreate({
             return
         }
 
+        const supplierSku = getSupplierSkuForProduct(product)
+
         const newItem = {
             inventory_product_id: product.id,
             sku: product.sku,
+            supplier_sku: supplierSku,
             name: product.name,
             brand: product.brand,
             quantity_ordered: 1,
@@ -106,6 +140,12 @@ export default function PurchasingCreate({
     const updateItemQuantity = (index, qty) => {
         const updated = [...data.items]
         updated[index].quantity_ordered = Math.max(1, parseInt(qty) || 1)
+        setData('items', updated)
+    }
+
+    const updateItemSupplierSku = (index, sku) => {
+        const updated = [...data.items]
+        updated[index].supplier_sku = sku
         setData('items', updated)
     }
 
@@ -353,6 +393,11 @@ export default function PurchasingCreate({
                                                             <span className="font-bold text-slate-900 dark:text-white">
                                                                 {prod.sku}
                                                             </span>
+                                                            {getSupplierSkuForProduct(prod) && (
+                                                                <span className="rounded bg-indigo-50 px-1.5 py-0.5 text-[10px] font-mono font-bold text-indigo-700 border border-indigo-200 dark:bg-indigo-950/60 dark:text-indigo-300 dark:border-indigo-800">
+                                                                    Cód: {getSupplierSkuForProduct(prod)}
+                                                                </span>
+                                                            )}
                                                             <span className="text-xs font-medium text-slate-500 dark:text-slate-400">
                                                                 [{prod.brand || 'S/M'}]
                                                             </span>
@@ -404,6 +449,7 @@ export default function PurchasingCreate({
                                 <table className="w-full text-left text-sm">
                                     <thead className="border-b border-slate-200 bg-slate-50/75 text-xs font-semibold uppercase tracking-wider text-slate-600 dark:border-neutral-800 dark:bg-neutral-950 dark:text-slate-400">
                                         <tr>
+                                            <th className="px-3 py-2.5 w-44 text-indigo-700 dark:text-indigo-400">Cód. Proveedor</th>
                                             <th className="px-3 py-2.5">SKU / Producto</th>
                                             <th className="px-3 py-2.5 w-32">Cantidad</th>
                                             <th className="px-3 py-2.5 w-36">Costo Unit. ($)</th>
@@ -417,6 +463,17 @@ export default function PurchasingCreate({
 
                                             return (
                                                 <tr key={item.inventory_product_id} className="hover:bg-slate-50/50 dark:hover:bg-neutral-800/40">
+                                                    <td className="px-3 py-3">
+                                                        <input
+                                                            type="text"
+                                                            value={item.supplier_sku || ''}
+                                                            onChange={(e) => updateItemSupplierSku(index, e.target.value)}
+                                                            placeholder="Cód. catálogo..."
+                                                            title="Código con el que tu proveedor identifica este producto en su lista"
+                                                            className="w-36 rounded-lg border border-indigo-200 bg-indigo-50/40 px-2.5 py-1.5 font-mono text-xs font-bold text-indigo-900 focus:border-indigo-500 focus:outline-none dark:border-indigo-900/50 dark:bg-indigo-950/30 dark:text-indigo-200"
+                                                        />
+                                                    </td>
+
                                                     <td className="px-3 py-3">
                                                         <div className="font-semibold text-slate-900 dark:text-white">
                                                             {item.sku}

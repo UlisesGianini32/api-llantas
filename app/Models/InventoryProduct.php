@@ -100,6 +100,11 @@ class InventoryProduct extends Model
         return $this->hasMany(InventoryChannelLink::class, 'inventory_product_id');
     }
 
+    public function supplierProducts(): HasMany
+    {
+        return $this->hasMany(SupplierProduct::class, 'inventory_product_id');
+    }
+
     public function isKit(): bool
     {
         return $this->product_type === self::KIT;

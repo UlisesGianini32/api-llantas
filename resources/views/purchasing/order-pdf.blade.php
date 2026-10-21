@@ -387,8 +387,9 @@
         <table class="items-table">
             <thead>
                 <tr>
-                    <th style="width: 36px; text-align: center;">#</th>
-                    <th style="width: 140px;">SKU</th>
+                    <th style="width: 32px; text-align: center;">#</th>
+                    <th style="width: 130px;">Cód. Proveedor</th>
+                    <th style="width: 100px;">SKU Interno</th>
                     <th>Producto / Descripción</th>
                     <th style="width: 110px; text-align: center;">Cantidad Pedida</th>
                 </tr>
@@ -397,7 +398,12 @@
                 @foreach($order->items as $index => $item)
                     <tr>
                         <td style="text-align: center; color: #94a3b8; font-size: 11px;">{{ $index + 1 }}</td>
-                        <td class="sku-cell">{{ $item->product?->sku ?? $item->sku }}</td>
+                        <td class="sku-cell" style="color: #4338ca; font-weight: 800; font-size: 13px;">
+                            {{ $item->supplier_sku ?: '—' }}
+                        </td>
+                        <td class="sku-cell" style="color: #64748b; font-size: 11px;">
+                            {{ $item->product?->sku ?? $item->sku }}
+                        </td>
                         <td>
                             <div style="font-weight: 600;">{{ $item->product?->name ?? $item->product_name }}</div>
                             @if($item->product?->brand)

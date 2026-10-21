@@ -50,6 +50,11 @@ class Supplier extends Model
         return $this->hasMany(PurchaseOrder::class, 'supplier_name', 'name');
     }
 
+    public function supplierProducts(): HasMany
+    {
+        return $this->hasMany(SupplierProduct::class, 'supplier_id');
+    }
+
     public function creator(): BelongsTo
     {
         return $this->belongsTo(User::class, 'created_by');

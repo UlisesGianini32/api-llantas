@@ -104,6 +104,7 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
             item_id: item.id,
             product_id: item.inventory_product_id,
             sku: item.product?.sku || item.sku || '-',
+            supplier_sku: item.supplier_sku || '',
             name: item.product?.name || item.product_name || '',
             barcode: item.product?.barcode || '',
             barcode_secondary: item.product?.barcode_secondary || '',
@@ -212,6 +213,14 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
         const isJoicoGroup = recipientType === 'joico_group'
         const cleanPhone = !isJoicoGroup ? (whatsappPhone || '').replace(/\D/g, '') : ''
 
+        const itemsSummary = (order.items || [])
+            .map((it) => {
+                const code = it.supplier_sku ? `[${it.supplier_sku}] ` : ''
+                const name = it.product?.name || it.product_name || ''
+                return `• ${code}${name} — *${it.quantity_ordered} pzas*`
+            })
+            .join('\n')
+
         const msgLines = [
             `📄 *ORDEN DE COMPRA: ${order.order_number}*`,
             `*T.O. THE BEAUTY SHOP (SBS)*`,
@@ -220,10 +229,14 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                 ? `Hola equipo Joico, compartimos la orden de compra adjunta en formato PDF.`
                 : `Estimado(a) ${order.supplier_name}, le compartimos la orden de compra oficial en formato PDF.`,
             ``,
+            `*Detalle de partidas pedidas:*`,
+            itemsSummary,
+            ``,
+            `*Total piezas solicitadas:* ${order.total_units_ordered} pzas`,
+            ``,
             `Enlace directo para consultar el documento:`,
             `${publicPdfUrl}`,
             ``,
-            `*Total piezas solicitadas:* ${order.total_units_ordered} pzas`,
             `_Favor de confirmar pedido y fecha estimada de entrega. ¡Muchas gracias!_`,
         ]
         const textMessage = msgLines.join('\n')
@@ -310,7 +323,8 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
             return (
                 (it.barcode && it.barcode.toLowerCase() === c) ||
                 (it.barcode_secondary && it.barcode_secondary.toLowerCase() === c) ||
-                (it.sku && it.sku.toLowerCase() === c)
+                (it.sku && it.sku.toLowerCase() === c) ||
+                (it.supplier_sku && it.supplier_sku.toLowerCase() === c)
             )
         })
 
@@ -879,7 +893,8 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                             <thead className="border-b border-slate-200 bg-slate-50/75 text-xs font-bold uppercase tracking-wider text-slate-700 dark:border-neutral-800 dark:bg-neutral-950 dark:text-slate-300">
                                 <tr>
                                     <th className="px-3 py-3 w-12 text-center">#</th>
-                                    <th className="px-3 py-3 w-36">SKU</th>
+                                    <th className="px-3 py-3 w-36 text-indigo-600 dark:text-indigo-400">Cód. Proveedor</th>
+                                    <th className="px-3 py-3 w-32">SKU Interno</th>
                                     <th className="px-3 py-3">Producto / Descripción</th>
                                     <th className="px-3 py-3 text-center w-28">Pedidas</th>
                                     {order.status !== 'DRAFT' && (
@@ -896,7 +911,12 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                                     return (
                                         <tr key={item.id} className="hover:bg-slate-50/30 dark:hover:bg-neutral-800/30">
                                             <td className="px-3 py-3 text-center text-xs text-slate-400">{idx + 1}</td>
-                                            <td className="px-3 py-3 font-mono font-bold text-slate-900 dark:text-white">
+                                            <td className="px-3 py-3 font-mono font-extrabold text-indigo-600 dark:text-indigo-400">
+                                                {item.supplier_sku || (
+                                                    <span className="text-slate-400 font-normal italic text-xs">—</span>
+                                                )}
+                                            </td>
+                                            <td className="px-3 py-3 font-mono text-xs text-slate-500 dark:text-slate-400">
                                                 {item.product?.sku || item.sku || '-'}
                                             </td>
                                             <td className="px-3 py-3 text-slate-800 dark:text-slate-200">
@@ -1230,7 +1250,8 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                                         <thead>
                                             <tr className="border-b-2 border-slate-200 bg-slate-50 text-[11px] font-bold uppercase tracking-wider text-slate-600">
                                                 <th className="py-2.5 px-3 w-10 text-center">#</th>
-                                                <th className="py-2.5 px-3 w-32">SKU</th>
+                                                <th className="py-2.5 px-3 w-32 text-indigo-700">Cód. Proveedor</th>
+                                                <th className="py-2.5 px-3 w-28">SKU Interno</th>
                                                 <th className="py-2.5 px-3">Producto / Descripción</th>
                                                 <th className="py-2.5 px-3 w-28 text-center">Cantidad Pedida</th>
                                             </tr>
@@ -1239,7 +1260,10 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                                             {(order.items || []).map((it, idx) => (
                                                 <tr key={it.id || idx}>
                                                     <td className="py-2.5 px-3 text-center text-slate-400 font-mono text-[11px]">{idx + 1}</td>
-                                                    <td className="py-2.5 px-3 font-mono font-bold text-slate-900">
+                                                    <td className="py-2.5 px-3 font-mono font-bold text-indigo-700 text-xs">
+                                                        {it.supplier_sku || '—'}
+                                                    </td>
+                                                    <td className="py-2.5 px-3 font-mono text-slate-500 text-[11px]">
                                                         {it.product?.sku || it.sku || '-'}
                                                     </td>
                                                     <td className="py-2.5 px-3 text-slate-800">

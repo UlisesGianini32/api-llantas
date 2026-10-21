@@ -148,6 +148,7 @@ class SupplierController extends Controller
             $products = InventoryProduct::query()
                 ->whereIn(DB::raw('UPPER(TRIM(brand))'), $brandNames)
                 ->where('is_active', true)
+                ->with(['supplierProducts' => fn ($q) => $q->where('supplier_id', $supplier->id)->orWhere('supplier_name', $supplier->name)])
                 ->orderBy('brand')
                 ->orderBy('name')
                 ->get(['id', 'sku', 'barcode', 'barcode_secondary', 'name', 'brand', 'supplier', 'cost', 'price_public']);

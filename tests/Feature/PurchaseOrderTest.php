@@ -62,6 +62,8 @@ class PurchaseOrderTest extends TestCase
         (require database_path('migrations/2026_09_26_000001_add_remote_user_product_id_to_inventory_channel_links.php'))->up();
         (require database_path('migrations/2026_09_30_000003_create_restock_configurations_table.php'))->up();
         (require database_path('migrations/2026_09_30_000004_create_purchase_orders_tables.php'))->up();
+        (require database_path('migrations/2026_10_07_193000_create_suppliers_and_supplier_brands_tables.php'))->up();
+        (require database_path('migrations/2026_10_21_160000_create_supplier_products_table.php'))->up();
 
         $this->admin = User::forceCreate([
             'name' => 'Admin Compras',
