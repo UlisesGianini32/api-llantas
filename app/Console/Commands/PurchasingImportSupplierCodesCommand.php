@@ -24,6 +24,24 @@ class PurchasingImportSupplierCodesCommand extends Command
         'icon',
     ];
 
+    /**
+     * Aliases de marcas en inventory_products para cada proveedor.
+     */
+    private const BRAND_ALIASES = [
+        'Alfaparf' => ['ALFAPARF', 'YELLOW', 'MILANO', 'IL SALONE'],
+        'Tec Italy' => ['TEC ITALY', 'TECITALY', 'TECITALLY', 'TEC'],
+        'Salerm' => ['SALERM', 'BIOKERA', 'SALERMVISON'],
+        'Lendan' => ['LENDAN'],
+        "L'Oréal" => ["L'OREAL", "L'ORÉAL", 'LOREAL', 'SERIE EXPERT'],
+        'Wella' => ['WELLA', 'COLOR PERFECT', 'ILLUMINA', 'SEBASTIAN', 'INVIGO', 'SP'],
+        'Schwarzkopf' => ['SCHWARZKOPF', 'BC BONACURE', 'OSIS', 'IGORA'],
+        'Wahl' => ['WAHL', 'WHAL'],
+        'Letmex' => ['LETMEX', 'MUEBLES'],
+        'ABC' => ['ABC', 'AUTHENTIC BEAUTY CONCEPT'],
+        'Joico' => ['JOICO', 'K-PAK', 'DEFY DAMAGE'],
+        'Davines' => ['DAVINES', 'MORE INSIDE', 'ESSENTIAL HAIRCARE', 'OI'],
+    ];
+
     public function handle(): int
     {
         $this->info('=====================================================');
@@ -54,10 +72,10 @@ class PurchasingImportSupplierCodesCommand extends Command
 
         $this->newLine();
         $this->info('=====================================================');
-        $this->info("✓ Extracción completada.");
+        $this->info('✓ Extracción completada.');
         $this->info("  Total códigos extraídos de proveedores: {$totalExtracted}");
         $this->info("  Total vinculados a productos existentes: {$totalMapped}");
-        $this->info("  Registros actuales en supplier_products: " . SupplierProduct::count());
+        $this->info('  Registros actuales en supplier_products: ' . SupplierProduct::count());
         $this->info('=====================================================');
 
         return Command::SUCCESS;
@@ -114,6 +132,8 @@ class PurchasingImportSupplierCodesCommand extends Command
                 $records = $this->parseLetmexRows($rows, 'Letmex');
             } elseif ($cleanName === 'abc') {
                 $records = $this->parseAbcRows($rows, 'ABC');
+            } elseif ($cleanName === 'wella') {
+                $records = $this->parseWellaRows($rows, 'Wella');
             } elseif ($cleanName === 'schwarzkopf.') {
                 $records = $this->parseSchwarzkopfRows($rows, 'Schwarzkopf');
             } elseif ($cleanName === 'davines') {
@@ -148,7 +168,6 @@ class PurchasingImportSupplierCodesCommand extends Command
             if (count($r) < 8) {
                 continue;
             }
-            // Col 3: EAN, Col 6: SAP, Col 7: Descripción, Col 9: Unitario
             $sap = trim((string) ($r[6] ?? ''));
             $ean = trim((string) ($r[3] ?? ''));
             $desc = trim((string) ($r[7] ?? ''));
@@ -245,15 +264,24 @@ class PurchasingImportSupplierCodesCommand extends Command
     {
         $items = [];
         foreach ($rows as $r) {
-            foreach ([0, 4, 8] as $colIdx) {
-                if (isset($r[$colIdx], $r[$colIdx + 1])) {
-                    $code = trim((string) $r[$colIdx]);
-                    $desc = trim((string) $r[$colIdx + 1]);
-                    if (is_numeric($code) && strlen($code) >= 5 && $desc !== '') {
+            $colCount = count($r);
+            for ($cIdx = 0; $cIdx < $colCount; $cIdx++) {
+                $val = trim((string) ($r[$cIdx] ?? ''));
+                if (is_numeric($val) && strlen($val) === 7) {
+                    $desc = '';
+                    $cap = '';
+                    if ($cIdx + 1 < $colCount && ! empty($r[$cIdx + 1])) {
+                        $desc = trim((string) $r[$cIdx + 1]);
+                    }
+                    if ($cIdx + 2 < $colCount && ! empty($r[$cIdx + 2])) {
+                        $cap = trim((string) $r[$cIdx + 2]);
+                    }
+                    $fullName = trim($desc . ($cap !== '' ? ' ' . $cap : ''));
+                    if ($fullName !== '') {
                         $items[] = [
                             'supplier_name' => $supplierName,
-                            'supplier_sku' => $code,
-                            'product_name' => $desc,
+                            'supplier_sku' => $val,
+                            'product_name' => $fullName,
                             'cost' => null,
                         ];
                     }
@@ -266,59 +294,25 @@ class PurchasingImportSupplierCodesCommand extends Command
     private function parseSalermRows(array $rows, string $supplierName): array
     {
         $items = [];
-        foreach ($rows as $r) {
-            if (count($r) < 2 || empty($r[0]) || empty($r[1])) {
-                continue;
-            }
-            $code = trim((string) $r[0]);
-            $desc = trim((string) $r[1]);
-            if ($code === '' || $code === 'REF.' || str_starts_with($code, 'SALERM COSMETICS') || strlen($code) < 2) {
-                continue;
+        $rowsCount = count($rows);
+        for ($i = 2; $i < $rowsCount; $i++) {
+            $r = $rows[$i];
+            $c0 = isset($r[0]) ? trim((string) $r[0]) : '';
+            $c1 = isset($r[1]) ? trim((string) $r[1]) : '';
+            $c2 = isset($r[2]) ? trim((string) $r[2]) : '';
+
+            $code = null;
+            $desc = null;
+
+            if ($c1 !== '' && $c2 !== '' && strlen($c1) <= 10 && ! $this->startsWithAny($c1, ['TINTE', 'PEROXIDO', 'BIOKERA', 'SALERM'])) {
+                $code = $c1;
+                $desc = $c2;
+            } elseif ($c0 !== '' && $c1 !== '') {
+                $code = $c0;
+                $desc = $c1;
             }
 
-            $items[] = [
-                'supplier_name' => $supplierName,
-                'supplier_sku' => $code,
-                'product_name' => $desc,
-                'cost' => null,
-            ];
-        }
-        return $items;
-    }
-
-    private function parseLendanRows(array $rows, string $supplierName): array
-    {
-        $items = [];
-        foreach ($rows as $r) {
-            if (count($r) < 2 || empty($r[0]) || empty($r[1])) {
-                continue;
-            }
-            $code = trim((string) $r[0]);
-            $desc = trim((string) $r[1]);
-            if ($code === '' || $code === 'REF.' || str_starts_with($code, 'LENDAN') || strlen($code) < 2) {
-                continue;
-            }
-
-            $items[] = [
-                'supplier_name' => $supplierName,
-                'supplier_sku' => $code,
-                'product_name' => $desc,
-                'cost' => null,
-            ];
-        }
-        return $items;
-    }
-
-    private function parseWahlRows(array $rows, string $supplierName): array
-    {
-        $items = [];
-        foreach ($rows as $r) {
-            if (count($r) < 2 || empty($r[0]) || empty($r[1])) {
-                continue;
-            }
-            $code = trim((string) $r[0]);
-            $desc = trim((string) $r[1]);
-            if (is_numeric($code) && strlen($code) >= 4 && $desc !== '') {
+            if ($code && $desc && $code !== 'REF.' && ! str_starts_with($code, 'SALERM') && strlen($code) >= 2) {
                 $items[] = [
                     'supplier_name' => $supplierName,
                     'supplier_sku' => $code,
@@ -330,25 +324,76 @@ class PurchasingImportSupplierCodesCommand extends Command
         return $items;
     }
 
+    private function parseLendanRows(array $rows, string $supplierName): array
+    {
+        $items = [];
+        $rowsCount = count($rows);
+        for ($i = 2; $i < $rowsCount; $i++) {
+            $r = $rows[$i];
+            $c0 = isset($r[0]) ? trim((string) $r[0]) : '';
+            $c1 = isset($r[1]) ? trim((string) $r[1]) : '';
+            $c2 = isset($r[2]) ? trim((string) $r[2]) : '';
+
+            $code = null;
+            $desc = null;
+
+            if ($c1 !== '' && $c2 !== '' && strlen($c1) <= 10 && ! $this->startsWithAny($c1, ['LENDAN', 'LD '])) {
+                $code = $c1;
+                $desc = $c2;
+            } elseif ($c0 !== '' && $c1 !== '') {
+                $code = $c0;
+                $desc = $c1;
+            }
+
+            if ($code && $desc && $code !== 'REF.' && ! str_starts_with($code, 'LENDAN') && strlen($code) >= 2) {
+                $items[] = [
+                    'supplier_name' => $supplierName,
+                    'supplier_sku' => $code,
+                    'product_name' => $desc,
+                    'cost' => null,
+                ];
+            }
+        }
+        return $items;
+    }
+
+    private function parseWahlRows(array $rows, string $supplierName): array
+    {
+        $items = [];
+        foreach ($rows as $r) {
+            // En la hoja de Wahl el código está en col 5 y nombre en col 6
+            if (isset($r[5], $r[6])) {
+                $code = trim((string) $r[5]);
+                $desc = trim((string) $r[6]);
+                if (strlen($code) >= 4 && $desc !== '' && $code !== 'WAHL' && ! str_starts_with($desc, 'nombre')) {
+                    $items[] = [
+                        'supplier_name' => $supplierName,
+                        'supplier_sku' => $code,
+                        'product_name' => $desc,
+                        'cost' => null,
+                    ];
+                }
+            }
+        }
+        return $items;
+    }
+
     private function parseLetmexRows(array $rows, string $supplierName): array
     {
         $items = [];
         foreach ($rows as $r) {
-            if (count($r) < 2 || empty($r[0]) || empty($r[1])) {
-                continue;
+            if (isset($r[1], $r[2])) {
+                $desc = trim((string) $r[1]);
+                $code = trim((string) $r[2]);
+                if ($code !== '' && ! str_starts_with($desc, 'cantidad') && strlen($code) >= 2) {
+                    $items[] = [
+                        'supplier_name' => $supplierName,
+                        'supplier_sku' => $code,
+                        'product_name' => $desc,
+                        'cost' => null,
+                    ];
+                }
             }
-            $desc = trim((string) $r[0]);
-            $code = trim((string) $r[1]);
-            if ($code === '' || str_starts_with($desc, 'cantidad') || strlen($code) < 2) {
-                continue;
-            }
-
-            $items[] = [
-                'supplier_name' => $supplierName,
-                'supplier_sku' => $code,
-                'product_name' => $desc,
-                'cost' => null,
-            ];
         }
         return $items;
     }
@@ -357,11 +402,11 @@ class PurchasingImportSupplierCodesCommand extends Command
     {
         $items = [];
         foreach ($rows as $r) {
-            if (! empty($r[0]) && ! empty($r[1])) {
-                $c = trim((string) $r[0]);
-                $d = trim((string) $r[1]);
-                $cost = isset($r[2]) && is_numeric($r[2]) ? (float) $r[2] : null;
-                if (is_numeric($c) && strlen($c) >= 5) {
+            if (isset($r[1], $r[2])) {
+                $c = trim((string) $r[1]);
+                $d = trim((string) $r[2]);
+                $cost = isset($r[3]) && is_numeric($r[3]) ? (float) $r[3] : null;
+                if (is_numeric($c) && strlen($c) >= 5 && $d !== '') {
                     $items[] = [
                         'supplier_name' => $supplierName,
                         'supplier_sku' => $c,
@@ -370,16 +415,38 @@ class PurchasingImportSupplierCodesCommand extends Command
                     ];
                 }
             }
-            if (! empty($r[7]) && ! empty($r[8])) {
-                $c = trim((string) $r[7]);
-                $d = trim((string) $r[8]);
-                $cost = isset($r[9]) && is_numeric($r[9]) ? (float) $r[9] : null;
-                if (is_numeric($c) && strlen($c) >= 5) {
+            if (isset($r[9], $r[10])) {
+                $c = trim((string) $r[9]);
+                $d = trim((string) $r[10]);
+                $cost = isset($r[11]) && is_numeric($r[11]) ? (float) $r[11] : null;
+                if (is_numeric($c) && strlen($c) >= 5 && $d !== '') {
                     $items[] = [
                         'supplier_name' => $supplierName,
                         'supplier_sku' => $c,
                         'product_name' => $d,
                         'cost' => $cost,
+                    ];
+                }
+            }
+        }
+        return $items;
+    }
+
+    private function parseWellaRows(array $rows, string $supplierName): array
+    {
+        $items = [];
+        foreach ($rows as $r) {
+            if (isset($r[0], $r[1])) {
+                $c = trim((string) $r[0]);
+                $d = trim((string) $r[1]);
+                $cost = isset($r[2]) && is_numeric($r[2]) ? (float) $r[2] : null;
+                if ((is_numeric($c) && strlen($c) >= 8) || str_starts_with($c, 'W')) {
+                    $items[] = [
+                        'supplier_name' => $supplierName,
+                        'supplier_sku' => $c,
+                        'product_name' => $d,
+                        'cost' => $cost,
+                        'ean' => (is_numeric($c) && strlen($c) === 13) ? $c : null,
                     ];
                 }
             }
@@ -435,7 +502,7 @@ class PurchasingImportSupplierCodesCommand extends Command
 
     /**
      * Sincroniza los registros con la tabla supplier_products
-     * buscando coincidencias con inventory_products.
+     * buscando coincidencias con inventory_products de manera inteligente.
      */
     private function syncRecords(array $records): int
     {
@@ -448,11 +515,10 @@ class PurchasingImportSupplierCodesCommand extends Command
             $cost = $entry['cost'] ?? null;
             $ean = $entry['ean'] ?? null;
 
-            // Buscar proveedor existente o relacionar
             $supplier = Supplier::where('name', $supplierName)->first();
 
             // Buscar coincidencia en inventory_products:
-            // 1. Por código de barras (EAN)
+            // 1. Por código de barras (EAN de 13 u 8 dígitos)
             $product = null;
             if ($ean) {
                 $product = InventoryProduct::where('barcode', $ean)
@@ -465,21 +531,40 @@ class PurchasingImportSupplierCodesCommand extends Command
                 $product = InventoryProduct::where('sku', $supplierSku)->first();
             }
 
-            // 3. Por marca + nombre similar
+            // 3. Por SKU o código de barras que contenga el código del proveedor
+            if (! $product && strlen($supplierSku) >= 4) {
+                $product = InventoryProduct::where('sku', 'like', "%{$supplierSku}%")
+                    ->orWhere('barcode', 'like', "%{$supplierSku}%")
+                    ->orWhere('barcode_secondary', 'like', "%{$supplierSku}%")
+                    ->first();
+            }
+
+            // 4. Por marca y similitud de nombre
             if (! $product && $productName !== '') {
-                $cleanSearch = $this->sanitizeForSearch($productName);
-                if (strlen($cleanSearch) >= 4) {
-                    $product = InventoryProduct::query()
-                        ->where(function ($q) use ($supplierName) {
-                            $q->where('brand', 'like', "%{$supplierName}%")
-                                ->orWhere('supplier', 'like', "%{$supplierName}%");
-                        })
-                        ->where('name', 'like', "%{$cleanSearch}%")
-                        ->first();
+                $aliases = self::BRAND_ALIASES[$supplierName] ?? [$supplierName];
+                $words = preg_split('/[\s\-\/\,\.]+/', mb_strtolower($productName));
+                $stopWords = ['shp', 'cnd', 'con', 'para', 'del', 'las', 'los', 'por', '1lt', '1000ml', '500ml', '300ml', '250ml', 'vol', 'pza', 'tinte'];
+                $keywords = array_values(array_filter($words, fn ($w) => strlen($w) >= 3 && ! in_array($w, $stopWords, true)));
+
+                if (! empty($keywords)) {
+                    $query = InventoryProduct::query()->where(function ($q) use ($aliases) {
+                        foreach ($aliases as $al) {
+                            $q->orWhere('brand', 'like', "%{$al}%")
+                                ->orWhere('supplier', 'like', "%{$al}%")
+                                ->orWhere('name', 'like', "%{$al}%");
+                        }
+                    });
+
+                    // Intentar con las 2 primeras palabras clave
+                    $searchWords = array_slice($keywords, 0, 2);
+                    foreach ($searchWords as $kw) {
+                        $query->where('name', 'like', "%{$kw}%");
+                    }
+
+                    $product = $query->first();
                 }
             }
 
-            // Si encontramos producto en inventory_products, guardamos relación
             if ($product) {
                 SupplierProduct::updateOrCreate(
                     [
@@ -501,11 +586,13 @@ class PurchasingImportSupplierCodesCommand extends Command
         return $mappedCount;
     }
 
-    private function sanitizeForSearch(string $text): string
+    private function startsWithAny(string $haystack, array $needles): bool
     {
-        $words = preg_split('/\s+/', trim($text));
-        // Tomar las primeras dos palabras significativas
-        $meaningful = array_filter($words, fn ($w) => strlen($w) >= 3);
-        return implode(' ', array_slice($meaningful, 0, 2));
+        foreach ($needles as $needle) {
+            if (str_starts_with($haystack, $needle)) {
+                return true;
+            }
+        }
+        return false;
     }
 }
