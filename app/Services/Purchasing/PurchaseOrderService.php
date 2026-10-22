@@ -500,7 +500,110 @@ class PurchaseOrderService
 
             $order->items()->update(['status' => PurchaseOrderItem::STATUS_CANCELLED]);
 
-            return $order->fresh(['location', 'buyer', 'cancelledBy', 'items']);
+        });
+    }
+
+    public function updateOrder(PurchaseOrder $order, array $data, User $user): PurchaseOrder
+    {
+        if ($order->receipts()->exists()) {
+            throw new InvalidArgumentException('No se puede modificar una orden que ya cuenta con recepciones de mercancía.');
+        }
+
+        if ($order->status === PurchaseOrder::STATUS_CANCELLED) {
+            throw new InvalidArgumentException('No se puede modificar una orden cancelada.');
+        }
+
+        $items = $data['items'] ?? [];
+        if (empty($items) || ! is_array($items)) {
+            throw new InvalidArgumentException('La orden de compra debe contener al menos un producto.');
+        }
+
+        return DB::transaction(function () use ($order, $data, $items) {
+            $existingItemIds = [];
+            $subtotal = 0.0;
+            $totalUnitsOrdered = 0;
+
+            foreach ($items as $itemData) {
+                $qty = (int) ($itemData['quantity_ordered'] ?? 0);
+                if ($qty <= 0) {
+                    continue; // omitir partidas en 0
+                }
+
+                $itemId = isset($itemData['id']) ? (int) $itemData['id'] : 0;
+                $productId = (int) ($itemData['inventory_product_id'] ?? 0);
+
+                if ($itemId > 0) {
+                    $orderItem = PurchaseOrderItem::where('purchase_order_id', $order->id)->find($itemId);
+                } else {
+                    $orderItem = null;
+                }
+
+                if (! $orderItem && $productId > 0) {
+                    $product = InventoryProduct::findOrFail($productId);
+                    $unitCost = isset($itemData['unit_cost']) ? (float) $itemData['unit_cost'] : (float) ($product->cost ?? 0);
+                    $itemSubtotal = round($qty * $unitCost, 2);
+
+                    $orderItem = $order->items()->create([
+                        'inventory_product_id' => $product->id,
+                        'sku' => $product->sku,
+                        'supplier_sku' => ! empty($itemData['supplier_sku']) ? trim((string) $itemData['supplier_sku']) : null,
+                        'product_name' => $product->name,
+                        'quantity_ordered' => $qty,
+                        'quantity_received' => 0,
+                        'unit_cost' => $unitCost,
+                        'subtotal' => $itemSubtotal,
+                        'status' => PurchaseOrderItem::STATUS_PENDING,
+                    ]);
+                } elseif ($orderItem) {
+                    $unitCost = isset($itemData['unit_cost']) ? (float) $itemData['unit_cost'] : (float) ($orderItem->unit_cost ?? 0);
+                    $itemSubtotal = round($qty * $unitCost, 2);
+
+                    $orderItem->update([
+                        'quantity_ordered' => $qty,
+                        'unit_cost' => $unitCost,
+                        'subtotal' => $itemSubtotal,
+                        'supplier_sku' => array_key_exists('supplier_sku', $itemData) ? (trim((string) $itemData['supplier_sku']) ?: null) : $orderItem->supplier_sku,
+                    ]);
+                }
+
+                if ($orderItem) {
+                    $existingItemIds[] = $orderItem->id;
+                    $subtotal += round($qty * (float) $orderItem->unit_cost, 2);
+                    $totalUnitsOrdered += $qty;
+                }
+            }
+
+            if (empty($existingItemIds)) {
+                throw new InvalidArgumentException('La orden no puede quedar vacía.');
+            }
+
+            // Eliminar partidas que no vienen en la lista
+            $order->items()->whereNotIn('id', $existingItemIds)->delete();
+
+            $shippingCost = isset($data['shipping_cost']) ? (float) $data['shipping_cost'] : (float) ($order->shipping_cost ?? 0);
+            $taxAmount = isset($data['tax_amount']) ? (float) $data['tax_amount'] : (float) ($order->tax_amount ?? 0);
+            $totalCost = round($subtotal + $shippingCost + $taxAmount, 2);
+
+            $updatePayload = [
+                'total_items_count' => count($existingItemIds),
+                'total_units_ordered' => $totalUnitsOrdered,
+                'subtotal' => $subtotal,
+                'total_cost' => $totalCost,
+            ];
+
+            if (array_key_exists('notes', $data)) {
+                $updatePayload['notes'] = $data['notes'];
+            }
+            if (array_key_exists('supplier_quote_reference', $data)) {
+                $updatePayload['supplier_quote_reference'] = $data['supplier_quote_reference'];
+            }
+            if (! empty($data['expected_delivery_date'])) {
+                $updatePayload['expected_delivery_date'] = $data['expected_delivery_date'];
+            }
+
+            $order->update($updatePayload);
+
+            return $order->fresh(['location', 'buyer', 'items.product.primaryLocation', 'receipts']);
         });
     }
 

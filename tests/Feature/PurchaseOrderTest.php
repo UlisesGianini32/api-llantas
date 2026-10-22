@@ -712,4 +712,78 @@ class PurchaseOrderTest extends TestCase
         $this->assertEquals(PurchaseOrder::STATUS_ORDERED, $order->fresh()->status);
         $this->assertEquals(0, $order->fresh()->total_units_received);
     }
+
+    public function test_can_update_purchase_order_items(): void
+    {
+        $order = $this->service->createOrder([
+            'supplier_name' => 'Proveedor Belleza',
+            'inventory_location_id' => $this->location->id,
+            'items' => [
+                [
+                    'inventory_product_id' => $this->productA->id,
+                    'quantity_ordered' => 5,
+                    'unit_cost' => 100.0,
+                ],
+            ],
+        ], $this->admin);
+
+        $itemA = $order->fresh()->items->first();
+
+        $response = $this->actingAs($this->admin)->put("/compras/ordenes/{$order->id}", [
+            'notes' => 'Notas actualizadas',
+            'items' => [
+                [
+                    'id' => $itemA->id,
+                    'inventory_product_id' => $this->productA->id,
+                    'quantity_ordered' => 10,
+                    'unit_cost' => 110.0,
+                ],
+                [
+                    'inventory_product_id' => $this->productB->id,
+                    'quantity_ordered' => 3,
+                    'unit_cost' => 200.0,
+                ],
+            ],
+        ]);
+
+        $response->assertSessionHasNoErrors();
+        $freshOrder = $order->fresh();
+
+        $this->assertEquals('Notas actualizadas', $freshOrder->notes);
+        $this->assertCount(2, $freshOrder->items);
+        $this->assertEquals(13, $freshOrder->total_units_ordered);
+        $this->assertEquals(1700.0, (float) $freshOrder->total_cost); // 10*110 + 3*200 = 1100 + 600 = 1700
+    }
+
+    public function test_can_destroy_single_item_from_draft_order(): void
+    {
+        $order = $this->service->createOrder([
+            'supplier_name' => 'Proveedor Belleza',
+            'inventory_location_id' => $this->location->id,
+            'items' => [
+                [
+                    'inventory_product_id' => $this->productA->id,
+                    'quantity_ordered' => 5,
+                    'unit_cost' => 100.0,
+                ],
+                [
+                    'inventory_product_id' => $this->productB->id,
+                    'quantity_ordered' => 2,
+                    'unit_cost' => 200.0,
+                ],
+            ],
+        ], $this->admin);
+
+        $itemB = $order->fresh()->items->where('inventory_product_id', $this->productB->id)->first();
+
+        $response = $this->actingAs($this->admin)->delete("/compras/ordenes/{$order->id}/partidas/{$itemB->id}");
+
+        $response->assertSessionHasNoErrors();
+        $freshOrder = $order->fresh();
+
+        $this->assertCount(1, $freshOrder->items);
+        $this->assertEquals(5, $freshOrder->total_units_ordered);
+        $this->assertEquals(500.0, (float) $freshOrder->total_cost);
+    }
 }
+

@@ -147,8 +147,124 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
     const [cancelReason, setCancelReason] = useState('')
     const [cancelSubmitting, setCancelSubmitting] = useState(false)
 
-    const percentReceived = order.total_units_ordered > 0
-        ? Math.min(100, Math.round((order.total_units_received / order.total_units_ordered) * 100))
+    // Editing order items state
+    const [isEditing, setIsEditing] = useState(false)
+    const [editItems, setEditItems] = useState(order.items || [])
+    const [savingEdit, setSavingEdit] = useState(false)
+    const [editNotes, setEditNotes] = useState(order.notes || '')
+    const [editQuoteRef, setEditQuoteRef] = useState(order.supplier_quote_reference || '')
+    const [addItemSearch, setAddItemSearch] = useState('')
+    const [addItemResults, setAddItemResults] = useState([])
+    const [searchingAddProduct, setSearchingAddProduct] = useState(false)
+
+    useEffect(() => {
+        setEditItems(order.items || [])
+        setEditNotes(order.notes || '')
+        setEditQuoteRef(order.supplier_quote_reference || '')
+    }, [order])
+
+    const handleQuantityChange = (idx, newQty) => {
+        const val = Math.max(1, parseInt(newQty, 10) || 1)
+        setEditItems((prev) => {
+            const next = [...prev]
+            next[idx] = { ...next[idx], quantity_ordered: val }
+            return next
+        })
+    }
+
+    const handleRemoveItem = (idx) => {
+        setEditItems((prev) => prev.filter((_, i) => i !== idx))
+    }
+
+    const handleSearchAddProduct = async (query) => {
+        setAddItemSearch(query)
+        if (!query || query.trim().length < 2) {
+            setAddItemResults([])
+            return
+        }
+        setSearchingAddProduct(true)
+        try {
+            const res = await fetch(route('purchasing.orders.search-products', { q: query.trim() }))
+            const data = await res.json()
+            setAddItemResults(data.data || [])
+        } catch {
+            setAddItemResults([])
+        } finally {
+            setSearchingAddProduct(false)
+        }
+    }
+
+    const handleAddProductToOrder = (prod) => {
+        const existingIdx = editItems.findIndex((it) => it.inventory_product_id === prod.id || it.product_id === prod.id)
+        if (existingIdx >= 0) {
+            handleQuantityChange(existingIdx, (editItems[existingIdx].quantity_ordered || 1) + 1)
+        } else {
+            setEditItems((prev) => [
+                ...prev,
+                {
+                    id: null,
+                    inventory_product_id: prod.id,
+                    product_id: prod.id,
+                    sku: prod.sku,
+                    supplier_sku: prod.supplier_products?.[0]?.supplier_sku || null,
+                    product_name: prod.name,
+                    product: prod,
+                    quantity_ordered: 1,
+                    quantity_received: 0,
+                    unit_cost: prod.cost || 0,
+                    subtotal: prod.cost || 0,
+                    status: 'PENDING',
+                },
+            ])
+        }
+        setAddItemSearch('')
+        setAddItemResults([])
+    }
+
+    const handleSaveOrderChanges = () => {
+        if (!editItems || editItems.length === 0) {
+            alert('La orden no puede quedar sin productos.')
+            return
+        }
+        setSavingEdit(true)
+        router.put(
+            route('purchasing.orders.update', order.id),
+            {
+                items: editItems.map((it) => ({
+                    id: it.id || null,
+                    inventory_product_id: it.inventory_product_id || it.product_id || it.product?.id,
+                    supplier_sku: it.supplier_sku || null,
+                    quantity_ordered: it.quantity_ordered,
+                    unit_cost: it.unit_cost || 0,
+                })),
+                notes: editNotes,
+                supplier_quote_reference: editQuoteRef,
+            },
+            {
+                preserveScroll: true,
+                onSuccess: () => {
+                    setIsEditing(false)
+                    setSavingEdit(false)
+                },
+                onError: (err) => {
+                    setSavingEdit(false)
+                    const msg = Object.values(err)[0] || 'Ocurrió un error al guardar los cambios.'
+                    alert(msg)
+                },
+            }
+        )
+    }
+
+    const currentDisplayItems = isEditing ? editItems : (order.items || [])
+    const currentTotalUnits = isEditing
+        ? editItems.reduce((acc, it) => acc + (parseInt(it.quantity_ordered, 10) || 0), 0)
+        : order.total_units_ordered
+    const currentTotalCount = isEditing
+        ? editItems.length
+        : (order.total_items_count || (order.items || []).length)
+
+    const percentReceived = currentTotalUnits > 0
+        ? Math.min(100, Math.round((order.total_units_received / currentTotalUnits) * 100))
         : 0
 
     // Auto-focus scanner input when reception modal opens
@@ -687,7 +803,46 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                             Ver / Enviar PDF (WhatsApp)
                         </button>
 
-                        {order.status === 'DRAFT' && (
+                        {/* Botón Modificar Pedido para órdenes en Borrador o Colocadas sin recibir */}
+                        {(order.status === 'DRAFT' || (order.status === 'ORDERED' && order.total_units_received === 0)) && (
+                            <>
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        if (isEditing) {
+                                            setEditItems(order.items || [])
+                                        }
+                                        setIsEditing(!isEditing)
+                                    }}
+                                    className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold shadow-sm transition ${
+                                        isEditing
+                                            ? 'border border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300'
+                                            : 'border border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 dark:border-indigo-800 dark:bg-indigo-950/40 dark:text-indigo-300'
+                                    }`}
+                                >
+                                    <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                                    </svg>
+                                    {isEditing ? 'Cancelar Edición' : 'Modificar Pedido'}
+                                </button>
+
+                                {isEditing && (
+                                    <button
+                                        type="button"
+                                        onClick={handleSaveOrderChanges}
+                                        disabled={savingEdit}
+                                        className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-700 disabled:opacity-50"
+                                    >
+                                        <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                                        </svg>
+                                        {savingEdit ? 'Guardando...' : 'Guardar Cambios'}
+                                    </button>
+                                )}
+                            </>
+                        )}
+
+                        {order.status === 'DRAFT' && !isEditing && (
                             <>
                                 <button
                                     type="button"
@@ -793,7 +948,7 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                             <p className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Progreso de Entrada</p>
                             <div className="mt-1 flex items-baseline gap-2">
                                 <span className="text-xl font-bold text-slate-900 dark:text-white">
-                                    {order.total_units_received} / {order.total_units_ordered}
+                                    {order.total_units_received} / {currentTotalUnits}
                                 </span>
                                 <span className="text-xs font-semibold text-slate-500">unidades ({percentReceived}%)</span>
                             </div>
@@ -808,14 +963,60 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                         <div>
                             <p className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Total Solicitado</p>
                             <p className="mt-1 text-xl font-bold text-slate-900 dark:text-white">
-                                {order.total_units_ordered} <span className="text-sm font-medium text-slate-500">piezas</span>
+                                {currentTotalUnits} <span className="text-sm font-medium text-slate-500">piezas</span>
                             </p>
                             <p className="text-xs text-slate-500">
-                                {order.total_items_count || (order.items || []).length} partidas registradas
+                                {currentTotalCount} partidas registradas
                             </p>
                         </div>
                     </div>
                 </div>
+
+                {/* Banner de Modo Edición */}
+                {isEditing && (
+                    <div className="print:hidden rounded-2xl border-2 border-amber-300 bg-amber-50/90 p-5 shadow-sm dark:border-amber-800 dark:bg-amber-950/40">
+                        <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
+                            <div className="flex items-center gap-3">
+                                <div className="rounded-xl bg-amber-500 p-2.5 text-white shadow-sm">
+                                    <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                                    </svg>
+                                </div>
+                                <div>
+                                    <h4 className="font-extrabold text-amber-950 dark:text-amber-200 text-sm">
+                                        Modo Edición Activado
+                                    </h4>
+                                    <p className="text-xs text-amber-800 dark:text-amber-300">
+                                        Puedes cambiar las cantidades pedidas, eliminar partidas no deseadas (icono de bote de basura) o buscar y añadir nuevos productos abajo.
+                                    </p>
+                                </div>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        setIsEditing(false)
+                                        setEditItems(order.items || [])
+                                    }}
+                                    className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-xs font-bold text-slate-700 shadow-sm hover:bg-slate-100 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-200"
+                                >
+                                    Cancelar
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={handleSaveOrderChanges}
+                                    disabled={savingEdit}
+                                    className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-5 py-2 text-xs font-extrabold text-white shadow-md hover:bg-emerald-700 disabled:opacity-50 transition"
+                                >
+                                    <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                                    </svg>
+                                    {savingEdit ? 'Guardando...' : 'Guardar Cambios'}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                )}
 
                 {/* Formal Printable Purchase Order Sheet (Receptor: T.O. THE BEAUTY SHOP, zero costs) */}
                 <div className="print-sheet rounded-2xl border border-slate-200 bg-white p-8 shadow-sm print:border-none print:shadow-none print:p-0 dark:border-neutral-800 dark:bg-neutral-900">
@@ -887,7 +1088,7 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                         </div>
                     </div>
 
-                    {/* Items table: Only SKU, Producto, Pedidas (+ Recibidas and Saldo in system tracking) */}
+                    {/* Items table */}
                     <div className="mt-6 overflow-x-auto">
                         <table className="w-full text-left text-sm">
                             <thead className="border-b border-slate-200 bg-slate-50/75 text-xs font-bold uppercase tracking-wider text-slate-700 dark:border-neutral-800 dark:bg-neutral-950 dark:text-slate-300">
@@ -897,19 +1098,22 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                                     <th className="px-3 py-3 w-32">SKU Interno</th>
                                     <th className="px-3 py-3">Producto / Descripción</th>
                                     <th className="px-3 py-3 text-center w-28">Pedidas</th>
-                                    {order.status !== 'DRAFT' && (
+                                    {!isEditing && order.status !== 'DRAFT' && (
                                         <>
                                             <th className="px-3 py-3 text-center w-28">Recibidas</th>
                                             <th className="px-3 py-3 text-center w-28">Saldo</th>
                                         </>
                                     )}
+                                    {isEditing && (
+                                        <th className="px-3 py-3 text-center w-20 text-rose-600 dark:text-rose-400">Acción</th>
+                                    )}
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-slate-100 dark:divide-neutral-800">
-                                {(order.items || []).map((item, idx) => {
-                                    const pending = Math.max(0, item.quantity_ordered - item.quantity_received)
+                                {currentDisplayItems.map((item, idx) => {
+                                    const pending = Math.max(0, item.quantity_ordered - (item.quantity_received || 0))
                                     return (
-                                        <tr key={item.id} className="hover:bg-slate-50/30 dark:hover:bg-neutral-800/30">
+                                        <tr key={item.id || `new-item-${idx}`} className="hover:bg-slate-50/30 dark:hover:bg-neutral-800/30">
                                             <td className="px-3 py-3 text-center text-xs text-slate-400">{idx + 1}</td>
                                             <td className="px-3 py-3 font-mono font-extrabold text-indigo-600 dark:text-indigo-400">
                                                 {item.supplier_sku || (
@@ -922,8 +1126,8 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                                             <td className="px-3 py-3 text-slate-800 dark:text-slate-200">
                                                 <p className="font-semibold">{item.product?.name || item.product_name || '-'}</p>
                                                 <div className="flex flex-wrap items-center gap-2 mt-0.5">
-                                                    {item.product?.brand && (
-                                                        <span className="text-xs text-slate-400">Marca: {item.product.brand}</span>
+                                                    {(item.product?.brand || item.brand) && (
+                                                        <span className="text-xs text-slate-400">Marca: {item.product?.brand || item.brand}</span>
                                                     )}
                                                     {item.product?.primary_location?.code ? (
                                                         <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] font-bold text-emerald-700 border border-emerald-200 dark:bg-emerald-950/60 dark:text-emerald-300 dark:border-emerald-800">
@@ -936,10 +1140,25 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                                                     )}
                                                 </div>
                                             </td>
-                                            <td className="px-3 py-3 text-center font-bold text-slate-900 dark:text-white text-base">
-                                                {item.quantity_ordered}
+
+                                            {/* Columna Pedidas (Editable si isEditing) */}
+                                            <td className="px-3 py-3 text-center">
+                                                {isEditing ? (
+                                                    <input
+                                                        type="number"
+                                                        min="1"
+                                                        value={item.quantity_ordered}
+                                                        onChange={(e) => handleQuantityChange(idx, e.target.value)}
+                                                        className="w-20 rounded-lg border-2 border-indigo-400 bg-white px-2 py-1 text-center font-black text-slate-900 shadow-sm focus:border-indigo-600 focus:ring-indigo-600 dark:border-indigo-600 dark:bg-neutral-800 dark:text-white text-base"
+                                                    />
+                                                ) : (
+                                                    <span className="font-bold text-slate-900 dark:text-white text-base">
+                                                        {item.quantity_ordered}
+                                                    </span>
+                                                )}
                                             </td>
-                                            {order.status !== 'DRAFT' && (
+
+                                            {!isEditing && order.status !== 'DRAFT' && (
                                                 <>
                                                     <td className="px-3 py-3 text-center font-semibold text-emerald-600 dark:text-emerald-400">
                                                         {item.quantity_received}
@@ -949,12 +1168,86 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                                                     </td>
                                                 </>
                                             )}
+
+                                            {/* Botón Eliminar Partida si isEditing */}
+                                            {isEditing && (
+                                                <td className="px-3 py-3 text-center">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => handleRemoveItem(idx)}
+                                                        className="inline-flex items-center justify-center rounded-lg p-2 text-rose-600 hover:bg-rose-100 hover:text-rose-800 dark:hover:bg-rose-950/50 transition"
+                                                        title="Eliminar partida de la orden"
+                                                    >
+                                                        <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                                        </svg>
+                                                    </button>
+                                                </td>
+                                            )}
                                         </tr>
                                     )
                                 })}
                             </tbody>
                         </table>
                     </div>
+
+                    {/* Buscador interactivo para añadir productos a la orden en modo edición */}
+                    {isEditing && (
+                        <div className="mt-6 rounded-2xl border-2 border-dashed border-indigo-300 bg-indigo-50/50 p-5 dark:border-indigo-800 dark:bg-indigo-950/30">
+                            <div className="flex items-center gap-2">
+                                <span className="rounded-lg bg-indigo-600 p-1.5 text-white">
+                                    <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                                    </svg>
+                                </span>
+                                <div>
+                                    <h4 className="text-sm font-bold text-indigo-950 dark:text-indigo-200">
+                                        Añadir Producto a la Orden
+                                    </h4>
+                                    <p className="text-xs text-indigo-700 dark:text-indigo-400">
+                                        Busca por nombre, código de barras o SKU para agregar productos adicionales al pedido.
+                                    </p>
+                                </div>
+                            </div>
+
+                            <div className="mt-3 relative">
+                                <input
+                                    type="text"
+                                    placeholder="Escribe el nombre o SKU del producto para buscar..."
+                                    value={addItemSearch}
+                                    onChange={(e) => handleSearchAddProduct(e.target.value)}
+                                    className="w-full rounded-xl border border-slate-300 p-2.5 text-sm text-slate-900 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 dark:border-neutral-700 dark:bg-neutral-800 dark:text-white"
+                                />
+                                {searchingAddProduct && (
+                                    <div className="absolute right-3 top-3 text-xs text-slate-400">Buscando en catálogo...</div>
+                                )}
+                                {addItemResults.length > 0 && (
+                                    <div className="absolute z-30 mt-1 max-h-64 w-full overflow-y-auto rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl dark:border-neutral-700 dark:bg-neutral-800">
+                                        {addItemResults.map((p) => (
+                                            <div
+                                                key={p.id}
+                                                onClick={() => handleAddProductToOrder(p)}
+                                                className="flex cursor-pointer items-center justify-between p-2.5 hover:bg-indigo-50 dark:hover:bg-neutral-700/60 rounded-xl transition"
+                                            >
+                                                <div>
+                                                    <p className="text-sm font-bold text-slate-800 dark:text-slate-100">{p.name}</p>
+                                                    <p className="text-xs text-slate-500">
+                                                        SKU: <span className="font-mono text-indigo-600 dark:text-indigo-400 font-semibold">{p.sku}</span> {p.brand && `• Marca: ${p.brand}`}
+                                                    </p>
+                                                </div>
+                                                <button
+                                                    type="button"
+                                                    className="inline-flex items-center gap-1 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-bold text-white shadow hover:bg-indigo-700"
+                                                >
+                                                    + Agregar
+                                                </button>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    )}
 
                     {/* Summary of quantities & Notes (No costs anywhere) */}
                     <div className="mt-8 flex flex-col justify-between gap-6 border-t border-slate-200 pt-6 sm:flex-row dark:border-neutral-800">

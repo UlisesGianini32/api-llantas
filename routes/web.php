@@ -208,6 +208,10 @@ Route::middleware(['auth', 'role'])->group(function () {
         Route::post('/proveedores/codigo-producto', [PurchaseOrderController::class, 'saveSupplierSku'])->name('save-supplier-sku');
         Route::get('/{purchaseOrder}', [PurchaseOrderController::class, 'show'])
             ->whereNumber('purchaseOrder')->name('show');
+        Route::put('/{purchaseOrder}', [PurchaseOrderController::class, 'update'])
+            ->whereNumber('purchaseOrder')->name('update');
+        Route::delete('/{purchaseOrder}/partidas/{item}', [PurchaseOrderController::class, 'destroyItem'])
+            ->whereNumber('purchaseOrder')->whereNumber('item')->name('destroy-item');
         Route::get('/{purchaseOrder}/pdf', [PurchaseOrderController::class, 'pdf'])
             ->whereNumber('purchaseOrder')->name('pdf');
         Route::post('/{purchaseOrder}/ordenar', [PurchaseOrderController::class, 'order'])

@@ -146,6 +146,83 @@ class PurchaseOrderController extends Controller
         }
     }
 
+    public function update(Request $request, PurchaseOrder $purchaseOrder): JsonResponse|RedirectResponse
+    {
+        $validated = $request->validate([
+            'supplier_quote_reference' => ['nullable', 'string', 'max:100'],
+            'expected_delivery_date' => ['nullable', 'date'],
+            'notes' => ['nullable', 'string', 'max:2000'],
+            'shipping_cost' => ['nullable', 'numeric', 'min:0'],
+            'tax_amount' => ['nullable', 'numeric', 'min:0'],
+            'items' => ['required', 'array', 'min:1'],
+            'items.*.id' => ['nullable', 'integer'],
+            'items.*.inventory_product_id' => ['required', 'integer', 'exists:inventory_products,id'],
+            'items.*.supplier_sku' => ['nullable', 'string', 'max:100'],
+            'items.*.quantity_ordered' => ['required', 'integer', 'min:1'],
+            'items.*.unit_cost' => ['nullable', 'numeric', 'min:0'],
+        ]);
+
+        try {
+            $updated = $this->poService->updateOrder($purchaseOrder, $validated, $request->user());
+
+            if ($request->wantsJson()) {
+                return response()->json([
+                    'ok' => true,
+                    'message' => "Orden de compra {$updated->order_number} actualizada exitosamente.",
+                    'order' => $updated,
+                ]);
+            }
+
+            return redirect()->route('purchasing.orders.show', $updated)
+                ->with('success', "Orden de compra {$updated->order_number} actualizada exitosamente.");
+        } catch (Throwable $e) {
+            if ($request->wantsJson()) {
+                return response()->json(['ok' => false, 'error' => $e->getMessage()], 422);
+            }
+
+            return back()->with('error', $e->getMessage())->withInput();
+        }
+    }
+
+    public function destroyItem(Request $request, PurchaseOrder $purchaseOrder, \App\Models\PurchaseOrderItem $item): JsonResponse|RedirectResponse
+    {
+        try {
+            if ($purchaseOrder->receipts()->exists()) {
+                throw new \InvalidArgumentException('No se puede eliminar partidas de una orden que ya tiene recibos.');
+            }
+
+            if ($purchaseOrder->items()->count() <= 1) {
+                throw new \InvalidArgumentException('No se puede eliminar la única partida de la orden.');
+            }
+
+            $deletedQty = $item->quantity_ordered;
+            $deletedSubtotal = $item->subtotal;
+            $item->delete();
+
+            $purchaseOrder->update([
+                'total_items_count' => $purchaseOrder->items()->count(),
+                'total_units_ordered' => max(0, $purchaseOrder->total_units_ordered - $deletedQty),
+                'subtotal' => max(0, round($purchaseOrder->subtotal - $deletedSubtotal, 2)),
+                'total_cost' => max(0, round($purchaseOrder->total_cost - $deletedSubtotal, 2)),
+            ]);
+
+            if ($request->wantsJson()) {
+                return response()->json([
+                    'ok' => true,
+                    'message' => 'Partida eliminada de la orden.',
+                ]);
+            }
+
+            return back()->with('success', 'Partida eliminada de la orden.');
+        } catch (Throwable $e) {
+            if ($request->wantsJson()) {
+                return response()->json(['ok' => false, 'error' => $e->getMessage()], 422);
+            }
+
+            return back()->with('error', $e->getMessage());
+        }
+    }
+
     public function show(PurchaseOrder $purchaseOrder): Response
     {
         $purchaseOrder->load([

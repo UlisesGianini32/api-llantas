@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands;
 
+use App\Models\BrandRestockConfiguration;
 use App\Models\InventoryLocation;
 use App\Models\InventoryProduct;
 use App\Models\PurchaseOrder;
@@ -9,6 +10,7 @@ use App\Models\PurchaseOrderItem;
 use App\Models\Supplier;
 use App\Models\User;
 use App\Services\Purchasing\PurchaseOrderService;
+use App\Services\Restock\InventoryDemandForecastingService;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
@@ -21,10 +23,11 @@ class PurchasingCreateUsaOrderCommand extends Command
     protected $signature = 'purchasing:create-usa-order
                             {--include-desired : Incluir también productos que solo tienen cantidad deseada}
                             {--as-ordered : Marcar la orden como Colocada / En camino en vez de Borrador}
-                            {--dry-run : Mostrar la coincidencia de productos y SKUs sin guardar cambios}
+                            {--apply-forecast : Ajustar cantidades automáticamente con base en las ventas y predicción semanal (7 días)}
+                            {--dry-run : Mostrar la coincidencia de productos, pronóstico y SKUs sin guardar cambios}
                             {--keep-previous : No eliminar la orden anterior generada para Compras USA}';
 
-    protected $description = 'Crea una orden de compra consolidada para Compras USA vinculando a productos existentes con sus SKUs reales de plataformas';
+    protected $description = 'Crea una orden de compra consolidada para Compras USA vinculando a productos existentes y con predicción de demanda semanal';
 
     private const BRAND_MAP = [
         'PURITANS PRIDE' => "Puritan's Pride",
@@ -50,10 +53,30 @@ class PurchasingCreateUsaOrderCommand extends Command
         "Siberian Green",
     ];
 
-    public function handle(PurchaseOrderService $poService): int
+    /**
+     * Marcas de salón profesionales que JAMÁS deben mezclarse ni vincularse a compras de USA.
+     */
+    private const FOREIGN_SALON_BRANDS = [
+        'LOREAL',
+        "L'OREAL",
+        "L'ORÉAL",
+        'JOICO',
+        'ALFAPARF',
+        'SALERM',
+        'WELLA',
+        'SCHWARZKOPF',
+        'LENDAN',
+        'TEC ITALY',
+        'FANOLA',
+        'OLAPLEX',
+        'ICON',
+    ];
+
+    public function handle(PurchaseOrderService $poService, InventoryDemandForecastingService $forecastingService): int
     {
         $this->info('=====================================================');
-        $this->info('  GENERADOR DE ORDEN DE COMPRA CONSOLIDADA - USA     ');
+        $this->info('  GENERADOR DE ORDEN CONSOLIDADA SEMANAL - USA       ');
+        $this->info('  (Basado en catálogo real y predicción de ventas)   ');
         $this->info('=====================================================');
 
         $csvPath = base_path('database/data/pedido_usa.csv');
@@ -64,6 +87,7 @@ class PurchasingCreateUsaOrderCommand extends Command
 
         $includeDesired = (bool) $this->option('include-desired');
         $asOrdered = (bool) $this->option('as-ordered');
+        $applyForecast = (bool) $this->option('apply-forecast');
         $dryRun = (bool) $this->option('dry-run');
         $keepPrevious = (bool) $this->option('keep-previous');
 
@@ -71,7 +95,7 @@ class PurchasingCreateUsaOrderCommand extends Command
             $this->warn('--- MODO SIMULACIÓN (DRY-RUN): No se guardarán cambios en la BD ---');
         }
 
-        // 1. Limpieza de orden anterior y productos provisionales "USA-..."
+        // 1. Limpieza de órdenes anteriores erróneas y productos provisionales "USA-..."
         if (! $dryRun && ! $keepPrevious) {
             $this->cleanPreviousUsaOrdersAndOrphanProducts();
         }
@@ -81,12 +105,12 @@ class PurchasingCreateUsaOrderCommand extends Command
             ['name' => 'Compras USA'],
             [
                 'contact_name' => 'Encargado Compras USA',
-                'notes' => 'Proveedor y logística para compras en Estados Unidos (Walmart, Sam\'s, Amazon US, marcas directas)',
+                'notes' => 'Proveedor y logística para compras semanales en Estados Unidos (Walmart, Sam\'s, Amazon US, marcas directas)',
                 'is_active' => true,
             ]
         );
 
-        // 3. Sincronizar marcas permitidas asociadas al proveedor (excluyendo las 5 marcas)
+        // 3. Sincronizar marcas permitidas asociadas al proveedor
         $supplierBrands = [
             'Spring Valley',
             'Life Extension',
@@ -100,6 +124,21 @@ class PurchasingCreateUsaOrderCommand extends Command
         ];
         if (! $dryRun) {
             $supplier->syncBrands($supplierBrands);
+
+            // Asegurar configuración de cadencia semanal (7 días de cobertura + 3 lead time + 3 safety stock)
+            foreach ($supplierBrands as $bName) {
+                BrandRestockConfiguration::firstOrCreate(
+                    ['brand' => $bName],
+                    [
+                        'supplier' => 'Compras USA',
+                        'cadence_preset' => BrandRestockConfiguration::PRESET_WEEKLY_7_10,
+                        'lead_time_days' => 3,
+                        'target_coverage_days' => 7,
+                        'safety_stock_days' => 3,
+                        'notes' => 'Reabastecimiento semanal recurrente de compras en USA.',
+                    ]
+                );
+            }
         }
 
         // 4. Ubicación de inventario
@@ -209,7 +248,7 @@ class PurchasingCreateUsaOrderCommand extends Command
 
         // 7. Búsqueda y vinculación a productos existentes en catálogo (respetando sus SKUs)
         $this->newLine();
-        $this->info("Buscando coincidencias en catálogo de almacén y vinculando productos...");
+        $this->info("Buscando coincidencias en catálogo de almacén y calculando predicción semanal...");
 
         $validatedItems = [];
         $totalUnits = 0;
@@ -221,12 +260,35 @@ class PurchasingCreateUsaOrderCommand extends Command
             $brand = $entry['brand'];
             $qty = $entry['quantity_ordered'];
 
-            // Buscar producto existente por nombre exacto, tokens o catálogo
+            // Buscar producto existente estrictamente dentro de la marca correcta
             $product = $this->findExistingProduct($brand, $name);
 
+            $forecastInfo = '';
             if ($product) {
                 $matchedExistingCount++;
-                $this->line("  [CATÁLOGO] <info>SKU: {$product->sku}</info> | {$product->name} (<comment>{$qty} pzas</comment>)");
+
+                // Predicción semanal de ventas
+                try {
+                    $forecast = $forecastingService->getProductForecast($product, [
+                        'cadence_preset' => BrandRestockConfiguration::PRESET_WEEKLY_7_10,
+                        'target_coverage_days' => 7,
+                        'lead_time_days' => 3,
+                        'safety_stock_days' => 3,
+                    ]);
+
+                    $suggestedQty = (int) ($forecast['suggested_quantity'] ?? 0);
+                    $sales30d = (int) ($forecast['sales_30d'] ?? 0);
+                    $avail = (int) ($forecast['available_stock'] ?? 0);
+                    $forecastInfo = " | Ventas 30d: {$sales30d} | Disp: {$avail} | Predicción semanal: {$suggestedQty} pzas";
+
+                    if ($applyForecast && $suggestedQty > 0) {
+                        $qty = $suggestedQty;
+                    }
+                } catch (Throwable) {
+                    // Continuar si falla el cálculo individual de pronóstico
+                }
+
+                $this->line("  [CATÁLOGO] <info>SKU: {$product->sku}</info> | [{$product->brand}] {$product->name} (<comment>{$qty} pzas</comment>){$forecastInfo}");
             } else {
                 // Producto no encontrado en catálogo existente
                 if (! $dryRun) {
@@ -242,10 +304,10 @@ class PurchasingCreateUsaOrderCommand extends Command
                         'primary_location_id' => $location->id,
                     ]);
                     $newCreatedCount++;
-                    $this->line("  [NUEVO ALTA] SKU provisional: <comment>{$product->sku}</comment> | {$name} ({$qty} pzas)");
+                    $this->line("  [NUEVO ALTA] SKU provisional: <comment>{$product->sku}</comment> | [{$brand}] {$name} ({$qty} pzas)");
                 } else {
                     $newCreatedCount++;
-                    $this->line("  [PENDIENTE] No encontrado en catálogo existente: {$name} ({$qty} pzas)");
+                    $this->line("  [PENDIENTE] No encontrado en catálogo existente: [{$brand}] {$name} ({$qty} pzas)");
                     continue;
                 }
             }
@@ -295,7 +357,7 @@ class PurchasingCreateUsaOrderCommand extends Command
                 'shipping_cost' => 0.00,
                 'total_cost' => 0.00,
                 'supplier_quote_reference' => 'COMPRAS-USA-' . now()->format('Ymd'),
-                'notes' => "Pedido consolidado de pastillas, suplementos y productos de Estados Unidos. Vinculado a productos existentes de plataformas con SKUs originales.",
+                'notes' => "Pedido consolidado semanal de pastillas, suplementos y productos de Estados Unidos. Vinculado a productos existentes con SKUs originales.",
             ]);
 
             foreach ($validatedItems as $vItem) {
@@ -310,9 +372,9 @@ class PurchasingCreateUsaOrderCommand extends Command
 
         $this->newLine();
         $this->info("=====================================================");
-        $this->info("✓ NUEVA ORDEN DE COMPRA CREADA: {$order->order_number}");
+        $this->info("✓ NUEVA ORDEN DE COMPRA CREADA: {$order->order_number} (ID: {$order->id})");
         $this->info("  Proveedor: Compras USA");
-        $this->info("  Estado: " . ($asOrdered ? "COLOCADA (En camino)" : "BORRADOR"));
+        $this->info("  Estado: " . ($asOrdered ? "COLOCADA (En camino)" : "BORRADOR (Modificable en web)"));
         $this->info("  Total de partidas: " . count($validatedItems));
         $this->info("  Total de piezas pedidas: {$totalUnits} pzas");
         $this->info("  Almacén de destino: {$location->name} ({$location->code})");
@@ -326,15 +388,16 @@ class PurchasingCreateUsaOrderCommand extends Command
     }
 
     /**
-     * Limpia la orden anterior errónea de Compras USA y los productos con prefijo USA- creados en esa ejecución.
+     * Limpia órdenes anteriores de Compras USA y los productos con prefijo USA- creados erróneamente.
      */
     private function cleanPreviousUsaOrdersAndOrphanProducts(): void
     {
-        // 1. Buscar órdenes de Compras USA generadas automáticamente
+        // 1. Buscar órdenes de Compras USA generadas automáticamente (incluidas órdenes 8 y 9)
         $previousOrders = PurchaseOrder::where('supplier_name', 'Compras USA')
             ->where(function ($q) {
                 $q->where('supplier_quote_reference', 'like', 'COMPRAS-USA-%')
-                  ->orWhere('order_number', 'OC-20261022-0001');
+                  ->orWhere('order_number', 'like', 'OC-20261022-%')
+                  ->orWhere('status', PurchaseOrder::STATUS_DRAFT);
             })
             ->get();
 
@@ -369,7 +432,7 @@ class PurchasingCreateUsaOrderCommand extends Command
 
     /**
      * Búsqueda inteligente de productos en el catálogo existente.
-     * NUNCA modifica el SKU existente del producto.
+     * NUNCA modifica el SKU existente del producto y RECHAZA estrictamente marcas de salón como L'Oreal o Joico.
      */
     private function findExistingProduct(string $brand, string $name): ?InventoryProduct
     {
@@ -383,7 +446,7 @@ class PurchasingCreateUsaOrderCommand extends Command
                   ->orWhere('name', $lowerName);
             })
             ->first();
-        if ($prod) {
+        if ($prod && ! $this->isForeignSalonBrand($prod->brand, $brand)) {
             return $prod;
         }
 
@@ -395,7 +458,7 @@ class PurchasingCreateUsaOrderCommand extends Command
                   ->orWhere('name', $withBrand);
             })
             ->first();
-        if ($prod) {
+        if ($prod && ! $this->isForeignSalonBrand($prod->brand, $brand)) {
             return $prod;
         }
 
@@ -404,16 +467,14 @@ class PurchasingCreateUsaOrderCommand extends Command
         $numbers = $tokens['numbers']; // ej: [10000, 60]
         $words = $tokens['words'];     // ej: ['biotin']
 
-        // Obtener candidatos potenciales en la base de datos
+        // Obtener candidatos potenciales en la base de datos que pertenezcan a la MISMA marca
         $candidates = InventoryProduct::where('sku', 'not like', 'USA-%')
-            ->where(function ($q) use ($brand, $words) {
+            ->where(function ($q) use ($brand) {
                 $q->where('brand', 'like', "%{$brand}%")
                   ->orWhere('name', 'like', "%{$brand}%");
-                if (! empty($words[0])) {
-                    $q->orWhere('name', 'like', "%{$words[0]}%");
-                }
             })
-            ->get();
+            ->get()
+            ->filter(fn ($p) => ! $this->isForeignSalonBrand($p->brand, $brand));
 
         $bestCandidate = null;
         $highestScore = 0;
@@ -428,7 +489,7 @@ class PurchasingCreateUsaOrderCommand extends Command
 
             // Coincidencia de marca
             if (strcasecmp($cand->brand ?? '', $brand) === 0 || str_contains($candTokens['clean'], mb_strtolower($brand))) {
-                $score += 20;
+                $score += 30;
             }
 
             // Coincidencia de números (dosis y conteo de piezas)
@@ -466,7 +527,7 @@ class PurchasingCreateUsaOrderCommand extends Command
 
             // Penalización si no coincide ninguno de los números clave
             if (! empty($numbers) && $matchedNumbers === 0) {
-                $score -= 20;
+                $score -= 25;
             }
 
             if ($score > $highestScore) {
@@ -475,27 +536,30 @@ class PurchasingCreateUsaOrderCommand extends Command
             }
         }
 
-        // Umbral de coincidencia
-        if ($bestCandidate && $highestScore >= 35) {
+        // Umbral de coincidencia estricto
+        if ($bestCandidate && $highestScore >= 45) {
             return $bestCandidate;
         }
 
-        // 4. Buscar en tabla products (catálogo de Mercado Libre) si existe
-        if (Schema::hasTable('products') && ! empty($words[0])) {
-            $mlProduct = DB::table('products')
-                ->where('name', 'like', "%{$words[0]}%")
-                ->when(! empty($numbers[0]), fn ($q) => $q->where('name', 'like', "%{$numbers[0]}%"))
-                ->first();
+        return null;
+    }
 
-            if ($mlProduct && ! empty($mlProduct->sku)) {
-                $invProd = InventoryProduct::where('sku', $mlProduct->sku)->first();
-                if ($invProd) {
-                    return $invProd;
-                }
-            }
+    /**
+     * Verifica si el producto candidato es de una marca salón ajena a USA (Loreal, Joico, Alfaparf, etc.).
+     */
+    private function isForeignSalonBrand(?string $candBrand, string $targetBrand): bool
+    {
+        if (! $candBrand) {
+            return false;
+        }
+        $candUpper = mb_strtoupper(trim($candBrand));
+        $targetUpper = mb_strtoupper(trim($targetBrand));
+
+        if ($candUpper !== $targetUpper && in_array($candUpper, self::FOREIGN_SALON_BRANDS, true)) {
+            return true;
         }
 
-        return null;
+        return false;
     }
 
     /**
