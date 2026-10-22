@@ -48,6 +48,11 @@ class PurchaseOrderItem extends Model
         return $this->belongsTo(InventoryProduct::class, 'inventory_product_id');
     }
 
+    public function inventoryProduct(): BelongsTo
+    {
+        return $this->product();
+    }
+
     public function quantityPending(): int
     {
         return max(0, $this->quantity_ordered - $this->quantity_received);

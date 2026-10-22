@@ -9,9 +9,9 @@ use App\Models\PurchaseOrderItem;
 use App\Models\Supplier;
 use App\Models\User;
 use App\Services\Purchasing\PurchaseOrderService;
-use Carbon\Carbon;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
 use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
 use Throwable;
@@ -20,9 +20,11 @@ class PurchasingCreateUsaOrderCommand extends Command
 {
     protected $signature = 'purchasing:create-usa-order
                             {--include-desired : Incluir también productos que solo tienen cantidad deseada}
-                            {--as-ordered : Marcar la orden como Colocada / En camino en vez de Borrador}';
+                            {--as-ordered : Marcar la orden como Colocada / En camino en vez de Borrador}
+                            {--dry-run : Mostrar la coincidencia de productos y SKUs sin guardar cambios}
+                            {--keep-previous : No eliminar la orden anterior generada para Compras USA}';
 
-    protected $description = 'Crea una orden de compra consolidada para Compras USA a partir de la lista de suplementos y productos';
+    protected $description = 'Crea una orden de compra consolidada para Compras USA vinculando a productos existentes con sus SKUs reales de plataformas';
 
     private const BRAND_MAP = [
         'PURITANS PRIDE' => "Puritan's Pride",
@@ -35,6 +37,17 @@ class PurchasingCreateUsaOrderCommand extends Command
         'SIBERIAN GREEN' => 'Siberian Green',
         'KUKAMONGA' => 'Kukamonga',
         'NOW' => 'NOW Foods',
+    ];
+
+    /**
+     * Marcas expresamente excluidas a petición del usuario.
+     */
+    private const EXCLUDED_BRANDS = [
+        "Nature's Bounty",
+        "Puritan's Pride",
+        "Goli Nutrition",
+        "Natrol",
+        "Siberian Green",
     ];
 
     public function handle(PurchaseOrderService $poService): int
@@ -51,8 +64,19 @@ class PurchasingCreateUsaOrderCommand extends Command
 
         $includeDesired = (bool) $this->option('include-desired');
         $asOrdered = (bool) $this->option('as-ordered');
+        $dryRun = (bool) $this->option('dry-run');
+        $keepPrevious = (bool) $this->option('keep-previous');
 
-        // 1. Obtener o crear proveedor 'Compras USA'
+        if ($dryRun) {
+            $this->warn('--- MODO SIMULACIÓN (DRY-RUN): No se guardarán cambios en la BD ---');
+        }
+
+        // 1. Limpieza de orden anterior y productos provisionales "USA-..."
+        if (! $dryRun && ! $keepPrevious) {
+            $this->cleanPreviousUsaOrdersAndOrphanProducts();
+        }
+
+        // 2. Obtener o crear proveedor 'Compras USA'
         $supplier = Supplier::firstOrCreate(
             ['name' => 'Compras USA'],
             [
@@ -62,26 +86,23 @@ class PurchasingCreateUsaOrderCommand extends Command
             ]
         );
 
-        // 2. Sincronizar marcas asociadas al proveedor
+        // 3. Sincronizar marcas permitidas asociadas al proveedor (excluyendo las 5 marcas)
         $supplierBrands = [
             'Spring Valley',
             'Life Extension',
-            "Puritan's Pride",
-            'Natrol',
             'Equate',
             'Native',
             'Starface',
-            "Nature's Bounty",
-            'Goli Nutrition',
-            'Siberian Green',
             "Burt's Bees",
             'Nature Made',
             "O'Keeffe's",
             'Zep',
         ];
-        $supplier->syncBrands($supplierBrands);
+        if (! $dryRun) {
+            $supplier->syncBrands($supplierBrands);
+        }
 
-        // 3. Ubicación de inventario
+        // 4. Ubicación de inventario
         $location = InventoryLocation::where('is_active', true)->orderBy('sort_order')->orderBy('id')->first();
         if (! $location) {
             $location = InventoryLocation::create([
@@ -91,7 +112,7 @@ class PurchasingCreateUsaOrderCommand extends Command
             ]);
         }
 
-        // 4. Usuario comprador
+        // 5. Usuario comprador
         $buyer = User::where('role', User::ROLE_ADMIN)->first() ?: User::first();
         if (! $buyer) {
             $buyer = User::forceCreate([
@@ -101,10 +122,11 @@ class PurchasingCreateUsaOrderCommand extends Command
             ]);
         }
 
-        // 5. Parsear CSV
+        // 6. Parsear CSV filtrando marcas excluidas
         $file = fopen($csvPath, 'r');
         $currentBrand = 'Spring Valley';
         $itemsToOrder = [];
+        $excludedCount = 0;
         $skippedCount = 0;
 
         while (($r = fgetcsv($file)) !== false) {
@@ -123,7 +145,7 @@ class PurchasingCreateUsaOrderCommand extends Command
                 continue;
             }
 
-            // Detectar si es un encabezado de sección de marca
+            // Detectar encabezado de sección de marca
             $upperName = mb_strtoupper($name);
             if (isset(self::BRAND_MAP[$upperName])) {
                 $currentBrand = self::BRAND_MAP[$upperName];
@@ -150,6 +172,12 @@ class PurchasingCreateUsaOrderCommand extends Command
                 $brand = 'Zep';
             }
 
+            // EXCLUSIÓN ESTRICTA DE LAS 5 MARCAS INDICADAS POR EL USUARIO
+            if (in_array($brand, self::EXCLUDED_BRANDS, true)) {
+                $excludedCount++;
+                continue;
+            }
+
             $pedidoQty = (is_numeric($pedidoStr) && (int) $pedidoStr > 0) ? (int) $pedidoStr : 0;
             $desiredQty = (is_numeric($desiredStr) && (int) $desiredStr > 0) ? (int) $desiredStr : 0;
 
@@ -171,56 +199,60 @@ class PurchasingCreateUsaOrderCommand extends Command
         }
         fclose($file);
 
+        $this->line("Marcas excluidas omitidas (Nature's Bounty, Puritan's Pride, Goli, Natrol, Siberian Green): <comment>{$excludedCount}</comment> filas");
+        $this->line("Partidas válidas a procesar: <info>" . count($itemsToOrder) . "</info>");
+
         if (empty($itemsToOrder)) {
             $this->warn('No se encontraron partidas con cantidad mayor a cero para ordenar.');
             return Command::SUCCESS;
         }
 
-        $this->line("Procesando <comment>" . count($itemsToOrder) . "</comment> partidas para compras en Estados Unidos...");
+        // 7. Búsqueda y vinculación a productos existentes en catálogo (respetando sus SKUs)
+        $this->newLine();
+        $this->info("Buscando coincidencias en catálogo de almacén y vinculando productos...");
 
-        // 6. Asegurar existencia de productos en inventory_products y armar partidas
         $validatedItems = [];
         $totalUnits = 0;
+        $matchedExistingCount = 0;
+        $newCreatedCount = 0;
 
         foreach ($itemsToOrder as $entry) {
             $name = $entry['name'];
             $brand = $entry['brand'];
             $qty = $entry['quantity_ordered'];
 
-            // Buscar producto existente por nombre exacto o similar
-            $product = InventoryProduct::query()
-                ->where('name', $name)
-                ->first();
+            // Buscar producto existente por nombre exacto, tokens o catálogo
+            $product = $this->findExistingProduct($brand, $name);
 
-            if (! $product) {
-                $cleanSearch = mb_substr($name, 0, 40);
-                $product = InventoryProduct::query()
-                    ->where(function ($q) use ($brand) {
-                        $q->where('brand', $brand)
-                            ->orWhere('supplier', 'Compras USA');
-                    })
-                    ->where('name', 'like', "%{$cleanSearch}%")
-                    ->first();
-            }
-
-            if (! $product) {
-                // Generar SKU único
-                $sku = $this->generateUniqueSku($brand, $name);
-                $product = InventoryProduct::create([
-                    'sku' => $sku,
-                    'name' => $name,
-                    'brand' => $brand,
-                    'supplier' => 'Compras USA',
-                    'product_type' => InventoryProduct::SIMPLE,
-                    'cost' => 0.00,
-                    'is_active' => true,
-                    'primary_location_id' => $location->id,
-                ]);
+            if ($product) {
+                $matchedExistingCount++;
+                $this->line("  [CATÁLOGO] <info>SKU: {$product->sku}</info> | {$product->name} (<comment>{$qty} pzas</comment>)");
+            } else {
+                // Producto no encontrado en catálogo existente
+                if (! $dryRun) {
+                    $sku = $this->generateUniqueSku($brand, $name);
+                    $product = InventoryProduct::create([
+                        'sku' => $sku,
+                        'name' => $name,
+                        'brand' => $brand,
+                        'supplier' => 'Compras USA',
+                        'product_type' => InventoryProduct::SIMPLE,
+                        'cost' => 0.00,
+                        'is_active' => true,
+                        'primary_location_id' => $location->id,
+                    ]);
+                    $newCreatedCount++;
+                    $this->line("  [NUEVO ALTA] SKU provisional: <comment>{$product->sku}</comment> | {$name} ({$qty} pzas)");
+                } else {
+                    $newCreatedCount++;
+                    $this->line("  [PENDIENTE] No encontrado en catálogo existente: {$name} ({$qty} pzas)");
+                    continue;
+                }
             }
 
             $validatedItems[] = [
                 'inventory_product_id' => $product->id,
-                'sku' => $product->sku,
+                'sku' => $product->sku, // SKU 100% ORIGINAL DEL PRODUCTO
                 'supplier_sku' => null,
                 'product_name' => $product->name,
                 'quantity_ordered' => $qty,
@@ -233,7 +265,17 @@ class PurchasingCreateUsaOrderCommand extends Command
             $totalUnits += $qty;
         }
 
-        // 7. Crear Orden de Compra en DB
+        $this->newLine();
+        $this->info("Resumen de vinculación:");
+        $this->line("  • Productos vinculados a catálogo existente (SKU conservado): <info>{$matchedExistingCount}</info>");
+        $this->line("  • Productos no encontrados previamente: <comment>{$newCreatedCount}</comment>");
+
+        if ($dryRun) {
+            $this->info('--- FIN DE SIMULACIÓN (DRY-RUN) ---');
+            return Command::SUCCESS;
+        }
+
+        // 8. Crear Orden de Compra en DB
         $order = DB::transaction(function () use ($poService, $supplier, $location, $buyer, $validatedItems, $totalUnits, $asOrdered) {
             $orderNumber = $poService->generateOrderNumber();
 
@@ -253,7 +295,7 @@ class PurchasingCreateUsaOrderCommand extends Command
                 'shipping_cost' => 0.00,
                 'total_cost' => 0.00,
                 'supplier_quote_reference' => 'COMPRAS-USA-' . now()->format('Ymd'),
-                'notes' => "Pedido consolidado de pastillas, suplementos y productos de Estados Unidos. Generado automáticamente a partir de lista de reabastecimiento.",
+                'notes' => "Pedido consolidado de pastillas, suplementos y productos de Estados Unidos. Vinculado a productos existentes de plataformas con SKUs originales.",
             ]);
 
             foreach ($validatedItems as $vItem) {
@@ -263,12 +305,12 @@ class PurchasingCreateUsaOrderCommand extends Command
             return $order;
         });
 
-        // 8. Generar exportación Excel
-        $this->exportOrderToExcel($order, $itemsToOrder);
+        // 9. Exportar a Excel
+        $this->exportOrderToExcel($order, $validatedItems);
 
         $this->newLine();
         $this->info("=====================================================");
-        $this->info("✓ ORDEN DE COMPRA CREADA EXITOSAMENTE: {$order->order_number}");
+        $this->info("✓ NUEVA ORDEN DE COMPRA CREADA: {$order->order_number}");
         $this->info("  Proveedor: Compras USA");
         $this->info("  Estado: " . ($asOrdered ? "COLOCADA (En camino)" : "BORRADOR"));
         $this->info("  Total de partidas: " . count($validatedItems));
@@ -281,6 +323,209 @@ class PurchasingCreateUsaOrderCommand extends Command
         $this->newLine();
 
         return Command::SUCCESS;
+    }
+
+    /**
+     * Limpia la orden anterior errónea de Compras USA y los productos con prefijo USA- creados en esa ejecución.
+     */
+    private function cleanPreviousUsaOrdersAndOrphanProducts(): void
+    {
+        // 1. Buscar órdenes de Compras USA generadas automáticamente
+        $previousOrders = PurchaseOrder::where('supplier_name', 'Compras USA')
+            ->where(function ($q) {
+                $q->where('supplier_quote_reference', 'like', 'COMPRAS-USA-%')
+                  ->orWhere('order_number', 'OC-20261022-0001');
+            })
+            ->get();
+
+        foreach ($previousOrders as $prevOrder) {
+            $this->warn("Limpiando orden previa: {$prevOrder->order_number} (ID: {$prevOrder->id})");
+            $prevOrder->items()->delete();
+            $prevOrder->delete();
+        }
+
+        // 2. Eliminar productos temporales creados con SKU "USA-..." que no tengan movimientos, pedidos ni ventas
+        $orphans = InventoryProduct::where('sku', 'like', 'USA-%')
+            ->whereDoesntHave('movements')
+            ->whereDoesntHave('reservations')
+            ->get();
+
+        $orphansToDelete = $orphans->filter(function ($orphan) {
+            $hasPoItems = Schema::hasTable('purchase_order_items')
+                && DB::table('purchase_order_items')->where('inventory_product_id', $orphan->id)->exists();
+            $hasPosItems = Schema::hasTable('pos_sale_items')
+                && DB::table('pos_sale_items')->where('inventory_product_id', $orphan->id)->exists();
+
+            return ! $hasPoItems && ! $hasPosItems;
+        });
+
+        if ($orphansToDelete->isNotEmpty()) {
+            $this->warn("Eliminando {$orphansToDelete->count()} productos temporales creados anteriormente con prefijo 'USA-'...");
+            foreach ($orphansToDelete as $orphan) {
+                $orphan->delete();
+            }
+        }
+    }
+
+    /**
+     * Búsqueda inteligente de productos en el catálogo existente.
+     * NUNCA modifica el SKU existente del producto.
+     */
+    private function findExistingProduct(string $brand, string $name): ?InventoryProduct
+    {
+        $cleanName = trim(preg_replace('/\s+/', ' ', $name));
+        $lowerName = mb_strtolower($cleanName);
+
+        // 1. Coincidencia exacta de nombre
+        $prod = InventoryProduct::where('sku', 'not like', 'USA-%')
+            ->where(function ($q) use ($lowerName) {
+                $q->whereRaw('LOWER(TRIM(name)) = ?', [$lowerName])
+                  ->orWhere('name', $lowerName);
+            })
+            ->first();
+        if ($prod) {
+            return $prod;
+        }
+
+        // 2. Coincidencia con marca antepuesta: "$brand $name"
+        $withBrand = mb_strtolower("{$brand} {$cleanName}");
+        $prod = InventoryProduct::where('sku', 'not like', 'USA-%')
+            ->where(function ($q) use ($withBrand) {
+                $q->whereRaw('LOWER(TRIM(name)) = ?', [$withBrand])
+                  ->orWhere('name', $withBrand);
+            })
+            ->first();
+        if ($prod) {
+            return $prod;
+        }
+
+        // 3. Normalización y extracción de tokens numéricos y palabras clave
+        $tokens = $this->extractProductTokens($cleanName);
+        $numbers = $tokens['numbers']; // ej: [10000, 60]
+        $words = $tokens['words'];     // ej: ['biotin']
+
+        // Obtener candidatos potenciales en la base de datos
+        $candidates = InventoryProduct::where('sku', 'not like', 'USA-%')
+            ->where(function ($q) use ($brand, $words) {
+                $q->where('brand', 'like', "%{$brand}%")
+                  ->orWhere('name', 'like', "%{$brand}%");
+                if (! empty($words[0])) {
+                    $q->orWhere('name', 'like', "%{$words[0]}%");
+                }
+            })
+            ->get();
+
+        $bestCandidate = null;
+        $highestScore = 0;
+
+        foreach ($candidates as $cand) {
+            $candTokens = $this->extractProductTokens($cand->name . ' ' . ($cand->description ?? ''));
+            $candNumbers = $candTokens['numbers'];
+            $candWords = $candTokens['words'];
+            $candSku = mb_strtolower($cand->sku);
+
+            $score = 0;
+
+            // Coincidencia de marca
+            if (strcasecmp($cand->brand ?? '', $brand) === 0 || str_contains($candTokens['clean'], mb_strtolower($brand))) {
+                $score += 20;
+            }
+
+            // Coincidencia de números (dosis y conteo de piezas)
+            $matchedNumbers = 0;
+            foreach ($numbers as $num) {
+                if (in_array($num, $candNumbers, true) || str_contains($candSku, $num)) {
+                    $score += 25;
+                    $matchedNumbers++;
+                }
+            }
+
+            // Coincidencia de palabras clave e ingredientes
+            foreach ($words as $w) {
+                if (in_array($w, $candWords, true) || str_contains($candSku, $w)) {
+                    $score += 15;
+                } else {
+                    $synonyms = [
+                        'biotin' => 'biotina',
+                        'melatonin' => 'melatonina',
+                        'curcumin' => 'curcuma',
+                        'iron' => 'hierro',
+                        'citrate' => 'citrato',
+                        'salmon' => 'salmon',
+                        'flaxseed' => 'linaza',
+                        'garlic' => 'ajo',
+                        'cranberry' => 'arandano',
+                        'calcium' => 'calcio',
+                        'magnesium' => 'magnesio',
+                    ];
+                    if (isset($synonyms[$w]) && in_array($synonyms[$w], $candWords, true)) {
+                        $score += 15;
+                    }
+                }
+            }
+
+            // Penalización si no coincide ninguno de los números clave
+            if (! empty($numbers) && $matchedNumbers === 0) {
+                $score -= 20;
+            }
+
+            if ($score > $highestScore) {
+                $highestScore = $score;
+                $bestCandidate = $cand;
+            }
+        }
+
+        // Umbral de coincidencia
+        if ($bestCandidate && $highestScore >= 35) {
+            return $bestCandidate;
+        }
+
+        // 4. Buscar en tabla products (catálogo de Mercado Libre) si existe
+        if (Schema::hasTable('products') && ! empty($words[0])) {
+            $mlProduct = DB::table('products')
+                ->where('name', 'like', "%{$words[0]}%")
+                ->when(! empty($numbers[0]), fn ($q) => $q->where('name', 'like', "%{$numbers[0]}%"))
+                ->first();
+
+            if ($mlProduct && ! empty($mlProduct->sku)) {
+                $invProd = InventoryProduct::where('sku', $mlProduct->sku)->first();
+                if ($invProd) {
+                    return $invProd;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Normaliza una cadena y extrae números y palabras significativas.
+     */
+    private function extractProductTokens(string $str): array
+    {
+        $clean = mb_strtolower($str);
+        $clean = str_replace(['á', 'é', 'í', 'ó', 'ú', 'ñ', 'ü'], ['a', 'e', 'i', 'o', 'u', 'n', 'u'], $clean);
+        // Remover comas dentro de números: 10,000 -> 10000
+        $clean = preg_replace('/(?<=\d),(?=\d)/', '', $clean);
+        // Separar letras de números: 10000mcg -> 10000 mcg, 60tabletas -> 60 tabletas
+        $clean = preg_replace('/(\d+)([a-zA-Z]+)/', '$1 $2', $clean);
+        $clean = preg_replace('/([a-zA-Z]+)(\d+)/', '$1 $2', $clean);
+        // Reemplazar caracteres especiales por espacios
+        $clean = preg_replace('/[^\w\s]/u', ' ', $clean);
+        $clean = trim(preg_replace('/\s+/', ' ', $clean));
+
+        preg_match_all('/\b\d+\b/', $clean, $numMatches);
+        $numbers = array_values(array_unique($numMatches[0] ?? []));
+
+        $words = explode(' ', $clean);
+        $stopWords = ['de', 'la', 'el', 'y', 'en', 'por', 'con', 'para', 'del', 'los', 'las', 'mg', 'mcg', 'iu', 'ml', 'gr', 'ct', 'tabletas', 'tabs', 'capsulas', 'caps', 'softgels', 'gomitas', 'gummies', 'tablets', 'vegetarian', 'zero', 'sugar', 'sin', 'sabor'];
+        $significant = array_values(array_unique(array_filter($words, fn ($w) => strlen($w) >= 3 && ! in_array($w, $stopWords, true) && ! is_numeric($w))));
+
+        return [
+            'numbers' => $numbers,
+            'words' => $significant,
+            'clean' => $clean,
+        ];
     }
 
     private function generateUniqueSku(string $brand, string $name): string
@@ -318,7 +563,7 @@ class PurchasingCreateUsaOrderCommand extends Command
             $sheet->setCellValue('A3', 'Proveedor: Compras USA | Fecha: ' . now()->format('d/m/Y'));
 
             // Columnas
-            $headers = ['#', 'Marca', 'Producto / Descripción', 'Cantidad Pedida', 'Cantidad Deseada', 'SKU'];
+            $headers = ['#', 'SKU Catálogo', 'Producto / Descripción', 'Cantidad Pedida'];
             $colLetter = 'A';
             foreach ($headers as $h) {
                 $sheet->setCellValue("{$colLetter}5", $h);
@@ -328,11 +573,9 @@ class PurchasingCreateUsaOrderCommand extends Command
             $rowIdx = 6;
             foreach ($items as $idx => $it) {
                 $sheet->setCellValue("A{$rowIdx}", $idx + 1);
-                $sheet->setCellValue("B{$rowIdx}", $it['brand']);
-                $sheet->setCellValue("C{$rowIdx}", $it['name']);
+                $sheet->setCellValue("B{$rowIdx}", $it['sku'] ?? '');
+                $sheet->setCellValue("C{$rowIdx}", $it['product_name']);
                 $sheet->setCellValue("D{$rowIdx}", $it['quantity_ordered']);
-                $sheet->setCellValue("E{$rowIdx}", $it['quantity_desired'] ?: '-');
-                $sheet->setCellValue("F{$rowIdx}", $it['sku'] ?? '');
                 $rowIdx++;
             }
 

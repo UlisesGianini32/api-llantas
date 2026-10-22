@@ -50,3 +50,4 @@ storage/logs/*.log
 /meli_republish_atributos_obligatorios_v2/
 /panel_salud_v1/
 /publicaciones_mercado_libre/
+database/data/orden_compra_*.xlsx

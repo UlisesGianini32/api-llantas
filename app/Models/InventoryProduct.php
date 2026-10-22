@@ -105,6 +105,11 @@ class InventoryProduct extends Model
         return $this->hasMany(SupplierProduct::class, 'inventory_product_id');
     }
 
+    public function purchaseOrderItems(): HasMany
+    {
+        return $this->hasMany(PurchaseOrderItem::class, 'inventory_product_id');
+    }
+
     public function isKit(): bool
     {
         return $this->product_type === self::KIT;
