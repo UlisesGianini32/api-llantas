@@ -89,7 +89,7 @@ class PurchaseOrderController extends Controller
             ->where('product_type', InventoryProduct::SIMPLE)
             ->orderBy('brand')
             ->orderBy('name')
-            ->get(['id', 'sku', 'name', 'brand', 'supplier', 'cost', 'primary_location_id']);
+            ->get(['id', 'sku', 'barcode', 'barcode_secondary', 'name', 'brand', 'supplier', 'cost', 'primary_location_id']);
 
         $registeredSuppliers = Supplier::query()
             ->where('is_active', true)
@@ -284,13 +284,16 @@ class PurchaseOrderController extends Controller
             return response()->json(['data' => []]);
         }
 
+        $strippedQ = ltrim($q, '0');
+        $cleanQ = preg_replace('/[^0-9A-Za-z]/', '', $q);
+
         $products = InventoryProduct::query()
             ->with([
                 'primaryLocation:id,code,name',
                 'supplierProducts:id,inventory_product_id,supplier_id,supplier_name,supplier_sku,supplier_cost',
             ])
             ->where('is_active', true)
-            ->where(function ($query) use ($q) {
+            ->where(function ($query) use ($q, $strippedQ, $cleanQ) {
                 $query->where('sku', 'like', "%{$q}%")
                     ->orWhere('barcode', 'like', "%{$q}%")
                     ->orWhere('barcode_secondary', 'like', "%{$q}%")
@@ -299,11 +302,105 @@ class PurchaseOrderController extends Controller
                     ->orWhereHas('supplierProducts', function ($spq) use ($q) {
                         $spq->where('supplier_sku', 'like', "%{$q}%");
                     });
+
+                if ($strippedQ !== '' && $strippedQ !== $q) {
+                    $query->orWhere('sku', 'like', "%{$strippedQ}%")
+                          ->orWhere('barcode', 'like', "%{$strippedQ}%");
+                }
+
+                if ($cleanQ !== '' && $cleanQ !== $q && $cleanQ !== $strippedQ) {
+                    $query->orWhere('sku', 'like', "%{$cleanQ}%")
+                          ->orWhere('barcode', 'like', "%{$cleanQ}%");
+                }
             })
-            ->limit(25)
+            ->limit(30)
             ->get(['id', 'sku', 'barcode', 'barcode_secondary', 'name', 'brand', 'cost', 'primary_location_id']);
 
         return response()->json(['data' => $products]);
+    }
+
+    public function quickCreateProduct(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'sku' => ['required', 'string', 'max:100'],
+            'name' => ['required', 'string', 'max:255'],
+            'brand' => ['nullable', 'string', 'max:100'],
+            'barcode' => ['nullable', 'string', 'max:100'],
+            'cost' => ['nullable', 'numeric', 'min:0'],
+            'supplier_name' => ['nullable', 'string', 'max:150'],
+            'supplier_sku' => ['nullable', 'string', 'max:100'],
+            'primary_location_id' => ['nullable', 'integer', 'exists:inventory_locations,id'],
+        ]);
+
+        $sku = trim($validated['sku']);
+        $barcode = ! empty($validated['barcode']) ? trim($validated['barcode']) : (is_numeric($sku) ? $sku : null);
+
+        // Buscar si ya existe por SKU o código de barras
+        $product = InventoryProduct::query()
+            ->where('sku', $sku)
+            ->when($barcode, fn ($q) => $q->orWhere('barcode', $barcode))
+            ->first();
+
+        if (! $product) {
+            $locationId = $validated['primary_location_id'] ?? null;
+            if (! $locationId) {
+                $location = InventoryLocation::where('is_active', true)->orderBy('sort_order')->orderBy('id')->first();
+                $locationId = $location?->id;
+            }
+
+            $product = InventoryProduct::create([
+                'sku' => $sku,
+                'barcode' => $barcode,
+                'name' => trim($validated['name']),
+                'brand' => ! empty($validated['brand']) ? trim($validated['brand']) : 'General',
+                'supplier' => ! empty($validated['supplier_name']) ? trim($validated['supplier_name']) : 'Compras USA',
+                'cost' => isset($validated['cost']) ? (float) $validated['cost'] : 0.00,
+                'product_type' => InventoryProduct::SIMPLE,
+                'is_active' => true,
+                'primary_location_id' => $locationId,
+            ]);
+        }
+
+        // Asociar supplier_sku si se especificó
+        if (! empty($validated['supplier_sku']) && ! empty($validated['supplier_name'])) {
+            $supplier = Supplier::where('name', $validated['supplier_name'])->first();
+            \App\Models\SupplierProduct::updateOrCreate(
+                [
+                    'supplier_name' => trim($validated['supplier_name']),
+                    'inventory_product_id' => $product->id,
+                    'supplier_sku' => trim($validated['supplier_sku']),
+                ],
+                [
+                    'supplier_id' => $supplier?->id,
+                    'supplier_product_name' => $product->name,
+                    'supplier_cost' => isset($validated['cost']) ? (float) $validated['cost'] : null,
+                    'is_primary' => true,
+                ]
+            );
+        }
+
+        $product->load(['primaryLocation:id,code,name', 'supplierProducts']);
+
+        return response()->json([
+            'ok' => true,
+            'message' => 'Producto registrado y listo para la orden.',
+            'product' => [
+                'id' => $product->id,
+                'sku' => $product->sku,
+                'barcode' => $product->barcode,
+                'barcode_secondary' => $product->barcode_secondary,
+                'name' => $product->name,
+                'brand' => $product->brand,
+                'cost' => (float) ($product->cost ?? 0),
+                'primary_location_id' => $product->primary_location_id,
+                'primary_location' => $product->primaryLocation ? [
+                    'id' => $product->primaryLocation->id,
+                    'code' => $product->primaryLocation->code,
+                    'name' => $product->primaryLocation->name,
+                ] : null,
+                'supplier_products' => $product->supplierProducts ?? [],
+            ],
+        ]);
     }
 
     public function saveSupplierSku(Request $request): JsonResponse

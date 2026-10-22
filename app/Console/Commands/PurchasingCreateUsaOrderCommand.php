@@ -251,6 +251,7 @@ class PurchasingCreateUsaOrderCommand extends Command
         $this->info("Buscando coincidencias en catálogo de almacén y calculando predicción semanal...");
 
         $validatedItems = [];
+        $usedProductIds = [];
         $totalUnits = 0;
         $matchedExistingCount = 0;
         $newCreatedCount = 0;
@@ -260,11 +261,12 @@ class PurchasingCreateUsaOrderCommand extends Command
             $brand = $entry['brand'];
             $qty = $entry['quantity_ordered'];
 
-            // Buscar producto existente estrictamente dentro de la marca correcta
-            $product = $this->findExistingProduct($brand, $name);
+            // Buscar producto existente estrictamente dentro de la marca correcta sin duplicar IDs ya asignados
+            $product = $this->findExistingProduct($brand, $name, $usedProductIds);
 
             $forecastInfo = '';
             if ($product) {
+                $usedProductIds[] = $product->id;
                 $matchedExistingCount++;
 
                 // Predicción semanal de ventas
@@ -303,6 +305,7 @@ class PurchasingCreateUsaOrderCommand extends Command
                         'is_active' => true,
                         'primary_location_id' => $location->id,
                     ]);
+                    $usedProductIds[] = $product->id;
                     $newCreatedCount++;
                     $this->line("  [NUEVO ALTA] SKU provisional: <comment>{$product->sku}</comment> | [{$brand}] {$name} ({$qty} pzas)");
                 } else {
@@ -312,17 +315,23 @@ class PurchasingCreateUsaOrderCommand extends Command
                 }
             }
 
-            $validatedItems[] = [
-                'inventory_product_id' => $product->id,
-                'sku' => $product->sku, // SKU 100% ORIGINAL DEL PRODUCTO
-                'supplier_sku' => null,
-                'product_name' => $product->name,
-                'quantity_ordered' => $qty,
-                'quantity_received' => 0,
-                'unit_cost' => (float) ($product->cost ?? 0),
-                'subtotal' => 0.00,
-                'status' => PurchaseOrderItem::STATUS_PENDING,
-            ];
+            // Consolidar cantidades si por alguna razón el producto ya estaba en la orden
+            if (isset($validatedItems[$product->id])) {
+                $validatedItems[$product->id]['quantity_ordered'] += $qty;
+                $this->warn("  [CONSOLIDADO] Partida repetida sumada (+{$qty} pzas) a partida única: {$product->name}");
+            } else {
+                $validatedItems[$product->id] = [
+                    'inventory_product_id' => $product->id,
+                    'sku' => $product->sku, // SKU 100% ORIGINAL DEL PRODUCTO
+                    'supplier_sku' => null,
+                    'product_name' => $product->name,
+                    'quantity_ordered' => $qty,
+                    'quantity_received' => 0,
+                    'unit_cost' => (float) ($product->cost ?? 0),
+                    'subtotal' => 0.00,
+                    'status' => PurchaseOrderItem::STATUS_PENDING,
+                ];
+            }
 
             $totalUnits += $qty;
         }
@@ -368,7 +377,7 @@ class PurchasingCreateUsaOrderCommand extends Command
         });
 
         // 9. Exportar a Excel
-        $this->exportOrderToExcel($order, $validatedItems);
+        $this->exportOrderToExcel($order, array_values($validatedItems));
 
         $this->newLine();
         $this->info("=====================================================");
@@ -432,9 +441,10 @@ class PurchasingCreateUsaOrderCommand extends Command
 
     /**
      * Búsqueda inteligente de productos en el catálogo existente.
-     * NUNCA modifica el SKU existente del producto y RECHAZA estrictamente marcas de salón como L'Oreal o Joico.
+     * NUNCA modifica el SKU existente del producto, excluye IDs ya asignados en esta orden
+     * y RECHAZA estrictamente marcas de salón como L'Oreal o Joico.
      */
-    private function findExistingProduct(string $brand, string $name): ?InventoryProduct
+    private function findExistingProduct(string $brand, string $name, array $excludedIds = []): ?InventoryProduct
     {
         $cleanName = trim(preg_replace('/\s+/', ' ', $name));
         $lowerName = mb_strtolower($cleanName);
@@ -445,6 +455,7 @@ class PurchasingCreateUsaOrderCommand extends Command
                 $q->whereRaw('LOWER(TRIM(name)) = ?', [$lowerName])
                   ->orWhere('name', $lowerName);
             })
+            ->when(! empty($excludedIds), fn ($q) => $q->whereNotIn('id', $excludedIds))
             ->first();
         if ($prod && ! $this->isForeignSalonBrand($prod->brand, $brand)) {
             return $prod;
@@ -457,6 +468,7 @@ class PurchasingCreateUsaOrderCommand extends Command
                 $q->whereRaw('LOWER(TRIM(name)) = ?', [$withBrand])
                   ->orWhere('name', $withBrand);
             })
+            ->when(! empty($excludedIds), fn ($q) => $q->whereNotIn('id', $excludedIds))
             ->first();
         if ($prod && ! $this->isForeignSalonBrand($prod->brand, $brand)) {
             return $prod;
@@ -467,12 +479,16 @@ class PurchasingCreateUsaOrderCommand extends Command
         $numbers = $tokens['numbers']; // ej: [10000, 60]
         $words = $tokens['words'];     // ej: ['biotin']
 
+        // Conteo de piezas/cápsulas común
+        $packageCounts = array_values(array_filter($numbers, fn ($n) => in_array((int) $n, [30, 40, 50, 60, 90, 100, 120, 140, 150, 180, 200, 240, 250, 300, 400, 500], true)));
+
         // Obtener candidatos potenciales en la base de datos que pertenezcan a la MISMA marca
         $candidates = InventoryProduct::where('sku', 'not like', 'USA-%')
             ->where(function ($q) use ($brand) {
                 $q->where('brand', 'like', "%{$brand}%")
                   ->orWhere('name', 'like', "%{$brand}%");
             })
+            ->when(! empty($excludedIds), fn ($q) => $q->whereNotIn('id', $excludedIds))
             ->get()
             ->filter(fn ($p) => ! $this->isForeignSalonBrand($p->brand, $brand));
 
@@ -484,6 +500,17 @@ class PurchasingCreateUsaOrderCommand extends Command
             $candNumbers = $candTokens['numbers'];
             $candWords = $candTokens['words'];
             $candSku = mb_strtolower($cand->sku);
+
+            // Si ambos especifican un conteo de unidades/gomitas (ej. 60 vs 180) y son diferentes, NO vincular
+            if (! empty($packageCounts)) {
+                $candCounts = array_values(array_filter($candNumbers, fn ($n) => in_array((int) $n, [30, 40, 50, 60, 90, 100, 120, 140, 150, 180, 200, 240, 250, 300, 400, 500], true)));
+                if (! empty($candCounts)) {
+                    $intersection = array_intersect($packageCounts, $candCounts);
+                    if (empty($intersection)) {
+                        continue; // Presentación distinta (ej. 60 tabletas vs 180 tabletas), no es el mismo producto
+                    }
+                }
+            }
 
             $score = 0;
 

@@ -194,10 +194,80 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
         }
     }
 
-    const handleAddProductToOrder = (prod) => {
+    // Quick create product modal state in Show
+    const [quickModalOpen, setQuickModalOpen] = useState(false)
+    const [quickSku, setQuickSku] = useState('')
+    const [quickBarcode, setQuickBarcode] = useState('')
+    const [quickName, setQuickName] = useState('')
+    const [quickBrand, setQuickBrand] = useState('')
+    const [quickCost, setQuickCost] = useState(0)
+    const [quickQty, setQuickQty] = useState(1)
+    const [quickSaving, setQuickSaving] = useState(false)
+    const [quickError, setQuickError] = useState(null)
+
+    const handleOpenQuickCreateShow = (code = '') => {
+        const cleanCode = (code || addItemSearch || '').trim()
+        setQuickSku(cleanCode)
+        setQuickBarcode(cleanCode)
+        setQuickName('')
+        setQuickBrand(order.brand && !order.brand.includes('/') ? order.brand : (order.supplier_name === 'Compras USA' ? 'Spring Valley' : ''))
+        setQuickCost(0)
+        setQuickQty(1)
+        setQuickError(null)
+        setQuickModalOpen(true)
+    }
+
+    const handleSaveQuickCreateShow = async (e) => {
+        e.preventDefault()
+        if (!quickSku.trim() || !quickName.trim()) {
+            setQuickError('El SKU/Código y el nombre del producto son obligatorios.')
+            return
+        }
+
+        setQuickSaving(true)
+        setQuickError(null)
+
+        try {
+            const res = await fetch('/compras/ordenes/producto-rapido', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '',
+                    'Accept': 'application/json',
+                },
+                body: JSON.stringify({
+                    sku: quickSku.trim(),
+                    barcode: quickBarcode.trim() || quickSku.trim(),
+                    name: quickName.trim(),
+                    brand: quickBrand.trim() || order.brand || 'General',
+                    cost: parseFloat(quickCost) || 0,
+                    supplier_name: order.supplier_name || 'Compras USA',
+                    primary_location_id: order.inventory_location_id || null,
+                }),
+            })
+
+            const data = await res.json()
+            if (data?.ok && data?.product) {
+                handleAddProductToOrder(data.product, quickQty, quickCost)
+                setQuickModalOpen(false)
+                setAddItemSearch('')
+                setAddItemResults([])
+            } else {
+                setQuickError(data?.error || data?.message || 'No se pudo guardar el producto.')
+            }
+        } catch {
+            setQuickError('Error al registrar el producto.')
+        } finally {
+            setQuickSaving(false)
+        }
+    }
+
+    const handleAddProductToOrder = (prod, initialQty = 1, initialCost = null) => {
+        const qty = Math.max(1, parseInt(initialQty) || 1)
+        const unitCost = initialCost !== null ? parseFloat(initialCost) : (parseFloat(prod.cost) || 0)
         const existingIdx = editItems.findIndex((it) => it.inventory_product_id === prod.id || it.product_id === prod.id)
         if (existingIdx >= 0) {
-            handleQuantityChange(existingIdx, (editItems[existingIdx].quantity_ordered || 1) + 1)
+            handleQuantityChange(existingIdx, (editItems[existingIdx].quantity_ordered || 1) + qty)
         } else {
             setEditItems((prev) => [
                 ...prev,
@@ -206,13 +276,14 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                     inventory_product_id: prod.id,
                     product_id: prod.id,
                     sku: prod.sku,
+                    barcode: prod.barcode,
                     supplier_sku: prod.supplier_products?.[0]?.supplier_sku || null,
                     product_name: prod.name,
                     product: prod,
-                    quantity_ordered: 1,
+                    quantity_ordered: qty,
                     quantity_received: 0,
-                    unit_cost: prod.cost || 0,
-                    subtotal: prod.cost || 0,
+                    unit_cost: unitCost,
+                    subtotal: Math.round(qty * unitCost * 100) / 100,
                     status: 'PENDING',
                 },
             ])
@@ -1210,41 +1281,93 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                                 </div>
                             </div>
 
-                            <div className="mt-3 relative">
-                                <input
-                                    type="text"
-                                    placeholder="Escribe el nombre o SKU del producto para buscar..."
-                                    value={addItemSearch}
-                                    onChange={(e) => handleSearchAddProduct(e.target.value)}
-                                    className="w-full rounded-xl border border-slate-300 p-2.5 text-sm text-slate-900 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 dark:border-neutral-700 dark:bg-neutral-800 dark:text-white"
-                                />
-                                {searchingAddProduct && (
-                                    <div className="absolute right-3 top-3 text-xs text-slate-400">Buscando en catálogo...</div>
-                                )}
-                                {addItemResults.length > 0 && (
-                                    <div className="absolute z-30 mt-1 max-h-64 w-full overflow-y-auto rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl dark:border-neutral-700 dark:bg-neutral-800">
-                                        {addItemResults.map((p) => (
-                                            <div
-                                                key={p.id}
-                                                onClick={() => handleAddProductToOrder(p)}
-                                                className="flex cursor-pointer items-center justify-between p-2.5 hover:bg-indigo-50 dark:hover:bg-neutral-700/60 rounded-xl transition"
-                                            >
-                                                <div>
-                                                    <p className="text-sm font-bold text-slate-800 dark:text-slate-100">{p.name}</p>
-                                                    <p className="text-xs text-slate-500">
-                                                        SKU: <span className="font-mono text-indigo-600 dark:text-indigo-400 font-semibold">{p.sku}</span> {p.brand && `• Marca: ${p.brand}`}
-                                                    </p>
+                            <div className="mt-3 flex items-center gap-2">
+                                <div className="relative flex-1">
+                                    <input
+                                        type="text"
+                                        placeholder="Escribe el nombre, SKU o código de barras para buscar..."
+                                        value={addItemSearch}
+                                        onChange={(e) => handleSearchAddProduct(e.target.value)}
+                                        className="w-full rounded-xl border border-slate-300 p-2.5 text-sm text-slate-900 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 dark:border-neutral-700 dark:bg-neutral-800 dark:text-white"
+                                    />
+                                    {searchingAddProduct && (
+                                        <div className="absolute right-3 top-3 text-xs text-slate-400">Buscando en catálogo...</div>
+                                    )}
+
+                                    {addItemResults.length > 0 && (
+                                        <div className="absolute z-30 mt-1 max-h-64 w-full overflow-y-auto rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl dark:border-neutral-700 dark:bg-neutral-800">
+                                            {addItemResults.map((p) => (
+                                                <div
+                                                    key={p.id}
+                                                    onClick={() => handleAddProductToOrder(p)}
+                                                    className="flex cursor-pointer items-center justify-between p-2.5 hover:bg-indigo-50 dark:hover:bg-neutral-700/60 rounded-xl transition"
+                                                >
+                                                    <div>
+                                                        <div className="flex items-center gap-2">
+                                                            <p className="text-sm font-bold text-slate-800 dark:text-slate-100">{p.name}</p>
+                                                            {p.barcode && (
+                                                                <span className="text-[10px] font-mono rounded bg-slate-100 px-1 text-slate-500 dark:bg-neutral-700 dark:text-slate-300">
+                                                                    UPC: {p.barcode}
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                        <p className="text-xs text-slate-500">
+                                                            SKU: <span className="font-mono text-indigo-600 dark:text-indigo-400 font-semibold">{p.sku}</span> {p.brand && `• Marca: ${p.brand}`}
+                                                        </p>
+                                                    </div>
+                                                    <button
+                                                        type="button"
+                                                        className="inline-flex items-center gap-1 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-bold text-white shadow hover:bg-indigo-700"
+                                                    >
+                                                        + Agregar
+                                                    </button>
                                                 </div>
+                                            ))}
+
+                                            <div className="border-t border-slate-100 bg-slate-50 p-2 text-center dark:border-neutral-700 dark:bg-neutral-700/40">
                                                 <button
                                                     type="button"
-                                                    className="inline-flex items-center gap-1 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-bold text-white shadow hover:bg-indigo-700"
+                                                    onClick={() => handleOpenQuickCreateShow(addItemSearch)}
+                                                    className="text-xs font-semibold text-indigo-600 hover:text-indigo-800 dark:text-indigo-400"
                                                 >
-                                                    + Agregar
+                                                    ➕ ¿No encuentras tu producto? Registrar nuevo con código '{addItemSearch}'
                                                 </button>
                                             </div>
-                                        ))}
-                                    </div>
-                                )}
+                                        </div>
+                                    )}
+
+                                    {addItemResults.length === 0 && addItemSearch.trim().length > 1 && !searchingAddProduct && (
+                                        <div className="absolute z-30 mt-1 w-full rounded-xl border border-slate-200 bg-white p-4 shadow-xl dark:border-neutral-700 dark:bg-neutral-800 text-center">
+                                            <p className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                                                No se encontró ningún producto con "{addItemSearch}".
+                                            </p>
+                                            <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
+                                                Puedes registrarlo inmediatamente con este código y añadirlo a la orden.
+                                            </p>
+                                            <button
+                                                type="button"
+                                                onClick={() => handleOpenQuickCreateShow(addItemSearch)}
+                                                className="mt-2.5 inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-3.5 py-2 text-xs font-bold text-white shadow hover:bg-indigo-700"
+                                            >
+                                                <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                                                </svg>
+                                                ➕ Registrar y agregar "{addItemSearch}" a la orden
+                                            </button>
+                                        </div>
+                                    )}
+                                </div>
+
+                                <button
+                                    type="button"
+                                    onClick={() => handleOpenQuickCreateShow('')}
+                                    className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-xl border border-emerald-300 bg-emerald-50 px-3.5 py-2.5 text-xs font-bold text-emerald-800 hover:bg-emerald-100 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300"
+                                >
+                                    <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                                    </svg>
+                                    + Producto Manual
+                                </button>
                             </div>
                         </div>
                     )}
@@ -2401,6 +2524,147 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
                                     className="rounded-xl bg-rose-600 px-4 py-2 text-sm font-semibold text-white hover:bg-rose-700 disabled:opacity-50 shadow-sm"
                                 >
                                     {voidReceiptSubmitting ? 'Revirtiendo Inventario...' : 'Confirmar Anulación y Descontar Stock'}
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+
+            {/* Modal: Registrar Producto Rápido / Manual en Show */}
+            {quickModalOpen && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
+                    <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl dark:bg-neutral-900 border border-slate-200 dark:border-neutral-800">
+                        <div className="flex items-center justify-between border-b border-slate-100 pb-3 dark:border-neutral-800">
+                            <div>
+                                <h3 className="text-base font-bold text-slate-900 dark:text-white">
+                                    Registrar Producto Manual
+                                </h3>
+                                <p className="text-xs text-slate-500 dark:text-slate-400">
+                                    Agrega un nuevo producto a tu catálogo y a esta orden de compra directamente.
+                                </p>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => setQuickModalOpen(false)}
+                                className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-neutral-800"
+                            >
+                                <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                                </svg>
+                            </button>
+                        </div>
+
+                        {quickError && (
+                            <div className="mt-3 rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700 dark:border-rose-900/50 dark:bg-rose-950/20 dark:text-rose-400">
+                                {quickError}
+                            </div>
+                        )}
+
+                        <form onSubmit={handleSaveQuickCreateShow} className="mt-4 space-y-4">
+                            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                                <div>
+                                    <label className="block text-xs font-semibold uppercase tracking-wider text-slate-600 dark:text-slate-400">
+                                        Código SKU / Código Tienda *
+                                    </label>
+                                    <input
+                                        type="text"
+                                        required
+                                        value={quickSku}
+                                        onChange={(e) => setQuickSku(e.target.value)}
+                                        placeholder="Ej. 681131096034"
+                                        className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 focus:border-indigo-500 focus:outline-none dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-100 font-mono"
+                                    />
+                                </div>
+
+                                <div>
+                                    <label className="block text-xs font-semibold uppercase tracking-wider text-slate-600 dark:text-slate-400">
+                                        Código de Barras (UPC)
+                                    </label>
+                                    <input
+                                        type="text"
+                                        value={quickBarcode}
+                                        onChange={(e) => setQuickBarcode(e.target.value)}
+                                        placeholder="Ej. 681131096034"
+                                        className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 focus:border-indigo-500 focus:outline-none dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-100 font-mono"
+                                    />
+                                </div>
+                            </div>
+
+                            <div>
+                                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-600 dark:text-slate-400">
+                                    Nombre o Descripción del Producto *
+                                </label>
+                                <input
+                                    type="text"
+                                    required
+                                    value={quickName}
+                                    onChange={(e) => setQuickName(e.target.value)}
+                                    placeholder="Ej. Spring Valley Melatonin 5mg Gummies Strawberry 120 gomitas"
+                                    className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2 text-sm text-slate-800 focus:border-indigo-500 focus:outline-none dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-100"
+                                />
+                            </div>
+
+                            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                                <div>
+                                    <label className="block text-xs font-semibold uppercase tracking-wider text-slate-600 dark:text-slate-400">
+                                        Marca
+                                    </label>
+                                    <input
+                                        type="text"
+                                        value={quickBrand}
+                                        onChange={(e) => setQuickBrand(e.target.value)}
+                                        placeholder="Ej. Spring Valley"
+                                        className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 focus:border-indigo-500 focus:outline-none dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-100"
+                                    />
+                                </div>
+
+                                <div>
+                                    <label className="block text-xs font-semibold uppercase tracking-wider text-slate-600 dark:text-slate-400">
+                                        Costo ($ MXN)
+                                    </label>
+                                    <input
+                                        type="number"
+                                        step="0.01"
+                                        min="0"
+                                        value={quickCost}
+                                        onChange={(e) => setQuickCost(e.target.value)}
+                                        className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 focus:border-indigo-500 focus:outline-none dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-100"
+                                    />
+                                </div>
+
+                                <div>
+                                    <label className="block text-xs font-semibold uppercase tracking-wider text-slate-600 dark:text-slate-400">
+                                        Cantidad a Pedir *
+                                    </label>
+                                    <input
+                                        type="number"
+                                        min="1"
+                                        required
+                                        value={quickQty}
+                                        onChange={(e) => setQuickQty(e.target.value)}
+                                        className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 focus:border-indigo-500 focus:outline-none dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-100 font-bold"
+                                    />
+                                </div>
+                            </div>
+
+                            <div className="mt-6 flex items-center justify-end gap-3 pt-3 border-t border-slate-100 dark:border-neutral-800">
+                                <button
+                                    type="button"
+                                    onClick={() => setQuickModalOpen(false)}
+                                    className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-200"
+                                >
+                                    Cancelar
+                                </button>
+                                <button
+                                    type="submit"
+                                    disabled={quickSaving}
+                                    className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2 text-xs font-bold text-white shadow hover:bg-indigo-700 disabled:opacity-50"
+                                >
+                                    <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                                    </svg>
+                                    {quickSaving ? 'Guardando...' : 'Guardar y Agregar a la Orden'}
                                 </button>
                             </div>
                         </form>

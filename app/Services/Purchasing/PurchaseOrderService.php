@@ -43,6 +43,7 @@ class PurchaseOrderService
             $subtotal = 0.0;
             $totalUnitsOrdered = 0;
             $validatedItems = [];
+            $productIndexMap = [];
 
             foreach ($items as $item) {
                 $productId = (int) ($item['inventory_product_id'] ?? 0);
@@ -51,6 +52,19 @@ class PurchaseOrderService
 
                 if ($productId <= 0 || $qty <= 0) {
                     throw new InvalidArgumentException('Cada partida debe tener un producto válido y cantidad mayor a cero.');
+                }
+
+                // Consolidar cantidades si el producto ya fue agregado en una partida previa
+                if (isset($productIndexMap[$productId])) {
+                    $existingIdx = $productIndexMap[$productId];
+                    $validatedItems[$existingIdx]['quantity_ordered'] += $qty;
+                    $validatedItems[$existingIdx]['subtotal'] = round(
+                        $validatedItems[$existingIdx]['quantity_ordered'] * $validatedItems[$existingIdx]['unit_cost'],
+                        2
+                    );
+                    $subtotal += round($qty * $validatedItems[$existingIdx]['unit_cost'], 2);
+                    $totalUnitsOrdered += $qty;
+                    continue;
                 }
 
                 $product = InventoryProduct::findOrFail($productId);
@@ -121,6 +135,8 @@ class PurchaseOrderService
                     'subtotal' => $itemSubtotal,
                     'status' => PurchaseOrderItem::STATUS_PENDING,
                 ];
+
+                $productIndexMap[$productId] = count($validatedItems) - 1;
             }
 
             $taxAmount = isset($data['tax_amount']) ? max(0, (float) $data['tax_amount']) : 0.0;
@@ -520,6 +536,7 @@ class PurchaseOrderService
 
         return DB::transaction(function () use ($order, $data, $items) {
             $existingItemIds = [];
+            $seenProductItemMap = [];
             $subtotal = 0.0;
             $totalUnitsOrdered = 0;
 
@@ -532,10 +549,30 @@ class PurchaseOrderService
                 $itemId = isset($itemData['id']) ? (int) $itemData['id'] : 0;
                 $productId = (int) ($itemData['inventory_product_id'] ?? 0);
 
+                // Si ya procesamos este producto en la orden, consolidar la cantidad
+                if ($productId > 0 && isset($seenProductItemMap[$productId])) {
+                    $existingItem = $seenProductItemMap[$productId];
+                    $newQty = $existingItem->quantity_ordered + $qty;
+                    $existingItem->update([
+                        'quantity_ordered' => $newQty,
+                        'subtotal' => round($newQty * (float) $existingItem->unit_cost, 2),
+                    ]);
+                    $subtotal += round($qty * (float) $existingItem->unit_cost, 2);
+                    $totalUnitsOrdered += $qty;
+                    continue;
+                }
+
                 if ($itemId > 0) {
                     $orderItem = PurchaseOrderItem::where('purchase_order_id', $order->id)->find($itemId);
                 } else {
                     $orderItem = null;
+                }
+
+                // Si no viene con ID de partida, pero ya existe una partida en la orden con este producto, reutilizarla
+                if (! $orderItem && $productId > 0) {
+                    $orderItem = PurchaseOrderItem::where('purchase_order_id', $order->id)
+                        ->where('inventory_product_id', $productId)
+                        ->first();
                 }
 
                 if (! $orderItem && $productId > 0) {
@@ -568,6 +605,7 @@ class PurchaseOrderService
 
                 if ($orderItem) {
                     $existingItemIds[] = $orderItem->id;
+                    $seenProductItemMap[$orderItem->inventory_product_id] = $orderItem;
                     $subtotal += round($qty * (float) $orderItem->unit_cost, 2);
                     $totalUnitsOrdered += $qty;
                 }

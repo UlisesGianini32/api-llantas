@@ -205,6 +205,7 @@ Route::middleware(['auth', 'role'])->group(function () {
         Route::get('/crear', [PurchaseOrderController::class, 'create'])->name('create');
         Route::post('/', [PurchaseOrderController::class, 'store'])->name('store');
         Route::get('/buscar-productos', [PurchaseOrderController::class, 'searchProducts'])->name('search-products');
+        Route::post('/producto-rapido', [PurchaseOrderController::class, 'quickCreateProduct'])->name('quick-create-product');
         Route::post('/proveedores/codigo-producto', [PurchaseOrderController::class, 'saveSupplierSku'])->name('save-supplier-sku');
         Route::get('/{purchaseOrder}', [PurchaseOrderController::class, 'show'])
             ->whereNumber('purchaseOrder')->name('show');

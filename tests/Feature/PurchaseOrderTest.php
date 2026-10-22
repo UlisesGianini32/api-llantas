@@ -785,5 +785,80 @@ class PurchaseOrderTest extends TestCase
         $this->assertEquals(5, $freshOrder->total_units_ordered);
         $this->assertEquals(500.0, (float) $freshOrder->total_cost);
     }
+
+    public function test_quick_create_product_endpoint(): void
+    {
+        $response = $this->actingAs($this->admin)->postJson('/compras/ordenes/producto-rapido', [
+            'sku' => '681131096034',
+            'barcode' => '681131096034',
+            'name' => 'Spring Valley Melatonin 5mg Gummies Strawberry 120 gomitas',
+            'brand' => 'Spring Valley',
+            'cost' => 180.50,
+            'supplier_name' => 'Compras USA',
+        ]);
+
+        $response->assertOk();
+        $response->assertJson([
+            'ok' => true,
+            'product' => [
+                'sku' => '681131096034',
+                'name' => 'Spring Valley Melatonin 5mg Gummies Strawberry 120 gomitas',
+                'brand' => 'Spring Valley',
+            ],
+        ]);
+
+        $this->assertDatabaseHas('inventory_products', [
+            'sku' => '681131096034',
+            'brand' => 'Spring Valley',
+        ]);
+    }
+
+    public function test_search_products_matches_barcode_and_normalized_code(): void
+    {
+        $prod = InventoryProduct::create([
+            'sku' => 'SV-MELATONIN-01',
+            'barcode' => '0681131096034',
+            'name' => 'Spring Valley Melatonina 5mg',
+            'brand' => 'Spring Valley',
+            'product_type' => InventoryProduct::SIMPLE,
+            'is_active' => true,
+        ]);
+
+        // Búsqueda sin el 0 inicial
+        $res = $this->actingAs($this->admin)->getJson('/compras/ordenes/buscar-productos?q=681131096034');
+        $res->assertOk();
+        $data = $res->json('data');
+
+        $this->assertNotEmpty($data);
+        $this->assertEquals($prod->id, $data[0]['id']);
+    }
+
+    public function test_create_order_consolidates_duplicate_products_without_creating_duplicate_lines(): void
+    {
+        $order = $this->service->createOrder([
+            'supplier_name' => 'Compras USA',
+            'inventory_location_id' => $this->location->id,
+            'items' => [
+                [
+                    'inventory_product_id' => $this->productA->id,
+                    'quantity_ordered' => 5,
+                    'unit_cost' => 100.0,
+                ],
+                [
+                    'inventory_product_id' => $this->productA->id, // DUPLICADO DEL MISMO PRODUCTO
+                    'quantity_ordered' => 7,
+                    'unit_cost' => 100.0,
+                ],
+            ],
+        ], $this->admin);
+
+        $freshOrder = $order->fresh(['items']);
+
+        // Debe haber EXACTAMENTE 1 partida consolidada
+        $this->assertCount(1, $freshOrder->items);
+        $this->assertEquals(12, $freshOrder->items->first()->quantity_ordered);
+        $this->assertEquals(12, $freshOrder->total_units_ordered);
+    }
 }
+
 
