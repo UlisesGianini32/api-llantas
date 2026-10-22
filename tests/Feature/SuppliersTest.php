@@ -57,6 +57,7 @@ class SuppliersTest extends TestCase
         (require database_path('migrations/2026_09_30_000003_create_restock_configurations_table.php'))->up();
         (require database_path('migrations/2026_09_30_000004_create_purchase_orders_tables.php'))->up();
         (require database_path('migrations/2026_10_07_193000_create_suppliers_and_supplier_brands_tables.php'))->up();
+        (require database_path('migrations/2026_10_21_160000_create_supplier_products_table.php'))->up();
 
         $this->admin = User::forceCreate([
             'name' => 'Admin Ulises',
@@ -275,5 +276,133 @@ class SuppliersTest extends TestCase
         $resText->assertOk();
         $this->assertCount(1, $resText->json('suppliers'));
         $this->assertSame('Proveedor Barbero', $resText->json('suppliers.0.name'));
+    }
+
+    public function test_admin_can_view_supplier_codes_index(): void
+    {
+        $supplier = Supplier::create(['name' => 'Proveedor Wella']);
+        $supplier->syncBrands(['WELLA']);
+
+        $product = InventoryProduct::create([
+            'sku' => 'WEL-SHP-250',
+            'name' => 'Wella Invigo Shampoo 250ml',
+            'brand' => 'WELLA',
+            'product_type' => InventoryProduct::SIMPLE,
+            'is_active' => true,
+            'cost' => 200.00,
+        ]);
+
+        $res = $this->actingAs($this->admin)->get(route('purchasing.suppliers.codes', ['supplier_id' => $supplier->id]));
+
+        $res->assertOk();
+        $res->assertInertia(fn (\Inertia\Testing\AssertableInertia $page) => $page
+            ->component('Purchasing/Suppliers/Codes')
+            ->where('selectedSupplier.name', 'Proveedor Wella')
+            ->has('products.data', 1)
+            ->where('products.data.0.sku', 'WEL-SHP-250')
+        );
+    }
+
+    public function test_admin_can_save_and_update_supplier_product_code(): void
+    {
+        $supplier = Supplier::create(['name' => 'Proveedor Joico']);
+
+        $product = InventoryProduct::create([
+            'sku' => 'JOI-KPAK-1L',
+            'name' => 'Joico K-Pak Shampoo 1000ml',
+            'brand' => 'JOICO',
+            'product_type' => InventoryProduct::SIMPLE,
+            'is_active' => true,
+            'cost' => 380.00,
+        ]);
+
+        // Guardar código inicial
+        $res = $this->actingAs($this->admin)->postJson(route('purchasing.suppliers.codes.save'), [
+            'inventory_product_id' => $product->id,
+            'supplier_id' => $supplier->id,
+            'supplier_name' => $supplier->name,
+            'supplier_sku' => '60515',
+            'supplier_cost' => 350.00,
+        ]);
+
+        $res->assertOk();
+        $this->assertTrue($res->json('ok'));
+
+        $this->assertDatabaseHas('supplier_products', [
+            'inventory_product_id' => $product->id,
+            'supplier_name' => 'Proveedor Joico',
+            'supplier_sku' => '60515',
+            'supplier_cost' => 350.00,
+        ]);
+
+        // Actualizar código y costo
+        $resUpdate = $this->actingAs($this->admin)->postJson(route('purchasing.suppliers.codes.save'), [
+            'inventory_product_id' => $product->id,
+            'supplier_id' => $supplier->id,
+            'supplier_name' => $supplier->name,
+            'supplier_sku' => '60515-REV2',
+            'supplier_cost' => 360.00,
+        ]);
+
+        $resUpdate->assertOk();
+        $this->assertDatabaseHas('supplier_products', [
+            'inventory_product_id' => $product->id,
+            'supplier_name' => 'Proveedor Joico',
+            'supplier_sku' => '60515-REV2',
+            'supplier_cost' => 360.00,
+        ]);
+        $this->assertSame(1, \App\Models\SupplierProduct::where('inventory_product_id', $product->id)->count());
+    }
+
+    public function test_admin_can_delete_supplier_product_code(): void
+    {
+        $supplier = Supplier::create(['name' => 'Proveedor Alfaparf']);
+
+        $product = InventoryProduct::create([
+            'sku' => 'ALF-SE-1L',
+            'name' => 'Semi Di Lino Diamond 1000ml',
+            'brand' => 'ALFAPARF',
+            'product_type' => InventoryProduct::SIMPLE,
+            'is_active' => true,
+            'cost' => 250.00,
+        ]);
+
+        \App\Models\SupplierProduct::create([
+            'supplier_id' => $supplier->id,
+            'supplier_name' => $supplier->name,
+            'inventory_product_id' => $product->id,
+            'supplier_sku' => 'ALF-9901',
+            'is_primary' => true,
+        ]);
+
+        $res = $this->actingAs($this->admin)->postJson(route('purchasing.suppliers.codes.delete'), [
+            'inventory_product_id' => $product->id,
+            'supplier_name' => $supplier->name,
+        ]);
+
+        $res->assertOk();
+        $this->assertDatabaseMissing('supplier_products', [
+            'inventory_product_id' => $product->id,
+            'supplier_name' => 'Proveedor Alfaparf',
+        ]);
+    }
+
+    public function test_admin_can_search_products_to_link_to_supplier(): void
+    {
+        $product = InventoryProduct::create([
+            'sku' => 'SCHW-OSIS-DUST',
+            'name' => 'Schwarzkopf Osis+ Dust It 10g',
+            'barcode' => '733257000123',
+            'brand' => 'SCHWARZKOPF',
+            'product_type' => InventoryProduct::SIMPLE,
+            'is_active' => true,
+            'cost' => 180.00,
+        ]);
+
+        $res = $this->actingAs($this->admin)->getJson(route('purchasing.suppliers.codes.search-products', ['q' => 'Dust It']));
+
+        $res->assertOk();
+        $this->assertCount(1, $res->json('products'));
+        $this->assertSame('SCHW-OSIS-DUST', $res->json('products.0.sku'));
     }
 }

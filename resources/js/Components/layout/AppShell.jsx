@@ -245,6 +245,7 @@ const ALL_SEARCH_ITEMS = [
     { title: 'Pronóstico de Compras', desc: 'Sugerencias de reabastecimiento y días de stock', href: '/reabastecimiento/pronostico', category: 'Inventario', icon: IconChart },
     { title: 'Órdenes de Compra', desc: 'Gestión de pedidos a proveedores', href: '/compras/ordenes', category: 'Inventario', icon: IconShoppingBag },
     { title: 'Proveedores y Marcas', desc: 'Directorio de proveedores y marcas que proveen', href: '/compras/proveedores', category: 'Inventario', icon: IconTruck },
+    { title: 'Códigos de Proveedor', desc: 'Asignar códigos de catálogo a cada proveedor sin alterar SKUs', href: '/compras/proveedores/codigos', category: 'Inventario', icon: IconTag },
     { title: 'Vincular Publicaciones', desc: 'Vincular catálogo con Mercado Libre, Amazon y Shopify', href: '/almacen/canales/importar', category: 'Inventario', icon: IconTag },
     { title: 'Stock Mercado Libre', desc: 'Monitoreo de existencias publicadas en MeLi', href: '/almacen/canales/mercado-libre/stock', category: 'Inventario', icon: IconMeli },
     { title: 'Comparar ML', desc: 'Comparativa de precios y competidores en ML', href: '/ml/compare', category: 'Inventario', icon: IconMeli },
@@ -702,10 +703,21 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                         <NavItem
                             href="/compras/proveedores"
                             icon={IconTruck}
-                            active={currentPath.startsWith('/compras/proveedores') || currentPath.startsWith('/proveedores')}
+                            active={
+                                (currentPath.startsWith('/compras/proveedores') && !currentPath.startsWith('/compras/proveedores/codigos')) ||
+                                currentPath.startsWith('/proveedores')
+                            }
                             onNavigate={onNavigate}
                         >
                             Proveedores y Marcas
+                        </NavItem>
+                        <NavItem
+                            href="/compras/proveedores/codigos"
+                            icon={IconTag}
+                            active={currentPath.startsWith('/compras/proveedores/codigos') || currentPath.startsWith('/compras/codigos')}
+                            onNavigate={onNavigate}
+                        >
+                            Códigos de Proveedor
                         </NavItem>
                         <NavItem
                             href="/almacen/canales/importar"

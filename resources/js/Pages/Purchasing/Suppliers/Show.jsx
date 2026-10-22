@@ -6,14 +6,144 @@ export default function SupplierShow({
     supplier = {},
     products = [],
 }) {
-    const [activeTab, setActiveTab] = useState('brands') // 'brands' | 'products' | 'orders'
+    const urlParams = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null
+    const initialTab = urlParams?.get('tab') || 'brands'
+    const [activeTab, setActiveTab] = useState(initialTab) // 'brands' | 'products' | 'supplier_codes' | 'orders'
+
+    const [rowStates, setRowStates] = useState({})
+    const [toastMessage, setToastMessage] = useState(null)
+    const [codeSearch, setCodeSearch] = useState('')
+    const [codeStatusFilter, setCodeStatusFilter] = useState('all')
 
     const brands = supplier.brands || []
     const purchaseOrders = supplier.purchase_orders || []
 
+    const showToast = (msg) => {
+        setToastMessage(msg)
+        setTimeout(() => setToastMessage(null), 3500)
+    }
+
+    const handleInputChange = (productId, field, value) => {
+        setRowStates((prev) => ({
+            ...prev,
+            [productId]: {
+                ...prev[productId],
+                [field]: value,
+                isDirty: true,
+                isSaved: false,
+            },
+        }))
+    }
+
+    const handleSaveRow = async (product) => {
+        const row = rowStates[product.id] || {
+            supplier_sku: product.supplier_sku || '',
+            supplier_cost: product.supplier_cost ?? product.cost ?? '',
+        }
+        const supplierSku = (row.supplier_sku || '').trim()
+
+        if (!supplierSku) {
+            alert('Por favor ingresa un código de catálogo válido.')
+            return
+        }
+
+        setRowStates((prev) => ({
+            ...prev,
+            [product.id]: { ...prev[product.id], isSaving: true },
+        }))
+
+        try {
+            const csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content')
+            const response = await fetch('/compras/proveedores/codigos/guardar', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                    'X-CSRF-TOKEN': csrfToken || '',
+                },
+                body: JSON.stringify({
+                    inventory_product_id: product.id,
+                    supplier_id: supplier.id,
+                    supplier_name: supplier.name,
+                    supplier_sku: supplierSku,
+                    supplier_cost: row.supplier_cost !== '' ? parseFloat(row.supplier_cost) : null,
+                }),
+            })
+
+            const data = await response.json()
+
+            if (response.ok && data.ok) {
+                setRowStates((prev) => ({
+                    ...prev,
+                    [product.id]: {
+                        ...prev[product.id],
+                        isSaving: false,
+                        isSaved: true,
+                        isDirty: false,
+                    },
+                }))
+                showToast(`✓ Código '${supplierSku}' guardado para ${product.name}`)
+            } else {
+                throw new Error(data.message || data.error || 'Error al guardar código')
+            }
+        } catch (err) {
+            alert(err.message || 'Error al guardar el código de proveedor')
+            setRowStates((prev) => ({
+                ...prev,
+                [product.id]: { ...prev[product.id], isSaving: false },
+            }))
+        }
+    }
+
+    const handleDeleteCode = async (product) => {
+        if (!confirm(`¿Eliminar el código de proveedor para '${product.name}'?`)) return
+
+        try {
+            const csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content')
+            const response = await fetch('/compras/proveedores/codigos/eliminar', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                    'X-CSRF-TOKEN': csrfToken || '',
+                },
+                body: JSON.stringify({
+                    inventory_product_id: product.id,
+                    supplier_name: supplier.name,
+                }),
+            })
+
+            const data = await response.json()
+
+            if (response.ok && data.ok) {
+                setRowStates((prev) => ({
+                    ...prev,
+                    [product.id]: {
+                        ...prev[product.id],
+                        supplier_sku: '',
+                        isDirty: false,
+                        isSaved: false,
+                    },
+                }))
+                showToast(`✓ Código de proveedor eliminado`)
+            } else {
+                throw new Error(data.message || 'Error al eliminar')
+            }
+        } catch (err) {
+            alert(err.message || 'Error al eliminar el código')
+        }
+    }
+
     return (
         <AppShell>
             <Head title={`${supplier.name} | Proveedor`} />
+
+            {/* FLOATING TOAST */}
+            {toastMessage && (
+                <div className="fixed top-5 right-5 z-50 flex items-center gap-2 rounded-2xl bg-slate-900 px-4 py-3 text-xs font-bold text-white shadow-2xl transition-all animate-bounce">
+                    <span>✨</span> {toastMessage}
+                </div>
+            )}
 
             <div className="space-y-6">
                 {/* BREADCRUMB & HEADER */}
@@ -57,6 +187,12 @@ export default function SupplierShow({
                         </div>
 
                         <div className="flex items-center gap-2">
+                            <Link
+                                href={`/compras/proveedores/codigos?supplier_id=${supplier.id}`}
+                                className="inline-flex items-center gap-1.5 rounded-xl border border-purple-300 bg-purple-50 px-3.5 py-2 text-xs font-bold text-purple-700 shadow-xs transition hover:bg-purple-100 dark:border-purple-800 dark:bg-purple-950/60 dark:text-purple-300"
+                            >
+                                <span>🏷️</span> Gestionar Códigos de Catálogo
+                            </Link>
                             <Link
                                 href="/compras/proveedores"
                                 className="rounded-xl border border-slate-300 bg-white px-3.5 py-2 text-xs font-semibold text-slate-700 shadow-xs transition hover:bg-slate-50 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-200"
@@ -212,6 +348,17 @@ export default function SupplierShow({
                     </button>
                     <button
                         type="button"
+                        onClick={() => setActiveTab('supplier_codes')}
+                        className={`flex items-center gap-2 border-b-2 px-4 py-2.5 text-xs font-bold transition ${
+                            activeTab === 'supplier_codes'
+                                ? 'border-purple-600 text-purple-600 dark:border-purple-400 dark:text-purple-400'
+                                : 'border-transparent text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-white'
+                        }`}
+                    >
+                        <span>🏷️</span> Códigos de Catálogo ({products.filter((p) => p.supplier_sku).length})
+                    </button>
+                    <button
+                        type="button"
                         onClick={() => setActiveTab('orders')}
                         className={`flex items-center gap-2 border-b-2 px-4 py-2.5 text-xs font-bold transition ${
                             activeTab === 'orders'
@@ -355,6 +502,208 @@ export default function SupplierShow({
                                 </table>
                             </div>
                         )}
+                    </div>
+                )}
+
+                {/* TAB 2.5: SUPPLIER CODES */}
+                {activeTab === 'supplier_codes' && (
+                    <div className="space-y-4">
+                        {/* Search & toolbar inside codes tab */}
+                        <div className="flex flex-col gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-xs sm:flex-row sm:items-center sm:justify-between dark:border-neutral-800 dark:bg-neutral-900">
+                            <div className="relative w-full max-w-md">
+                                <span className="absolute inset-y-0 left-0 flex items-center pl-3 text-slate-400">
+                                    🔍
+                                </span>
+                                <input
+                                    type="text"
+                                    placeholder="Filtrar por nombre, SKU o código de proveedor..."
+                                    value={codeSearch}
+                                    onChange={(e) => setCodeSearch(e.target.value)}
+                                    className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2 pr-3 pl-9 text-xs text-slate-900 outline-none transition focus:border-purple-500 focus:bg-white focus:ring-1 focus:ring-purple-500 dark:border-neutral-700 dark:bg-neutral-800 dark:text-white"
+                                />
+                            </div>
+
+                            <div className="flex items-center gap-2">
+                                <select
+                                    value={codeStatusFilter}
+                                    onChange={(e) => setCodeStatusFilter(e.target.value)}
+                                    className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 outline-none dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-200"
+                                >
+                                    <option value="all">Todos ({products.length})</option>
+                                    <option value="with_code">Con código ({products.filter((p) => p.supplier_sku).length})</option>
+                                    <option value="without_code">Sin código ({products.filter((p) => !p.supplier_sku).length})</option>
+                                </select>
+
+                                <Link
+                                    href={`/compras/proveedores/codigos?supplier_id=${supplier.id}`}
+                                    className="inline-flex items-center gap-1.5 rounded-xl bg-purple-600 px-3.5 py-1.5 text-xs font-bold text-white shadow-xs hover:bg-purple-500"
+                                >
+                                    <span>➕</span> Vincular otro producto
+                                </Link>
+                            </div>
+                        </div>
+
+                        {/* Codes Table */}
+                        <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xs dark:border-neutral-800 dark:bg-neutral-900">
+                            {products.length === 0 ? (
+                                <div className="p-8 text-center text-xs text-slate-400">
+                                    No hay productos asociados a este proveedor en el catálogo.
+                                </div>
+                            ) : (
+                                <div className="overflow-x-auto">
+                                    <table className="w-full text-left text-xs">
+                                        <thead>
+                                            <tr className="border-b border-slate-200 bg-slate-50/80 font-bold uppercase tracking-wider text-slate-500 dark:border-neutral-800 dark:bg-neutral-800/60 dark:text-slate-400">
+                                                <th className="p-3.5">SKU SBS (Interno)</th>
+                                                <th className="p-3.5">Producto</th>
+                                                <th className="p-3.5">Marca</th>
+                                                <th className="p-3.5 min-w-[200px]">Código de Proveedor (Catálogo)</th>
+                                                <th className="p-3.5 min-w-[120px] text-right">Costo ($)</th>
+                                                <th className="p-3.5 text-center">Estado</th>
+                                                <th className="p-3.5 text-right">Acción</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-slate-100 dark:divide-neutral-800/60">
+                                            {products
+                                                .filter((p) => {
+                                                    const s = codeSearch.toLowerCase()
+                                                    const matchesSearch =
+                                                        !s ||
+                                                        p.name.toLowerCase().includes(s) ||
+                                                        p.sku.toLowerCase().includes(s) ||
+                                                        (p.barcode && p.barcode.includes(s)) ||
+                                                        (p.supplier_sku && p.supplier_sku.toLowerCase().includes(s))
+
+                                                    const row = rowStates[p.id]
+                                                    const currentSku = row?.supplier_sku !== undefined ? row.supplier_sku : (p.supplier_sku || '')
+                                                    const matchesStatus =
+                                                        codeStatusFilter === 'all' ||
+                                                        (codeStatusFilter === 'with_code' && currentSku) ||
+                                                        (codeStatusFilter === 'without_code' && !currentSku)
+
+                                                    return matchesSearch && matchesStatus
+                                                })
+                                                .map((p) => {
+                                                    const state = rowStates[p.id] || {
+                                                        supplier_sku: p.supplier_sku || '',
+                                                        supplier_cost: p.supplier_cost ?? p.cost ?? '',
+                                                        isSaving: false,
+                                                        isSaved: false,
+                                                        isDirty: false,
+                                                    }
+                                                    const hasSavedCode = Boolean(p.supplier_sku)
+
+                                                    return (
+                                                        <tr key={p.id} className="hover:bg-slate-50/70 dark:hover:bg-neutral-800/30">
+                                                            <td className="p-3.5 align-top">
+                                                                <span className="font-mono font-bold text-indigo-600 dark:text-indigo-400 block">
+                                                                    {p.sku}
+                                                                </span>
+                                                                {p.barcode && (
+                                                                    <span className="font-mono text-[10px] text-slate-400 block">
+                                                                        UPC: {p.barcode}
+                                                                    </span>
+                                                                )}
+                                                            </td>
+                                                            <td className="p-3.5 align-top font-semibold text-slate-800 dark:text-slate-200 max-w-[280px]">
+                                                                {p.name}
+                                                            </td>
+                                                            <td className="p-3.5 align-top">
+                                                                <span className="rounded-md bg-purple-100 px-2 py-0.5 font-bold text-[10px] text-purple-800 dark:bg-purple-950/70 dark:text-purple-300">
+                                                                    {p.brand}
+                                                                </span>
+                                                            </td>
+                                                            <td className="p-3.5 align-top">
+                                                                <input
+                                                                    type="text"
+                                                                    placeholder="ej. 60515, LOR-101..."
+                                                                    value={state.supplier_sku}
+                                                                    onChange={(e) => handleInputChange(p.id, 'supplier_sku', e.target.value.toUpperCase())}
+                                                                    onKeyDown={(e) => {
+                                                                        if (e.key === 'Enter') {
+                                                                            e.preventDefault()
+                                                                            handleSaveRow(p)
+                                                                        }
+                                                                    }}
+                                                                    className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-mono font-bold uppercase outline-none focus:border-purple-500 focus:bg-white focus:ring-1 focus:ring-purple-500 dark:border-neutral-700 dark:bg-neutral-800 dark:text-white"
+                                                                />
+                                                            </td>
+                                                            <td className="p-3.5 align-top text-right">
+                                                                <input
+                                                                    type="number"
+                                                                    step="0.01"
+                                                                    min="0"
+                                                                    placeholder="0.00"
+                                                                    value={state.supplier_cost}
+                                                                    onChange={(e) => handleInputChange(p.id, 'supplier_cost', e.target.value)}
+                                                                    onKeyDown={(e) => {
+                                                                        if (e.key === 'Enter') {
+                                                                            e.preventDefault()
+                                                                            handleSaveRow(p)
+                                                                        }
+                                                                    }}
+                                                                    className="w-24 rounded-xl border border-slate-200 bg-slate-50 px-2 py-1.5 text-right text-xs font-mono font-bold outline-none focus:border-purple-500 focus:bg-white focus:ring-1 focus:ring-purple-500 dark:border-neutral-700 dark:bg-neutral-800 dark:text-white"
+                                                                />
+                                                            </td>
+                                                            <td className="p-3.5 align-top text-center">
+                                                                {state.isSaving ? (
+                                                                    <span className="rounded-full bg-indigo-100 px-2 py-0.5 text-[10px] font-bold text-indigo-700 animate-pulse">
+                                                                        Guardando...
+                                                                    </span>
+                                                                ) : state.isSaved ? (
+                                                                    <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-bold text-emerald-800">
+                                                                        ✓ Guardado
+                                                                    </span>
+                                                                ) : state.isDirty ? (
+                                                                    <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-800">
+                                                                        ● Modificado
+                                                                    </span>
+                                                                ) : hasSavedCode ? (
+                                                                    <span className="rounded-full bg-purple-100 px-2 py-0.5 text-[10px] font-bold text-purple-800">
+                                                                        Asignado
+                                                                    </span>
+                                                                ) : (
+                                                                    <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] text-slate-500">
+                                                                        Sin código
+                                                                    </span>
+                                                                )}
+                                                            </td>
+                                                            <td className="p-3.5 align-top text-right">
+                                                                <div className="flex items-center justify-end gap-1.5">
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => handleSaveRow(p)}
+                                                                        disabled={state.isSaving || (!state.isDirty && hasSavedCode)}
+                                                                        className={`rounded-xl px-3 py-1.5 text-xs font-bold transition ${
+                                                                            state.isDirty
+                                                                                ? 'bg-purple-600 text-white hover:bg-purple-500'
+                                                                                : hasSavedCode
+                                                                                ? 'border border-slate-200 bg-white text-slate-400'
+                                                                                : 'bg-indigo-600 text-white hover:bg-indigo-500'
+                                                                        }`}
+                                                                    >
+                                                                        {state.isSaving ? '...' : 'Guardar'}
+                                                                    </button>
+                                                                    {hasSavedCode && (
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={() => handleDeleteCode(p)}
+                                                                            className="rounded-xl border border-rose-200 p-1.5 text-rose-500 hover:bg-rose-50"
+                                                                            title="Eliminar código"
+                                                                        >
+                                                                            ✕
+                                                                        </button>
+                                                                    )}
+                                                                </div>
+                                                            </td>
+                                                        </tr>
+                                                    )
+                                                })}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            )}
+                        </div>
                     </div>
                 )}
 

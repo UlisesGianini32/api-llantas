@@ -8,6 +8,8 @@ use App\Models\InventoryProduct;
 use App\Models\PurchaseOrder;
 use App\Models\Supplier;
 use App\Models\SupplierBrand;
+use App\Models\SupplierProduct;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -136,23 +138,248 @@ class SupplierController extends Controller
         ]);
     }
 
+    public function codesIndex(Request $request): Response
+    {
+        $suppliers = Supplier::query()
+            ->orderBy('name')
+            ->with('brands')
+            ->get();
+
+        $selectedSupplierId = $request->input('supplier_id');
+        $selectedSupplier = null;
+
+        if ($selectedSupplierId) {
+            $selectedSupplier = $suppliers->firstWhere('id', (int) $selectedSupplierId);
+        }
+
+        // Si no se especificó un proveedor y existen proveedores registrados, elegir el primero por defecto
+        if (! $selectedSupplier && $suppliers->isNotEmpty() && ! $request->has('supplier_id')) {
+            $selectedSupplier = $suppliers->first();
+            $selectedSupplierId = $selectedSupplier->id;
+        }
+
+        $brandFilter = $request->input('brand');
+        $statusFilter = $request->input('status', 'all'); // 'all', 'with_code', 'without_code'
+        $search = trim((string) $request->input('search', ''));
+
+        // Conteo de códigos de catálogo asignados por proveedor
+        $supplierCodesCounts = SupplierProduct::query()
+            ->selectRaw('supplier_name, COUNT(DISTINCT inventory_product_id) as count')
+            ->groupBy('supplier_name')
+            ->pluck('count', 'supplier_name');
+
+        $suppliersList = $suppliers->map(function (Supplier $sup) use ($supplierCodesCounts) {
+            return [
+                'id' => $sup->id,
+                'name' => $sup->name,
+                'brands' => $sup->brands->pluck('brand')->all(),
+                'codes_count' => (int) ($supplierCodesCounts[$sup->name] ?? 0),
+            ];
+        });
+
+        $productsQuery = InventoryProduct::query()->where('is_active', true);
+
+        if ($selectedSupplier) {
+            $brandNames = $selectedSupplier->brands->pluck('brand')->all();
+            $supplierName = $selectedSupplier->name;
+            $supplierId = $selectedSupplier->id;
+
+            $productsQuery->where(function (Builder $q) use ($supplierName, $supplierId, $brandNames) {
+                $hasCond = false;
+                if (! empty($brandNames)) {
+                    $q->whereIn(DB::raw('UPPER(TRIM(brand))'), $brandNames);
+                    $hasCond = true;
+                }
+                if ($hasCond) {
+                    $q->orWhere('supplier', $supplierName)
+                      ->orWhereHas('supplierProducts', fn ($sq) => $sq->where('supplier_id', $supplierId)->orWhere('supplier_name', $supplierName));
+                } else {
+                    $q->where('supplier', $supplierName)
+                      ->orWhereHas('supplierProducts', fn ($sq) => $sq->where('supplier_id', $supplierId)->orWhere('supplier_name', $supplierName));
+                }
+            });
+        }
+
+        if ($brandFilter) {
+            $productsQuery->where(DB::raw('UPPER(TRIM(brand))'), mb_strtoupper(trim($brandFilter)));
+        }
+
+        if ($search !== '') {
+            $digits = preg_replace('/[^0-9]/', '', $search);
+            $unpadded = $digits !== '' ? ltrim($digits, '0') : '';
+
+            $productsQuery->where(function (Builder $q) use ($search, $digits, $unpadded) {
+                $q->where('sku', 'like', "%{$search}%")
+                    ->orWhere('barcode', 'like', "%{$search}%")
+                    ->orWhere('barcode_secondary', 'like', "%{$search}%")
+                    ->orWhere('name', 'like', "%{$search}%")
+                    ->orWhereHas('supplierProducts', function ($sq) use ($search) {
+                        $sq->where('supplier_sku', 'like', "%{$search}%");
+                    });
+
+                if ($digits !== '' && strlen($digits) >= 6) {
+                    $q->orWhere('barcode', $digits)
+                      ->orWhere('barcode_secondary', $digits);
+                }
+                if ($unpadded !== '' && strlen($unpadded) >= 6) {
+                    $q->orWhere('barcode', $unpadded)
+                      ->orWhere('barcode', str_pad($unpadded, 12, '0', STR_PAD_LEFT))
+                      ->orWhere('barcode', str_pad($unpadded, 13, '0', STR_PAD_LEFT));
+                }
+            });
+        }
+
+        if ($statusFilter === 'with_code' && $selectedSupplier) {
+            $productsQuery->whereHas('supplierProducts', function ($sq) use ($selectedSupplier) {
+                $sq->where('supplier_id', $selectedSupplier->id)
+                   ->orWhere('supplier_name', $selectedSupplier->name);
+            });
+        } elseif ($statusFilter === 'without_code' && $selectedSupplier) {
+            $productsQuery->whereDoesntHave('supplierProducts', function ($sq) use ($selectedSupplier) {
+                $sq->where('supplier_id', $selectedSupplier->id)
+                   ->orWhere('supplier_name', $selectedSupplier->name);
+            });
+        }
+
+        // Métricas rápidas del proveedor seleccionado
+        $totalForSupplier = 0;
+        $withCodeCount = 0;
+        $withoutCodeCount = 0;
+        if ($selectedSupplier) {
+            $baseSupplierQuery = InventoryProduct::query()
+                ->where('is_active', true)
+                ->where(function (Builder $q) use ($selectedSupplier) {
+                    $brandNames = $selectedSupplier->brands->pluck('brand')->all();
+                    $supplierName = $selectedSupplier->name;
+                    $supplierId = $selectedSupplier->id;
+                    $hasCond = false;
+                    if (! empty($brandNames)) {
+                        $q->whereIn(DB::raw('UPPER(TRIM(brand))'), $brandNames);
+                        $hasCond = true;
+                    }
+                    if ($hasCond) {
+                        $q->orWhere('supplier', $supplierName)
+                          ->orWhereHas('supplierProducts', fn ($sq) => $sq->where('supplier_id', $supplierId)->orWhere('supplier_name', $supplierName));
+                    } else {
+                        $q->where('supplier', $supplierName)
+                          ->orWhereHas('supplierProducts', fn ($sq) => $sq->where('supplier_id', $supplierId)->orWhere('supplier_name', $supplierName));
+                    }
+                });
+
+            $totalForSupplier = (clone $baseSupplierQuery)->count();
+            $withCodeCount = (clone $baseSupplierQuery)->whereHas('supplierProducts', function ($sq) use ($selectedSupplier) {
+                $sq->where('supplier_id', $selectedSupplier->id)->orWhere('supplier_name', $selectedSupplier->name);
+            })->count();
+            $withoutCodeCount = max(0, $totalForSupplier - $withCodeCount);
+        }
+
+        $products = $productsQuery
+            ->with(['supplierProducts' => function ($sq) use ($selectedSupplier) {
+                if ($selectedSupplier) {
+                    $sq->where('supplier_id', $selectedSupplier->id)
+                       ->orWhere('supplier_name', $selectedSupplier->name);
+                }
+            }])
+            ->orderBy('brand')
+            ->orderBy('name')
+            ->paginate(50)
+            ->withQueryString();
+
+        $products->through(function (InventoryProduct $p) {
+            $supProduct = $p->supplierProducts->first();
+
+            return [
+                'id' => $p->id,
+                'sku' => $p->sku,
+                'barcode' => $p->barcode,
+                'barcode_secondary' => $p->barcode_secondary,
+                'name' => $p->name,
+                'brand' => $p->brand,
+                'supplier' => $p->supplier,
+                'cost' => (float) $p->cost,
+                'price_public' => (float) $p->price_public,
+                'supplier_sku' => $supProduct?->supplier_sku ?? '',
+                'supplier_cost' => $supProduct?->supplier_cost !== null ? (float) $supProduct->supplier_cost : (float) $p->cost,
+                'supplier_product_id' => $supProduct?->id,
+            ];
+        });
+
+        $availableBrands = $selectedSupplier
+            ? $selectedSupplier->brands->pluck('brand')->all()
+            : InventoryProduct::whereNotNull('brand')->where('brand', '!=', '')->distinct()->pluck('brand')->sort()->values()->all();
+
+        return Inertia::render('Purchasing/Suppliers/Codes', [
+            'suppliers' => $suppliersList,
+            'selectedSupplier' => $selectedSupplier ? [
+                'id' => $selectedSupplier->id,
+                'name' => $selectedSupplier->name,
+                'rfc' => $selectedSupplier->rfc,
+                'brands' => $selectedSupplier->brands->pluck('brand')->all(),
+            ] : null,
+            'products' => $products,
+            'availableBrands' => $availableBrands,
+            'filters' => [
+                'supplier_id' => $selectedSupplierId ? (int) $selectedSupplierId : null,
+                'search' => $search,
+                'brand' => $brandFilter ?? '',
+                'status' => $statusFilter,
+            ],
+            'summary' => [
+                'total' => $totalForSupplier,
+                'with_code' => $withCodeCount,
+                'without_code' => $withoutCodeCount,
+                'supplier_name' => $selectedSupplier?->name ?? 'General',
+            ],
+        ]);
+    }
+
     public function show(Supplier $supplier): Response
     {
         $supplier->load(['brands', 'purchaseOrders' => fn ($q) => $q->latest()->limit(15)]);
 
         $brandNames = $supplier->brands->pluck('brand')->all();
+        $supplierName = $supplier->name;
+        $supplierId = $supplier->id;
 
-        // Productos del catálogo pertenecientes a las marcas de este proveedor
-        $products = [];
-        if (! empty($brandNames)) {
-            $products = InventoryProduct::query()
-                ->whereIn(DB::raw('UPPER(TRIM(brand))'), $brandNames)
-                ->where('is_active', true)
-                ->with(['supplierProducts' => fn ($q) => $q->where('supplier_id', $supplier->id)->orWhere('supplier_name', $supplier->name)])
-                ->orderBy('brand')
-                ->orderBy('name')
-                ->get(['id', 'sku', 'barcode', 'barcode_secondary', 'name', 'brand', 'supplier', 'cost', 'price_public']);
-        }
+        // Productos del catálogo pertenecientes a este proveedor (por marca, supplier o supplier_products)
+        $products = InventoryProduct::query()
+            ->where(function (Builder $q) use ($supplierName, $supplierId, $brandNames) {
+                $hasCond = false;
+                if (! empty($brandNames)) {
+                    $q->whereIn(DB::raw('UPPER(TRIM(brand))'), $brandNames);
+                    $hasCond = true;
+                }
+                if ($hasCond) {
+                    $q->orWhere('supplier', $supplierName)
+                      ->orWhereHas('supplierProducts', fn ($sq) => $sq->where('supplier_id', $supplierId)->orWhere('supplier_name', $supplierName));
+                } else {
+                    $q->where('supplier', $supplierName)
+                      ->orWhereHas('supplierProducts', fn ($sq) => $sq->where('supplier_id', $supplierId)->orWhere('supplier_name', $supplierName));
+                }
+            })
+            ->where('is_active', true)
+            ->with(['supplierProducts' => fn ($q) => $q->where('supplier_id', $supplierId)->orWhere('supplier_name', $supplierName)])
+            ->orderBy('brand')
+            ->orderBy('name')
+            ->get(['id', 'sku', 'barcode', 'barcode_secondary', 'name', 'brand', 'supplier', 'cost', 'price_public'])
+            ->map(function (InventoryProduct $p) {
+                $supProduct = $p->supplierProducts->first();
+
+                return [
+                    'id' => $p->id,
+                    'sku' => $p->sku,
+                    'barcode' => $p->barcode,
+                    'barcode_secondary' => $p->barcode_secondary,
+                    'name' => $p->name,
+                    'brand' => $p->brand,
+                    'supplier' => $p->supplier,
+                    'cost' => (float) $p->cost,
+                    'price_public' => (float) $p->price_public,
+                    'supplier_sku' => $supProduct?->supplier_sku ?? '',
+                    'supplier_cost' => $supProduct?->supplier_cost !== null ? (float) $supProduct->supplier_cost : (float) $p->cost,
+                    'supplier_product_id' => $supProduct?->id,
+                ];
+            });
 
         // Conteo de productos por marca
         $productCountsByBrand = InventoryProduct::query()
@@ -191,6 +418,135 @@ class SupplierController extends Controller
                 'brands' => $brandsDetailed,
                 'purchase_orders' => $supplier->purchaseOrders,
             ],
+            'products' => $products,
+        ]);
+    }
+
+    /**
+     * Guarda o actualiza el código de proveedor (supplier_sku) y costo para un producto
+     */
+    public function saveProductCode(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'inventory_product_id' => ['required', 'integer', 'exists:inventory_products,id'],
+            'supplier_id' => ['nullable', 'integer', 'exists:suppliers,id'],
+            'supplier_name' => ['required', 'string', 'max:150'],
+            'supplier_sku' => ['required', 'string', 'max:100'],
+            'supplier_cost' => ['nullable', 'numeric', 'min:0'],
+        ]);
+
+        $product = InventoryProduct::findOrFail($validated['inventory_product_id']);
+        $supplierName = trim($validated['supplier_name']);
+        $supplierSku = trim($validated['supplier_sku']);
+
+        $supplier = null;
+        if (! empty($validated['supplier_id'])) {
+            $supplier = Supplier::find($validated['supplier_id']);
+        }
+        if (! $supplier) {
+            $supplier = Supplier::where('name', $supplierName)->first();
+        }
+
+        // Buscar registro existente para este producto y proveedor
+        $supProduct = SupplierProduct::where('inventory_product_id', $product->id)
+            ->where(function ($q) use ($supplier, $supplierName) {
+                if ($supplier) {
+                    $q->where('supplier_id', $supplier->id)->orWhere('supplier_name', $supplierName);
+                } else {
+                    $q->where('supplier_name', $supplierName);
+                }
+            })
+            ->first();
+
+        if ($supProduct) {
+            $supProduct->update([
+                'supplier_id' => $supplier?->id ?? $supProduct->supplier_id,
+                'supplier_name' => $supplierName,
+                'supplier_sku' => $supplierSku,
+                'supplier_product_name' => $product->name,
+                'supplier_cost' => $validated['supplier_cost'] ?? $supProduct->supplier_cost,
+                'is_primary' => true,
+            ]);
+        } else {
+            $supProduct = SupplierProduct::create([
+                'supplier_id' => $supplier?->id,
+                'supplier_name' => $supplierName,
+                'inventory_product_id' => $product->id,
+                'supplier_sku' => $supplierSku,
+                'supplier_product_name' => $product->name,
+                'supplier_cost' => $validated['supplier_cost'] ?? $product->cost,
+                'is_primary' => true,
+            ]);
+        }
+
+        return response()->json([
+            'ok' => true,
+            'message' => "Código '{$supplierSku}' asignado correctamente a '{$product->name}'.",
+            'supplier_product' => [
+                'id' => $supProduct->id,
+                'inventory_product_id' => $product->id,
+                'supplier_sku' => $supProduct->supplier_sku,
+                'supplier_cost' => (float) $supProduct->supplier_cost,
+            ],
+        ]);
+    }
+
+    /**
+     * Desvincula / elimina el código de proveedor de un producto
+     */
+    public function deleteProductCode(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'inventory_product_id' => ['required', 'integer', 'exists:inventory_products,id'],
+            'supplier_name' => ['required', 'string', 'max:150'],
+        ]);
+
+        SupplierProduct::where('inventory_product_id', $validated['inventory_product_id'])
+            ->where('supplier_name', trim($validated['supplier_name']))
+            ->delete();
+
+        return response()->json([
+            'ok' => true,
+            'message' => 'Código de proveedor desvinculado exitosamente.',
+        ]);
+    }
+
+    /**
+     * Búsqueda general de productos del catálogo para vincular a un proveedor
+     */
+    public function searchProductsForSupplier(Request $request): JsonResponse
+    {
+        $term = trim((string) $request->input('q', ''));
+        if (mb_strlen($term) < 2) {
+            return response()->json(['ok' => true, 'products' => []]);
+        }
+
+        $digits = preg_replace('/[^0-9]/', '', $term);
+        $unpadded = $digits !== '' ? ltrim($digits, '0') : '';
+
+        $products = InventoryProduct::query()
+            ->where('is_active', true)
+            ->where(function (Builder $q) use ($term, $digits, $unpadded) {
+                $q->where('sku', 'like', "%{$term}%")
+                    ->orWhere('name', 'like', "%{$term}%")
+                    ->orWhere('barcode', 'like', "%{$term}%")
+                    ->orWhere('barcode_secondary', 'like', "%{$term}%");
+
+                if ($digits !== '' && strlen($digits) >= 6) {
+                    $q->orWhere('barcode', $digits)
+                      ->orWhere('barcode_secondary', $digits);
+                }
+                if ($unpadded !== '' && strlen($unpadded) >= 6) {
+                    $q->orWhere('barcode', $unpadded)
+                      ->orWhere('barcode', str_pad($unpadded, 12, '0', STR_PAD_LEFT))
+                      ->orWhere('barcode', str_pad($unpadded, 13, '0', STR_PAD_LEFT));
+                }
+            })
+            ->limit(25)
+            ->get(['id', 'sku', 'barcode', 'barcode_secondary', 'name', 'brand', 'supplier', 'cost', 'price_public']);
+
+        return response()->json([
+            'ok' => true,
             'products' => $products,
         ]);
     }

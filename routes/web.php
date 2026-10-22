@@ -232,6 +232,10 @@ Route::middleware(['auth', 'role'])->group(function () {
     // PROVEEDORES Y MARCAS
     Route::prefix('compras/proveedores')->name('purchasing.suppliers.')->group(function () {
         Route::get('/', [SupplierController::class, 'index'])->name('index');
+        Route::get('/codigos', [SupplierController::class, 'codesIndex'])->name('codes');
+        Route::post('/codigos/guardar', [SupplierController::class, 'saveProductCode'])->name('codes.save');
+        Route::post('/codigos/eliminar', [SupplierController::class, 'deleteProductCode'])->name('codes.delete');
+        Route::get('/codigos/buscar-productos', [SupplierController::class, 'searchProductsForSupplier'])->name('codes.search-products');
         Route::post('/', [SupplierController::class, 'store'])->name('store');
         Route::get('/buscar', [SupplierController::class, 'search'])->name('search');
         Route::get('/{supplier}', [SupplierController::class, 'show'])
@@ -244,6 +248,7 @@ Route::middleware(['auth', 'role'])->group(function () {
             ->whereNumber('supplier')->name('destroy');
     });
     Route::get('/proveedores', fn () => redirect()->route('purchasing.suppliers.index'));
+    Route::get('/compras/codigos', fn () => redirect()->route('purchasing.suppliers.codes'));
 
     // ALMACÉN: catálogo maestro independiente de llantas y Syscom.
     Route::prefix('almacen/productos')->name('inventory.products.')->group(function () {
