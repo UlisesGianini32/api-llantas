@@ -47,6 +47,7 @@ class SupplierController extends Controller
 
         // Conteo de productos del catálogo por marca
         $productCountsByBrand = InventoryProduct::query()
+            ->purchasableFromSupplier()
             ->whereNotNull('brand')
             ->where('brand', '!=', '')
             ->selectRaw('UPPER(TRIM(brand)) as clean_brand, COUNT(*) as count')
@@ -94,6 +95,7 @@ class SupplierController extends Controller
 
         // Marcas disponibles en el sistema (productos, configuraciones y proveedores)
         $catalogBrands = InventoryProduct::query()
+            ->purchasableFromSupplier()
             ->whereNotNull('brand')
             ->where('brand', '!=', '')
             ->distinct()
@@ -177,7 +179,9 @@ class SupplierController extends Controller
             ];
         });
 
-        $productsQuery = InventoryProduct::query()->where('is_active', true);
+        $productsQuery = InventoryProduct::query()
+            ->where('is_active', true)
+            ->purchasableFromSupplier();
 
         if ($selectedSupplier) {
             $brandNames = $selectedSupplier->brands->pluck('brand')->all();
@@ -241,13 +245,14 @@ class SupplierController extends Controller
             });
         }
 
-        // Métricas rápidas del proveedor seleccionado
+        // Métricas rápidas del proveedor seleccionado (excluyendo kits y duos)
         $totalForSupplier = 0;
         $withCodeCount = 0;
         $withoutCodeCount = 0;
         if ($selectedSupplier) {
             $baseSupplierQuery = InventoryProduct::query()
                 ->where('is_active', true)
+                ->purchasableFromSupplier()
                 ->where(function (Builder $q) use ($selectedSupplier) {
                     $brandNames = $selectedSupplier->brands->pluck('brand')->all();
                     $supplierName = $selectedSupplier->name;
@@ -306,7 +311,7 @@ class SupplierController extends Controller
 
         $availableBrands = $selectedSupplier
             ? $selectedSupplier->brands->pluck('brand')->all()
-            : InventoryProduct::whereNotNull('brand')->where('brand', '!=', '')->distinct()->pluck('brand')->sort()->values()->all();
+            : InventoryProduct::purchasableFromSupplier()->whereNotNull('brand')->where('brand', '!=', '')->distinct()->pluck('brand')->sort()->values()->all();
 
         return Inertia::render('Purchasing/Suppliers/Codes', [
             'suppliers' => $suppliersList,
@@ -343,6 +348,8 @@ class SupplierController extends Controller
 
         // Productos del catálogo pertenecientes a este proveedor (por marca, supplier o supplier_products)
         $products = InventoryProduct::query()
+            ->where('is_active', true)
+            ->purchasableFromSupplier()
             ->where(function (Builder $q) use ($supplierName, $supplierId, $brandNames) {
                 $hasCond = false;
                 if (! empty($brandNames)) {
@@ -357,7 +364,6 @@ class SupplierController extends Controller
                       ->orWhereHas('supplierProducts', fn ($sq) => $sq->where('supplier_id', $supplierId)->orWhere('supplier_name', $supplierName));
                 }
             })
-            ->where('is_active', true)
             ->with(['supplierProducts' => fn ($q) => $q->where('supplier_id', $supplierId)->orWhere('supplier_name', $supplierName)])
             ->orderBy('brand')
             ->orderBy('name')
@@ -383,6 +389,7 @@ class SupplierController extends Controller
 
         // Conteo de productos por marca
         $productCountsByBrand = InventoryProduct::query()
+            ->purchasableFromSupplier()
             ->whereIn(DB::raw('UPPER(TRIM(brand))'), $brandNames)
             ->selectRaw('UPPER(TRIM(brand)) as clean_brand, COUNT(*) as count')
             ->groupBy(DB::raw('UPPER(TRIM(brand))'))
@@ -526,6 +533,7 @@ class SupplierController extends Controller
 
         $products = InventoryProduct::query()
             ->where('is_active', true)
+            ->purchasableFromSupplier()
             ->where(function (Builder $q) use ($term, $digits, $unpadded) {
                 $q->where('sku', 'like', "%{$term}%")
                     ->orWhere('name', 'like', "%{$term}%")

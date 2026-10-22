@@ -517,25 +517,30 @@ class PurchasingImportSupplierCodesCommand extends Command
 
             $supplier = Supplier::where('name', $supplierName)->first();
 
-            // Buscar coincidencia en inventory_products:
+            // Buscar coincidencia en inventory_products (excluyendo kits y duos):
             // 1. Por código de barras (EAN de 13 u 8 dígitos)
             $product = null;
             if ($ean) {
-                $product = InventoryProduct::where('barcode', $ean)
-                    ->orWhere('barcode_secondary', $ean)
+                $product = InventoryProduct::purchasableFromSupplier()
+                    ->where(function ($q) use ($ean) {
+                        $q->where('barcode', $ean)->orWhere('barcode_secondary', $ean);
+                    })
                     ->first();
             }
 
             // 2. Por coincidencia exacta de SKU
             if (! $product) {
-                $product = InventoryProduct::where('sku', $supplierSku)->first();
+                $product = InventoryProduct::purchasableFromSupplier()->where('sku', $supplierSku)->first();
             }
 
             // 3. Por SKU o código de barras que contenga el código del proveedor
             if (! $product && strlen($supplierSku) >= 4) {
-                $product = InventoryProduct::where('sku', 'like', "%{$supplierSku}%")
-                    ->orWhere('barcode', 'like', "%{$supplierSku}%")
-                    ->orWhere('barcode_secondary', 'like', "%{$supplierSku}%")
+                $product = InventoryProduct::purchasableFromSupplier()
+                    ->where(function ($q) use ($supplierSku) {
+                        $q->where('sku', 'like', "%{$supplierSku}%")
+                            ->orWhere('barcode', 'like', "%{$supplierSku}%")
+                            ->orWhere('barcode_secondary', 'like', "%{$supplierSku}%");
+                    })
                     ->first();
             }
 
@@ -547,7 +552,7 @@ class PurchasingImportSupplierCodesCommand extends Command
                 $keywords = array_values(array_filter($words, fn ($w) => strlen($w) >= 3 && ! in_array($w, $stopWords, true)));
 
                 if (! empty($keywords)) {
-                    $query = InventoryProduct::query()->where(function ($q) use ($aliases) {
+                    $query = InventoryProduct::purchasableFromSupplier()->where(function ($q) use ($aliases) {
                         foreach ($aliases as $al) {
                             $q->orWhere('brand', 'like', "%{$al}%")
                                 ->orWhere('supplier', 'like', "%{$al}%")
@@ -565,7 +570,7 @@ class PurchasingImportSupplierCodesCommand extends Command
                 }
             }
 
-            if ($product) {
+            if ($product && ! $product->isBundleOrKit()) {
                 SupplierProduct::updateOrCreate(
                     [
                         'supplier_name' => $supplierName,

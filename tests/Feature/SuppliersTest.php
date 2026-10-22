@@ -405,4 +405,118 @@ class SuppliersTest extends TestCase
         $this->assertCount(1, $res->json('products'));
         $this->assertSame('SCHW-OSIS-DUST', $res->json('products.0.sku'));
     }
+
+    public function test_codes_index_and_search_exclude_kits_and_duos(): void
+    {
+        $supplier = Supplier::create(['name' => 'Proveedor Joico']);
+        $supplier->syncBrands(['JOICO']);
+
+        // Producto regular comprable
+        $regular = InventoryProduct::create([
+            'sku' => 'JOIC-DEFY-SHAMP',
+            'name' => 'Joico Defy Damage Shampoo 300ml',
+            'brand' => 'JOICO',
+            'product_type' => InventoryProduct::SIMPLE,
+            'is_active' => true,
+        ]);
+
+        // Kit por SKU
+        InventoryProduct::create([
+            'sku' => 'KITJOIC0333',
+            'name' => 'Defy Damage Shampoo + Acondicionador',
+            'brand' => 'JOICO',
+            'product_type' => InventoryProduct::SIMPLE,
+            'is_active' => true,
+        ]);
+
+        // Duo por SKU
+        InventoryProduct::create([
+            'sku' => 'JOIC-KPAK-DUO',
+            'name' => 'K-Pak Shampoo 300ml + Mascarilla',
+            'brand' => 'JOICO',
+            'product_type' => InventoryProduct::SIMPLE,
+            'is_active' => true,
+        ]);
+
+        // Kit por Nombre
+        InventoryProduct::create([
+            'sku' => 'JOIC015',
+            'name' => 'Kit JOICO Defy Damage Completo',
+            'brand' => 'JOICO',
+            'product_type' => InventoryProduct::SIMPLE,
+            'is_active' => true,
+        ]);
+
+        // Duo por Nombre
+        InventoryProduct::create([
+            'sku' => 'JOIC999',
+            'name' => 'Dúo Joico Color Therapy',
+            'brand' => 'JOICO',
+            'product_type' => InventoryProduct::SIMPLE,
+            'is_active' => true,
+        ]);
+
+        // Tipo KIT explícito
+        InventoryProduct::create([
+            'sku' => 'JOIC-BUNDLE-1',
+            'name' => 'Tratamiento Reconstructor',
+            'brand' => 'JOICO',
+            'product_type' => InventoryProduct::KIT,
+            'is_active' => true,
+        ]);
+
+        // Verificar en codesIndex
+        $res = $this->actingAs($this->admin)->get(route('purchasing.suppliers.codes', ['supplier_id' => $supplier->id]));
+        $res->assertOk();
+        $res->assertInertia(fn (Assert $page) => $page
+            ->component('Purchasing/Suppliers/Codes')
+            ->has('products.data', 1)
+            ->where('products.data.0.sku', 'JOIC-DEFY-SHAMP')
+            ->where('summary.total', 1)
+        );
+
+        // Verificar en búsqueda de productos
+        $searchRes = $this->actingAs($this->admin)->getJson(route('purchasing.suppliers.codes.search-products', ['q' => 'JOIC']));
+        $searchRes->assertOk();
+        $products = collect($searchRes->json('products'));
+        $this->assertTrue($products->contains('sku', 'JOIC-DEFY-SHAMP'));
+        $this->assertFalse($products->contains('sku', 'KITJOIC0333'));
+        $this->assertFalse($products->contains('sku', 'JOIC-KPAK-DUO'));
+        $this->assertFalse($products->contains('sku', 'JOIC015'));
+        $this->assertFalse($products->contains('sku', 'JOIC999'));
+        $this->assertFalse($products->contains('sku', 'JOIC-BUNDLE-1'));
+    }
+
+    public function test_cleanup_migration_deletes_supplier_products_for_kits_and_sets_kit_type(): void
+    {
+        $supplier = Supplier::create(['name' => 'Joico Proveedor Limpieza']);
+
+        $kit = InventoryProduct::create([
+            'sku' => 'KITJOIC022',
+            'name' => 'Kit Joico Especial',
+            'brand' => 'JOICO',
+            'product_type' => InventoryProduct::SIMPLE,
+            'is_active' => true,
+        ]);
+
+        \App\Models\SupplierProduct::create([
+            'supplier_id' => $supplier->id,
+            'supplier_name' => $supplier->name,
+            'inventory_product_id' => $kit->id,
+            'supplier_sku' => 'SUP-KIT-01',
+            'is_primary' => true,
+        ]);
+
+        $this->assertDatabaseHas('supplier_products', ['inventory_product_id' => $kit->id]);
+
+        // Ejecutar la migración de limpieza
+        (require database_path('migrations/2026_10_21_210000_cleanup_kits_and_duos_from_suppliers.php'))->up();
+
+        // El producto debe ser marcado como KIT
+        $this->assertSame(InventoryProduct::KIT, $kit->fresh()->product_type);
+
+        // El registro en supplier_products debe haber sido eliminado
+        $this->assertDatabaseMissing('supplier_products', ['inventory_product_id' => $kit->id]);
+    }
 }
+

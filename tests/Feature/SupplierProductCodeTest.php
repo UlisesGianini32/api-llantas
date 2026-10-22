@@ -252,4 +252,37 @@ class SupplierProductCodeTest extends TestCase
             'supplier_name' => 'Icon',
         ]);
     }
+
+    public function test_purchase_order_product_search_excludes_kits_and_duos(): void
+    {
+        $this->actingAs($this->admin);
+
+        InventoryProduct::create([
+            'sku' => 'KIT-BEAUTY-01',
+            'name' => 'Kit Reconstructor Capilar',
+            'brand' => 'JOICO',
+            'product_type' => InventoryProduct::SIMPLE,
+            'is_active' => true,
+            'cost' => 500,
+        ]);
+
+        InventoryProduct::create([
+            'sku' => 'JOIC-DUO-01',
+            'name' => 'Dúo Shampoo y Mascara',
+            'brand' => 'JOICO',
+            'product_type' => InventoryProduct::SIMPLE,
+            'is_active' => true,
+            'cost' => 450,
+        ]);
+
+        $response = $this->getJson(route('purchasing.orders.search-products', ['q' => 'Reconstructor']));
+        $response->assertStatus(200);
+        $data = $response->json('data');
+        $this->assertEmpty($data);
+
+        $responseDuo = $this->getJson(route('purchasing.orders.search-products', ['q' => 'Dúo']));
+        $responseDuo->assertStatus(200);
+        $this->assertEmpty($responseDuo->json('data'));
+    }
 }
+

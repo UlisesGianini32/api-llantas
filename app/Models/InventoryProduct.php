@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
@@ -118,6 +119,95 @@ class InventoryProduct extends Model
     public function isSimple(): bool
     {
         return ! $this->isKit();
+    }
+
+    /**
+     * Determina si el producto es un paquete, combo, kit o dúo ensamblado internamente.
+     */
+    public function isBundleOrKit(): bool
+    {
+        if ($this->product_type === self::KIT) {
+            return true;
+        }
+
+        $sku = mb_strtoupper((string) $this->sku);
+        if (
+            str_starts_with($sku, 'KIT') ||
+            str_contains($sku, '-KIT') ||
+            str_starts_with($sku, 'DUO') ||
+            str_ends_with($sku, 'DUO') ||
+            str_contains($sku, '-DUO') ||
+            str_starts_with($sku, 'COMBO')
+        ) {
+            return true;
+        }
+
+        $name = mb_strtoupper((string) $this->name);
+        if (
+            str_starts_with($name, 'KIT ') ||
+            str_contains($name, ' KIT ') ||
+            str_starts_with($name, 'DUO ') ||
+            str_starts_with($name, 'DÚO ') ||
+            str_contains($name, ' DUO ') ||
+            str_contains($name, ' DÚO ') ||
+            str_starts_with($name, 'COMBO ') ||
+            str_contains($name, ' COMBO ') ||
+            str_starts_with($name, 'PAQUETE ') ||
+            str_contains($name, ' PAQUETE ') ||
+            str_starts_with($name, 'TRIO ') ||
+            str_starts_with($name, 'TRÍO ')
+        ) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Scope para excluir kits, combos, dúos y paquetes que se ensamblan internamente
+     * y NO se compran directamente a proveedores.
+     */
+    public function scopePurchasableFromSupplier(Builder $query): Builder
+    {
+        return $query
+            ->where(function (Builder $q) {
+                $q->whereNull('product_type')
+                  ->orWhere('product_type', '!=', self::KIT);
+            })
+            ->whereDoesntHave('kitComponents')
+            ->where(function (Builder $q) {
+                $q->where('sku', 'not like', 'KIT%')
+                  ->where('sku', 'not like', '%-KIT%')
+                  ->where('sku', 'not like', 'DUO%')
+                  ->where('sku', 'not like', '%-DUO%')
+                  ->where('sku', 'not like', '%DUO')
+                  ->where('sku', 'not like', 'COMBO%')
+                  ->where('sku', 'not like', '%-COMBO%');
+            })
+            ->where(function (Builder $q) {
+                $q->where('name', 'not like', 'Kit %')
+                  ->where('name', 'not like', 'KIT %')
+                  ->where('name', 'not like', '% Kit %')
+                  ->where('name', 'not like', '% KIT %')
+                  ->where('name', 'not like', 'Duo %')
+                  ->where('name', 'not like', 'DUO %')
+                  ->where('name', 'not like', 'Dúo %')
+                  ->where('name', 'not like', 'DÚO %')
+                  ->where('name', 'not like', '% Duo %')
+                  ->where('name', 'not like', '% Dúo %')
+                  ->where('name', 'not like', 'Paquete %')
+                  ->where('name', 'not like', 'PAQUETE %')
+                  ->where('name', 'not like', '% Paquete %')
+                  ->where('name', 'not like', 'Combo %')
+                  ->where('name', 'not like', 'COMBO %')
+                  ->where('name', 'not like', '% Combo %')
+                  ->where('name', 'not like', 'Trío %')
+                  ->where('name', 'not like', 'Trio %')
+                  ->where('name', 'not like', 'TRÍO %')
+                  ->where('name', 'not like', 'TRIO %')
+                  ->where('name', 'not like', '% Trío %')
+                  ->where('name', 'not like', '% Trio %');
+            });
     }
 
     public function physicalStock(): int

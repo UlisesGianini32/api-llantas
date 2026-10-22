@@ -293,6 +293,7 @@ class PurchaseOrderController extends Controller
                 'supplierProducts:id,inventory_product_id,supplier_id,supplier_name,supplier_sku,supplier_cost',
             ])
             ->where('is_active', true)
+            ->purchasableFromSupplier()
             ->where(function ($query) use ($q, $strippedQ, $cleanQ) {
                 $query->where('sku', 'like', "%{$q}%")
                     ->orWhere('barcode', 'like', "%{$q}%")
