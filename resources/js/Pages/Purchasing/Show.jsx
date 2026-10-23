@@ -184,7 +184,7 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
         }
         setSearchingAddProduct(true)
         try {
-            const res = await fetch(route('purchasing.orders.search-products', { q: query.trim() }))
+            const res = await fetch(`/compras/ordenes/buscar-productos?q=${encodeURIComponent(query.trim())}`)
             const data = await res.json()
             setAddItemResults(data.data || [])
         } catch {
@@ -299,7 +299,7 @@ export default function PurchasingShow({ order, locations = [], supplier = null 
         }
         setSavingEdit(true)
         router.put(
-            route('purchasing.orders.update', order.id),
+            `/compras/ordenes/${order.id}`,
             {
                 items: editItems.map((it) => ({
                     id: it.id || null,
