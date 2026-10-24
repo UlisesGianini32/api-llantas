@@ -859,6 +859,18 @@ class PurchaseOrderTest extends TestCase
         $this->assertEquals(12, $freshOrder->items->first()->quantity_ordered);
         $this->assertEquals(12, $freshOrder->total_units_ordered);
     }
+
+    public function test_purchasing_generate_wella_order_command(): void
+    {
+        $this->artisan('purchasing:generate-wella-order --level=balanced')
+            ->assertSuccessful();
+
+        $this->assertFileExists(base_path('database/data/pedido_wella_noviembre_diciembre_2026.xlsx'));
+        $this->assertDatabaseHas('suppliers', [
+            'name' => 'Beauty Art (Wella)',
+        ]);
+    }
 }
+
 
 
