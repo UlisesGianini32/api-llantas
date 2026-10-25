@@ -69,4 +69,9 @@ class MeliOrder extends Model
     {
         return $this->hasMany(MeliOrderItem::class, 'meli_order_id');
     }
+
+    public function claims(): HasMany
+    {
+        return $this->hasMany(MeliClaim::class, 'meli_order_id');
+    }
 }

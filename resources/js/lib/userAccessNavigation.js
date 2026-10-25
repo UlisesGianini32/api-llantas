@@ -1,6 +1,7 @@
 const sections = [
     { key: 'general', label: 'General', items: [
         { key: 'dashboard', label: 'Dashboard', href: '/dashboard', exact: true },
+        { key: 'profitability', label: 'Rentabilidad y Comisiones', href: '/rentabilidad-comisiones' },
     ] },
     { key: 'inventory', label: 'Inventario', adminOnly: true, items: [
         { key: 'products_ml', label: 'Productos ML', href: '/producto' },

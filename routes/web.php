@@ -51,6 +51,7 @@ use App\Http\Controllers\PriceRulesController;
 use App\Http\Controllers\ProductoCompuestoController;
 use App\Http\Controllers\ProductoController;
 use App\Http\Controllers\ProductoSyncController;
+use App\Http\Controllers\ProfitabilityController;
 use App\Http\Controllers\Purchasing\PurchaseOrderController;
 use App\Http\Controllers\Purchasing\SupplierController;
 use App\Http\Controllers\QzTrayController;
@@ -117,6 +118,12 @@ Route::middleware(['auth', 'role'])->group(function () {
 
     // DASHBOARD
     Route::get('/dashboard', [DashboardController::class, 'index'])->name('dashboard');
+
+    // RENTABILIDAD Y PROPUESTA DE COMISIONES
+    Route::get('/rentabilidad-comisiones', [ProfitabilityController::class, 'index'])
+        ->name('profitability.index');
+    Route::get('/rentabilidad-comisiones/export', [ProfitabilityController::class, 'exportCsv'])
+        ->name('profitability.export');
 
     // CENTRO DE NOTIFICACIONES
     Route::prefix('notificaciones')->name('notifications.')->group(function () {
