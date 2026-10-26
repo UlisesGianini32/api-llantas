@@ -156,11 +156,11 @@ export default function ProfitabilityIndex({ metrics = {}, timeline = [], orders
                                 Rentabilidad y Propuesta de Comisiones
                             </h1>
                             <span className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-bold text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300">
-                                Auditado ML & SYSCOM
+                                SYSCOM & Llantas
                             </span>
                         </div>
                         <p className="mt-1 text-sm text-slate-600 dark:text-neutral-400">
-                            Cálculo transparente de margen real deduciendo costo de mercancía, tarifas de Mercado Libre, envíos y cancelaciones/devoluciones.
+                            Cálculo transparente de margen real de tus ventas de <strong>SYSCOM</strong> y <strong>Llantas</strong>, deduciendo costo de mercancía, tarifas de Mercado Libre, envíos y cancelaciones/devoluciones. El catálogo general de belleza queda automáticamente excluido.
                         </p>
                     </div>
 
@@ -291,29 +291,40 @@ export default function ProfitabilityIndex({ metrics = {}, timeline = [], orders
                     )}
                 </div>
 
-                {/* PESTAÑAS DE CANAL (CONSOLIDADO / SYSCOM / LLANTAS) */}
-                <div className="flex items-center border-b border-slate-200 dark:border-neutral-800 print:hidden">
-                    {[
-                        { key: 'all', label: 'Consolidado General', count: metrics.total_orders_count },
-                        { key: 'syscom', label: 'Canal SYSCOM', count: metrics.syscom?.total_orders ?? 0 },
-                        { key: 'llantas', label: 'Canal Llantas', count: metrics.llantas?.total_orders ?? 0 },
-                    ].map((tab) => (
-                        <button
-                            key={tab.key}
-                            type="button"
-                            onClick={() => handleChannelTab(tab.key)}
-                            className={`flex items-center gap-2 border-b-2 px-5 py-3 text-sm font-semibold transition ${
-                                channel === tab.key
-                                    ? 'border-indigo-600 text-indigo-600 dark:border-indigo-400 dark:text-indigo-400'
-                                    : 'border-transparent text-slate-500 hover:border-slate-300 hover:text-slate-800 dark:text-neutral-400 dark:hover:text-neutral-200'
-                            }`}
-                        >
-                            <span>{tab.label}</span>
-                            <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600 dark:bg-neutral-800 dark:text-neutral-400">
-                                {tab.count}
+                {/* PESTAÑAS DE CANAL (SYSCOM Y LLANTAS / SOLO SYSCOM / SOLO LLANTAS) */}
+                <div className="flex flex-wrap items-center justify-between border-b border-slate-200 dark:border-neutral-800 print:hidden">
+                    <div className="flex items-center">
+                        {[
+                            { key: 'all', label: 'SYSCOM y Llantas (Ambos)', count: metrics.channel_counts?.all ?? metrics.total_orders_count },
+                            { key: 'syscom', label: 'Solo SYSCOM', count: metrics.channel_counts?.syscom ?? metrics.syscom?.total_orders ?? 0 },
+                            { key: 'llantas', label: 'Solo Llantas', count: metrics.channel_counts?.llantas ?? metrics.llantas?.total_orders ?? 0 },
+                        ].map((tab) => (
+                            <button
+                                key={tab.key}
+                                type="button"
+                                onClick={() => handleChannelTab(tab.key)}
+                                className={`flex items-center gap-2 border-b-2 px-5 py-3 text-sm font-semibold transition ${
+                                    channel === tab.key
+                                        ? 'border-indigo-600 text-indigo-600 dark:border-indigo-400 dark:text-indigo-400'
+                                        : 'border-transparent text-slate-500 hover:border-slate-300 hover:text-slate-800 dark:text-neutral-400 dark:hover:text-neutral-200'
+                                }`}
+                            >
+                                <span>{tab.label}</span>
+                                <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600 dark:bg-neutral-800 dark:text-neutral-400">
+                                    {tab.count}
+                                </span>
+                            </button>
+                        ))}
+                    </div>
+
+                    {(metrics.channel_counts?.otro ?? 0) > 0 && (
+                        <div className="hidden pb-2 text-xs text-slate-400 md:block dark:text-neutral-500">
+                            <span className="inline-flex items-center gap-1.5 rounded-lg bg-slate-100 px-2.5 py-1 text-[11px] font-medium text-slate-500 dark:bg-neutral-800 dark:text-neutral-400">
+                                <span className="h-1.5 w-1.5 rounded-full bg-slate-400" />
+                                {metrics.channel_counts.otro} pedidos de belleza excluidos
                             </span>
-                        </button>
-                    ))}
+                        </div>
+                    )}
                 </div>
 
                 {/* TARJETAS DE KPIS FINANCIEROS AUDITADOS */}
@@ -652,6 +663,25 @@ export default function ProfitabilityIndex({ metrics = {}, timeline = [], orders
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-slate-100 dark:divide-neutral-800">
+                                {(!orders.data || orders.data.length === 0) && (
+                                    <tr>
+                                        <td colSpan={9} className="py-12 text-center text-slate-500 dark:text-neutral-400">
+                                            <div className="mx-auto flex max-w-sm flex-col items-center">
+                                                <div className="rounded-full bg-slate-100 p-3 dark:bg-neutral-800">
+                                                    <svg className="h-6 w-6 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                                                    </svg>
+                                                </div>
+                                                <p className="mt-3 text-sm font-semibold text-slate-800 dark:text-neutral-200">
+                                                    Sin órdenes de SYSCOM ni Llantas en este periodo
+                                                </p>
+                                                <p className="mt-1 text-xs text-slate-500 dark:text-neutral-400">
+                                                    Prueba seleccionando otro rango de fechas o eliminando filtros. El catálogo general de belleza ha sido excluido automáticamente.
+                                                </p>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                )}
                                 {(orders.data || []).map((order) => {
                                     const isCancelled = order.is_cancelled_or_returned
                                     return (

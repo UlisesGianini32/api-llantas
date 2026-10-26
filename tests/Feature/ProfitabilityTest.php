@@ -186,8 +186,8 @@ class ProfitabilityTest extends TestCase
         MeliOrderItem::create([
             'meli_order_id' => $order->id,
             'item_id' => 'MLM99884',
-            'title' => 'Producto Prueba',
-            'sku' => 'SKU-TEST',
+            'title' => 'Llanta 205/55R16 Michelin',
+            'sku' => 'LLANTA-MICH-16',
             'quantity' => 1,
             'unit_price' => 500.0,
         ]);
@@ -197,5 +197,89 @@ class ProfitabilityTest extends TestCase
         $response->assertStatus(200);
         $response->assertHeader('Content-Type', 'text/csv; charset=UTF-8');
         $this->assertStringContainsString('attachment; filename="rentabilidad_comisiones_', (string) $response->headers->get('Content-Disposition'));
+    }
+
+    public function test_beauty_shop_orders_are_classified_as_other_and_excluded_by_default(): void
+    {
+        $user = User::factory()->create();
+        $this->actingAs($user);
+
+        // 1. Orden SYSCOM
+        $orderSyscom = MeliOrder::create([
+            'order_id' => '200009998885',
+            'status' => 'paid',
+            'shipping_status' => 'delivered',
+            'syscom_order_folio' => 'SYS-101',
+            'syscom_order_synced_at' => now(),
+            'syscom_order_raw' => ['resumen' => ['total' => 400.0]],
+            'raw' => ['total_amount' => 800.0],
+            'created_at' => now(),
+        ]);
+        MeliOrderItem::create([
+            'meli_order_id' => $orderSyscom->id,
+            'item_id' => 'MLM99885',
+            'title' => 'Cámara de Seguridad SYSCOM',
+            'sku' => 'SYS-CAM-01',
+            'quantity' => 1,
+            'unit_price' => 800.0,
+        ]);
+
+        // 2. Orden Llanta
+        $orderLlanta = MeliOrder::create([
+            'order_id' => '200009998886',
+            'status' => 'paid',
+            'shipping_status' => 'delivered',
+            'raw' => ['total_amount' => 1200.0],
+            'created_at' => now(),
+        ]);
+        MeliOrderItem::create([
+            'meli_order_id' => $orderLlanta->id,
+            'item_id' => 'MLM99886',
+            'title' => 'Llanta 185/65R15 Firestone',
+            'sku' => 'LL-185-65-15',
+            'quantity' => 1,
+            'unit_price' => 1200.0,
+        ]);
+
+        // 3. Orden Belleza / SBS (Tinte de pelo)
+        $orderBeauty = MeliOrder::create([
+            'order_id' => '200009998887',
+            'status' => 'paid',
+            'shipping_status' => 'delivered',
+            'raw' => ['total_amount' => 250.0],
+            'created_at' => now(),
+        ]);
+        MeliOrderItem::create([
+            'meli_order_id' => $orderBeauty->id,
+            'item_id' => 'MLM99887',
+            'title' => 'Tinte Wella Koleston Perfect 60ml Tono 7/1',
+            'sku' => 'WELLA-71-60ML',
+            'quantity' => 1,
+            'unit_price' => 250.0,
+        ]);
+
+        /** @var ProfitabilityService $service */
+        $service = app(ProfitabilityService::class);
+
+        // Verificar clasificación unitaria
+        $this->assertSame('syscom', $service->resolveOrderChannel($orderSyscom));
+        $this->assertSame('llantas', $service->resolveOrderChannel($orderLlanta));
+        $this->assertSame('otro', $service->resolveOrderChannel($orderBeauty));
+
+        // Consultar resumen con filtro por defecto ('all' = SYSCOM + Llantas)
+        $summary = $service->getSummary(['period' => 'hoy']);
+
+        // Debe contener únicamente las 2 órdenes de SYSCOM y Llantas, excluyendo la de belleza
+        $this->assertSame(2, $summary['metrics']['total_orders_count']);
+        $this->assertSame(2, $summary['metrics']['channel_counts']['all']);
+        $this->assertSame(1, $summary['metrics']['channel_counts']['syscom']);
+        $this->assertSame(1, $summary['metrics']['channel_counts']['llantas']);
+        $this->assertSame(1, $summary['metrics']['channel_counts']['otro']);
+
+        // Las órdenes paginadas no deben incluir el producto de belleza
+        $orderSkus = collect($summary['orders']->items())->pluck('sku')->all();
+        $this->assertContains('SYS-CAM-01', $orderSkus);
+        $this->assertContains('LL-185-65-15', $orderSkus);
+        $this->assertNotContains('WELLA-71-60ML', $orderSkus);
     }
 }

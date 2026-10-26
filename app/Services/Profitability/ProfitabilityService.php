@@ -57,15 +57,19 @@ class ProfitabilityService
         $search = $data['search'];
         $fallbackFeePct = $data['fallbackFeePct'];
 
-        // Calcular KPIs agregados
+        // Calcular KPIs agregados para las órdenes visibles
         $metrics = $this->aggregateMetrics($processedOrders, $commissionPct, $commissionBase);
 
-        // Sub-métricas por canal (SYSCOM vs Llantas)
-        $syscomOrders = $processedOrders->filter(fn (array $o) => $o['channel'] === 'syscom');
-        $llantasOrders = $processedOrders->filter(fn (array $o) => $o['channel'] === 'llantas');
-
-        $metrics['syscom'] = $this->aggregateChannelMetrics($syscomOrders);
-        $metrics['llantas'] = $this->aggregateChannelMetrics($llantasOrders);
+        // Sub-métricas por canal (SYSCOM vs Llantas) en el periodo
+        $metrics['syscom'] = $this->aggregateChannelMetrics($data['periodSyscomOrders'] ?? collect());
+        $metrics['llantas'] = $this->aggregateChannelMetrics($data['periodLlantasOrders'] ?? collect());
+        $metrics['channel_counts'] = $data['channelCounts'] ?? [
+            'all' => $processedOrders->count(),
+            'syscom' => 0,
+            'llantas' => 0,
+            'otro' => 0,
+            'todo' => $processedOrders->count(),
+        ];
 
         // Escenarios de propuesta de comisión para presentar al jefe
         $metrics['scenarios'] = $this->calculateCommissionScenarios($metrics['total_net_profit'], $metrics['total_sales_net']);
@@ -159,7 +163,7 @@ class ProfitabilityService
         $this->preloadRelationsForOrders($allOrders);
 
         // Procesar y clasificar cada orden de forma segura
-        $processedOrders = $allOrders->map(function (MeliOrder $order) use ($fallbackFeePct) {
+        $allProcessed = $allOrders->map(function (MeliOrder $order) use ($fallbackFeePct) {
             try {
                 return $this->calculateOrderProfitability($order, $fallbackFeePct);
             } catch (\Throwable $e) {
@@ -168,9 +172,26 @@ class ProfitabilityService
             }
         });
 
-        // Filtrar por canal
-        if ($channelFilter !== 'all') {
-            $processedOrders = $processedOrders->filter(fn (array $o) => $o['channel'] === $channelFilter);
+        // Colecciones separadas por canal del periodo
+        $syscomOrdersAll = $allProcessed->filter(fn (array $o) => $o['channel'] === 'syscom');
+        $llantasOrdersAll = $allProcessed->filter(fn (array $o) => $o['channel'] === 'llantas');
+        $bothOrdersAll = $allProcessed->filter(fn (array $o) => in_array($o['channel'], ['syscom', 'llantas'], true));
+        $otrosOrdersAll = $allProcessed->filter(fn (array $o) => $o['channel'] === 'otro');
+
+        // Filtrar según el canal seleccionado
+        // Por defecto 'all' incluye ÚNICAMENTE SYSCOM y Llantas (excluyendo automáticamente productos de belleza SBS)
+        if ($channelFilter === 'all') {
+            $processedOrders = $bothOrdersAll;
+        } elseif ($channelFilter === 'syscom') {
+            $processedOrders = $syscomOrdersAll;
+        } elseif ($channelFilter === 'llantas') {
+            $processedOrders = $llantasOrdersAll;
+        } elseif ($channelFilter === 'otro') {
+            $processedOrders = $otrosOrdersAll;
+        } elseif ($channelFilter === 'todo') {
+            $processedOrders = $allProcessed;
+        } else {
+            $processedOrders = $bothOrdersAll;
         }
 
         // Filtrar por estado
@@ -191,6 +212,15 @@ class ProfitabilityService
             'commissionPct' => $commissionPct,
             'commissionBase' => $commissionBase,
             'fallbackFeePct' => $fallbackFeePct,
+            'channelCounts' => [
+                'all' => $bothOrdersAll->count(),
+                'syscom' => $syscomOrdersAll->count(),
+                'llantas' => $llantasOrdersAll->count(),
+                'otro' => $otrosOrdersAll->count(),
+                'todo' => $allProcessed->count(),
+            ],
+            'periodSyscomOrders' => $syscomOrdersAll,
+            'periodLlantasOrders' => $llantasOrdersAll,
         ];
     }
 
@@ -461,17 +491,54 @@ class ProfitabilityService
             }
         }
 
-        // Clasificación por palabras clave en títulos o SKU
-        $firstItemTitle = mb_strtolower((string) $order->items->first()?->title);
-        if (str_contains($firstItemTitle, 'llanta') || str_contains($firstItemTitle, 'neumatico') || preg_match('/\d{3}\/\d{2}[rR]\d{2}/', $firstItemTitle)) {
-            $this->orderChannelCache[$orderId] = 'llantas';
+        // Clasificación por palabras clave en títulos o SKU de todos los items
+        foreach ($order->items as $item) {
+            $title = mb_strtolower((string) $item->title);
+            $sku = mb_strtolower((string) $item->sku);
 
-            return 'llantas';
+            // 1. Detección de Llantas / Neumáticos / Rodados
+            if (
+                str_contains($title, 'llanta') ||
+                str_contains($title, 'llantas') ||
+                str_contains($title, 'neumatico') ||
+                str_contains($title, 'neumático') ||
+                str_contains($title, 'neumaticos') ||
+                str_contains($title, 'neumáticos') ||
+                str_contains($title, 'rin ') ||
+                preg_match('/\d{3}\/\d{2}\s*[rR]\s*\d{2}/', $title)
+            ) {
+                $this->orderChannelCache[$orderId] = 'llantas';
+
+                return 'llantas';
+            }
+
+            // 2. Detección de SYSCOM (equipos de seguridad, redes, comunicación y marcas de Syscom)
+            if (
+                str_contains($title, 'syscom') ||
+                str_contains($title, 'hikvision') ||
+                str_contains($title, 'epcom') ||
+                str_contains($title, 'ezviz') ||
+                str_contains($title, 'ubiquiti') ||
+                str_contains($title, 'hilook') ||
+                str_contains($title, 'zkteco') ||
+                str_contains($title, 'cámara de seguridad') ||
+                str_contains($title, 'camara de seguridad') ||
+                str_contains($title, 'videovigilancia') ||
+                str_contains($title, 'intercom') ||
+                str_contains($title, 'torniquete') ||
+                str_contains($title, 'control de acceso') ||
+                str_starts_with($sku, 'sys-')
+            ) {
+                $this->orderChannelCache[$orderId] = 'syscom';
+
+                return 'syscom';
+            }
         }
 
-        $this->orderChannelCache[$orderId] = 'syscom';
+        // Fallback definitivo: si no pertenece a Syscom ni a Llantas, es producto general (Belleza / Estética / SBS / Otro)
+        $this->orderChannelCache[$orderId] = 'otro';
 
-        return 'syscom';
+        return 'otro';
     }
 
     /**
@@ -1021,6 +1088,13 @@ class ProfitabilityService
                     'fees_and_shipping' => 0.0,
                     'net_profit' => 0.0,
                     'margin_pct' => 0.0,
+                ],
+                'channel_counts' => [
+                    'all' => 0,
+                    'syscom' => 0,
+                    'llantas' => 0,
+                    'otro' => 0,
+                    'todo' => 0,
                 ],
                 'scenarios' => $this->calculateCommissionScenarios(0.0, 0.0),
             ],
