@@ -18,6 +18,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Schema;
 
 class ProfitabilityService
 {
@@ -131,27 +132,39 @@ class ProfitabilityService
             : 'profit';
         $fallbackFeePct = max(0, (float) ($filters['fallback_fee_pct'] ?? 15.0));
 
-        // Obtener órdenes en el rango de fechas con selección óptima de columnas para evitar saturación de memoria
+        // Obtener columnas existentes de forma segura por si alguna migración aún no se ha corrido en el servidor
+        try {
+            $existingCols = array_flip(Schema::getColumnListing('meli_orders'));
+        } catch (\Throwable) {
+            $existingCols = [];
+        }
+
+        $desiredCols = [
+            'id',
+            'meli_account_id',
+            'order_id',
+            'pack_id',
+            'display_id',
+            'shipping_id',
+            'status',
+            'shipping_status',
+            'shipping_mode',
+            'delivery_type',
+            'syscom_order_folio',
+            'syscom_order_synced_at',
+            'syscom_order_cancelled_at',
+            'syscom_order_raw',
+            'shipping_raw',
+            'raw',
+            'created_at',
+        ];
+
+        $selectCols = ! empty($existingCols)
+            ? array_values(array_filter($desiredCols, fn (string $c) => isset($existingCols[$c])))
+            : ['id', 'order_id', 'status', 'shipping_status', 'syscom_order_folio', 'syscom_order_synced_at', 'syscom_order_cancelled_at', 'syscom_order_raw', 'raw', 'created_at'];
+
         $query = MeliOrder::query()
-            ->select([
-                'id',
-                'meli_account_id',
-                'order_id',
-                'pack_id',
-                'display_id',
-                'shipping_id',
-                'status',
-                'shipping_status',
-                'shipping_mode',
-                'delivery_type',
-                'syscom_order_folio',
-                'syscom_order_synced_at',
-                'syscom_order_cancelled_at',
-                'syscom_order_raw',
-                'shipping_raw',
-                'raw',
-                'created_at',
-            ])
+            ->select($selectCols)
             ->with([
                 'items:id,meli_order_id,item_id,sku,title,quantity,unit_price',
                 'claims:id,meli_order_id,type,stage,status',
@@ -159,17 +172,26 @@ class ProfitabilityService
             ->whereBetween('created_at', [$startDate->copy()->startOfDay(), $endDate->copy()->endOfDay()]);
 
         if ($search !== '') {
-            $query->where(function (Builder $q) use ($search) {
+            $query->where(function (Builder $q) use ($search, $existingCols) {
                 $q->where('order_id', 'like', "%{$search}%")
-                    ->orWhere('pack_id', 'like', "%{$search}%")
-                    ->orWhere('display_id', 'like', "%{$search}%")
-                    ->orWhere('shipping_id', 'like', "%{$search}%")
-                    ->orWhere('syscom_order_folio', 'like', "%{$search}%")
-                    ->orWhereHas('items', function (Builder $itemQuery) use ($search) {
-                        $itemQuery->where('sku', 'like', "%{$search}%")
-                            ->orWhere('title', 'like', "%{$search}%")
-                            ->orWhere('item_id', 'like', "%{$search}%");
-                    });
+                    ->orWhere('syscom_order_folio', 'like', "%{$search}%");
+
+                foreach (['pack_id', 'display_id', 'shipping_id'] as $optCol) {
+                    if (empty($existingCols) || isset($existingCols[$optCol])) {
+                        $q->orWhere($optCol, 'like', "%{$search}%");
+                    }
+                }
+
+                // Buscar también en el JSON raw por si pack_id o shipping_id viene dentro del payload de ML
+                if (empty($existingCols) || isset($existingCols['raw'])) {
+                    $q->orWhere('raw', 'like', "%{$search}%");
+                }
+
+                $q->orWhereHas('items', function (Builder $itemQuery) use ($search) {
+                    $itemQuery->where('sku', 'like', "%{$search}%")
+                        ->orWhere('title', 'like', "%{$search}%")
+                        ->orWhere('item_id', 'like', "%{$search}%");
+                });
             });
         }
 
@@ -455,7 +477,7 @@ class ProfitabilityService
      */
     protected function fetchRemoteSellerShippingCost(MeliOrder $order, string $shippingId): ?float
     {
-        if (app()->runningUnitTests() || $this->remoteShippingLookupsCount >= 15) {
+        if (app()->runningUnitTests() || $this->remoteShippingLookupsCount >= 3) {
             return null;
         }
 
@@ -470,7 +492,7 @@ class ProfitabilityService
             $resp = Http::withToken($token)
                 ->withHeaders(['X-Format-New' => 'true'])
                 ->acceptJson()
-                ->timeout(4)
+                ->timeout(2)
                 ->get("https://api.mercadolibre.com/shipments/{$shippingId}/costs");
 
             if ($resp->successful()) {
@@ -485,9 +507,13 @@ class ProfitabilityService
                     $shippingRaw['seller_shipping_cost'] = $costVal;
                     $order->shipping_raw = $shippingRaw;
 
-                    MeliOrder::query()->whereKey($order->id)->update([
-                        'shipping_raw' => json_encode($shippingRaw),
-                    ]);
+                    try {
+                        MeliOrder::query()->whereKey($order->id)->update([
+                            'shipping_raw' => json_encode($shippingRaw),
+                        ]);
+                    } catch (\Throwable) {
+                        // Ignorar si no se puede persistir en BD
+                    }
 
                     return $costVal;
                 }
@@ -865,9 +891,16 @@ class ProfitabilityService
             ? SyscomProduct::query()->whereIn('modelo', $uniqueSkus)->get()->keyBy('modelo')
             : collect();
 
-        $this->preloadedData['syscomProductsBySyscomId'] = ! empty($uniqueSyscomIds)
-            ? SyscomProduct::query()->whereIn('syscom_id', $uniqueSyscomIds)->get()->keyBy(fn (SyscomProduct $p) => (string) $p->syscom_id)
-            : collect();
+        try {
+            $this->preloadedData['syscomProductsBySyscomId'] = ! empty($uniqueSyscomIds)
+                ? SyscomProduct::query()
+                    ->whereIn('syscom_producto_id', $uniqueSyscomIds)
+                    ->get()
+                    ->keyBy(fn (SyscomProduct $p) => (string) $p->syscom_producto_id)
+                : collect();
+        } catch (\Throwable) {
+            $this->preloadedData['syscomProductsBySyscomId'] = collect();
+        }
 
         $this->preloadedData['syscomProductsById'] = ! empty($queueProdIds)
             ? SyscomProduct::query()->whereIn('id', $queueProdIds)->get()->keyBy('id')
@@ -1075,7 +1108,11 @@ class ProfitabilityService
 
         $prod = null;
         if ($syscomId !== null) {
-            $prod = SyscomProduct::query()->where('syscom_id', $syscomId)->first();
+            try {
+                $prod = SyscomProduct::query()->where('syscom_producto_id', $syscomId)->first();
+            } catch (\Throwable) {
+                $prod = null;
+            }
         }
 
         if (! $prod && $sku !== '') {
@@ -1083,8 +1120,8 @@ class ProfitabilityService
         }
 
         if (! $prod && $mlm !== '') {
-            $queue = SyscomMeliQueue::query()->where('mlm', $mlm)->with('syscomProduct')->first();
-            $prod = $queue?->syscomProduct;
+            $queue = SyscomMeliQueue::query()->where('mlm', $mlm)->with('product')->first();
+            $prod = $queue?->product;
         }
 
         $this->syscomProductCache[$cacheKey] = $prod;
