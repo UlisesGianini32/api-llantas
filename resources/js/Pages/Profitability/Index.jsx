@@ -70,13 +70,15 @@ export default function ProfitabilityIndex({ metrics = {}, timeline = [], orders
     // Desglose porcentual de la venta neta
     const costBreakdown = useMemo(() => {
         const netSale = Number(metrics.total_sales_net || 0)
-        if (netSale <= 0) return { costPct: 0, feesPct: 0, profitPct: 0 }
+        if (netSale <= 0) return { costPct: 0, feesPct: 0, taxesPct: 0, profitPct: 0 }
         const costPct = (Number(metrics.total_product_cost || 0) / netSale) * 100
         const feesPct = ((Number(metrics.total_meli_fees || 0) + Number(metrics.total_shipping_fees || 0)) / netSale) * 100
+        const taxesPct = (Number(metrics.total_taxes_fees || 0) / netSale) * 100
         const profitPct = (Number(metrics.total_net_profit || 0) / netSale) * 100
         return {
             costPct: Math.max(0, costPct),
             feesPct: Math.max(0, feesPct),
+            taxesPct: Math.max(0, taxesPct),
             profitPct: Math.max(0, profitPct),
         }
     }, [metrics])
@@ -160,7 +162,7 @@ export default function ProfitabilityIndex({ metrics = {}, timeline = [], orders
                             </span>
                         </div>
                         <p className="mt-1 text-sm text-slate-600 dark:text-neutral-400">
-                            Cálculo transparente de margen real de tus ventas de <strong>SYSCOM</strong> y <strong>Llantas</strong>, deduciendo costo de mercancía, tarifas de Mercado Libre, envíos y cancelaciones/devoluciones. El catálogo general de belleza queda automáticamente excluido.
+                            Cálculo transparente de margen real de tus ventas de <strong>SYSCOM</strong> y <strong>Llantas</strong>, deduciendo costo de mercancía, cargos por venta de Mercado Libre, envíos a tu cargo, impuestos retenidos (IVA 8% + ISR 2.5%) y cancelaciones/devoluciones. El catálogo general de belleza queda automáticamente excluido.
                         </p>
                     </div>
 
@@ -240,8 +242,8 @@ export default function ProfitabilityIndex({ metrics = {}, timeline = [], orders
                                     type="text"
                                     value={search}
                                     onChange={(e) => setSearch(e.target.value)}
-                                    placeholder="Buscar orden, SKU, folio..."
-                                    className="w-48 rounded-xl border border-slate-200 bg-slate-50 py-1.5 pr-8 pl-3 text-xs text-slate-800 placeholder-slate-400 focus:border-indigo-500 focus:bg-white focus:outline-hidden dark:border-neutral-700 dark:bg-neutral-800 dark:text-neutral-200 sm:w-60"
+                                    placeholder="Buscar venta/pack, orden, envío, SKU, folio..."
+                                    className="w-56 rounded-xl border border-slate-200 bg-slate-50 py-1.5 pr-8 pl-3 text-xs text-slate-800 placeholder-slate-400 focus:border-indigo-500 focus:bg-white focus:outline-hidden dark:border-neutral-700 dark:bg-neutral-800 dark:text-neutral-200 sm:w-72"
                                 />
                                 {search && (
                                     <button
@@ -329,49 +331,55 @@ export default function ProfitabilityIndex({ metrics = {}, timeline = [], orders
 
                 {/* TARJETAS DE KPIS FINANCIEROS AUDITADOS */}
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
-                    {/* 1. Venta Bruta */}
-                    <StatCard
-                        title="Venta Bruta ML"
-                        value={formatMoney(metrics.total_sales_gross)}
-                        subtitle={`${metrics.total_orders_count} órdenes procesadas`}
-                        badge="Facturado"
-                    />
-
-                    {/* 2. Devoluciones & Canceladas */}
-                    <StatCard
-                        title="Devoluciones"
-                        value={`-${formatMoney(metrics.total_returns_amount)}`}
-                        subtitle={`${metrics.cancelled_returned_count} pedidos cancelados/devueltos`}
-                        badge="Deducido"
-                        badgeColor="bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300"
-                        accentBorder="border-rose-200/80 dark:border-rose-900/60"
-                    />
-
-                    {/* 3. Venta Neta Efectiva */}
+                    {/* 1. Venta Neta Efectiva */}
                     <StatCard
                         title="Venta Neta Real"
                         value={formatMoney(metrics.total_sales_net)}
-                        subtitle={`${metrics.delivered_orders_count} órdenes entregadas`}
+                        subtitle={
+                            Number(metrics.cancelled_returned_count || 0) > 0
+                                ? `${metrics.delivered_orders_count} efectivas · ${metrics.cancelled_returned_count} devueltas (-${formatMoney(metrics.total_returns_amount)})`
+                                : `${metrics.delivered_orders_count} órdenes entregadas (Bruta: ${formatMoney(metrics.total_sales_gross)})`
+                        }
                         badge="Ingreso Base"
                         badgeColor="bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300"
                     />
 
-                    {/* 4. Costo de Mercancía */}
+                    {/* 2. Comisiones y Envíos ML */}
+                    <StatCard
+                        title="Comisión + Envíos ML"
+                        value={`-${formatMoney(Number(metrics.total_meli_fees || 0) + Number(metrics.total_shipping_fees || 0))}`}
+                        subtitle={`Venta: ${formatMoney(metrics.total_meli_fees)} | Envío: ${formatMoney(metrics.total_shipping_fees)}`}
+                        badge="Tarifas ML"
+                        badgeColor="bg-yellow-100 text-yellow-800 dark:bg-yellow-950 dark:text-yellow-300"
+                    />
+
+                    {/* 3. Impuestos Retenidos ML (IVA + ISR) */}
+                    <StatCard
+                        title="Impuestos ML (IVA + ISR)"
+                        value={`-${formatMoney(metrics.total_taxes_fees)}`}
+                        subtitle={`IVA 8%: ${formatMoney(metrics.total_iva_fees)} | ISR 2.5%: ${formatMoney(metrics.total_isr_fees)}`}
+                        badge="Retención SAT"
+                        badgeColor="bg-purple-100 text-purple-800 dark:bg-purple-950 dark:text-purple-300"
+                        accentBorder="border-purple-200/80 dark:border-purple-900/60"
+                    />
+
+                    {/* 4. Total a Recibir en ML */}
+                    <StatCard
+                        title="Total a Recibir en ML"
+                        value={formatMoney(metrics.total_meli_net_received)}
+                        subtitle={`Lo que ML deposita (${formatPercent(metrics.meli_net_received_pct)})`}
+                        badge="Recibes en ML"
+                        badgeColor="bg-sky-100 text-sky-800 dark:bg-sky-950 dark:text-sky-300"
+                        accentBorder="border-sky-200/80 dark:border-sky-900/60"
+                    />
+
+                    {/* 5. Costo de Mercancía */}
                     <StatCard
                         title="Costo de Compra"
-                        value={formatMoney(metrics.total_product_cost)}
+                        value={`-${formatMoney(metrics.total_product_cost)}`}
                         subtitle={`${formatPercent(costBreakdown.costPct)} de la venta neta`}
                         badge="Syscom / Llantas"
                         badgeColor="bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300"
-                    />
-
-                    {/* 5. Comisiones y Envíos ML */}
-                    <StatCard
-                        title="Comisión + Envíos ML"
-                        value={formatMoney(Number(metrics.total_meli_fees || 0) + Number(metrics.total_shipping_fees || 0))}
-                        subtitle={`Fee: ${formatMoney(metrics.total_meli_fees)} | Envío: ${formatMoney(metrics.total_shipping_fees)}`}
-                        badge="Mercado Libre"
-                        badgeColor="bg-yellow-100 text-yellow-800 dark:bg-yellow-950 dark:text-yellow-300"
                     />
 
                     {/* 6. Utilidad Real Neta (Destacada) */}
@@ -397,7 +405,7 @@ export default function ProfitabilityIndex({ metrics = {}, timeline = [], orders
                                 Transparencia total: hacia dónde se va el dinero antes de calcular ganancias y comisiones.
                             </p>
                         </div>
-                        <div className="flex items-center gap-4 text-xs font-medium">
+                        <div className="flex flex-wrap items-center gap-4 text-xs font-medium">
                             <span className="flex items-center gap-1.5">
                                 <span className="h-3 w-3 rounded-xs bg-amber-500" />
                                 <span>Costo Mercancía ({formatPercent(costBreakdown.costPct)})</span>
@@ -405,6 +413,10 @@ export default function ProfitabilityIndex({ metrics = {}, timeline = [], orders
                             <span className="flex items-center gap-1.5">
                                 <span className="h-3 w-3 rounded-xs bg-yellow-400" />
                                 <span>Tarifas ML & Envíos ({formatPercent(costBreakdown.feesPct)})</span>
+                            </span>
+                            <span className="flex items-center gap-1.5">
+                                <span className="h-3 w-3 rounded-xs bg-purple-500" />
+                                <span>Impuestos ML ({formatPercent(costBreakdown.taxesPct)})</span>
                             </span>
                             <span className="flex items-center gap-1.5 font-bold text-emerald-700 dark:text-emerald-400">
                                 <span className="h-3 w-3 rounded-xs bg-emerald-500" />
@@ -417,17 +429,22 @@ export default function ProfitabilityIndex({ metrics = {}, timeline = [], orders
                         <div
                             className="bg-amber-500 transition-all duration-500"
                             style={{ width: `${Math.min(100, costBreakdown.costPct)}%` }}
-                            title={`Costo: ${formatPercent(costBreakdown.costPct)}`}
+                            title={`Costo Mercancía: ${formatPercent(costBreakdown.costPct)}`}
                         />
                         <div
                             className="bg-yellow-400 transition-all duration-500"
-                            style={{ width: `${Math.min(100 - costBreakdown.costPct, costBreakdown.feesPct)}%` }}
-                            title={`Tarifas ML: ${formatPercent(costBreakdown.feesPct)}`}
+                            style={{ width: `${Math.min(Math.max(0, 100 - costBreakdown.costPct), costBreakdown.feesPct)}%` }}
+                            title={`Tarifas ML & Envíos: ${formatPercent(costBreakdown.feesPct)}`}
+                        />
+                        <div
+                            className="bg-purple-500 transition-all duration-500"
+                            style={{ width: `${Math.min(Math.max(0, 100 - costBreakdown.costPct - costBreakdown.feesPct), costBreakdown.taxesPct)}%` }}
+                            title={`Impuestos ML (IVA + ISR): ${formatPercent(costBreakdown.taxesPct)}`}
                         />
                         <div
                             className="bg-emerald-500 transition-all duration-500"
                             style={{ width: `${Math.max(0, costBreakdown.profitPct)}%` }}
-                            title={`Ganancia Neta: ${formatPercent(costBreakdown.profitPct)}`}
+                            title={`Ganancia Neta Libre: ${formatPercent(costBreakdown.profitPct)}`}
                         />
                     </div>
                 </div>
@@ -638,7 +655,7 @@ export default function ProfitabilityIndex({ metrics = {}, timeline = [], orders
                                 Auditoría Detallada de Órdenes ({orders.total} órdenes encontradas)
                             </h3>
                             <p className="text-xs text-slate-500 dark:text-neutral-400">
-                                Cada fila muestra el desglose exacto de venta bruta, comisiones de Mercado Libre, costo de adquisición y utilidad neta resultante.
+                                Desglose exacto igual a Mercado Libre: Venta Bruta, Cargo por Venta + Envío, Impuestos retenidos (IVA 8% + ISR 2.5%), Total a recibir en ML, Costo de Compra y Ganancia Neta Real.
                             </p>
                         </div>
 
@@ -651,13 +668,15 @@ export default function ProfitabilityIndex({ metrics = {}, timeline = [], orders
                         <table className="w-full text-left text-xs">
                             <thead>
                                 <tr className="border-b border-slate-200 bg-slate-50 font-semibold text-slate-600 dark:border-neutral-800 dark:bg-neutral-800/40 dark:text-neutral-300">
-                                    <th className="py-3 px-3">Orden / Fecha</th>
+                                    <th className="py-3 px-3">Orden / Venta ML</th>
                                     <th className="py-3 px-3">Canal</th>
                                     <th className="py-3 px-3">Producto / SKU</th>
                                     <th className="py-3 px-3">Estado</th>
                                     <th className="py-3 px-3 text-right">Venta Bruta</th>
+                                    <th className="py-3 px-3 text-right">Cargo Venta + Envío</th>
+                                    <th className="py-3 px-3 text-right">Impuestos ML</th>
+                                    <th className="py-3 px-3 text-right font-bold text-sky-700 dark:text-sky-400">Recibes en ML</th>
                                     <th className="py-3 px-3 text-right">Costo Compra</th>
-                                    <th className="py-3 px-3 text-right">Tarifas ML + Envío</th>
                                     <th className="py-3 px-3 text-right font-bold text-slate-900 dark:text-white">Ganancia Neta</th>
                                     <th className="py-3 px-3 text-right">Margen</th>
                                 </tr>
@@ -665,7 +684,7 @@ export default function ProfitabilityIndex({ metrics = {}, timeline = [], orders
                             <tbody className="divide-y divide-slate-100 dark:divide-neutral-800">
                                 {(!orders.data || orders.data.length === 0) && (
                                     <tr>
-                                        <td colSpan={9} className="py-12 text-center text-slate-500 dark:text-neutral-400">
+                                        <td colSpan={11} className="py-12 text-center text-slate-500 dark:text-neutral-400">
                                             <div className="mx-auto flex max-w-sm flex-col items-center">
                                                 <div className="rounded-full bg-slate-100 p-3 dark:bg-neutral-800">
                                                     <svg className="h-6 w-6 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -684,6 +703,8 @@ export default function ProfitabilityIndex({ metrics = {}, timeline = [], orders
                                 )}
                                 {(orders.data || []).map((order) => {
                                     const isCancelled = order.is_cancelled_or_returned
+                                    const packOrDisplayId = order.pack_id || order.display_id
+                                    const hasDistinctPack = packOrDisplayId && String(packOrDisplayId) !== String(order.order_id)
                                     return (
                                         <tr
                                             key={order.id}
@@ -694,6 +715,16 @@ export default function ProfitabilityIndex({ metrics = {}, timeline = [], orders
                                             {/* Orden / Fecha */}
                                             <td className="py-3 px-3">
                                                 <p className="font-bold text-slate-900 dark:text-white">#{order.order_id}</p>
+                                                {hasDistinctPack && (
+                                                    <p className="text-[10px] font-semibold text-indigo-600 dark:text-indigo-400">
+                                                        Venta: #{packOrDisplayId}
+                                                    </p>
+                                                )}
+                                                {order.shipping_id && (
+                                                    <p className="text-[10px] font-mono text-slate-400 dark:text-neutral-500">
+                                                        Envío: #{order.shipping_id}
+                                                    </p>
+                                                )}
                                                 <p className="text-[11px] text-slate-500 dark:text-neutral-400">{order.created_at}</p>
                                             </td>
 
@@ -750,21 +781,59 @@ export default function ProfitabilityIndex({ metrics = {}, timeline = [], orders
                                                 {formatMoney(order.gross_sale)}
                                             </td>
 
-                                            {/* Costo Compra */}
-                                            <td className="py-3 px-3 text-right text-slate-600 dark:text-neutral-400">
-                                                {isCancelled ? '—' : formatMoney(order.product_cost)}
-                                            </td>
-
-                                            {/* Tarifas ML + Envío */}
+                                            {/* Cargo Venta + Envío ML */}
                                             <td className="py-3 px-3 text-right text-slate-600 dark:text-neutral-400">
                                                 {isCancelled ? '—' : (
                                                     <div>
-                                                        <p>{formatMoney(order.meli_fee + order.shipping_fee)}</p>
-                                                        {order.shipping_fee > 0 && (
-                                                            <p className="text-[10px] text-slate-400">Envío: {formatMoney(order.shipping_fee)}</p>
+                                                        <p className="font-medium text-rose-600/90 dark:text-rose-400/90">
+                                                            -{formatMoney(Number(order.meli_fee || 0) + Number(order.shipping_fee || 0))}
+                                                        </p>
+                                                        <p className="text-[10px] text-slate-400">
+                                                            Venta: -{formatMoney(order.meli_fee)}
+                                                        </p>
+                                                        {Number(order.shipping_fee || 0) > 0 && (
+                                                            <p className="text-[10px] text-slate-400">
+                                                                Envío: -{formatMoney(order.shipping_fee)}
+                                                            </p>
                                                         )}
                                                     </div>
                                                 )}
+                                            </td>
+
+                                            {/* Impuestos ML (IVA + ISR) */}
+                                            <td className="py-3 px-3 text-right text-slate-600 dark:text-neutral-400">
+                                                {isCancelled ? '—' : (
+                                                    <div>
+                                                        <p className="font-medium text-purple-700 dark:text-purple-400">
+                                                            -{formatMoney(order.taxes_fee)}
+                                                        </p>
+                                                        <p className="text-[10px] text-slate-400">
+                                                            IVA: -{formatMoney(order.iva_fee)}
+                                                        </p>
+                                                        <p className="text-[10px] text-slate-400">
+                                                            ISR: -{formatMoney(order.isr_fee)}
+                                                        </p>
+                                                    </div>
+                                                )}
+                                            </td>
+
+                                            {/* Total a Recibir en ML */}
+                                            <td className="py-3 px-3 text-right">
+                                                {isCancelled ? '—' : (
+                                                    <div>
+                                                        <p className="font-bold text-sky-700 dark:text-sky-400">
+                                                            {formatMoney(order.meli_net_received)}
+                                                        </p>
+                                                        <p className="text-[10px] text-slate-400">
+                                                            {formatPercent(order.meli_net_received_pct)} de venta
+                                                        </p>
+                                                    </div>
+                                                )}
+                                            </td>
+
+                                            {/* Costo Compra */}
+                                            <td className="py-3 px-3 text-right font-medium text-slate-700 dark:text-neutral-300">
+                                                {isCancelled ? '—' : `-${formatMoney(order.product_cost)}`}
                                             </td>
 
                                             {/* Ganancia Neta */}

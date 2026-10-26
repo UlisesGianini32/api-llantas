@@ -101,10 +101,14 @@ class ProfitabilityController extends Controller
             fputcsv($handle, ['Venta Bruta Total:', '$' . number_format($metrics['total_sales_gross'], 2)]);
             fputcsv($handle, ['Devoluciones / Cancelaciones:', '-$' . number_format($metrics['total_returns_amount'], 2)]);
             fputcsv($handle, ['Venta Neta:', '$' . number_format($metrics['total_sales_net'], 2)]);
-            fputcsv($handle, ['Costo Mercancia (SYSCOM/Llantas):', '$' . number_format($metrics['total_product_cost'], 2)]);
-            fputcsv($handle, ['Comisiones Mercado Libre:', '$' . number_format($metrics['total_meli_fees'], 2)]);
-            fputcsv($handle, ['Envios Absorbidos:', '$' . number_format($metrics['total_shipping_fees'], 2)]);
-            fputcsv($handle, ['Total Deducciones:', '$' . number_format($metrics['total_deductions'], 2)]);
+            fputcsv($handle, ['Comisiones Mercado Libre (Cargo por venta):', '-$' . number_format($metrics['total_meli_fees'], 2)]);
+            fputcsv($handle, ['Envios a Cargo del Vendedor ML:', '-$' . number_format($metrics['total_shipping_fees'], 2)]);
+            fputcsv($handle, ['ISR Retenido ML (2.5%):', '-$' . number_format($metrics['total_isr_fees'] ?? 0, 2)]);
+            fputcsv($handle, ['IVA Retenido ML (8.0%):', '-$' . number_format($metrics['total_iva_fees'] ?? 0, 2)]);
+            fputcsv($handle, ['Total Impuestos Retenidos ML:', '-$' . number_format($metrics['total_taxes_fees'] ?? 0, 2)]);
+            fputcsv($handle, ['TOTAL A RECIBIR EN MERCADO LIBRE:', '$' . number_format($metrics['total_meli_net_received'] ?? 0, 2)]);
+            fputcsv($handle, ['Costo Mercancia (SYSCOM/Llantas):', '-$' . number_format($metrics['total_product_cost'], 2)]);
+            fputcsv($handle, ['Total Deducciones (ML + Impuestos + Costo):', '-$' . number_format($metrics['total_deductions'], 2)]);
             fputcsv($handle, ['GANANCIA REAL NETA LIBRE:', '$' . number_format($metrics['total_net_profit'], 2)]);
             fputcsv($handle, ['Margen de Rentabilidad Neta:', $metrics['profit_margin_pct'] . '%']);
             fputcsv($handle, []);
@@ -116,6 +120,7 @@ class ProfitabilityController extends Controller
             fputcsv($handle, []);
             fputcsv($handle, [
                 'ID Orden ML',
+                'ID Venta / Pack ML',
                 'Fecha',
                 'Canal',
                 'Folio Syscom',
@@ -127,18 +132,23 @@ class ProfitabilityController extends Controller
                 'Cancelada/Devuelta',
                 'Motivo Cancelacion',
                 'Venta Bruta (MXN)',
-                'Costo Compra (MXN)',
                 'Comision ML (MXN)',
-                'Envio (MXN)',
+                'Envio Vendedor ML (MXN)',
+                'ISR Retenido ML (MXN)',
+                'IVA Retenido ML (MXN)',
+                'Total Impuestos ML (MXN)',
+                'Total a Recibir ML (MXN)',
+                'Costo Compra (MXN)',
                 'Total Deducciones (MXN)',
                 'Venta Neta (MXN)',
-                'Ganancia Neta (MXN)',
+                'Ganancia Neta Real (MXN)',
                 'Margen %',
             ]);
 
             foreach ($orders as $order) {
                 fputcsv($handle, [
                     $order['order_id'],
+                    $order['pack_id'] ?? $order['display_id'] ?? $order['order_id'],
                     $order['created_at'],
                     $order['channel_label'],
                     $order['syscom_order_folio'] ?? '—',
@@ -150,9 +160,13 @@ class ProfitabilityController extends Controller
                     $order['is_cancelled_or_returned'] ? 'SI (Devuelta/Cancelada)' : 'NO (Efectiva)',
                     $order['cancellation_reason'] ?? '',
                     number_format($order['gross_sale'], 2, '.', ''),
-                    number_format($order['product_cost'], 2, '.', ''),
                     number_format($order['meli_fee'], 2, '.', ''),
                     number_format($order['shipping_fee'], 2, '.', ''),
+                    number_format($order['isr_fee'] ?? 0, 2, '.', ''),
+                    number_format($order['iva_fee'] ?? 0, 2, '.', ''),
+                    number_format($order['taxes_fee'] ?? 0, 2, '.', ''),
+                    number_format($order['meli_net_received'] ?? 0, 2, '.', ''),
+                    number_format($order['product_cost'], 2, '.', ''),
                     number_format($order['total_deductions'], 2, '.', ''),
                     number_format($order['net_sale'], 2, '.', ''),
                     number_format($order['net_profit'], 2, '.', ''),

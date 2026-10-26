@@ -3,18 +3,21 @@
 namespace App\Services\Profitability;
 
 use App\Models\Llanta;
+use App\Models\MeliAccount;
 use App\Models\MeliOrder;
 use App\Models\MeliOrderItem;
 use App\Models\MeliPublication;
 use App\Models\ProductoCompuesto;
 use App\Models\SyscomMeliQueue;
 use App\Models\SyscomProduct;
+use App\Models\User;
 use App\Services\SyscomProductPricingService;
 use Carbon\Carbon;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
 
 class ProfitabilityService
 {
@@ -32,6 +35,9 @@ class ProfitabilityService
 
     /** @var ?float */
     protected ?float $cachedExchangeRate = null;
+
+    /** @var int */
+    protected int $remoteShippingLookupsCount = 0;
 
     public function __construct(
         protected SyscomProductPricingService $syscomPricing
@@ -129,13 +135,20 @@ class ProfitabilityService
         $query = MeliOrder::query()
             ->select([
                 'id',
+                'meli_account_id',
                 'order_id',
+                'pack_id',
+                'display_id',
+                'shipping_id',
                 'status',
                 'shipping_status',
+                'shipping_mode',
+                'delivery_type',
                 'syscom_order_folio',
                 'syscom_order_synced_at',
                 'syscom_order_cancelled_at',
                 'syscom_order_raw',
+                'shipping_raw',
                 'raw',
                 'created_at',
             ])
@@ -148,6 +161,9 @@ class ProfitabilityService
         if ($search !== '') {
             $query->where(function (Builder $q) use ($search) {
                 $q->where('order_id', 'like', "%{$search}%")
+                    ->orWhere('pack_id', 'like', "%{$search}%")
+                    ->orWhere('display_id', 'like', "%{$search}%")
+                    ->orWhere('shipping_id', 'like', "%{$search}%")
                     ->orWhere('syscom_order_folio', 'like', "%{$search}%")
                     ->orWhereHas('items', function (Builder $itemQuery) use ($search) {
                         $itemQuery->where('sku', 'like', "%{$search}%")
@@ -240,21 +256,19 @@ class ProfitabilityService
         if ($grossSale <= 0 && $order->items->isNotEmpty()) {
             $grossSale = (float) $order->items->sum(fn (MeliOrderItem $i) => ((float) $i->unit_price) * ((int) $i->quantity));
         }
+        $grossSale = round($grossSale, 2);
 
-        // 2. Comisiones y Envíos de Mercado Libre
+        // 2. Cargo por venta (sale_fee) de Mercado Libre
         $meliFee = 0.0;
-        $shippingFee = 0.0;
-        $taxesFee = (float) data_get($raw, 'taxes.amount', 0);
-
-        // Extraer cargo por venta (sale_fee) exacto de items en raw
         $rawItems = data_get($raw, 'order_items', []);
         $exactFeeFound = false;
 
         if (is_array($rawItems) && ! empty($rawItems)) {
             foreach ($rawItems as $rItem) {
                 $fee = data_get($rItem, 'sale_fee');
-                if (is_numeric($fee) && $fee > 0) {
-                    $meliFee += (float) $fee;
+                if (is_numeric($fee) && (float) $fee > 0) {
+                    $itemQty = max(1, (int) (data_get($rItem, 'quantity') ?? 1));
+                    $meliFee += round(((float) $fee) * $itemQty, 2);
                     $exactFeeFound = true;
                 }
             }
@@ -266,8 +280,8 @@ class ProfitabilityService
             if (is_array($payments)) {
                 foreach ($payments as $p) {
                     $mpFee = data_get($p, 'marketplace_fee');
-                    if (is_numeric($mpFee) && $mpFee > 0) {
-                        $meliFee += (float) $mpFee;
+                    if (is_numeric($mpFee) && (float) $mpFee > 0) {
+                        $meliFee += round((float) $mpFee, 2);
                         $exactFeeFound = true;
                     }
                 }
@@ -278,41 +292,56 @@ class ProfitabilityService
         if (! $exactFeeFound && $grossSale > 0) {
             $meliFee = round($grossSale * ($fallbackFeePct / 100), 2);
         }
+        $meliFee = round($meliFee, 2);
+        $meliFeePct = $grossSale > 0 ? round(($meliFee / $grossSale) * 100, 2) : 0.0;
 
-        // Costo de envío absorbido por el vendedor
-        $shipCost = data_get($raw, 'shipping.cost')
-            ?? data_get($raw, 'shipping.base_cost')
-            ?? data_get($raw, 'shipping.shipping_option.cost')
-            ?? data_get($raw, 'shipping.shipping_option.list_cost');
-        if (is_numeric($shipCost) && $shipCost > 0) {
-            $shippingFee = (float) $shipCost;
-        }
+        // 3. Costo de envío absorbido por el vendedor (desde shipping_raw, /shipments/{id}/costs o raw)
+        $shippingFee = $this->resolveSellerShippingFee($order, $grossSale);
 
-        // 3. Costo del Producto (Costo de adquisición / mercancía)
+        // 4. Impuestos retenidos por Mercado Libre (IVA 8.00% + ISR 2.50% sobre base sin IVA)
+        $taxes = $this->resolveOrderTaxes($order, $grossSale);
+        $isrFee = $taxes['isr_fee'];
+        $ivaFee = $taxes['iva_fee'];
+        $taxesFee = $taxes['taxes_fee'];
+
+        // 5. Total a recibir en Mercado Libre ("Información del cobro -> Total a recibir")
+        $meliNetReceived = round($grossSale - $meliFee - $shippingFee - $taxesFee, 2);
+        $meliNetReceivedPct = $grossSale > 0 ? round(($meliNetReceived / $grossSale) * 100, 2) : 0.0;
+
+        // 6. Costo del Producto (Costo de adquisición en SYSCOM / Llantas)
         $productCost = $this->resolveOrderCost($order, $channel);
 
-        // 4. Ganancia Real Neta
+        // 7. Ganancia Real Neta Libre (Total a recibir ML - Costo Compra)
         if ($isCancelledOrReturned) {
             // En devoluciones/cancelaciones, la venta se reembolsa, ganancia neta es 0
             $netSale = 0.0;
+            $meliNetReceived = 0.0;
+            $meliNetReceivedPct = 0.0;
             $netProfit = 0.0;
             $profitMarginPct = 0.0;
         } else {
             $netSale = $grossSale;
-            // Ganancia Neta Real = Venta Bruta - Comisión ML - Envío - Costo Producto
-            $netProfit = round($grossSale - $meliFee - $shippingFee - $productCost, 2);
+            // Ganancia Neta Real = Total a Recibir ML - Costo Producto
+            $netProfit = round($meliNetReceived - $productCost, 2);
             $profitMarginPct = $grossSale > 0 ? round(($netProfit / $grossSale) * 100, 2) : 0.0;
         }
 
-        // Descripción / Título principal de la orden
+        // Descripción / Título principal de la orden e identificadores de venta/envío
         $firstItem = $order->items->first();
         $title = $firstItem?->title ?? 'Pedido #' . $order->order_id;
         $sku = $firstItem?->sku ?? '—';
         $quantity = (int) $order->items->sum('quantity');
 
+        $packId = trim((string) ($order->pack_id ?: data_get($raw, 'pack_id') ?: ''));
+        $displayId = trim((string) ($order->display_id ?: $packId ?: $order->order_id));
+        $shippingId = trim((string) ($order->shipping_id ?: data_get($raw, 'shipping.id') ?: ''));
+
         return [
             'id' => $order->id,
             'order_id' => (string) $order->order_id,
+            'pack_id' => $packId !== '' ? $packId : null,
+            'display_id' => $displayId !== '' ? $displayId : (string) $order->order_id,
+            'shipping_id' => $shippingId !== '' ? $shippingId : null,
             'created_at' => $order->created_at?->format('d/m/Y H:i'),
             'date_raw' => $order->created_at?->toDateString(),
             'channel' => $channel, // 'syscom' | 'llantas' | 'otro'
@@ -332,13 +361,199 @@ class ProfitabilityService
             'gross_sale' => $grossSale,
             'product_cost' => $productCost,
             'meli_fee' => $meliFee,
+            'meli_fee_pct' => $meliFeePct,
             'shipping_fee' => $shippingFee,
+            'isr_fee' => $isrFee,
+            'iva_fee' => $ivaFee,
             'taxes_fee' => $taxesFee,
-            'total_deductions' => round($meliFee + $shippingFee + $productCost, 2),
+            'meli_net_received' => $meliNetReceived,
+            'meli_net_received_pct' => $meliNetReceivedPct,
+            'total_deductions' => round($meliFee + $shippingFee + $taxesFee + $productCost, 2),
             'net_sale' => $netSale,
             'net_profit' => $netProfit,
             'profit_margin_pct' => $profitMarginPct,
             'has_syscom_raw' => ! empty($order->syscom_order_raw),
+        ];
+    }
+
+    /**
+     * Resuelve el costo de envío absorbido por el vendedor ("Envíos en Mercado Libre a tu cargo").
+     */
+    protected function resolveSellerShippingFee(MeliOrder $order, float $grossSale): float
+    {
+        $shippingRaw = is_array($order->shipping_raw) ? $order->shipping_raw : [];
+        $raw = is_array($order->raw) ? $order->raw : [];
+        $rawShipping = is_array($raw['shipping'] ?? null) ? $raw['shipping'] : [];
+
+        // Si ya fue consultado y cacheado en shipping_raw
+        if (array_key_exists('seller_shipping_cost', $shippingRaw) && is_numeric($shippingRaw['seller_shipping_cost'])) {
+            return round(max(0.0, (float) $shippingRaw['seller_shipping_cost']), 2);
+        }
+
+        foreach ([$shippingRaw, $rawShipping] as $source) {
+            if ($source === []) {
+                continue;
+            }
+
+            // 1. Si viene el desglose explícito de senders (/shipments/{id}/costs)
+            foreach (['senders.0.cost', 'costs.senders.0.cost', 'costs.sender.cost', 'sender_cost', 'cost_components.sender_cost'] as $senderKey) {
+                $val = data_get($source, $senderKey);
+                if (is_numeric($val) && (float) $val > 0) {
+                    return round((float) $val, 2);
+                }
+            }
+
+            // 2. Envíos con list_cost (shipping_option.list_cost o lead_time.list_cost)
+            // En ML: list_cost es el cargo total con descuento por reputación, y cost es lo que pagó el comprador (0 cuando es envío gratis a cargo del vendedor).
+            foreach (['shipping_option', 'lead_time'] as $optKey) {
+                $listCost = data_get($source, "{$optKey}.list_cost");
+                $buyerCost = data_get($source, "{$optKey}.cost");
+                if (is_numeric($listCost) && (float) $listCost > 0) {
+                    $buyerPaid = is_numeric($buyerCost) && (float) $buyerCost > 0 ? (float) $buyerCost : 0.0;
+                    $sellerAbsorbed = round((float) $listCost - $buyerPaid, 2);
+                    if ($sellerAbsorbed > 0) {
+                        return $sellerAbsorbed;
+                    }
+                }
+            }
+
+            // 3. Fallback a base_cost o cost directo cuando es mayor a 0
+            foreach (['base_cost', 'cost', 'shipping_option.cost', 'lead_time.cost'] as $fallbackKey) {
+                $val = data_get($source, $fallbackKey);
+                if (is_numeric($val) && (float) $val > 0) {
+                    return round((float) $val, 2);
+                }
+            }
+        }
+
+        // 4. Si la orden tiene un shipping_id real de Mercado Envíos pero aún no tenía el costo del vendedor en shipping_raw,
+        // consultar GET /shipments/{id}/costs y guardarlo en shipping_raw para futuras consultas.
+        $shippingId = trim((string) ($order->shipping_id ?: data_get($raw, 'shipping.id') ?: ''));
+        $isAgreedDelivery = ($order->delivery_type === 'agreed_delivery') || ($order->shipping_mode === 'custom');
+
+        if ($shippingId !== '' && ! $isAgreedDelivery) {
+            $remoteCost = $this->fetchRemoteSellerShippingCost($order, $shippingId);
+            if ($remoteCost !== null && $remoteCost > 0) {
+                return $remoteCost;
+            }
+
+            // Si la API no devolvió el costo (ej. token expirado o sin red) y la venta es >= $299 (envío gratis obligatorio en ML México),
+            // aplicar el costo estándar de envío a cargo del vendedor ($95.00 MXN o el configurado).
+            if ($remoteCost === null && $grossSale >= 299.0) {
+                $configuredShip = (float) config('syscom.meli_recibes_estimate.shipping_absorb_mxn', 0);
+
+                return $configuredShip > 0 ? round($configuredShip, 2) : 95.0;
+            }
+        }
+
+        return 0.0;
+    }
+
+    /**
+     * Consulta en Mercado Libre (GET /shipments/{id}/costs) el costo real absorbido por el vendedor
+     * y lo persiste en shipping_raw para que no vuelva a requerir llamada HTTP.
+     */
+    protected function fetchRemoteSellerShippingCost(MeliOrder $order, string $shippingId): ?float
+    {
+        if (app()->runningUnitTests() || $this->remoteShippingLookupsCount >= 15) {
+            return null;
+        }
+
+        $token = $this->resolveMeliAccessTokenForOrder($order);
+        if (! $token) {
+            return null;
+        }
+
+        $this->remoteShippingLookupsCount++;
+
+        try {
+            $resp = Http::withToken($token)
+                ->withHeaders(['X-Format-New' => 'true'])
+                ->acceptJson()
+                ->timeout(4)
+                ->get("https://api.mercadolibre.com/shipments/{$shippingId}/costs");
+
+            if ($resp->successful()) {
+                $json = $resp->json();
+                $sellerCost = data_get($json, 'senders.0.cost')
+                    ?? data_get($json, 'sender.cost')
+                    ?? data_get($json, 'gross_amount');
+
+                if (is_numeric($sellerCost)) {
+                    $costVal = round(max(0.0, (float) $sellerCost), 2);
+                    $shippingRaw = is_array($order->shipping_raw) ? $order->shipping_raw : [];
+                    $shippingRaw['seller_shipping_cost'] = $costVal;
+                    $order->shipping_raw = $shippingRaw;
+
+                    MeliOrder::query()->whereKey($order->id)->update([
+                        'shipping_raw' => json_encode($shippingRaw),
+                    ]);
+
+                    return $costVal;
+                }
+            }
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::debug("No se pudo consultar /shipments/{$shippingId}/costs: " . $e->getMessage());
+        }
+
+        return null;
+    }
+
+    protected function resolveMeliAccessTokenForOrder(MeliOrder $order): ?string
+    {
+        $accountId = (int) ($order->meli_account_id ?? 0);
+        if ($accountId > 0 && isset($this->preloadedData['meliAccountsById'])) {
+            $acc = $this->preloadedData['meliAccountsById']->get($accountId);
+            if ($acc && filled($acc->access_token)) {
+                return (string) $acc->access_token;
+            }
+        }
+
+        return $this->preloadedData['defaultMeliToken'] ?? null;
+    }
+
+    /**
+     * Calcula las retenciones fiscales exactas de Mercado Libre México:
+     * Base sin IVA = Venta Bruta / 1.16
+     * Retención IVA = 8.00% de la base sin IVA
+     * Retención ISR = 2.50% de la base sin IVA
+     *
+     * @return array{isr_fee: float, iva_fee: float, taxes_fee: float}
+     */
+    protected function resolveOrderTaxes(MeliOrder $order, float $grossSale): array
+    {
+        if ($grossSale <= 0) {
+            return [
+                'isr_fee' => 0.0,
+                'iva_fee' => 0.0,
+                'taxes_fee' => 0.0,
+            ];
+        }
+
+        $raw = is_array($order->raw) ? $order->raw : [];
+        $explicitIva = data_get($raw, 'taxes.iva_fee') ?? data_get($raw, 'taxes.iva');
+        $explicitIsr = data_get($raw, 'taxes.isr_fee') ?? data_get($raw, 'taxes.isr');
+
+        if (is_numeric($explicitIva) && is_numeric($explicitIsr)) {
+            $ivaFee = round(max(0.0, (float) $explicitIva), 2);
+            $isrFee = round(max(0.0, (float) $explicitIsr), 2);
+
+            return [
+                'isr_fee' => $isrFee,
+                'iva_fee' => $ivaFee,
+                'taxes_fee' => round($isrFee + $ivaFee, 2),
+            ];
+        }
+
+        // Regla fiscal validada de Mercado Libre México (Base = Precio / 1.16; IVA = 8.00%; ISR = 2.50%)
+        $taxableBase = $grossSale / 1.16;
+        $isrFee = round($taxableBase * 0.025, 2);
+        $ivaFee = round($taxableBase * 0.08, 2);
+
+        return [
+            'isr_fee' => $isrFee,
+            'iva_fee' => $ivaFee,
+            'taxes_fee' => round($isrFee + $ivaFee, 2),
         ];
     }
 
@@ -379,13 +594,14 @@ class ProfitabilityService
             foreach ($order->items as $item) {
                 $qty = max(1, (int) $item->quantity);
                 $sku = trim((string) $item->sku);
+                $kitPieces = $this->extractSyscomKitPiecesFromSku($sku);
                 $syscomProd = $this->findSyscomProduct($sku, (string) $item->item_id);
 
                 if ($syscomProd) {
                     try {
                         $baseUsd = $this->syscomPricing->baseCosto($syscomProd);
                         $costMxn = $this->safeUsdToMxnWithIva($baseUsd);
-                        $totalCost += ($costMxn * $qty);
+                        $totalCost += ($costMxn * $kitPieces * $qty);
                     } catch (\Throwable) {
                         $unitPrice = (float) $item->unit_price;
                         $totalCost += round(($unitPrice / 1.12) * $qty, 2);
@@ -527,6 +743,7 @@ class ProfitabilityService
                 str_contains($title, 'intercom') ||
                 str_contains($title, 'torniquete') ||
                 str_contains($title, 'control de acceso') ||
+                str_starts_with($sku, 'syscom-') ||
                 str_starts_with($sku, 'sys-')
             ) {
                 $this->orderChannelCache[$orderId] = 'syscom';
@@ -602,8 +819,13 @@ class ProfitabilityService
     {
         $allSkus = [];
         $allMlms = [];
+        $allSyscomIds = [];
+        $allAccountIds = [];
 
         foreach ($orders as $order) {
+            if ($order->meli_account_id) {
+                $allAccountIds[(int) $order->meli_account_id] = true;
+            }
             if (! $order->relationLoaded('items')) {
                 continue;
             }
@@ -612,6 +834,10 @@ class ProfitabilityService
                 $mlm = trim((string) $item->item_id);
                 if ($sku !== '') {
                     $allSkus[$sku] = true;
+                    $syscomId = $this->extractSyscomIdFromSku($sku);
+                    if ($syscomId !== null) {
+                        $allSyscomIds[$syscomId] = true;
+                    }
                 }
                 if ($mlm !== '') {
                     $allMlms[$mlm] = true;
@@ -621,6 +847,8 @@ class ProfitabilityService
 
         $uniqueSkus = array_keys($allSkus);
         $uniqueMlms = array_keys($allMlms);
+        $uniqueSyscomIds = array_keys($allSyscomIds);
+        $uniqueAccountIds = array_keys($allAccountIds);
 
         $queues = ! empty($uniqueMlms)
             ? SyscomMeliQueue::query()
@@ -635,6 +863,10 @@ class ProfitabilityService
 
         $this->preloadedData['syscomProductsByModel'] = ! empty($uniqueSkus)
             ? SyscomProduct::query()->whereIn('modelo', $uniqueSkus)->get()->keyBy('modelo')
+            : collect();
+
+        $this->preloadedData['syscomProductsBySyscomId'] = ! empty($uniqueSyscomIds)
+            ? SyscomProduct::query()->whereIn('syscom_id', $uniqueSyscomIds)->get()->keyBy(fn (SyscomProduct $p) => (string) $p->syscom_id)
             : collect();
 
         $this->preloadedData['syscomProductsById'] = ! empty($queueProdIds)
@@ -656,6 +888,44 @@ class ProfitabilityService
         $this->preloadedData['meliPubsWithLlanta'] = ! empty($uniqueMlms)
             ? MeliPublication::query()->whereIn('mlm', $uniqueMlms)->whereHas('llanta')->pluck('mlm')->flip()->all()
             : [];
+
+        try {
+            $this->preloadedData['meliAccountsById'] = ! empty($uniqueAccountIds)
+                ? MeliAccount::query()->whereIn('id', $uniqueAccountIds)->get()->keyBy('id')
+                : collect();
+            $this->preloadedData['defaultMeliToken'] = User::query()->whereNotNull('access_token')->value('access_token');
+        } catch (\Throwable) {
+            $this->preloadedData['meliAccountsById'] = collect();
+            $this->preloadedData['defaultMeliToken'] = null;
+        }
+    }
+
+    protected function extractSyscomIdFromSku(string $sku): ?string
+    {
+        $sku = trim($sku);
+        if ($sku === '') {
+            return null;
+        }
+
+        $prefix = (string) config('syscom.sku_prefix', 'SYSCOM');
+        $pattern = '/^' . preg_quote($prefix, '/') . '-(\d+)(?:-(?:2|4))?$/i';
+        if (preg_match($pattern, $sku, $m)) {
+            return (string) $m[1];
+        }
+
+        return null;
+    }
+
+    protected function extractSyscomKitPiecesFromSku(string $sku): int
+    {
+        $sku = trim($sku);
+        $prefix = (string) config('syscom.sku_prefix', 'SYSCOM');
+        $pattern = '/^' . preg_quote($prefix, '/') . '-\d+-(2|4)$/i';
+        if (preg_match($pattern, $sku, $m)) {
+            return (int) $m[1];
+        }
+
+        return 1;
     }
 
     /**
@@ -688,7 +958,7 @@ class ProfitabilityService
             \Illuminate\Support\Facades\Log::warning('SYSCOM tipo_cambio fallback en ProfitabilityService: ' . $e->getMessage());
         }
 
-        $this->cachedExchangeRate = (float) config('syscom.tipo_cambio_fallback', 20.0);
+        $this->cachedExchangeRate = (float) config('syscom.tc_fallback', config('syscom.tipo_cambio_fallback', 20.0));
 
         return $this->cachedExchangeRate;
     }
@@ -719,14 +989,25 @@ class ProfitabilityService
         if ($order->relationLoaded('items')) {
             $grossSale = (float) $order->items->sum(fn ($i) => ((float) $i->unit_price) * ((int) $i->quantity));
         }
+        $grossSale = round($grossSale, 2);
 
         $meliFee = round($grossSale * ($fallbackFeePct / 100), 2);
+        $taxes = $this->resolveOrderTaxes($order, $grossSale);
+        $isrFee = $taxes['isr_fee'];
+        $ivaFee = $taxes['iva_fee'];
+        $taxesFee = $taxes['taxes_fee'];
+        $meliNetReceived = round($grossSale - $meliFee - $taxesFee, 2);
+        $meliNetReceivedPct = $grossSale > 0 ? round(($meliNetReceived / $grossSale) * 100, 2) : 0.0;
+
         $productCost = round($grossSale * 0.75, 2);
-        $netProfit = max(0.0, round($grossSale - $meliFee - $productCost, 2));
+        $netProfit = round($meliNetReceived - $productCost, 2);
 
         return [
             'id' => $order->id,
             'order_id' => (string) $order->order_id,
+            'pack_id' => $order->pack_id ?: null,
+            'display_id' => $order->display_id ?: (string) $order->order_id,
+            'shipping_id' => $order->shipping_id ?: null,
             'created_at' => $order->created_at?->format('d/m/Y H:i'),
             'date_raw' => $order->created_at?->toDateString(),
             'channel' => 'otro',
@@ -742,9 +1023,14 @@ class ProfitabilityService
             'gross_sale' => $grossSale,
             'product_cost' => $productCost,
             'meli_fee' => $meliFee,
+            'meli_fee_pct' => $grossSale > 0 ? round(($meliFee / $grossSale) * 100, 2) : 0.0,
             'shipping_fee' => 0.0,
-            'taxes_fee' => 0.0,
-            'total_deductions' => round($meliFee + $productCost, 2),
+            'isr_fee' => $isrFee,
+            'iva_fee' => $ivaFee,
+            'taxes_fee' => $taxesFee,
+            'meli_net_received' => $meliNetReceived,
+            'meli_net_received_pct' => $meliNetReceivedPct,
+            'total_deductions' => round($meliFee + $taxesFee + $productCost, 2),
             'net_sale' => $grossSale,
             'net_profit' => $netProfit,
             'profit_margin_pct' => $grossSale > 0 ? round(($netProfit / $grossSale) * 100, 2) : 0.0,
@@ -754,7 +1040,16 @@ class ProfitabilityService
 
     protected function findSyscomProduct(string $sku, string $mlm): ?SyscomProduct
     {
+        $syscomId = $this->extractSyscomIdFromSku($sku);
+
         // 1. Buscar en datos precargados en lote
+        if ($syscomId !== null && isset($this->preloadedData['syscomProductsBySyscomId'])) {
+            $p = $this->preloadedData['syscomProductsBySyscomId']->get($syscomId);
+            if ($p) {
+                return $p;
+            }
+        }
+
         if ($sku !== '' && isset($this->preloadedData['syscomProductsByModel'])) {
             $p = $this->preloadedData['syscomProductsByModel']->get($sku);
             if ($p) {
@@ -779,7 +1074,11 @@ class ProfitabilityService
         }
 
         $prod = null;
-        if ($sku !== '') {
+        if ($syscomId !== null) {
+            $prod = SyscomProduct::query()->where('syscom_id', $syscomId)->first();
+        }
+
+        if (! $prod && $sku !== '') {
             $prod = SyscomProduct::query()->where('modelo', $sku)->first();
         }
 
@@ -847,7 +1146,12 @@ class ProfitabilityService
         $productCostTotal = round($deliveredOrders->sum('product_cost'), 2);
         $meliFeesTotal = round($deliveredOrders->sum('meli_fee'), 2);
         $shippingFeesTotal = round($deliveredOrders->sum('shipping_fee'), 2);
-        $totalDeductions = round($productCostTotal + $meliFeesTotal + $shippingFeesTotal, 2);
+        $isrFeesTotal = round($deliveredOrders->sum('isr_fee'), 2);
+        $ivaFeesTotal = round($deliveredOrders->sum('iva_fee'), 2);
+        $taxesFeesTotal = round($deliveredOrders->sum('taxes_fee'), 2);
+        $meliNetReceivedTotal = round($deliveredOrders->sum('meli_net_received'), 2);
+        $meliNetReceivedPct = $netSalesTotal > 0 ? round(($meliNetReceivedTotal / $netSalesTotal) * 100, 2) : 0.0;
+        $totalDeductions = round($productCostTotal + $meliFeesTotal + $shippingFeesTotal + $taxesFeesTotal, 2);
 
         $netProfitTotal = round($deliveredOrders->sum('net_profit'), 2);
         $overallMarginPct = $netSalesTotal > 0 ? round(($netProfitTotal / $netSalesTotal) * 100, 2) : 0.0;
@@ -867,6 +1171,11 @@ class ProfitabilityService
             'total_product_cost' => $productCostTotal,
             'total_meli_fees' => $meliFeesTotal,
             'total_shipping_fees' => $shippingFeesTotal,
+            'total_isr_fees' => $isrFeesTotal,
+            'total_iva_fees' => $ivaFeesTotal,
+            'total_taxes_fees' => $taxesFeesTotal,
+            'total_meli_net_received' => $meliNetReceivedTotal,
+            'meli_net_received_pct' => $meliNetReceivedPct,
             'total_deductions' => $totalDeductions,
             'total_net_profit' => $netProfitTotal,
             'profit_margin_pct' => $overallMarginPct,
@@ -896,6 +1205,8 @@ class ProfitabilityService
         $netSales = round($active->sum('gross_sale'), 2);
         $cost = round($active->sum('product_cost'), 2);
         $fees = round($active->sum('meli_fee') + $active->sum('shipping_fee'), 2);
+        $taxes = round($active->sum('taxes_fee'), 2);
+        $meliReceived = round($active->sum('meli_net_received'), 2);
         $profit = round($active->sum('net_profit'), 2);
         $margin = $netSales > 0 ? round(($profit / $netSales) * 100, 2) : 0.0;
 
@@ -908,6 +1219,8 @@ class ProfitabilityService
             'net_sales' => $netSales,
             'product_cost' => $cost,
             'fees_and_shipping' => $fees,
+            'taxes_fees' => $taxes,
+            'meli_net_received' => $meliReceived,
             'net_profit' => $profit,
             'margin_pct' => $margin,
         ];
@@ -1054,6 +1367,11 @@ class ProfitabilityService
                 'total_product_cost' => 0.0,
                 'total_meli_fees' => 0.0,
                 'total_shipping_fees' => 0.0,
+                'total_isr_fees' => 0.0,
+                'total_iva_fees' => 0.0,
+                'total_taxes_fees' => 0.0,
+                'total_meli_net_received' => 0.0,
+                'meli_net_received_pct' => 0.0,
                 'total_deductions' => 0.0,
                 'total_net_profit' => 0.0,
                 'profit_margin_pct' => 0.0,
@@ -1074,6 +1392,8 @@ class ProfitabilityService
                     'net_sales' => 0.0,
                     'product_cost' => 0.0,
                     'fees_and_shipping' => 0.0,
+                    'taxes_fees' => 0.0,
+                    'meli_net_received' => 0.0,
                     'net_profit' => 0.0,
                     'margin_pct' => 0.0,
                 ],
@@ -1086,6 +1406,8 @@ class ProfitabilityService
                     'net_sales' => 0.0,
                     'product_cost' => 0.0,
                     'fees_and_shipping' => 0.0,
+                    'taxes_fees' => 0.0,
+                    'meli_net_received' => 0.0,
                     'net_profit' => 0.0,
                     'margin_pct' => 0.0,
                 ],
