@@ -27,6 +27,12 @@ class ProfitabilityService
     /** @var array<string, string> */
     protected array $orderChannelCache = [];
 
+    /** @var array<string, mixed> */
+    protected array $preloadedData = [];
+
+    /** @var ?float */
+    protected ?float $cachedExchangeRate = null;
+
     public function __construct(
         protected SyscomProductPricingService $syscomPricing
     ) {}
@@ -115,9 +121,24 @@ class ProfitabilityService
             : 'profit';
         $fallbackFeePct = max(0, (float) ($filters['fallback_fee_pct'] ?? 15.0));
 
-        // Obtener órdenes en el rango de fechas
+        // Obtener órdenes en el rango de fechas con selección óptima de columnas para evitar saturación de memoria
         $query = MeliOrder::query()
-            ->with(['items', 'claims'])
+            ->select([
+                'id',
+                'order_id',
+                'status',
+                'shipping_status',
+                'syscom_order_folio',
+                'syscom_order_synced_at',
+                'syscom_order_cancelled_at',
+                'syscom_order_raw',
+                'raw',
+                'created_at',
+            ])
+            ->with([
+                'items:id,meli_order_id,item_id,sku,title,quantity,unit_price',
+                'claims:id,meli_order_id,type,stage,status',
+            ])
             ->whereBetween('created_at', [$startDate->copy()->startOfDay(), $endDate->copy()->endOfDay()]);
 
         if ($search !== '') {
@@ -134,9 +155,17 @@ class ProfitabilityService
 
         $allOrders = $query->orderByDesc('created_at')->get();
 
-        // Procesar y clasificar cada orden
+        // Precarga en bloque de productos, llantas y colas (elimina 100% el problema N+1)
+        $this->preloadRelationsForOrders($allOrders);
+
+        // Procesar y clasificar cada orden de forma segura
         $processedOrders = $allOrders->map(function (MeliOrder $order) use ($fallbackFeePct) {
-            return $this->calculateOrderProfitability($order, $fallbackFeePct);
+            try {
+                return $this->calculateOrderProfitability($order, $fallbackFeePct);
+            } catch (\Throwable $e) {
+                \Illuminate\Support\Facades\Log::warning("Error calculando rentabilidad para orden #{$order->order_id}: " . $e->getMessage());
+                return $this->fallbackOrderProfitability($order, $fallbackFeePct);
+            }
         });
 
         // Filtrar por canal
@@ -323,9 +352,14 @@ class ProfitabilityService
                 $syscomProd = $this->findSyscomProduct($sku, (string) $item->item_id);
 
                 if ($syscomProd) {
-                    $baseUsd = $this->syscomPricing->baseCosto($syscomProd);
-                    $costMxn = $this->syscomPricing->usdToMxnWithIva($baseUsd);
-                    $totalCost += ($costMxn * $qty);
+                    try {
+                        $baseUsd = $this->syscomPricing->baseCosto($syscomProd);
+                        $costMxn = $this->safeUsdToMxnWithIva($baseUsd);
+                        $totalCost += ($costMxn * $qty);
+                    } catch (\Throwable) {
+                        $unitPrice = (float) $item->unit_price;
+                        $totalCost += round(($unitPrice / 1.12) * $qty, 2);
+                    }
                 } else {
                     // Si no se encuentra en catálogo, estimar usando la fórmula estándar de SYSCOM (costo * 1.12)
                     $unitPrice = (float) $item->unit_price;
@@ -348,8 +382,11 @@ class ProfitabilityService
                 if ($llanta && (float) $llanta->costo > 0) {
                     $totalCost += (((float) $llanta->costo) * $qty);
                 } else {
-                    // Revisar si es producto compuesto (ej. par o juego de llantas)
-                    $compuesto = ProductoCompuesto::query()->where('mlm', $mlm)->with('llanta')->first();
+                    // Revisar si es producto compuesto preloaded o consultar
+                    $compuesto = isset($this->preloadedData['compuestosByMlm'])
+                        ? $this->preloadedData['compuestosByMlm']->get($mlm)
+                        : ProductoCompuesto::query()->where('mlm', $mlm)->with('llanta')->first();
+
                     if ($compuesto && $compuesto->llanta && (float) $compuesto->llanta->costo > 0) {
                         $totalCost += (((float) $compuesto->llanta->costo) * (int) ($compuesto->cantidad ?? 1) * $qty);
                     } else {
@@ -391,8 +428,8 @@ class ProfitabilityService
             $mlm = trim((string) $item->item_id);
             $sku = trim((string) $item->sku);
 
-            // 1. Revisar si está en la cola o catálogo de SYSCOM
-            if (SyscomMeliQueue::query()->where('mlm', $mlm)->exists()) {
+            // 1. Revisar si está en la cola o catálogo de SYSCOM (en memoria primero)
+            if (isset($this->preloadedData['queuesByMlm'][$mlm]) || SyscomMeliQueue::query()->where('mlm', $mlm)->exists()) {
                 $this->orderChannelCache[$orderId] = 'syscom';
 
                 return 'syscom';
@@ -404,20 +441,20 @@ class ProfitabilityService
                 return 'syscom';
             }
 
-            // 2. Revisar si es una Llanta
+            // 2. Revisar si es una Llanta (en memoria primero)
             if ($this->findLlanta($sku, $mlm) !== null) {
                 $this->orderChannelCache[$orderId] = 'llantas';
 
                 return 'llantas';
             }
 
-            if (ProductoCompuesto::query()->where('mlm', $mlm)->exists()) {
+            if (isset($this->preloadedData['compuestosByMlm'][$mlm]) || ProductoCompuesto::query()->where('mlm', $mlm)->exists()) {
                 $this->orderChannelCache[$orderId] = 'llantas';
 
                 return 'llantas';
             }
 
-            if (MeliPublication::query()->where('mlm', $mlm)->whereHas('llanta')->exists()) {
+            if (isset($this->preloadedData['meliPubsWithLlanta'][$mlm]) || MeliPublication::query()->where('mlm', $mlm)->whereNotNull('llanta_id')->exists()) {
                 $this->orderChannelCache[$orderId] = 'llantas';
 
                 return 'llantas';
@@ -489,8 +526,186 @@ class ProfitabilityService
         return null;
     }
 
+    /**
+     * Precarga masiva en memoria de colas, productos SYSCOM, llantas y compuestos para eliminar N+1.
+     *
+     * @param Collection<int, MeliOrder> $orders
+     */
+    protected function preloadRelationsForOrders(Collection $orders): void
+    {
+        $allSkus = [];
+        $allMlms = [];
+
+        foreach ($orders as $order) {
+            if (! $order->relationLoaded('items')) {
+                continue;
+            }
+            foreach ($order->items as $item) {
+                $sku = trim((string) $item->sku);
+                $mlm = trim((string) $item->item_id);
+                if ($sku !== '') {
+                    $allSkus[$sku] = true;
+                }
+                if ($mlm !== '') {
+                    $allMlms[$mlm] = true;
+                }
+            }
+        }
+
+        $uniqueSkus = array_keys($allSkus);
+        $uniqueMlms = array_keys($allMlms);
+
+        $queues = ! empty($uniqueMlms)
+            ? SyscomMeliQueue::query()
+                ->whereIn('mlm', $uniqueMlms)
+                ->select(['id', 'mlm', 'syscom_product_id'])
+                ->get()
+            : collect();
+
+        $this->preloadedData['queuesByMlm'] = $queues->keyBy('mlm');
+
+        $queueProdIds = $queues->pluck('syscom_product_id')->filter()->unique()->values()->all();
+
+        $this->preloadedData['syscomProductsByModel'] = ! empty($uniqueSkus)
+            ? SyscomProduct::query()->whereIn('modelo', $uniqueSkus)->get()->keyBy('modelo')
+            : collect();
+
+        $this->preloadedData['syscomProductsById'] = ! empty($queueProdIds)
+            ? SyscomProduct::query()->whereIn('id', $queueProdIds)->get()->keyBy('id')
+            : collect();
+
+        $this->preloadedData['llantasBySku'] = ! empty($uniqueSkus)
+            ? Llanta::query()->whereIn('sku', $uniqueSkus)->get()->keyBy('sku')
+            : collect();
+
+        $this->preloadedData['llantasByMlm'] = ! empty($uniqueMlms)
+            ? Llanta::query()->whereIn('MLM', $uniqueMlms)->get()->keyBy('MLM')
+            : collect();
+
+        $this->preloadedData['compuestosByMlm'] = ! empty($uniqueMlms)
+            ? ProductoCompuesto::query()->whereIn('mlm', $uniqueMlms)->with('llanta')->get()->keyBy('mlm')
+            : collect();
+
+        $this->preloadedData['meliPubsWithLlanta'] = ! empty($uniqueMlms)
+            ? MeliPublication::query()->whereIn('mlm', $uniqueMlms)->whereNotNull('llanta_id')->pluck('mlm')->flip()->all()
+            : [];
+    }
+
+    /**
+     * Resuelve el tipo de cambio USD/MXN con protección de timeout y fallback seguro.
+     */
+    protected function resolveExchangeRate(): float
+    {
+        if ($this->cachedExchangeRate !== null) {
+            return $this->cachedExchangeRate;
+        }
+
+        try {
+            $cached = \Illuminate\Support\Facades\Cache::get('syscom_tipo_cambio');
+            if (is_numeric($cached) && (float) $cached > 0) {
+                $this->cachedExchangeRate = (float) $cached;
+
+                return $this->cachedExchangeRate;
+            }
+
+            // Intentar convertir 1 USD de forma segura sin bloquear el hilo
+            $costMx = $this->syscomPricing->usdToMxnWithIva(1.0);
+            $iva = max(0.0, (float) config('syscom.iva_pct', 16));
+            $rate = $costMx / (1 + $iva / 100);
+            if ($rate > 10.0 && $rate < 40.0) {
+                $this->cachedExchangeRate = round($rate, 4);
+
+                return $this->cachedExchangeRate;
+            }
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::warning('SYSCOM tipo_cambio fallback en ProfitabilityService: ' . $e->getMessage());
+        }
+
+        $this->cachedExchangeRate = (float) config('syscom.tipo_cambio_fallback', 20.0);
+
+        return $this->cachedExchangeRate;
+    }
+
+    /**
+     * Convierte USD a MXN con IVA usando el tipo de cambio cacheado seguro sin llamadas bloqueantes a la API.
+     */
+    protected function safeUsdToMxnWithIva(float $usd): float
+    {
+        if ($usd <= 0) {
+            return 0.0;
+        }
+
+        $tc = $this->resolveExchangeRate();
+        $iva = max(0.0, (float) config('syscom.iva_pct', 16));
+
+        return round($usd * $tc * (1 + $iva / 100), 4);
+    }
+
+    /**
+     * Genera datos financieros seguros de contingencia si una orden individual falla por datos corruptos.
+     *
+     * @return array<string, mixed>
+     */
+    protected function fallbackOrderProfitability(MeliOrder $order, float $fallbackFeePct = 15.0): array
+    {
+        $grossSale = 0.0;
+        if ($order->relationLoaded('items')) {
+            $grossSale = (float) $order->items->sum(fn ($i) => ((float) $i->unit_price) * ((int) $i->quantity));
+        }
+
+        $meliFee = round($grossSale * ($fallbackFeePct / 100), 2);
+        $productCost = round($grossSale * 0.75, 2);
+        $netProfit = max(0.0, round($grossSale - $meliFee - $productCost, 2));
+
+        return [
+            'id' => $order->id,
+            'order_id' => (string) $order->order_id,
+            'created_at' => $order->created_at?->format('d/m/Y H:i'),
+            'date_raw' => $order->created_at?->toDateString(),
+            'channel' => 'otro',
+            'channel_label' => 'Estimado',
+            'status' => $order->status ?? 'closed',
+            'shipping_status' => $order->shipping_status ?? '—',
+            'is_cancelled_or_returned' => false,
+            'cancellation_reason' => null,
+            'syscom_order_folio' => $order->syscom_order_folio,
+            'title' => $order->items->first()?->title ?? 'Pedido #' . $order->order_id,
+            'sku' => $order->items->first()?->sku ?? '—',
+            'quantity' => 1,
+            'gross_sale' => $grossSale,
+            'product_cost' => $productCost,
+            'meli_fee' => $meliFee,
+            'shipping_fee' => 0.0,
+            'taxes_fee' => 0.0,
+            'total_deductions' => round($meliFee + $productCost, 2),
+            'net_sale' => $grossSale,
+            'net_profit' => $netProfit,
+            'profit_margin_pct' => $grossSale > 0 ? round(($netProfit / $grossSale) * 100, 2) : 0.0,
+            'has_syscom_raw' => false,
+        ];
+    }
+
     protected function findSyscomProduct(string $sku, string $mlm): ?SyscomProduct
     {
+        // 1. Buscar en datos precargados en lote
+        if ($sku !== '' && isset($this->preloadedData['syscomProductsByModel'])) {
+            $p = $this->preloadedData['syscomProductsByModel']->get($sku);
+            if ($p) {
+                return $p;
+            }
+        }
+
+        if ($mlm !== '' && isset($this->preloadedData['queuesByMlm'])) {
+            $queue = $this->preloadedData['queuesByMlm']->get($mlm);
+            if ($queue && $queue->syscom_product_id && isset($this->preloadedData['syscomProductsById'])) {
+                $p = $this->preloadedData['syscomProductsById']->get($queue->syscom_product_id);
+                if ($p) {
+                    return $p;
+                }
+            }
+        }
+
+        // 2. Fallback con caché en memoria individual
         $cacheKey = "syscom:{$sku}:{$mlm}";
         if (array_key_exists($cacheKey, $this->syscomProductCache)) {
             return $this->syscomProductCache[$cacheKey];
@@ -513,6 +728,22 @@ class ProfitabilityService
 
     protected function findLlanta(string $sku, string $mlm): ?Llanta
     {
+        // 1. Buscar en datos precargados en lote
+        if ($sku !== '' && isset($this->preloadedData['llantasBySku'])) {
+            $l = $this->preloadedData['llantasBySku']->get($sku);
+            if ($l) {
+                return $l;
+            }
+        }
+
+        if ($mlm !== '' && isset($this->preloadedData['llantasByMlm'])) {
+            $l = $this->preloadedData['llantasByMlm']->get($mlm);
+            if ($l) {
+                return $l;
+            }
+        }
+
+        // 2. Fallback con caché en memoria individual
         $cacheKey = "llanta:{$sku}:{$mlm}";
         if (array_key_exists($cacheKey, $this->llantaCache)) {
             return $this->llantaCache[$cacheKey];
@@ -733,5 +964,81 @@ class ProfitabilityService
                 'Este mes (' . now()->translatedFormat('F Y') . ')',
             ],
         };
+    }
+
+    /**
+     * Resumen seguro de contingencia con métricas en cero en caso de fallo crítico en la consulta.
+     *
+     * @param array<string, mixed> $filters
+     * @return array<string, mixed>
+     */
+    public function getEmptySummary(array $filters = [], string $errorMessage = ''): array
+    {
+        [$startDate, $endDate, $periodLabel] = $this->resolveDateRange($filters);
+
+        return [
+            'metrics' => [
+                'total_orders_count' => 0,
+                'delivered_orders_count' => 0,
+                'cancelled_returned_count' => 0,
+                'total_sales_gross' => 0.0,
+                'total_returns_amount' => 0.0,
+                'total_sales_net' => 0.0,
+                'total_product_cost' => 0.0,
+                'total_meli_fees' => 0.0,
+                'total_shipping_fees' => 0.0,
+                'total_deductions' => 0.0,
+                'total_net_profit' => 0.0,
+                'profit_margin_pct' => 0.0,
+                'commission' => [
+                    'rate_pct' => (float) ($filters['commission_pct'] ?? 10.0),
+                    'base' => $filters['commission_base'] ?? 'profit',
+                    'base_label' => ($filters['commission_base'] ?? 'profit') === 'sales' ? 'Venta Neta' : 'Ganancia Neta Real',
+                    'user_amount' => 0.0,
+                    'company_amount' => 0.0,
+                    'company_share_pct' => 100.0,
+                ],
+                'syscom' => [
+                    'total_orders' => 0,
+                    'active_orders' => 0,
+                    'cancelled_orders' => 0,
+                    'gross_sales' => 0.0,
+                    'returns_amount' => 0.0,
+                    'net_sales' => 0.0,
+                    'product_cost' => 0.0,
+                    'fees_and_shipping' => 0.0,
+                    'net_profit' => 0.0,
+                    'margin_pct' => 0.0,
+                ],
+                'llantas' => [
+                    'total_orders' => 0,
+                    'active_orders' => 0,
+                    'cancelled_orders' => 0,
+                    'gross_sales' => 0.0,
+                    'returns_amount' => 0.0,
+                    'net_sales' => 0.0,
+                    'product_cost' => 0.0,
+                    'fees_and_shipping' => 0.0,
+                    'net_profit' => 0.0,
+                    'margin_pct' => 0.0,
+                ],
+                'scenarios' => $this->calculateCommissionScenarios(0.0, 0.0),
+            ],
+            'timeline' => [],
+            'orders' => new \Illuminate\Pagination\LengthAwarePaginator([], 0, 30),
+            'filters' => [
+                'period' => $filters['period'] ?? 'este_mes',
+                'from' => $startDate->toDateString(),
+                'to' => $endDate->toDateString(),
+                'channel' => $filters['channel'] ?? 'all',
+                'status' => $filters['status'] ?? 'all',
+                'search' => $filters['search'] ?? '',
+                'commission_pct' => (float) ($filters['commission_pct'] ?? 10.0),
+                'commission_base' => $filters['commission_base'] ?? 'profit',
+                'fallback_fee_pct' => (float) ($filters['fallback_fee_pct'] ?? 15.0),
+                'period_label' => $periodLabel,
+            ],
+            'error' => $errorMessage !== '' ? $errorMessage : null,
+        ];
     }
 }

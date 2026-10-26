@@ -33,13 +33,22 @@ class ProfitabilityController extends Controller
             'per_page',
         ]);
 
-        $summary = $this->profitabilityService->getSummary($filters);
+        try {
+            $summary = $this->profitabilityService->getSummary($filters);
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::error('Error cargando módulo de Rentabilidad y Comisiones: ' . $e->getMessage(), [
+                'trace' => $e->getTraceAsString(),
+            ]);
+
+            $summary = $this->profitabilityService->getEmptySummary($filters, $e->getMessage());
+        }
 
         return Inertia::render('Profitability/Index', [
             'metrics' => $summary['metrics'],
             'timeline' => $summary['timeline'],
             'orders' => $summary['orders'],
             'filters' => $summary['filters'],
+            'error' => $summary['error'] ?? null,
         ]);
     }
 

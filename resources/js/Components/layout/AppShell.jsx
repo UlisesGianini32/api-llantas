@@ -185,6 +185,266 @@ function IconBellNav({ className = 'h-4 w-4' }) {
     )
 }
 
+function IconDatabase({ className = 'h-4 w-4' }) {
+    return (
+        <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+            <ellipse cx="12" cy="5" rx="9" ry="3" />
+            <path strokeLinecap="round" strokeLinejoin="round" d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5M3 12c0 1.66 4 3 9 3s9-1.34 9-3" />
+        </svg>
+    )
+}
+
+function IconShelves({ className = 'h-4 w-4' }) {
+    return (
+        <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 3v18m16.5-18v18M3.75 7.5h16.5m-16.5 6h16.5m-16.5 6h16.5M7 4.5h3.5v3H7zm6.5 0h3.5v3h-3.5zm-6.5 6h4.5v3H7zm7 0h3v3h-3z" />
+        </svg>
+    )
+}
+
+function IconTrendChart({ className = 'h-4 w-4' }) {
+    return (
+        <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 18L9 11.25l4.306 4.307a11.95 11.95 0 015.814-5.519l2.74-1.22m0 0l-5.94-.228m5.94.228l-.228 5.941" />
+        </svg>
+    )
+}
+
+function IconBarcode({ className = 'h-4 w-4' }) {
+    return (
+        <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 4.5v15m3-15v15m4.5-15v15m1.5-15v15m4.5-15v15m3-15v15" />
+        </svg>
+    )
+}
+
+function IconLinkChain({ className = 'h-4 w-4' }) {
+    return (
+        <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M13.19 8.688a4.5 4.5 0 011.242 7.244l-4.5 4.5a4.5 4.5 0 01-6.364-6.364l1.757-1.757m13.35-3.375l1.757-1.757a4.5 4.5 0 00-6.364-6.364l-4.5 4.5a4.5 4.5 0 001.242 7.244" />
+        </svg>
+    )
+}
+
+function IconCompareScale({ className = 'h-4 w-4' }) {
+    return (
+        <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v18m0-18l-8 4m8-4l8 4M4 7l-2 6h8L8 7zm12 0l-2 6h8l-2-6zm-7 14h6" />
+        </svg>
+    )
+}
+
+function IconSingleItem({ className = 'h-4 w-4' }) {
+    return (
+        <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+            <circle cx="12" cy="12" r="9" />
+            <circle cx="12" cy="12" r="4" />
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v5m0 8v5M3 12h5m8 0h5" />
+        </svg>
+    )
+}
+
+function IconSplitColumns({ className = 'h-4 w-4' }) {
+    return (
+        <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M9 4.5v15m6-15v15m-11.25 0h16.5a1.5 1.5 0 001.5-1.5V6a1.5 1.5 0 00-1.5-1.5H3.75A1.5 1.5 0 002.25 6v12a1.5 1.5 0 001.5 1.5z" />
+        </svg>
+    )
+}
+
+function IconLayersBundle({ className = 'h-4 w-4' }) {
+    return (
+        <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M6.429 9.75L2.25 12l9.75 5.25 9.75-5.25-4.179-2.25m-11.321 4.5L2.25 16.5l9.75 5.25 9.75-5.25-4.179-2.25M12 3.75L2.25 9l9.75 5.25L21.75 9 12 3.75z" />
+        </svg>
+    )
+}
+
+function IconCalculator({ className = 'h-4 w-4' }) {
+    return (
+        <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+            <rect x="4.5" y="3" width="15" height="18" rx="2.25" strokeLinecap="round" strokeLinejoin="round" />
+            <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 7.5h7.5M8.25 11.25h1.5m3 0h1.5m-6 3.75h1.5m3 0h1.5m-6 3.75h1.5m3 0h1.5" />
+        </svg>
+    )
+}
+
+function IconSyncArrows({ className = 'h-4 w-4' }) {
+    return (
+        <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
+        </svg>
+    )
+}
+
+function IconPackageDelivery({ className = 'h-4 w-4' }) {
+    return (
+        <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 18.75a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m3 0h6m-9 0H3.375a1.125 1.125 0 01-1.125-1.125V14.25m17.25 4.5a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m3 0h1.125c.621 0 1.129-.504 1.09-1.124a17.902 17.902 0 00-3.213-9.193 2.056 2.056 0 00-1.58-.86H14.25M16.5 18.75h-2.25m0-11.25V4.875c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v9.375c0 .621.504 1.125 1.125 1.125h.375" />
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 9.75l2.25 2.25-2.25 2.25" />
+        </svg>
+    )
+}
+
+function IconSpreadsheet({ className = 'h-4 w-4' }) {
+    return (
+        <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 5.25A2.25 2.25 0 016 3h12a2.25 2.25 0 012.25 2.25v13.5A2.25 2.25 0 0118 21H6a2.25 2.25 0 01-2.25-2.25V5.25zM3.75 9h16.5M3.75 15h16.5M9.75 9v12m4.5-12v12" />
+        </svg>
+    )
+}
+
+function IconPrinter({ className = 'h-4 w-4' }) {
+    return (
+        <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M6.75 7.5V3.75h10.5V7.5M6.75 16.5h10.5m-10.5 3.75h10.5A2.25 2.25 0 0019.5 18v-6.75a2.25 2.25 0 00-2.25-2.25H6.75A2.25 2.25 0 004.5 11.25V18a2.25 2.25 0 002.25 2.25z" />
+        </svg>
+    )
+}
+
+function IconQuestionCircle({ className = 'h-4 w-4' }) {
+    return (
+        <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M9.879 7.519c1.171-1.025 3.071-1.025 4.242 0 1.172 1.025 1.172 2.687 0 3.712-.203.179-.43.326-.67.442-.745.361-1.45.999-1.45 1.827v.75m0 3.75h.008v.008H12v-.008zM21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+        </svg>
+    )
+}
+
+function IconChatDots({ className = 'h-4 w-4' }) {
+    return (
+        <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M20.25 8.511c.884.284 1.5 1.128 1.5 2.097v4.286c0 1.136-.847 2.1-1.98 2.193-.34.027-.68.052-1.02.072v3.091l-3.32-3.09c-.276-.02-.553-.046-.83-.075-1.133-.122-1.98-1.09-1.98-2.228V12.75M16.5 4.5H4.5A2.25 2.25 0 002.25 6.75v7.5A2.25 2.25 0 004.5 16.5h2.25v3l3.75-3h6a2.25 2.25 0 002.25-2.25v-7.5A2.25 2.25 0 0016.5 4.5z" />
+        </svg>
+    )
+}
+
+function IconStorefront({ className = 'h-4 w-4' }) {
+    return (
+        <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 21v-7.5a.75.75 0 01.75-.75h3a.75.75 0 01.75.75V21m-4.5 0H2.36m11.14 0H18m0 0h3.64m-1.39 0V9.349m-16.5 11.65V9.35m0 0a3.001 3.001 0 003.75-.615A2.993 2.993 0 009 9.75c.896 0 1.7-.393 2.25-1.016a2.993 2.993 0 002.25 1.016c.896 0 1.7-.393 2.25-1.016a3.001 3.001 0 003.75.614m-16.5 0a3.004 3.004 0 01-.621-4.72L4.318 3.44A1.5 1.5 0 015.378 3h13.243a1.5 1.5 0 011.06.44l1.19 1.189a3 3 0 01-.621 4.72" />
+        </svg>
+    )
+}
+
+function IconPriceTag({ className = 'h-4 w-4' }) {
+    return (
+        <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M9.568 3H5.25A2.25 2.25 0 003 5.25v4.318c0 .597.237 1.17.659 1.591l9.581 9.581c.699.699 1.78.872 2.607.33a18.095 18.095 0 005.223-5.223c.542-.827.369-1.908-.33-2.607L11.16 3.66A2.25 2.25 0 009.568 3z" />
+            <circle cx="7.5" cy="7.5" r="1.5" fill="currentColor" />
+        </svg>
+    )
+}
+
+function IconBadgeCheck({ className = 'h-4 w-4' }) {
+    return (
+        <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12c0 1.268-.63 2.39-1.593 3.068a3.745 3.745 0 01-1.043 3.296 3.745 3.745 0 01-3.296 1.043A3.745 3.745 0 0112 21c-1.268 0-2.39-.63-3.068-1.593a3.746 3.746 0 01-3.296-1.043 3.745 3.745 0 01-1.043-3.296A3.745 3.745 0 013 12c0-1.268.63-2.39 1.593-3.068a3.745 3.745 0 011.043-3.296 3.746 3.746 0 013.296-1.043A3.746 3.746 0 0112 3c1.268 0 2.39.63 3.068 1.593a3.746 3.746 0 013.296 1.043 3.746 3.746 0 011.043 3.296A3.745 3.745 0 0121 12z" />
+        </svg>
+    )
+}
+
+function IconCalendarDiscount({ className = 'h-4 w-4' }) {
+    return (
+        <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 012.25-2.25h13.5A2.25 2.25 0 0121 7.5v11.25m-18 0A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75m-18 0v-7.5A2.25 2.25 0 015.25 9h13.5A2.25 2.25 0 0121 11.25v7.5m-9-3.75h.008v.008H12v-.008zM15 15h.008v.008H15V15z" />
+        </svg>
+    )
+}
+
+function IconFolderSearch({ className = 'h-4 w-4' }) {
+    return (
+        <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z" />
+            <circle cx="15.5" cy="15.5" r="2.5" />
+            <path strokeLinecap="round" strokeLinejoin="round" d="M17.5 17.5l2 2" />
+        </svg>
+    )
+}
+
+function IconWarehouse({ className = 'h-4 w-4' }) {
+    return (
+        <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 21h19.5m-18-18v18m16.5-18v18M12 3l9 4.5V21M12 3L3 7.5V21M9 13.5h6m-6 3.75h6m-7.5-7.5h9" />
+        </svg>
+    )
+}
+
+function IconBoxStack({ className = 'h-4 w-4' }) {
+    return (
+        <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5m8.25 3v6.75m0 0l-3-3m3 3l3-3M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z" />
+        </svg>
+    )
+}
+
+function IconClipboardList({ className = 'h-4 w-4' }) {
+    return (
+        <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h3.75M9 15h3.75M9 18h3.75m3 .75H18a2.25 2.25 0 002.25-2.25V6.108c0-1.135-.845-2.098-1.976-2.188a48.567 48.567 0 00-4.024-.265m-8.5 0a48.567 48.567 0 00-4.024.265C4.095 4.01 3.25 4.973 3.25 6.108V16.5A2.25 2.25 0 005.5 18.75h2.25m3.75 0h3.75M9 4.5v-.75A1.5 1.5 0 0110.5 2.25h3a1.5 1.5 0 011.5 1.5v.75" />
+        </svg>
+    )
+}
+
+function IconBarcodeScan({ className = 'h-4 w-4' }) {
+    return (
+        <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 4.5h3m10.5 0h3m-16.5 15h3m10.5 0h3M6.75 9v6m3-6v6m3-6v6m3-6v6m-13.5-3h16.5" />
+        </svg>
+    )
+}
+
+function IconSplitRoute({ className = 'h-4 w-4' }) {
+    return (
+        <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M7.5 21V9a3 3 0 013-3h3m0 0l-2.5-2.5M13.5 6l-2.5 2.5m5.5 3v9.5m0-9.5a3 3 0 00-3-3" />
+            <circle cx="7.5" cy="21" r="1.5" />
+            <circle cx="16.5" cy="21" r="1.5" />
+        </svg>
+    )
+}
+
+function IconCalendarClock({ className = 'h-4 w-4' }) {
+    return (
+        <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 2v2m0 16v2M2 12h2m16 0h2" />
+        </svg>
+    )
+}
+
+function IconActivityPulse({ className = 'h-4 w-4' }) {
+    return (
+        <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 12h3.75l2.25-6 3.75 12 2.25-6h6" />
+        </svg>
+    )
+}
+
+function IconQueue({ className = 'h-4 w-4' }) {
+    return (
+        <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25H12" />
+            <path strokeLinecap="round" strokeLinejoin="round" d="M16.5 15l4.5 2.25L16.5 19.5V15z" />
+        </svg>
+    )
+}
+
+function IconTerminal({ className = 'h-4 w-4' }) {
+    return (
+        <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M6.75 7.5l3 3-3 3m4.5 1.5h6M3.75 4.5h16.5A1.5 1.5 0 0121.75 6v12a1.5 1.5 0 01-1.5 1.5H3.75A1.5 1.5 0 012.25 18V6a1.5 1.5 0 011.5-1.5z" />
+        </svg>
+    )
+}
+
+function IconBolt({ className = 'h-4 w-4' }) {
+    return (
+        <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z" />
+        </svg>
+    )
+}
+
 /* =========================================================================
    NAVIGATION ITEM
    ========================================================================= */
@@ -245,37 +505,39 @@ const ALL_SEARCH_ITEMS = [
     { title: 'Rentabilidad y Comisiones', desc: 'Márgenes reales, deducciones ML/SYSCOM y propuesta de comisiones', href: '/rentabilidad-comisiones', category: 'General', icon: IconCurrency },
     { title: 'Punto de Venta (POS)', desc: 'Cobro rápido, tickets y venta mostrador', href: '/pos', category: 'General', icon: IconPOS },
     { title: 'Clientes y Créditos', desc: 'Directorio de estilistas, plazos 7/15/30 y pagarés', href: '/pos/clientes', category: 'General', icon: IconUsers },
-    { title: 'Almacén (Catálogo maestro)', desc: 'Productos, SKU, códigos de barra y stock', href: '/almacen/productos', category: 'Inventario', icon: IconBox },
+    { title: 'Almacén (Catálogo maestro)', desc: 'Productos, SKU, códigos de barra y stock', href: '/almacen/productos', category: 'Inventario', icon: IconDatabase },
     { title: 'Ubicaciones de Almacén', desc: 'Pasillos, estantes E10-1, D10-1 y bins', href: '/almacen/ubicaciones', category: 'Inventario', icon: IconLocation },
-    { title: 'Inventario por Anaquel', desc: 'Auditoría, conteo físico y ajustes por anaquel', href: '/almacen/auditorias', category: 'Inventario', icon: IconClipboardCheck },
+    { title: 'Inventario por Anaquel', desc: 'Auditoría, conteo físico y ajustes por anaquel', href: '/almacen/auditorias', category: 'Inventario', icon: IconShelves },
     { title: 'Movimientos de Inventario', desc: 'Entradas, salidas y ajustes de stock', href: '/almacen/movimientos', category: 'Inventario', icon: IconArrows },
     { title: 'Reservas de Stock', desc: 'Apartados por pedidos pendientes', href: '/almacen/reservas', category: 'Inventario', icon: IconLock },
     { title: 'Kits y Ensambles', desc: 'Productos agrupados con stock derivado', href: '/almacen/kits', category: 'Inventario', icon: IconPuzzle },
-    { title: 'Pronóstico de Compras', desc: 'Sugerencias de reabastecimiento y días de stock', href: '/reabastecimiento/pronostico', category: 'Inventario', icon: IconChart },
+    { title: 'Pronóstico de Compras', desc: 'Sugerencias de reabastecimiento y días de stock', href: '/reabastecimiento/pronostico', category: 'Inventario', icon: IconTrendChart },
     { title: 'Órdenes de Compra', desc: 'Gestión de pedidos a proveedores', href: '/compras/ordenes', category: 'Inventario', icon: IconShoppingBag },
     { title: 'Proveedores y Marcas', desc: 'Directorio de proveedores y marcas que proveen', href: '/compras/proveedores', category: 'Inventario', icon: IconTruck },
-    { title: 'Códigos de Proveedor', desc: 'Asignar códigos de catálogo a cada proveedor sin alterar SKUs', href: '/compras/proveedores/codigos', category: 'Inventario', icon: IconTag },
-    { title: 'Vincular Publicaciones', desc: 'Vincular catálogo con Mercado Libre, Amazon y Shopify', href: '/almacen/canales/importar', category: 'Inventario', icon: IconTag },
+    { title: 'Códigos de Proveedor', desc: 'Asignar códigos de catálogo a cada proveedor sin alterar SKUs', href: '/compras/proveedores/codigos', category: 'Inventario', icon: IconBarcode },
+    { title: 'Vincular Publicaciones', desc: 'Vincular catálogo con Mercado Libre, Amazon y Shopify', href: '/almacen/canales/importar', category: 'Inventario', icon: IconLinkChain },
     { title: 'Stock Mercado Libre', desc: 'Monitoreo de existencias publicadas en MeLi', href: '/almacen/canales/mercado-libre/stock', category: 'Inventario', icon: IconMeli },
-    { title: 'Comparar ML', desc: 'Comparativa de precios y competidores en ML', href: '/ml/compare', category: 'Inventario', icon: IconMeli },
-    { title: 'Llantas Compuestas', desc: 'Combos de 2 y 4 llantas', href: '/productos', category: 'Inventario', icon: IconPuzzle },
-    { title: 'Fórmulas de Precios', desc: 'Reglas y márgenes para cálculo de precios', href: '/price-rules', category: 'Inventario', icon: IconChart },
-    { title: 'Importar Excel', desc: 'Carga masiva de inventario y listas', href: '/importar-excel', category: 'Inventario', icon: IconBox },
-    { title: 'Etiquetas Mercado Libre', desc: 'Impresión térmica ZPL / PDF de envíos', href: '/mercado-libre/etiquetas', category: 'Mercado Libre', icon: IconTag },
-    { title: 'Preguntas de Productos', desc: 'Respuestas rápidas a clientes en ML', href: '/meli/preguntas', category: 'Mercado Libre', icon: IconMessage },
-    { title: 'Mensajería Posventa', desc: 'Chats con compradores después de su compra', href: '/meli/mensajeria', category: 'Mercado Libre', icon: IconMessage },
-    { title: 'Reclamos ML', desc: 'Gestión y resolución de disputas', href: '/meli-claims', category: 'Mercado Libre', icon: IconAlert },
-    { title: 'Publicaciones ML', desc: 'Listado completo de publicaciones activas', href: '/meli/publicaciones', category: 'Mercado Libre', icon: IconMeli },
-    { title: 'Meli Price Manager', desc: 'Gestión de precios dinámicos por marca', href: '/meli-price-manager', category: 'Mercado Libre', icon: IconTag },
-    { title: 'Inventario FULL', desc: 'Monitoreo de existencias en bodegas de MeLi', href: '/meli/full', category: 'Mercado Libre', icon: IconBox },
-    { title: 'Envíos FULL (Cajas 30)', desc: 'Armado de paquetes para despacho a bodega MeLi', href: '/meli/full/envios', category: 'Mercado Libre', icon: IconTruck },
-    { title: 'AMS Pedidos', desc: 'Operación central de pedidos y despachos', href: '/ams/pedidos', category: 'Operaciones', icon: IconTruck },
-    { title: 'AMS Procesar', desc: 'Escaneo y empaquetado de pedidos activos', href: '/ams/pedidos-procesar', category: 'Operaciones', icon: IconTruck },
+    { title: 'Comparar ML', desc: 'Comparativa de precios y competidores en ML', href: '/ml/compare', category: 'Inventario', icon: IconCompareScale },
+    { title: 'Llantas Compuestas', desc: 'Combos de 2 y 4 llantas', href: '/productos', category: 'Inventario', icon: IconLayersBundle },
+    { title: 'Fórmulas de Precios', desc: 'Reglas y márgenes para cálculo de precios', href: '/price-rules', category: 'Inventario', icon: IconCalculator },
+    { title: 'Importar Excel', desc: 'Carga masiva de inventario y listas', href: '/importar-excel', category: 'Inventario', icon: IconSpreadsheet },
+    { title: 'Etiquetas Mercado Libre', desc: 'Impresión térmica ZPL / PDF de envíos', href: '/mercado-libre/etiquetas', category: 'Mercado Libre', icon: IconPrinter },
+    { title: 'Preguntas de Productos', desc: 'Respuestas rápidas a clientes en ML', href: '/meli/preguntas', category: 'Mercado Libre', icon: IconQuestionCircle },
+    { title: 'Mensajería Posventa', desc: 'Chats con compradores después de su compra', href: '/meli/mensajeria', category: 'Mercado Libre', icon: IconChatDots },
+    { title: 'Reclamos ML', desc: 'Gestión y resolución de disputas', href: '/meli-claims', category: 'Mercado Libre', icon: IconCompareScale },
+    { title: 'Publicaciones ML', desc: 'Listado completo de publicaciones activas', href: '/meli/publicaciones', category: 'Mercado Libre', icon: IconStorefront },
+    { title: 'Meli Price Manager', desc: 'Gestión de precios dinámicos por marca', href: '/meli-price-manager', category: 'Mercado Libre', icon: IconPriceTag },
+    { title: 'Inventario FULL', desc: 'Monitoreo de existencias en bodegas de MeLi', href: '/meli/full', category: 'Mercado Libre', icon: IconWarehouse },
+    { title: 'Envíos FULL (Cajas 30)', desc: 'Armado de paquetes para despacho a bodega MeLi', href: '/meli/full/envios', category: 'Mercado Libre', icon: IconBoxStack },
+    { title: 'AMS Pedidos', desc: 'Operación central de pedidos y despachos', href: '/ams/pedidos', category: 'Operaciones', icon: IconClipboardList },
+    { title: 'AMS Procesar', desc: 'Escaneo y empaquetado de pedidos activos', href: '/ams/pedidos-procesar', category: 'Operaciones', icon: IconBarcodeScan },
+    { title: 'AMS Secundaria', desc: 'Pedidos y bodega secundaria', href: '/ams/pedidos-secundaria', category: 'Operaciones', icon: IconSplitRoute },
+    { title: 'AMS Mañana', desc: 'Programación de despacho al día siguiente', href: '/ams/pedidos-manana', category: 'Operaciones', icon: IconCalendarClock },
     { title: 'AMS Incidencias', desc: 'Reporte de problemas en productos o envíos', href: '/ams/incidencias', category: 'Operaciones', icon: IconAlert },
-    { title: 'Estado del Sistema', desc: 'Salud de Laravel, APIs y servidor', href: '/sistema/estado', category: 'Sistema', icon: IconGear },
-    { title: 'Colas y Tareas', desc: 'Supervisión de jobs en segundo plano', href: '/sistema/colas', category: 'Sistema', icon: IconGear },
-    { title: 'Logs del Sistema', desc: 'Registro de errores y auditoría', href: '/sistema/logs', category: 'Sistema', icon: IconGear },
-    { title: 'Acciones Rápidas', desc: 'Limpieza de caché, sincronizaciones forzadas', href: '/sistema/acciones', category: 'Sistema', icon: IconGear },
+    { title: 'Estado del Sistema', desc: 'Salud de Laravel, APIs y servidor', href: '/sistema/estado', category: 'Sistema', icon: IconActivityPulse },
+    { title: 'Colas y Tareas', desc: 'Supervisión de jobs en segundo plano', href: '/sistema/colas', category: 'Sistema', icon: IconQueue },
+    { title: 'Logs del Sistema', desc: 'Registro de errores y auditoría', href: '/sistema/logs', category: 'Sistema', icon: IconTerminal },
+    { title: 'Acciones Rápidas', desc: 'Limpieza de caché, sincronizaciones forzadas', href: '/sistema/acciones', category: 'Sistema', icon: IconBolt },
 ]
 
 function CommandPalette({ open, onClose }) {
@@ -655,7 +917,7 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                     <div className="space-y-0.5">
                         <NavItem
                             href="/almacen/productos"
-                            icon={IconBox}
+                            icon={IconDatabase}
                             active={currentPath.startsWith('/almacen/productos')}
                             onNavigate={onNavigate}
                         >
@@ -671,7 +933,7 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                         </NavItem>
                         <NavItem
                             href="/almacen/auditorias"
-                            icon={IconClipboardCheck}
+                            icon={IconShelves}
                             active={currentPath.startsWith('/almacen/auditorias')}
                             onNavigate={onNavigate}
                         >
@@ -703,7 +965,7 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                         </NavItem>
                         <NavItem
                             href="/reabastecimiento/pronostico"
-                            icon={IconChart}
+                            icon={IconTrendChart}
                             active={currentPath.startsWith('/reabastecimiento')}
                             onNavigate={onNavigate}
                         >
@@ -730,7 +992,7 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                         </NavItem>
                         <NavItem
                             href="/compras/proveedores/codigos"
-                            icon={IconTag}
+                            icon={IconBarcode}
                             active={currentPath.startsWith('/compras/proveedores/codigos') || currentPath.startsWith('/compras/codigos')}
                             onNavigate={onNavigate}
                         >
@@ -738,7 +1000,7 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                         </NavItem>
                         <NavItem
                             href="/almacen/canales/importar"
-                            icon={IconTag}
+                            icon={IconLinkChain}
                             active={
                                 currentPath.startsWith('/almacen/canales/importar') ||
                                 currentPath.startsWith('/almacen/canales/mercado-libre/importar')
@@ -757,7 +1019,7 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                         </NavItem>
                         <NavItem
                             href="/ml/compare"
-                            icon={IconChart}
+                            icon={IconCompareScale}
                             active={currentPath.startsWith('/ml/compare')}
                             onNavigate={onNavigate}
                         >
@@ -765,7 +1027,7 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                         </NavItem>
                         <NavItem
                             href="/llantas"
-                            icon={IconBox}
+                            icon={IconSingleItem}
                             active={
                                 currentPath === '/llantas' ||
                                 (currentPath.startsWith('/llantas/') && !currentPath.startsWith('/llantas/comparador'))
@@ -776,7 +1038,7 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                         </NavItem>
                         <NavItem
                             href="/llantas/comparador"
-                            icon={IconChart}
+                            icon={IconSplitColumns}
                             active={currentPath.startsWith('/llantas/comparador')}
                             onNavigate={onNavigate}
                         >
@@ -784,7 +1046,7 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                         </NavItem>
                         <NavItem
                             href="/productos"
-                            icon={IconPuzzle}
+                            icon={IconLayersBundle}
                             active={currentPath === '/productos' || currentPath.startsWith('/productos/')}
                             onNavigate={onNavigate}
                         >
@@ -792,7 +1054,7 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                         </NavItem>
                         <NavItem
                             href="/price-rules"
-                            icon={IconTag}
+                            icon={IconCalculator}
                             active={currentPath.startsWith('/price-rules')}
                             onNavigate={onNavigate}
                         >
@@ -800,7 +1062,7 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                         </NavItem>
                         <NavItem
                             href="/syscom-ml"
-                            icon={IconTag}
+                            icon={IconSyncArrows}
                             active={
                                 currentPath === '/syscom-ml' ||
                                 (currentPath.startsWith('/syscom-ml/') && !currentPath.startsWith('/syscom-ml/pedidos'))
@@ -811,7 +1073,7 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                         </NavItem>
                         <NavItem
                             href="/syscom-ml/pedidos"
-                            icon={IconTruck}
+                            icon={IconPackageDelivery}
                             active={currentPath.startsWith('/syscom-ml/pedidos')}
                             onNavigate={onNavigate}
                         >
@@ -819,7 +1081,7 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                         </NavItem>
                         <NavItem
                             href="/importar-excel"
-                            icon={IconBox}
+                            icon={IconSpreadsheet}
                             active={currentPath.startsWith('/importar-excel')}
                             onNavigate={onNavigate}
                         >
@@ -837,7 +1099,7 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                 <div className="space-y-0.5">
                     <NavItem
                         href="/mercado-libre/etiquetas"
-                        icon={IconTag}
+                        icon={IconPrinter}
                         active={currentPath.startsWith('/mercado-libre/etiquetas')}
                         onNavigate={onNavigate}
                     >
@@ -845,7 +1107,7 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                     </NavItem>
                     <NavItem
                         href="/meli/preguntas"
-                        icon={IconMessage}
+                        icon={IconQuestionCircle}
                         active={currentPath.startsWith('/meli/preguntas')}
                         badge={pendingQuestions > 0 ? (pendingQuestions > 99 ? '99+' : pendingQuestions) : null}
                         onNavigate={onNavigate}
@@ -854,7 +1116,7 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                     </NavItem>
                     <NavItem
                         href="/meli/mensajeria"
-                        icon={IconMessage}
+                        icon={IconChatDots}
                         active={currentPath.startsWith('/meli/mensajeria')}
                         onNavigate={onNavigate}
                     >
@@ -862,7 +1124,7 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                     </NavItem>
                     <NavItem
                         href="/meli-claims"
-                        icon={IconAlert}
+                        icon={IconCompareScale}
                         active={currentPath.startsWith('/meli-claims')}
                         onNavigate={onNavigate}
                     >
@@ -870,7 +1132,7 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                     </NavItem>
                     <NavItem
                         href="/meli/publicaciones"
-                        icon={IconMeli}
+                        icon={IconStorefront}
                         active={currentPath.startsWith('/meli/publicaciones')}
                         onNavigate={onNavigate}
                     >
@@ -881,7 +1143,7 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                         <>
                             <NavItem
                                 href="/meli-price-manager"
-                                icon={IconTag}
+                                icon={IconPriceTag}
                                 active={currentPath === '/meli-price-manager'}
                                 onNavigate={onNavigate}
                             >
@@ -889,7 +1151,7 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                             </NavItem>
                             <NavItem
                                 href="/meli-price-manager/brands"
-                                icon={IconTag}
+                                icon={IconBadgeCheck}
                                 active={currentPath.startsWith('/meli-price-manager/brands')}
                                 onNavigate={onNavigate}
                             >
@@ -897,7 +1159,7 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                             </NavItem>
                             <NavItem
                                 href="/meli-price-manager/scheduled-discounts"
-                                icon={IconTag}
+                                icon={IconCalendarDiscount}
                                 active={currentPath.startsWith('/meli-price-manager/scheduled-discounts')}
                                 onNavigate={onNavigate}
                             >
@@ -905,7 +1167,7 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                             </NavItem>
                             <NavItem
                                 href="/meli-price-manager/uncategorized"
-                                icon={IconAlert}
+                                icon={IconFolderSearch}
                                 active={currentPath.startsWith('/meli-price-manager/uncategorized')}
                                 onNavigate={onNavigate}
                             >
@@ -916,7 +1178,7 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
 
                     <NavItem
                         href="/meli/full"
-                        icon={IconBox}
+                        icon={IconWarehouse}
                         active={currentPath === '/meli/full'}
                         onNavigate={onNavigate}
                     >
@@ -924,7 +1186,7 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                     </NavItem>
                     <NavItem
                         href="/meli/full/envios"
-                        icon={IconTruck}
+                        icon={IconBoxStack}
                         active={currentPath.startsWith('/meli/full/envios')}
                         onNavigate={onNavigate}
                     >
@@ -941,7 +1203,7 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                 <div className="space-y-0.5">
                     <NavItem
                         href="/ams/pedidos"
-                        icon={IconTruck}
+                        icon={IconClipboardList}
                         active={currentPath.startsWith('/ams/pedidos')}
                         onNavigate={onNavigate}
                     >
@@ -949,7 +1211,7 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                     </NavItem>
                     <NavItem
                         href="/ams/pedidos-procesar"
-                        icon={IconTruck}
+                        icon={IconBarcodeScan}
                         active={currentPath.startsWith('/ams/pedidos-procesar')}
                         onNavigate={onNavigate}
                     >
@@ -957,7 +1219,7 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                     </NavItem>
                     <NavItem
                         href="/ams/pedidos-secundaria"
-                        icon={IconTruck}
+                        icon={IconSplitRoute}
                         active={currentPath.startsWith('/ams/pedidos-secundaria')}
                         onNavigate={onNavigate}
                     >
@@ -965,7 +1227,7 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                     </NavItem>
                     <NavItem
                         href="/ams/pedidos-manana"
-                        icon={IconTruck}
+                        icon={IconCalendarClock}
                         active={currentPath.startsWith('/ams/pedidos-manana')}
                         onNavigate={onNavigate}
                     >
@@ -984,7 +1246,7 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                         <>
                             <NavItem
                                 href="/almacen/canales"
-                                icon={IconTag}
+                                icon={IconLinkChain}
                                 active={currentPath.startsWith('/almacen/canales')}
                                 onNavigate={onNavigate}
                             >
@@ -992,7 +1254,7 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                             </NavItem>
                             <NavItem
                                 href="/almacen/canales/importar"
-                                icon={IconTag}
+                                icon={IconLinkChain}
                                 active={
                                     currentPath.startsWith('/almacen/canales/importar') ||
                                     currentPath.startsWith('/almacen/canales/mercado-libre/importar')
@@ -1011,7 +1273,7 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                             </NavItem>
                             <NavItem
                                 href="/reabastecimiento/pronostico"
-                                icon={IconChart}
+                                icon={IconTrendChart}
                                 active={currentPath.startsWith('/reabastecimiento')}
                                 onNavigate={onNavigate}
                             >
@@ -1039,7 +1301,7 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                     <div className="space-y-0.5">
                         <NavItem
                             href="/sistema/estado"
-                            icon={IconGear}
+                            icon={IconActivityPulse}
                             active={currentPath.startsWith('/sistema/estado')}
                             onNavigate={onNavigate}
                         >
@@ -1047,7 +1309,7 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                         </NavItem>
                         <NavItem
                             href="/sistema/colas"
-                            icon={IconGear}
+                            icon={IconQueue}
                             active={currentPath.startsWith('/sistema/colas')}
                             onNavigate={onNavigate}
                         >
@@ -1055,7 +1317,7 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                         </NavItem>
                         <NavItem
                             href="/sistema/logs"
-                            icon={IconGear}
+                            icon={IconTerminal}
                             active={currentPath.startsWith('/sistema/logs')}
                             onNavigate={onNavigate}
                         >
@@ -1063,7 +1325,7 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                         </NavItem>
                         <NavItem
                             href="/sistema/acciones"
-                            icon={IconGear}
+                            icon={IconBolt}
                             active={currentPath.startsWith('/sistema/acciones')}
                             onNavigate={onNavigate}
                         >
@@ -1180,8 +1442,8 @@ export default function AppShell({ title = 'Dashboard', children }) {
                     )}
 
                     {/* DESKTOP SIDEBAR */}
-                    <aside className="hidden w-72 shrink-0 border-r border-slate-200/80 bg-white lg:block dark:border-neutral-800/80 dark:bg-neutral-900">
-                        <div className="flex h-screen sticky top-0 flex-col p-4">
+                    <aside className="hidden lg:flex lg:flex-col lg:w-72 lg:min-w-[18rem] lg:max-w-[18rem] shrink-0 border-r border-slate-200/80 bg-white dark:border-neutral-800/80 dark:bg-neutral-900">
+                        <div className="sticky top-0 flex h-screen w-72 min-w-[18rem] max-w-[18rem] flex-col p-4">
                             <SidebarBrand />
 
                             <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto pr-1">
@@ -1199,7 +1461,7 @@ export default function AppShell({ title = 'Dashboard', children }) {
                     </aside>
 
                     {/* MAIN CONTENT AREA */}
-                    <main className="min-w-0 flex-1">
+                    <main className="min-w-0 flex-1 overflow-x-hidden">
                         {/* TOPBAR (Sticky Glassmorphism) */}
                         <header className="sticky top-0 z-30 flex h-16 items-center justify-between border-b border-slate-200/80 bg-white/85 px-4 backdrop-blur-md sm:px-6 dark:border-neutral-800/80 dark:bg-neutral-900/85">
                             {/* Left: Mobile trigger & breadcrumb / page title */}
