@@ -454,7 +454,7 @@ class ProfitabilityService
                 return 'llantas';
             }
 
-            if (isset($this->preloadedData['meliPubsWithLlanta'][$mlm]) || MeliPublication::query()->where('mlm', $mlm)->whereNotNull('llanta_id')->exists()) {
+            if (isset($this->preloadedData['meliPubsWithLlanta'][$mlm]) || MeliPublication::query()->where('mlm', $mlm)->whereHas('llanta')->exists()) {
                 $this->orderChannelCache[$orderId] = 'llantas';
 
                 return 'llantas';
@@ -587,7 +587,7 @@ class ProfitabilityService
             : collect();
 
         $this->preloadedData['meliPubsWithLlanta'] = ! empty($uniqueMlms)
-            ? MeliPublication::query()->whereIn('mlm', $uniqueMlms)->whereNotNull('llanta_id')->pluck('mlm')->flip()->all()
+            ? MeliPublication::query()->whereIn('mlm', $uniqueMlms)->whereHas('llanta')->pluck('mlm')->flip()->all()
             : [];
     }
 
