@@ -346,6 +346,23 @@ class ProfitabilityTest extends TestCase
             'unit_price' => 250.0,
         ]);
 
+        // 4. Orden Belleza / SBS con palabra "Neumático" en título (Cepillo Termix Raqueta Neumático)
+        $orderBrush = MeliOrder::create([
+            'order_id' => '2000019164959234',
+            'status' => 'paid',
+            'shipping_status' => 'ready_to_ship',
+            'raw' => ['total_amount' => 469.0],
+            'created_at' => now(),
+        ]);
+        MeliOrderItem::create([
+            'meli_order_id' => $orderBrush->id,
+            'item_id' => 'MLM99888',
+            'title' => 'Cepillo Termix Raqueta Neumático Gomoso Profesional',
+            'sku' => 'TXPRAQU',
+            'quantity' => 1,
+            'unit_price' => 469.0,
+        ]);
+
         /** @var ProfitabilityService $service */
         $service = app(ProfitabilityService::class);
 
@@ -353,21 +370,23 @@ class ProfitabilityTest extends TestCase
         $this->assertSame('syscom', $service->resolveOrderChannel($orderSyscom));
         $this->assertSame('llantas', $service->resolveOrderChannel($orderLlanta));
         $this->assertSame('otro', $service->resolveOrderChannel($orderBeauty));
+        $this->assertSame('otro', $service->resolveOrderChannel($orderBrush));
 
         // Consultar resumen con filtro por defecto ('all' = SYSCOM + Llantas)
         $summary = $service->getSummary(['period' => 'hoy']);
 
-        // Debe contener únicamente las 2 órdenes de SYSCOM y Llantas, excluyendo la de belleza
+        // Debe contener únicamente las 2 órdenes de SYSCOM y Llantas, excluyendo las 2 de belleza
         $this->assertSame(2, $summary['metrics']['total_orders_count']);
         $this->assertSame(2, $summary['metrics']['channel_counts']['all']);
         $this->assertSame(1, $summary['metrics']['channel_counts']['syscom']);
         $this->assertSame(1, $summary['metrics']['channel_counts']['llantas']);
-        $this->assertSame(1, $summary['metrics']['channel_counts']['otro']);
+        $this->assertSame(2, $summary['metrics']['channel_counts']['otro']);
 
-        // Las órdenes paginadas no deben incluir el producto de belleza
+        // Las órdenes paginadas no deben incluir productos de belleza
         $orderSkus = collect($summary['orders']->items())->pluck('sku')->all();
         $this->assertContains('SYS-CAM-01', $orderSkus);
         $this->assertContains('LL-185-65-15', $orderSkus);
         $this->assertNotContains('WELLA-71-60ML', $orderSkus);
+        $this->assertNotContains('TXPRAQU', $orderSkus);
     }
 }

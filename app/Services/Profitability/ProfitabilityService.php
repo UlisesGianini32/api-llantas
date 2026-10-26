@@ -2,7 +2,10 @@
 
 namespace App\Services\Profitability;
 
+use App\Models\InventoryChannelLink;
+use App\Models\InventoryProduct;
 use App\Models\Llanta;
+use App\Models\LlantaSkuAlias;
 use App\Models\MeliAccount;
 use App\Models\MeliOrder;
 use App\Models\MeliOrderItem;
@@ -720,16 +723,32 @@ class ProfitabilityService
                 return 'llantas';
             }
 
-            if (isset($this->preloadedData['compuestosByMlm'][$mlm]) || ProductoCompuesto::query()->where('mlm', $mlm)->exists()) {
+            if (isset($this->preloadedData['compuestosByMlm'][$mlm]) || ($mlm !== '' && ProductoCompuesto::query()->where('mlm', $mlm)->exists())) {
                 $this->orderChannelCache[$orderId] = 'llantas';
 
                 return 'llantas';
             }
 
-            if (isset($this->preloadedData['meliPubsWithLlanta'][$mlm]) || MeliPublication::query()->where('mlm', $mlm)->whereHas('llanta')->exists()) {
+            if ($sku !== '' && (isset($this->preloadedData['compuestosBySku'][$sku]) || ProductoCompuesto::query()->where('sku', $sku)->exists())) {
                 $this->orderChannelCache[$orderId] = 'llantas';
 
                 return 'llantas';
+            }
+
+            if (isset($this->preloadedData['meliPubsWithLlanta'][$mlm]) || ($mlm !== '' && MeliPublication::query()->where('mlm', $mlm)->whereHas('llanta')->exists())) {
+                $this->orderChannelCache[$orderId] = 'llantas';
+
+                return 'llantas';
+            }
+
+            // 3. Si pertenece al catálogo maestro de almacén / belleza SBS (InventoryProduct o InventoryChannelLink), excluir como 'otro'
+            if (
+                ($sku !== '' && isset($this->preloadedData['inventorySkus'][$sku])) ||
+                ($mlm !== '' && isset($this->preloadedData['inventoryMlms'][$mlm]))
+            ) {
+                $this->orderChannelCache[$orderId] = 'otro';
+
+                return 'otro';
             }
         }
 
@@ -738,16 +757,20 @@ class ProfitabilityService
             $title = mb_strtolower((string) $item->title);
             $sku = mb_strtolower((string) $item->sku);
 
-            // 1. Detección de Llantas / Neumáticos / Rodados
+            // 0. Descartar inmediatamente artículos de belleza, peluquería, estética o barbería (ej. "Cepillo Termix Raqueta Neumático")
+            if ($this->isBeautyOrSalonItem($title, $sku)) {
+                $this->orderChannelCache[$orderId] = 'otro';
+
+                return 'otro';
+            }
+
+            // 1. Detección estricta de Llantas Automotrices (palabra llanta/llantas o medida de llanta ej. 205/55R16)
             if (
                 str_contains($title, 'llanta') ||
                 str_contains($title, 'llantas') ||
-                str_contains($title, 'neumatico') ||
-                str_contains($title, 'neumático') ||
-                str_contains($title, 'neumaticos') ||
-                str_contains($title, 'neumáticos') ||
-                str_contains($title, 'rin ') ||
-                preg_match('/\d{3}\/\d{2}\s*[rR]\s*\d{2}/', $title)
+                str_starts_with($sku, 'llanta') ||
+                str_starts_with($sku, 'll-') ||
+                preg_match('/\b\d{2,3}\/\d{2}\s*[zZ]?[rR]\s*\d{2}\b/', $title)
             ) {
                 $this->orderChannelCache[$orderId] = 'llantas';
 
@@ -782,6 +805,134 @@ class ProfitabilityService
         $this->orderChannelCache[$orderId] = 'otro';
 
         return 'otro';
+    }
+
+    /**
+     * Detecta si el título o SKU corresponde a un producto de belleza, estética, peluquería o barbería (SBS),
+     * evitando falsos positivos como "Cepillo Termix Raqueta Neumático".
+     */
+    protected function isBeautyOrSalonItem(string $title, string $sku): bool
+    {
+        $beautyKeywords = [
+            'cepillo',
+            'termix',
+            'raqueta',
+            'peine',
+            'peineta',
+            'secadora',
+            'plancha',
+            'alaciadora',
+            'rizadora',
+            'tenaza',
+            'ferro',
+            'tinte',
+            'shampoo',
+            'champú',
+            'champu',
+            'acondicionador',
+            'mascarilla',
+            'ampolleta',
+            'capilar',
+            'cabello',
+            'pelo',
+            'barba',
+            'barber',
+            'barbería',
+            'barberia',
+            'estética',
+            'estetica',
+            'salón',
+            'estilista',
+            'wahl',
+            'babyliss',
+            'andis',
+            'oster',
+            'jrl',
+            'stylecraft',
+            'wella',
+            'koleston',
+            'igora',
+            'schwarzkopf',
+            'loreal',
+            'l\'oreal',
+            'l\'oréal',
+            'revlon',
+            'salerm',
+            'alfaparf',
+            'pravana',
+            'olaplex',
+            'hidracolor',
+            'kuul',
+            'annonce',
+            'kokoro',
+            'moroccanoil',
+            'redken',
+            'matrix',
+            'biolage',
+            'joico',
+            'paul mitchell',
+            'nioxin',
+            'fanola',
+            'framesi',
+            'tec italy',
+            'avivah',
+            'nutrapel',
+            'reelance',
+            'manicure',
+            'pedicure',
+            'uñas',
+            'esmalte',
+            'acrílico',
+            'acrilico',
+            'gelish',
+            'polygel',
+            'monómero',
+            'monomero',
+            'pestañas',
+            'cejas',
+            'depilación',
+            'depilacion',
+            'oxidante',
+            'peróxido',
+            'peroxido',
+            'decolorante',
+            'matizador',
+            'keratina',
+            'queratina',
+            'alaciado',
+            'loción',
+            'locion',
+            'tónico',
+            'tonico',
+            'serum',
+            'sérum',
+            'fijador',
+            'pomada',
+            'tijera',
+            'navaja',
+            'atomizador',
+            'rociador',
+            'cerdas',
+            'jabalí',
+            'jabali',
+            'difusor',
+            'maquillaje',
+            'facial',
+            'corporal',
+            'exfoliante',
+        ];
+
+        foreach ($beautyKeywords as $kw) {
+            if (str_contains($title, $kw)) {
+                return true;
+            }
+        }
+
+        if (str_starts_with($sku, 'txp') || str_starts_with($sku, 'wella')) {
+            return true;
+        }
+
+        return false;
     }
 
     /**
@@ -918,9 +1069,41 @@ class ProfitabilityService
             ? ProductoCompuesto::query()->whereIn('mlm', $uniqueMlms)->with('llanta')->get()->keyBy('mlm')
             : collect();
 
+        try {
+            $this->preloadedData['compuestosBySku'] = ! empty($uniqueSkus)
+                ? ProductoCompuesto::query()->whereIn('sku', $uniqueSkus)->with('llanta')->get()->keyBy('sku')
+                : collect();
+        } catch (\Throwable) {
+            $this->preloadedData['compuestosBySku'] = collect();
+        }
+
+        try {
+            $this->preloadedData['llantaAliasBySku'] = ! empty($uniqueSkus)
+                ? LlantaSkuAlias::query()->whereIn('sku_alias', $uniqueSkus)->with('llanta')->get()->keyBy('sku_alias')
+                : collect();
+        } catch (\Throwable) {
+            $this->preloadedData['llantaAliasBySku'] = collect();
+        }
+
         $this->preloadedData['meliPubsWithLlanta'] = ! empty($uniqueMlms)
             ? MeliPublication::query()->whereIn('mlm', $uniqueMlms)->whereHas('llanta')->pluck('mlm')->flip()->all()
             : [];
+
+        try {
+            $this->preloadedData['inventorySkus'] = ! empty($uniqueSkus)
+                ? InventoryProduct::query()->whereIn('sku', $uniqueSkus)->pluck('sku')->flip()->all()
+                : [];
+        } catch (\Throwable) {
+            $this->preloadedData['inventorySkus'] = [];
+        }
+
+        try {
+            $this->preloadedData['inventoryMlms'] = ! empty($uniqueMlms)
+                ? InventoryChannelLink::query()->whereIn('remote_listing_id', $uniqueMlms)->pluck('remote_listing_id')->flip()->all()
+                : [];
+        } catch (\Throwable) {
+            $this->preloadedData['inventoryMlms'] = [];
+        }
 
         try {
             $this->preloadedData['meliAccountsById'] = ! empty($uniqueAccountIds)
@@ -1136,6 +1319,13 @@ class ProfitabilityService
             $l = $this->preloadedData['llantasBySku']->get($sku);
             if ($l) {
                 return $l;
+            }
+        }
+
+        if ($sku !== '' && isset($this->preloadedData['llantaAliasBySku'])) {
+            $alias = $this->preloadedData['llantaAliasBySku']->get($sku);
+            if ($alias && $alias->llanta) {
+                return $alias->llanta;
             }
         }
 
