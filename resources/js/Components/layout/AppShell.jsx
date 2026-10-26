@@ -136,6 +136,14 @@ function IconTruck({ className = 'h-4 w-4' }) {
     )
 }
 
+function IconCurrency({ className = 'h-4 w-4' }) {
+    return (
+        <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v12m-3-2.818l.879.659c1.171.879 3.07.879 4.242 0 1.172-.879 1.172-2.303 0-3.182C13.536 12.219 12.768 12 12 12c-.725 0-1.45-.22-2.003-.659-1.106-.879-1.106-2.303 0-3.182s2.9-.879 4.006 0l.415.33M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+        </svg>
+    )
+}
+
 function IconGear({ className = 'h-4 w-4' }) {
     return (
         <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
@@ -234,6 +242,7 @@ function NavItem({
    ========================================================================= */
 const ALL_SEARCH_ITEMS = [
     { title: 'Dashboard', desc: 'Resumen general del inventario y ventas', href: '/dashboard', category: 'General', icon: IconDashboard },
+    { title: 'Rentabilidad y Comisiones', desc: 'Márgenes reales, deducciones ML/SYSCOM y propuesta de comisiones', href: '/rentabilidad-comisiones', category: 'General', icon: IconCurrency },
     { title: 'Punto de Venta (POS)', desc: 'Cobro rápido, tickets y venta mostrador', href: '/pos', category: 'General', icon: IconPOS },
     { title: 'Clientes y Créditos', desc: 'Directorio de estilistas, plazos 7/15/30 y pagarés', href: '/pos/clientes', category: 'General', icon: IconUsers },
     { title: 'Almacén (Catálogo maestro)', desc: 'Productos, SKU, códigos de barra y stock', href: '/almacen/productos', category: 'Inventario', icon: IconBox },
@@ -599,6 +608,14 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                         onNavigate={onNavigate}
                     >
                         Dashboard
+                    </NavItem>
+                    <NavItem
+                        href="/rentabilidad-comisiones"
+                        icon={IconCurrency}
+                        active={currentPath.startsWith('/rentabilidad-comisiones')}
+                        onNavigate={onNavigate}
+                    >
+                        Rentabilidad y Comisiones
                     </NavItem>
                     <NavItem
                         href="/notificaciones"
