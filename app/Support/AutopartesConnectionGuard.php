@@ -141,14 +141,24 @@ final class AutopartesConnectionGuard
         $port = trim((string) ($config['port'] ?? ''));
         $username = trim((string) ($config['username'] ?? ''));
 
+        // Prohibir explícitamente DB_CONNECTION=autopartes en el entorno operativo
+        $rawEnvConnection = self::readRawEnv('DB_CONNECTION');
+        if ($rawEnvConnection !== null && strtolower(trim($rawEnvConnection)) === self::CONNECTION_NAME) {
+            throw new RuntimeException(
+                "AutopartesConnectionGuard bloqueó el acceso: DB_CONNECTION no puede ser 'autopartes'."
+            );
+        }
+
+        // Prohibir database.default='autopartes' salvo cuando el migrador oficial de Laravel esté
+        // ejecutando legítimamente migraciones dedicadas de Autopartes con --database=autopartes.
         $defaultName = (string) config('database.default', '');
-        if ($defaultName === self::CONNECTION_NAME) {
+        $isMigratorForAutopartes = self::isMigratorRunningForAutopartes();
+        if ($defaultName === self::CONNECTION_NAME && ! $isMigratorForAutopartes) {
             throw new RuntimeException(
                 "AutopartesConnectionGuard bloqueó el acceso: database.default no puede ser 'autopartes'."
             );
         }
 
-        $defaultConfig = config("database.connections.{$defaultName}");
         $strictEnv = function_exists('app') && app()->bound('env') && app()->environment(['pilot', 'production']);
 
         if (in_array($driver, ['mariadb', 'mysql'], true) && $strictEnv) {
@@ -164,18 +174,25 @@ final class AutopartesConnectionGuard
             }
         }
 
-        if (is_array($defaultConfig)) {
-            $defaultDriver = strtolower(trim((string) ($defaultConfig['driver'] ?? '')));
-            $defaultDb = trim((string) ($defaultConfig['database'] ?? ''));
-            $defaultHost = strtolower(trim((string) ($defaultConfig['host'] ?? '')));
-            $defaultPort = trim((string) ($defaultConfig['port'] ?? ''));
-            $defaultUser = trim((string) ($defaultConfig['username'] ?? ''));
+        // Validar de forma independiente contra las conexiones operativas para asegurar aislamiento estricto
+        $operationalConnections = self::resolveOperationalConnectionsToCheck();
+        foreach ($operationalConnections as $opName => $opConfig) {
+            if (! is_array($opConfig)) {
+                continue;
+            }
 
-            if (in_array($driver, ['mariadb', 'mysql'], true) && in_array($defaultDriver, ['mariadb', 'mysql'], true)) {
-                $sameServer = $host === $defaultHost && $port === $defaultPort;
-                if ($sameServer && strcasecmp($database, $defaultDb) === 0) {
+            $opDriver = strtolower(trim((string) ($opConfig['driver'] ?? '')));
+            $opDb = trim((string) ($opConfig['database'] ?? ''));
+            $opHost = strtolower(trim((string) ($opConfig['host'] ?? '')));
+            $opPort = trim((string) ($opConfig['port'] ?? ''));
+            $opUser = trim((string) ($opConfig['username'] ?? ''));
+
+            if (in_array($driver, ['mariadb', 'mysql'], true) && in_array($opDriver, ['mariadb', 'mysql'], true)) {
+                $sameServer = ($host === $opHost || ($host === 'localhost' && $opHost === '127.0.0.1') || ($host === '127.0.0.1' && $opHost === 'localhost'))
+                    && $port === $opPort;
+                if ($sameServer && strcasecmp($database, $opDb) === 0) {
                     throw new RuntimeException(
-                        "AutopartesConnectionGuard bloqueó el acceso: 'autopartes' comparte base de datos ('{$database}') con la conexión predeterminada '{$defaultName}'."
+                        "AutopartesConnectionGuard bloqueó el acceso: 'autopartes' comparte base de datos ('{$database}') con la conexión predeterminada '{$opName}'."
                     );
                 }
 
@@ -183,17 +200,17 @@ final class AutopartesConnectionGuard
                 if (
                     $sameServer
                     && $strictEnv
-                    && $defaultUser !== ''
+                    && $opUser !== ''
                     && $username !== ''
-                    && strcasecmp($username, $defaultUser) === 0
+                    && strcasecmp($username, $opUser) === 0
                 ) {
                     throw new RuntimeException(
-                        "AutopartesConnectionGuard bloqueó el acceso: 'autopartes' no puede compartir el mismo usuario SQL ('{$username}') con '{$defaultName}' en el mismo servidor."
+                        "AutopartesConnectionGuard bloqueó el acceso: 'autopartes' no puede compartir el mismo usuario SQL ('{$username}') con '{$opName}' en el mismo servidor."
                     );
                 }
             }
 
-            if ($driver === 'sqlite' && $defaultDriver === 'sqlite' && $database !== ':memory:' && strcasecmp($database, $defaultDb) === 0) {
+            if ($driver === 'sqlite' && $opDriver === 'sqlite' && $database !== ':memory:' && $opDb !== ':memory:' && strcasecmp($database, $opDb) === 0) {
                 throw new RuntimeException(
                     "AutopartesConnectionGuard bloqueó el acceso: 'autopartes' no puede reutilizar el archivo SQLite operativo ('{$database}')."
                 );
@@ -217,6 +234,27 @@ final class AutopartesConnectionGuard
      */
     public static function assertSafeForSchemaChange(?string $connectionName = null): array
     {
+        // 1. Bloquear si el migrador oficial está ejecutándose sin --database=autopartes para no alterar ni registrar en la base operativa
+        if (self::isMigratorActive() && function_exists('app') && app()->bound('migrator')) {
+            try {
+                $migrator = app('migrator');
+                $migratorConn = method_exists($migrator, 'getConnection')
+                    ? (string) $migrator->getConnection()
+                    : '';
+
+                if ($migratorConn !== self::CONNECTION_NAME) {
+                    $operationalTarget = self::resolveOperationalConnectionName();
+                    throw new RuntimeException(
+                        "AutopartesConnectionGuard bloqueó la migración: el migrador está operando sobre la conexión '{$operationalTarget}' en lugar de 'autopartes'. Las migraciones de Autopartes deben ejecutarse con --database=autopartes para no alterar el esquema ni registrar migraciones en la base operativa."
+                    );
+                }
+            } catch (Throwable $e) {
+                if ($e instanceof RuntimeException && str_contains($e->getMessage(), 'AutopartesConnectionGuard')) {
+                    throw $e;
+                }
+            }
+        }
+
         $info = self::assertDedicatedConnectionSafe($connectionName);
 
         if (function_exists('app') && app()->bound('env')) {
@@ -229,6 +267,12 @@ final class AutopartesConnectionGuard
             if (app()->environment('staging') && ! in_array($info['database'], [self::STAGING_DATABASE, self::STAGING_TEST_DATABASE], true)) {
                 throw new RuntimeException(
                     "AutopartesConnectionGuard rechazó migración en staging: base '{$info['database']}' no autorizada."
+                );
+            }
+
+            if (app()->environment('production') && in_array($info['driver'], ['mariadb', 'mysql'], true) && $info['database'] !== self::PRODUCTION_DATABASE) {
+                throw new RuntimeException(
+                    "AutopartesConnectionGuard rechazó migración en producción: se requiere '".self::PRODUCTION_DATABASE."', recibido '{$info['database']}'."
                 );
             }
         }
@@ -246,9 +290,9 @@ final class AutopartesConnectionGuard
         $info = self::assertDedicatedConnectionSafe(self::CONNECTION_NAME);
         $resolved = $connection ?? DB::connection(self::CONNECTION_NAME);
         $resolvedName = method_exists($resolved, 'getName') ? (string) $resolved->getName() : '';
-        $defaultName = (string) config('database.default', '');
+        $operationalName = self::resolveOperationalConnectionName();
 
-        if ($resolvedName !== self::CONNECTION_NAME || $resolvedName === $defaultName) {
+        if ($resolvedName !== self::CONNECTION_NAME || ($operationalName !== '' && $resolvedName === $operationalName)) {
             throw new RuntimeException(
                 "AutopartesConnectionGuard bloqueó transacción de inventario: se ejecutó sobre conexión '{$resolvedName}' en lugar de 'autopartes'."
             );
@@ -273,16 +317,17 @@ final class AutopartesConnectionGuard
             );
         }
 
-        // En entornos reales (fuera de RefreshDatabase en unit tests), prohibir transacciones abiertas simultáneas en default durante mutaciones de inventario.
+        // En entornos reales (fuera de RefreshDatabase en unit tests), prohibir transacciones abiertas simultáneas en la conexión principal durante mutaciones de inventario.
         if (
             $requireActiveTransaction
             && (! function_exists('app') || ! app()->runningUnitTests())
-            && $defaultName !== ''
+            && $operationalName !== ''
+            && $operationalName !== self::CONNECTION_NAME
         ) {
-            $defaultConn = DB::connection($defaultName);
-            if (method_exists($defaultConn, 'transactionLevel') && $defaultConn->transactionLevel() > 0) {
+            $operationalConn = DB::connection($operationalName);
+            if (method_exists($operationalConn, 'transactionLevel') && $operationalConn->transactionLevel() > 0) {
                 throw new RuntimeException(
-                    "AutopartesConnectionGuard bloqueó mutación de inventario: existe una transacción abierta sobre la conexión principal '{$defaultName}'."
+                    "AutopartesConnectionGuard bloqueó mutación de inventario: existe una transacción abierta sobre la conexión principal '{$operationalName}'."
                 );
             }
         }
@@ -372,8 +417,10 @@ final class AutopartesConnectionGuard
             );
         }
 
-        $defaultName = (string) config('database.default', '');
-        $defaultDb = trim((string) config("database.connections.{$defaultName}.database", ''));
+        $operationalName = self::resolveOperationalConnectionName();
+        $defaultDb = $operationalName !== self::CONNECTION_NAME
+            ? trim((string) config("database.connections.{$operationalName}.database", ''))
+            : '';
 
         foreach ($grants as $grantLine) {
             $line = trim((string) $grantLine);
@@ -496,6 +543,98 @@ final class AutopartesConnectionGuard
         $path = parse_url($url, PHP_URL_PATH);
 
         return is_string($path) ? ltrim(trim($path), '/') : '';
+    }
+
+    public static function isMigratorActive(): bool
+    {
+        foreach (debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS) as $frame) {
+            if (($frame['class'] ?? '') === 'Illuminate\Database\Migrations\Migrator') {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    public static function isMigratorRunningForAutopartes(): bool
+    {
+        if (! self::isMigratorActive()) {
+            return false;
+        }
+
+        if (! function_exists('app') || ! app()->bound('migrator')) {
+            return false;
+        }
+
+        try {
+            $migrator = app('migrator');
+            $migratorConn = method_exists($migrator, 'getConnection')
+                ? (string) $migrator->getConnection()
+                : '';
+
+            return $migratorConn === self::CONNECTION_NAME;
+        } catch (Throwable) {
+            return false;
+        }
+    }
+
+    public static function resolveOperationalConnectionName(): string
+    {
+        $rawEnv = self::readRawEnv('DB_CONNECTION');
+        if ($rawEnv !== null && trim($rawEnv) !== '') {
+            $normalized = strtolower(trim($rawEnv));
+            if ($normalized === self::CONNECTION_NAME) {
+                throw new RuntimeException(
+                    "AutopartesConnectionGuard bloqueó el acceso: DB_CONNECTION no puede ser 'autopartes'."
+                );
+            }
+
+            return $normalized;
+        }
+
+        $defaultName = strtolower(trim((string) config('database.default', '')));
+        if ($defaultName !== '' && $defaultName !== self::CONNECTION_NAME) {
+            return $defaultName;
+        }
+
+        if (self::isMigratorRunningForAutopartes()) {
+            foreach (['mysql', 'mariadb', 'sqlite', 'pgsql', 'sqlsrv'] as $candidate) {
+                $cfg = config("database.connections.{$candidate}");
+                if (is_array($cfg) && ! empty($cfg['driver'])) {
+                    return $candidate;
+                }
+            }
+        }
+
+        return $defaultName;
+    }
+
+    /**
+     * @return array<string, array<string, mixed>>
+     */
+    public static function resolveOperationalConnectionsToCheck(): array
+    {
+        $connections = [];
+        $primaryOpName = self::resolveOperationalConnectionName();
+
+        if ($primaryOpName !== '' && $primaryOpName !== self::CONNECTION_NAME) {
+            $primaryConfig = config("database.connections.{$primaryOpName}");
+            if (is_array($primaryConfig)) {
+                $connections[$primaryOpName] = $primaryConfig;
+            }
+        }
+
+        foreach (['mysql', 'mariadb', 'sqlite'] as $candidate) {
+            if ($candidate === $primaryOpName) {
+                continue;
+            }
+            $candidateConfig = config("database.connections.{$candidate}");
+            if (is_array($candidateConfig) && ! empty($candidateConfig['driver'])) {
+                $connections[$candidate] = $candidateConfig;
+            }
+        }
+
+        return $connections;
     }
 
     private static function readRawEnv(string $key): ?string
