@@ -7,9 +7,9 @@ use Illuminate\Database\ConnectionResolverInterface;
 use Illuminate\Queue\Failed\CountableFailedJobProvider;
 use Illuminate\Queue\Failed\FailedJobProviderInterface;
 use Illuminate\Queue\Failed\PrunableFailedJobProvider;
-use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Date;
 use Illuminate\Support\Str;
+use RuntimeException;
 use Throwable;
 
 final class AutopartesFailedJobProvider implements FailedJobProviderInterface, PrunableFailedJobProvider, CountableFailedJobProvider
@@ -26,9 +26,9 @@ final class AutopartesFailedJobProvider implements FailedJobProviderInterface, P
 
     public function log($connection, $queue, $payload, $exception): ?string
     {
-        if ($this->isAutopartesJob($connection, $queue)) {
+        if (self::isAutopartesJob($connection, $queue)) {
             try {
-                $decoded = json_decode($payload, true);
+                $decoded = json_decode((string) $payload, true);
                 $uuid = is_array($decoded) && isset($decoded['uuid'])
                     ? (string) $decoded['uuid']
                     : (string) Str::uuid();
@@ -43,12 +43,17 @@ final class AutopartesFailedJobProvider implements FailedJobProviderInterface, P
                 ]);
 
                 return $uuid;
-            } catch (Throwable) {
-                // If the automotive_failed_jobs table is unavailable, fail-safe to default provider if present
-                if ($this->defaultProvider) {
-                    return $this->defaultProvider->log($connection, $queue, $payload, $exception);
-                }
-                return null;
+            } catch (Throwable $e) {
+                // PROHIBIDO el fallback a api_llantas.failed_jobs.
+                // Fallar de forma explícita y verificable para garantizar aislamiento físico.
+                throw new RuntimeException(
+                    "AutopartesFailedJobProvider bloqueó el registro de fallo: no se pudo escribir en '"
+                    .self::TABLE."' de la conexión dedicada '"
+                    .self::DB_CONNECTION."'. Prohibido registrar fallos de Autopartes en la base operativa 'api_llantas'. Error: "
+                    .$e->getMessage(),
+                    0,
+                    $e
+                );
             }
         }
 
@@ -57,15 +62,26 @@ final class AutopartesFailedJobProvider implements FailedJobProviderInterface, P
 
     public function ids($queue = null): array
     {
+        if ($queue !== null && self::isAutopartesJob(null, $queue)) {
+            try {
+                return $this->getAutopartesTable()
+                    ->where('queue', $queue)
+                    ->orderBy('id', 'desc')
+                    ->pluck('uuid')
+                    ->all();
+            } catch (Throwable) {
+                return [];
+            }
+        }
+
         $defaultIds = $this->defaultProvider?->ids($queue) ?? [];
 
-        if ($queue !== null && ! str_starts_with((string) $queue, self::QUEUE_NAME)) {
+        if ($queue !== null) {
             return $defaultIds;
         }
 
         try {
             $autoIds = $this->getAutopartesTable()
-                ->when(! is_null($queue), fn ($q) => $q->where('queue', $queue))
                 ->orderBy('id', 'desc')
                 ->pluck('uuid')
                 ->all();
@@ -167,7 +183,7 @@ final class AutopartesFailedJobProvider implements FailedJobProviderInterface, P
 
     public function count($connection = null, $queue = null): int
     {
-        if ($this->isAutopartesJob($connection, $queue)) {
+        if (self::isAutopartesJob($connection, $queue)) {
             try {
                 return $this->getAutopartesTable()
                     ->when($connection, fn ($b) => $b->where('connection', $connection))
@@ -194,13 +210,14 @@ final class AutopartesFailedJobProvider implements FailedJobProviderInterface, P
         return $defaultCount;
     }
 
-    private function isAutopartesJob(?string $connection, ?string $queue): bool
+    public static function isAutopartesJob(?string $connection, ?string $queue): bool
     {
-        if ($connection === self::CONNECTION_NAME) {
+        if ($connection !== null && $connection === self::CONNECTION_NAME) {
             return true;
         }
 
-        if ($queue !== null && str_starts_with($queue, self::QUEUE_NAME)) {
+        $configuredQueue = (string) config('autopartes.queue', self::QUEUE_NAME);
+        if ($queue !== null && ($queue === self::QUEUE_NAME || $queue === $configuredQueue)) {
             return true;
         }
 

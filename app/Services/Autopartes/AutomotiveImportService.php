@@ -168,11 +168,11 @@ final class AutomotiveImportService
         });
     }
 
-    public function confirm(User $actor, AutomotiveBranch $branch, AutomotiveImportRun $run, bool $retry = false): void
+    public function confirm(User $actor, AutomotiveBranch $branch, AutomotiveImportRun $run, bool $retry = false, bool $dispatchQueue = true): void
     {
         $this->access->authorize($actor, $branch, BranchCatalogAccess::IMPORT);
         abort_unless((int) $run->branch_id === (int) $branch->id, 404);
-        if (config('autopartes.queue_connection') === 'sync') {
+        if ($dispatchQueue && config('autopartes.queue_connection') === 'sync') {
             throw ValidationException::withMessages(['import' => 'Configure una cola asíncrona para autopartes.']);
         }
         $this->store->verifiedPath($run->file);
@@ -187,7 +187,7 @@ final class AutomotiveImportService
 
             return true;
         });
-        if ($changed) {
+        if ($changed && $dispatchQueue) {
             ProcessAutomotiveImport::dispatch($run->id);
         }
     }

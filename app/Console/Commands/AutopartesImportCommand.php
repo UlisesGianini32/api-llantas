@@ -116,7 +116,10 @@ class AutopartesImportCommand extends Command
             return 0;
         }
 
-        $shouldConfirm = $this->option('confirm') || $this->option('process');
+        $isDirectProcess = (bool) $this->option('process');
+        $dispatchQueue = ! $isDirectProcess;
+
+        $shouldConfirm = $this->option('confirm') || $isDirectProcess;
         if (! $shouldConfirm) {
             if (! $this->confirm("¿Desea confirmar y encolar la importación Run ID {$run->id}?", true)) {
                 $this->warn("Operación cancelada. El Run ID {$run->id} permanece en 'preview'.");
@@ -126,7 +129,7 @@ class AutopartesImportCommand extends Command
 
         $this->info("\nConfirmando importación Run ID {$run->id}...");
         try {
-            $service->confirm($user, $branch, $run);
+            $service->confirm($user, $branch, $run, retry: false, dispatchQueue: $dispatchQueue);
         } catch (Throwable $e) {
             $this->error("Error al confirmar la importación: " . $e->getMessage());
             return 1;
@@ -134,7 +137,11 @@ class AutopartesImportCommand extends Command
 
         $run->refresh();
         $this->info("Importación confirmada. Estado: {$run->status}.");
-        $this->line("Trabajo despachado a la conexión de cola: " . config('autopartes.queue_connection') . ", cola: " . config('autopartes.queue'));
+        if ($dispatchQueue) {
+            $this->line("Trabajo despachado a la conexión de cola: " . config('autopartes.queue_connection') . ", cola: " . config('autopartes.queue'));
+        } else {
+            $this->line("Modo sincrónico CLI activo: no se encolaron trabajos redundantes en " . config('autopartes.queue_connection') . ".");
+        }
 
         if ($this->option('process')) {
             $this->info("\nProcesando lotes en este proceso CLI...");
