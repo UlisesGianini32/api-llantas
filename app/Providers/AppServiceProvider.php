@@ -3,6 +3,7 @@
 namespace App\Providers;
 
 use App\Services\TelegramAlertService;
+use App\Support\AutopartesFailedJobProvider;
 use App\Support\PilotDatabaseGuard;
 use App\Support\StagingExternalHttpGuard;
 use Illuminate\Queue\Events\JobFailed;
@@ -26,6 +27,10 @@ class AppServiceProvider extends ServiceProvider
     public function boot(): void
     {
         PilotDatabaseGuard::enforceIfConfigured();
+
+        $this->app->extend('queue.failer', function ($defaultFailer, $app) {
+            return new AutopartesFailedJobProvider($defaultFailer, $app['db']);
+        });
 
         if (StagingExternalHttpGuard::shouldBlock() && ! app()->runningUnitTests()) {
             Http::preventStrayRequests();

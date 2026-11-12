@@ -11,8 +11,8 @@ return [
     'batch_size' => 100,
     'max_receipt_item_quantity' => (int) env('AUTOPARTES_MAX_RECEIPT_ITEM_QUANTITY', 5000),
     'max_adjustment_quantity' => (int) env('AUTOPARTES_MAX_ADJUSTMENT_QUANTITY', 5000),
-    'queue_connection' => env('AUTOPARTES_QUEUE_CONNECTION', 'database'),
-    'queue' => 'autopartes',
+    'queue_connection' => env('AUTOPARTES_QUEUE_CONNECTION', 'autopartes_database'),
+    'queue' => env('AUTOPARTES_QUEUE_NAME', 'autopartes'),
     'transaction_attempts' => max(1, (int) env('AUTOPARTES_DB_TX_ATTEMPTS', 3)),
     'block_external_channels' => filter_var(env('AUTOPARTES_BLOCK_EXTERNAL_CHANNELS', false), FILTER_VALIDATE_BOOLEAN),
 

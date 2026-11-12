@@ -46,6 +46,15 @@ return [
             'after_commit' => false,
         ],
 
+        'autopartes_database' => [
+            'driver' => 'database',
+            'connection' => env('AUTOPARTES_DB_CONNECTION', 'autopartes'),
+            'table' => env('AUTOPARTES_DB_QUEUE_TABLE', 'automotive_jobs'),
+            'queue' => env('AUTOPARTES_QUEUE_NAME', 'autopartes'),
+            'retry_after' => (int) env('AUTOPARTES_QUEUE_RETRY_AFTER', 180),
+            'after_commit' => false,
+        ],
+
         'beanstalkd' => [
             'driver' => 'beanstalkd',
             'host' => env('BEANSTALKD_QUEUE_HOST', 'localhost'),

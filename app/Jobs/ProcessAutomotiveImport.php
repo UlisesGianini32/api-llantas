@@ -16,8 +16,8 @@ class ProcessAutomotiveImport implements ShouldQueue
 
     public function __construct(public int $runId)
     {
-        $this->onConnection(config('autopartes.queue_connection'));
-        $this->onQueue(config('autopartes.queue'));
+        $this->onConnection(config('autopartes.queue_connection', 'autopartes_database'));
+        $this->onQueue(config('autopartes.queue', 'autopartes'));
     }
 
     public function handle(AutomotiveImportProcessor $processor): void
