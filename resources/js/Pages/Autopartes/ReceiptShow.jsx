@@ -1,6 +1,8 @@
 import { Link, router, useForm } from '@inertiajs/react'
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import CameraBarcodeScanner from '@/Components/CameraBarcodeScanner'
 import { AUTOPARTES_CAPABILITIES, hasCapability } from '@/lib/autopartesCapabilities'
+import { autopartesHttp, formatAutopartesHttpError } from '@/lib/autopartesHttp'
 import Layout, {
     IdentityBadge,
     baseUrl,
@@ -11,6 +13,7 @@ import Layout, {
     secondaryButton,
     statusLabel,
 } from './Layout'
+import ReceiptItemModal from './ReceiptItemModal'
 
 export default function ReceiptShow({
     branch,
@@ -28,12 +31,17 @@ export default function ReceiptShow({
     const canConfirm = hasCapability(capabilities, AUTOPARTES_CAPABILITIES.RECEIPT_CONFIRM)
     const canResolveIdentity = hasCapability(capabilities, AUTOPARTES_CAPABILITIES.IDENTITY_RESOLVE)
 
-    const scanForm = useForm({
-        scan_code: '',
-        quantity: 1,
-        entry_mode: 'scan',
-        notes: '',
-    })
+    // Modal & Scanner states
+    const [isCameraOpen, setIsCameraOpen] = useState(false)
+    const [isModalOpen, setIsModalOpen] = useState(false)
+    const [modalCandidate, setModalCandidate] = useState(null)
+    const [modalEntryMode, setModalEntryMode] = useState('scan')
+    const [modalScannedCode, setModalScannedCode] = useState('')
+    const [scanCodeText, setScanCodeText] = useState('')
+    const [isLookingUp, setIsLookingUp] = useState(false)
+    const [isAddingItem, setIsAddingItem] = useState(false)
+    const [scanFeedback, setScanFeedback] = useState(null)
+    const [activeDisambiguation, setActiveDisambiguation] = useState(lookupDisambiguation)
 
     const [manualQuery, setManualQuery] = useState(manualSearch || '')
     const [editingQuantities, setEditingQuantities] = useState({})
@@ -52,44 +60,151 @@ export default function ReceiptShow({
 
     const receiptUrl = `${baseUrl(branch)}/entradas/${receipt.id}`
 
-    const handleScanSubmit = e => {
-        e.preventDefault()
+    // Refocus scan input whenever modal closes or camera closes (on desktop)
+    useEffect(() => {
+        if (!isCameraOpen && !isModalOpen && scanInputRef.current) {
+            scanInputRef.current.focus()
+        }
+    }, [isCameraOpen, isModalOpen])
+
+    const performLookup = async (rawCode, mode = 'scan') => {
+        const code = String(rawCode || '').trim()
+        if (!code) return
         if (!isDraft || !canDraft) return
-        scanForm.post(`${receiptUrl}/partidas`, {
+        if (isLookingUp || isAddingItem || isModalOpen) return
+
+        setIsLookingUp(true)
+        setScanFeedback(null)
+
+        try {
+            const res = await autopartesHttp.post(`${baseUrl(branch)}/entradas/buscar-codigo`, {
+                code,
+            })
+            const data = res.data
+
+            if (data.match_status === 'not_found' || !data.candidate) {
+                if (data.requires_disambiguation && data.candidates?.length > 0) {
+                    setActiveDisambiguation(data)
+                    setScanFeedback({
+                        type: 'warning',
+                        message: data.warning || 'El código escaneado coincide con múltiples autopartes. Seleccione la correcta.',
+                    })
+                } else {
+                    setScanFeedback({
+                        type: 'error',
+                        message: data.warning || `No se encontró ninguna autoparte con el código '${code}'.`,
+                    })
+                }
+                return
+            }
+
+            if (data.match_status === 'ambiguous' || data.requires_disambiguation) {
+                setActiveDisambiguation(data)
+                setScanFeedback({
+                    type: 'warning',
+                    message: data.warning || 'Identidad ambigua o múltiples coincidencias detectadas.',
+                })
+                return
+            }
+
+            const candidate = data.candidate
+            if (!candidate.is_receivable || candidate.identity_status === 'ambiguous') {
+                setActiveDisambiguation(data)
+                setScanFeedback({
+                    type: 'warning',
+                    message: 'Esta autoparte tiene identidad ambigua o recepción restringida. Debe resolver su identidad antes de recibir existencias físicas.',
+                })
+                return
+            }
+
+            // Candidato único y recepcionable encontrado
+            setScanCodeText('')
+            setModalCandidate(candidate)
+            setModalScannedCode(code)
+            setModalEntryMode(mode)
+            setIsModalOpen(true)
+        } catch (err) {
+            setScanFeedback({
+                type: 'error',
+                message: formatAutopartesHttpError(err, `Error al consultar el código '${code}'.`),
+            })
+        } finally {
+            setIsLookingUp(false)
+        }
+    }
+
+    const handleCameraScan = decodedText => {
+        performLookup(decodedText, 'scan')
+    }
+
+    const handleScanKeyDown = e => {
+        if (e.key === 'Enter') {
+            e.preventDefault()
+            e.stopPropagation()
+            if (isLookingUp || isAddingItem || isModalOpen) return
+            performLookup(scanCodeText, 'scan')
+        }
+    }
+
+    const handleScanFormSubmit = e => {
+        e.preventDefault()
+        e.stopPropagation()
+        performLookup(scanCodeText, 'scan')
+    }
+
+    const handleSelectCandidateToModal = (candidate, mode = 'manual_assisted') => {
+        if (!isDraft || !canDraft) return
+        if (!candidate.is_receivable || candidate.identity_status === 'ambiguous') {
+            setScanFeedback({
+                type: 'warning',
+                message: 'Esta autoparte tiene identidad ambigua o recepción restringida. Debe resolver su identidad antes de recibir existencias físicas.',
+            })
+            return
+        }
+
+        setModalCandidate(candidate)
+        setModalScannedCode(candidate.scanned_code || candidate.verified_barcode || '')
+        setModalEntryMode(mode)
+        setIsModalOpen(true)
+    }
+
+    const handleModalClose = () => {
+        setIsModalOpen(false)
+        setModalCandidate(null)
+        if (!isCameraOpen && scanInputRef.current) {
+            scanInputRef.current.focus()
+        }
+    }
+
+    const handleModalAdd = payload => {
+        if (!isDraft || !canDraft || isAddingItem) return
+
+        setIsAddingItem(true)
+        router.post(`${receiptUrl}/partidas`, payload, {
             preserveScroll: true,
             onSuccess: () => {
-                scanForm.setData({
-                    scan_code: '',
-                    quantity: 1,
-                    entry_mode: 'scan',
-                    notes: '',
+                setIsModalOpen(false)
+                setModalCandidate(null)
+                setScanCodeText('')
+                setScanFeedback({
+                    type: 'success',
+                    message: `Partida agregada al borrador (+${payload.quantity} piezas).`,
                 })
-                if (scanInputRef.current) {
+                if (!isCameraOpen && scanInputRef.current) {
                     scanInputRef.current.focus()
                 }
             },
-        })
-    }
-
-    const handleSelectCandidate = (candidate, mode = 'disambiguated_scan', qty = 1) => {
-        if (!isDraft || !canDraft) return
-        router.post(
-            `${receiptUrl}/partidas`,
-            {
-                automotive_part_id: candidate.automotive_part_id,
-                scan_code: candidate.scanned_code || scanForm.data.scan_code || null,
-                quantity: qty,
-                entry_mode: mode,
+            onError: errors => {
+                const msg = Object.values(errors).flat().join(' ')
+                setScanFeedback({
+                    type: 'error',
+                    message: msg || 'Error al agregar la partida al borrador.',
+                })
             },
-            {
-                preserveScroll: true,
-                onSuccess: () => {
-                    if (scanInputRef.current) {
-                        scanInputRef.current.focus()
-                    }
-                },
-            }
-        )
+            onFinish: () => {
+                setIsAddingItem(false)
+            },
+        })
     }
 
     const handleUpdateQuantity = item => {
@@ -123,15 +238,15 @@ export default function ReceiptShow({
     return (
         <Layout branch={branch} title={`Recepción ${receipt.folio}`}>
             <div className="flex flex-wrap items-center justify-between gap-3">
-                <Link className="font-medium text-indigo-600 hover:underline" href={`${baseUrl(branch)}/entradas`}>
+                <Link className="font-medium text-indigo-600 hover:underline dark:text-indigo-400" href={`${baseUrl(branch)}/entradas`}>
                     ← Volver a sesiones de recepción
                 </Link>
                 <div className="flex items-center gap-3">
                     <span
                         className={`rounded-lg px-3 py-1 text-sm font-semibold ${
                             receipt.status === 'confirmed'
-                                ? 'bg-emerald-100 text-emerald-900'
-                                : 'bg-amber-100 text-amber-900'
+                                ? 'bg-emerald-100 text-emerald-900 dark:bg-emerald-950 dark:text-emerald-300'
+                                : 'bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-300'
                         }`}
                     >
                         {statusLabel(receipt.status)}
@@ -139,99 +254,135 @@ export default function ReceiptShow({
                 </div>
             </div>
 
+            {/* Ficha resumen de la recepción */}
             <div className={card}>
                 <div className="grid grid-cols-2 gap-4 md:grid-cols-5 text-sm">
                     <div>
-                        <p className="text-xs uppercase text-slate-500">Folio de recepción</p>
-                        <p className="mt-1 font-mono font-bold">{receipt.folio}</p>
+                        <p className="text-xs uppercase text-slate-500 dark:text-neutral-400">Folio de recepción</p>
+                        <p className="mt-1 font-mono font-bold text-slate-900 dark:text-white">{receipt.folio}</p>
                     </div>
                     <div>
-                        <p className="text-xs uppercase text-slate-500">Ubicación física ({branch.code})</p>
-                        <p className="mt-1 font-mono font-semibold">
+                        <p className="text-xs uppercase text-slate-500 dark:text-neutral-400">Ubicación física ({branch.code})</p>
+                        <p className="mt-1 font-mono font-semibold text-slate-900 dark:text-white">
                             {receipt.location ? `${receipt.location.code} · ${receipt.location.name}` : '—'}
                         </p>
                     </div>
                     <div>
-                        <p className="text-xs uppercase text-slate-500">Partidas / Unidades</p>
-                        <p className="mt-1 font-bold text-indigo-700">
+                        <p className="text-xs uppercase text-slate-500 dark:text-neutral-400">Partidas / Unidades</p>
+                        <p className="mt-1 font-bold text-indigo-700 dark:text-indigo-400">
                             {receipt.total_items} partidas · {receipt.total_units} unidades
                         </p>
                     </div>
                     <div>
-                        <p className="text-xs uppercase text-slate-500">Creado por</p>
-                        <p className="mt-1">{receipt.created_by_name || '—'}</p>
+                        <p className="text-xs uppercase text-slate-500 dark:text-neutral-400">Creado por</p>
+                        <p className="mt-1 text-slate-800 dark:text-neutral-200">{receipt.created_by_name || '—'}</p>
                     </div>
                     <div>
-                        <p className="text-xs uppercase text-slate-500">Confirmado por</p>
-                        <p className="mt-1">{receipt.confirmed_by_name || 'En borrador (sin movimientos aún)'}</p>
+                        <p className="text-xs uppercase text-slate-500 dark:text-neutral-400">Confirmado por</p>
+                        <p className="mt-1 text-slate-800 dark:text-neutral-200">{receipt.confirmed_by_name || 'En borrador (sin movimientos aún)'}</p>
                     </div>
                 </div>
             </div>
 
+            {/* Aviso general de backend */}
             {lookupWarning && (
-                <div role="status" className="rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900">
+                <div role="status" className="rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-700/60 dark:bg-amber-950/40 dark:text-amber-200">
                     <strong>Aviso de identificación:</strong> {lookupWarning}
                 </div>
             )}
 
+            {/* Feedback interactivo de escaneo */}
+            {scanFeedback && (
+                <div
+                    role="alert"
+                    className={`rounded-2xl p-4 text-sm flex items-center justify-between gap-3 shadow-xs ${
+                        scanFeedback.type === 'success'
+                            ? 'bg-emerald-50 text-emerald-900 border border-emerald-300 dark:bg-emerald-950/50 dark:text-emerald-200 dark:border-emerald-800'
+                            : scanFeedback.type === 'warning'
+                            ? 'bg-amber-50 text-amber-900 border border-amber-300 dark:bg-amber-950/50 dark:text-amber-200 dark:border-amber-800'
+                            : 'bg-rose-50 text-rose-900 border border-rose-300 dark:bg-rose-950/50 dark:text-rose-200 dark:border-rose-800'
+                    }`}
+                >
+                    <div className="flex items-center gap-2">
+                        <span className="text-lg">
+                            {scanFeedback.type === 'success' ? '✓' : scanFeedback.type === 'warning' ? '⚠️' : '✕'}
+                        </span>
+                        <span>{scanFeedback.message}</span>
+                    </div>
+                    <button
+                        type="button"
+                        onClick={() => setScanFeedback(null)}
+                        className="rounded-lg p-1 text-xs font-bold opacity-60 hover:opacity-100"
+                        title="Cerrar aviso"
+                    >
+                        ✕
+                    </button>
+                </div>
+            )}
+
+            {/* Secciones de captura activa cuando está en borrador */}
             {isDraft && canDraft && (
                 <div className="grid gap-5 lg:grid-cols-2">
-                    <form className={`${card} border-2 border-indigo-500 space-y-4`} onSubmit={handleScanSubmit}>
-                        <div>
-                            <h2 className="text-base font-semibold text-indigo-900 dark:text-indigo-200">
-                                1. Escaneo rápido con lector USB (Modo Teclado)
-                            </h2>
-                            <p className="mt-1 text-xs text-slate-600 dark:text-neutral-400">
-                                Coloque el cursor en el campo de código y escanee la etiqueta. Al enviar <code>Enter</code>, el lector busca y agrega únicamente la pieza al borrador (nunca confirma la recepción completa).
-                            </p>
+                    {/* Tarjeta de escáner USB / Bluetooth y Celular */}
+                    <div className={`${card} border-2 border-indigo-500/80 space-y-4`}>
+                        <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 pb-3 border-b border-slate-100 dark:border-neutral-800">
+                            <div>
+                                <h2 className="text-base font-semibold text-indigo-900 dark:text-indigo-200">
+                                    1. Escaneo por cámara o lector HID
+                                </h2>
+                                <p className="mt-0.5 text-xs text-slate-600 dark:text-neutral-400">
+                                    Escanee la etiqueta de la caja para abrir el modal de recepción con selector grande.
+                                </p>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => setIsCameraOpen(true)}
+                                className="inline-flex items-center justify-center gap-2 rounded-2xl bg-indigo-600 px-4 py-2.5 text-sm font-bold text-white shadow-sm hover:bg-indigo-700 active:scale-95 transition dark:bg-indigo-500 dark:hover:bg-indigo-600"
+                            >
+                                <span>📷</span>
+                                <span>Escanear con cámara</span>
+                            </button>
                         </div>
-                        <div className="grid gap-3 sm:grid-cols-4">
-                            <label className="flex flex-col gap-1 text-sm sm:col-span-3">
-                                Código de barras / SKU / Item # / MFG Part #
-                                <input
-                                    ref={scanInputRef}
-                                    autoFocus
-                                    required
-                                    className={`${field} font-mono text-base`}
-                                    value={scanForm.data.scan_code}
-                                    onChange={e => scanForm.setData('scan_code', e.target.value)}
-                                    placeholder="Escanee etiqueta aquí (conserva ceros iniciales)..."
-                                />
-                            </label>
-                            <label className="flex flex-col gap-1 text-sm">
-                                Cantidad (piezas/caja)
-                                <input
-                                    type="number"
-                                    min={1}
-                                    step={1}
-                                    required
-                                    className={`${field} font-mono text-base`}
-                                    value={scanForm.data.quantity}
-                                    onChange={e => scanForm.setData('quantity', e.target.value)}
-                                />
-                            </label>
-                        </div>
-                        <label className="flex flex-col gap-1 text-sm">
-                            Nota de conteo para este escaneo (opcional)
-                            <input
-                                className={field}
-                                value={scanForm.data.notes}
-                                onChange={e => scanForm.setData('notes', e.target.value)}
-                                placeholder="Ej. Caja cerrada con 6 piezas, estante A"
-                            />
-                        </label>
-                        <button type="submit" className={button} disabled={scanForm.processing}>
-                            {scanForm.processing ? 'Buscando y agregando…' : 'Buscar / Agregar al borrador (Enter)'}
-                        </button>
-                    </form>
 
+                        {/* Entrada para lector de código de barras USB / Bluetooth */}
+                        <form onSubmit={handleScanFormSubmit} className="space-y-3">
+                            <label className="flex flex-col gap-1 text-sm font-medium">
+                                <span>Código de barras / SKU / Item # / MFG Part # (Lector USB / Bluetooth)</span>
+                                <div className="flex gap-2">
+                                    <input
+                                        ref={scanInputRef}
+                                        autoFocus
+                                        required
+                                        className={`${field} font-mono text-base flex-1`}
+                                        value={scanCodeText}
+                                        onChange={e => setScanCodeText(e.target.value)}
+                                        onKeyDown={handleScanKeyDown}
+                                        disabled={isLookingUp || isAddingItem}
+                                        placeholder="Escanee con pistola o escriba código aquí..."
+                                    />
+                                    <button
+                                        type="submit"
+                                        className={button}
+                                        disabled={isLookingUp || isAddingItem || !scanCodeText.trim()}
+                                    >
+                                        {isLookingUp ? 'Buscando…' : 'Buscar / Detectar'}
+                                    </button>
+                                </div>
+                            </label>
+                            <p className="text-[11px] text-slate-500 dark:text-neutral-400">
+                                Compatible con lectores HID en modo teclado (con o sin sufijo Enter). Al detectar la pieza abrirá automáticamente el modal con selector de cantidad.
+                            </p>
+                        </form>
+                    </div>
+
+                    {/* Tarjeta de búsqueda manual asistida */}
                     <div className={`${card} space-y-4`}>
                         <div>
-                            <h2 className="text-base font-semibold">
+                            <h2 className="text-base font-semibold text-slate-900 dark:text-white">
                                 2. Búsqueda manual asistida (Piezas sin etiqueta legible)
                             </h2>
                             <p className="mt-1 text-xs text-slate-600 dark:text-neutral-400">
-                                Si la pieza no trae código de barras legible, busque por número de parte grabado, descripción, proveedor o categoría.
+                                Si la pieza no trae código de barras legible, busque por número de parte grabado, descripción o proveedor.
                             </p>
                         </div>
                         <form
@@ -253,18 +404,18 @@ export default function ReceiptShow({
                         </form>
 
                         {manualResults.length > 0 && (
-                            <div className="max-h-72 overflow-y-auto rounded-lg border border-slate-200 p-2 text-xs space-y-2 dark:border-neutral-700">
+                            <div className="max-h-72 overflow-y-auto rounded-2xl border border-slate-200 p-2 text-xs space-y-2 dark:border-neutral-700">
                                 {manualResults.map(cand => (
                                     <div
                                         key={cand.automotive_part_id}
-                                        className="flex flex-wrap items-center justify-between gap-2 rounded border border-slate-100 p-2 dark:border-neutral-800"
+                                        className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-100 p-2.5 dark:border-neutral-800"
                                     >
                                         <div className="max-w-md">
-                                            <p className="font-mono font-semibold text-indigo-700">
+                                            <p className="font-mono font-semibold text-indigo-700 dark:text-indigo-400">
                                                 {cand.code} · Item #: {cand.item_number || '—'} · MFG: {cand.manufacturer_part_number || '—'}
                                             </p>
-                                            <p className="font-medium">{cand.description}</p>
-                                            <p className="text-slate-500">
+                                            <p className="font-medium text-slate-900 dark:text-white">{cand.description}</p>
+                                            <p className="text-slate-500 dark:text-neutral-400">
                                                 Fila Excel #{cand.source_row_number} · {cand.vendor_name} · Qty Excel: {cand.excel_qty} · Stock {branch.code}: {cand.branch_stock}
                                             </p>
                                             <div className="mt-1">
@@ -272,13 +423,13 @@ export default function ReceiptShow({
                                             </div>
                                         </div>
                                         <div className="flex flex-col gap-1">
-                                            {cand.is_receivable ? (
+                                            {cand.is_receivable && cand.identity_status !== 'ambiguous' ? (
                                                 <button
                                                     type="button"
                                                     className={button}
-                                                    onClick={() => handleSelectCandidate(cand, 'manual_assisted', Number(scanForm.data.quantity) || 1)}
+                                                    onClick={() => handleSelectCandidateToModal(cand, 'manual_assisted')}
                                                 >
-                                                    Seleccionar (+{Number(scanForm.data.quantity) || 1})
+                                                    Seleccionar
                                                 </button>
                                             ) : (
                                                 canResolveIdentity && (
@@ -293,7 +444,7 @@ export default function ReceiptShow({
                                                             })
                                                         }}
                                                     >
-                                                        Resolver ambigüedad primero
+                                                        Resolver ambigüedad
                                                     </button>
                                                 )
                                             )}
@@ -306,53 +457,57 @@ export default function ReceiptShow({
                 </div>
             )}
 
-            {lookupDisambiguation && lookupDisambiguation.candidates?.length > 0 && (
+            {/* Desambiguación de códigos */}
+            {activeDisambiguation && activeDisambiguation.candidates?.length > 0 && (
                 <div className={`${card} border-2 border-amber-400 space-y-4`}>
-                    <div>
-                        <h2 className="text-base font-semibold text-amber-900">
-                            Resolución de coincidencias para el código escaneado: <code>{lookupDisambiguation.scanned_code}</code>
-                        </h2>
-                        <p className="mt-1 text-sm text-amber-800">
-                            {lookupDisambiguation.warning ||
-                                'Se encontraron múltiples registros o una identidad ambigua. El sistema nunca selecciona el primero automáticamente.'}
-                        </p>
+                    <div className="flex items-start justify-between gap-3">
+                        <div>
+                            <h2 className="text-base font-semibold text-amber-900 dark:text-amber-200">
+                                Resolución de coincidencias para el código escaneado: <code>{activeDisambiguation.scanned_code}</code>
+                            </h2>
+                            <p className="mt-1 text-sm text-amber-800 dark:text-amber-300">
+                                {activeDisambiguation.warning ||
+                                    'Se encontraron múltiples registros o una identidad ambigua. El sistema nunca selecciona el primero automáticamente.'}
+                            </p>
+                        </div>
+                        <button
+                            type="button"
+                            onClick={() => setActiveDisambiguation(null)}
+                            className="rounded-lg p-1 text-xs font-bold text-amber-800 hover:bg-amber-100 dark:text-amber-300 dark:hover:bg-amber-900"
+                        >
+                            ✕ Cerrar
+                        </button>
                     </div>
                     <div className="space-y-3">
-                        {lookupDisambiguation.candidates.map(cand => (
+                        {activeDisambiguation.candidates.map(cand => (
                             <div
                                 key={cand.automotive_part_id}
-                                className="flex flex-wrap items-center justify-between gap-4 rounded-lg border border-amber-200 bg-amber-50/40 p-3 text-sm"
+                                className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-amber-200 bg-amber-50/40 p-3.5 text-sm dark:border-amber-800 dark:bg-amber-950/20"
                             >
                                 <div className="space-y-1 max-w-2xl">
-                                    <p className="font-mono text-xs font-bold text-indigo-700">
+                                    <p className="font-mono text-xs font-bold text-indigo-700 dark:text-indigo-400">
                                         {cand.code} · Fila Excel #{cand.source_row_number} ({cand.source_sheet_name})
                                     </p>
                                     <p>
                                         Item #: <strong className="font-mono">{cand.item_number || '—'}</strong> · MFG Part #:{' '}
                                         <strong className="font-mono">{cand.manufacturer_part_number || '—'}</strong>
                                     </p>
-                                    <p className="font-medium">{cand.description}</p>
-                                    <p className="text-xs text-slate-600">
+                                    <p className="font-medium text-slate-900 dark:text-white">{cand.description}</p>
+                                    <p className="text-xs text-slate-600 dark:text-neutral-400">
                                         Proveedor: {cand.vendor_name || '—'} · Categoría: {cand.category || '—'} · Qty Excel (doc):{' '}
                                         {cand.excel_qty} · Stock actual {branch.code}: <strong>{cand.branch_stock}</strong>
                                     </p>
                                     <IdentityBadge status={cand.identity_status} />
                                 </div>
                                 <div className="flex flex-wrap gap-2">
-                                    {cand.is_receivable ? (
+                                    {cand.is_receivable && cand.identity_status !== 'ambiguous' ? (
                                         isDraft && canDraft && (
                                             <button
                                                 type="button"
                                                 className={button}
-                                                onClick={() =>
-                                                    handleSelectCandidate(
-                                                        cand,
-                                                        'disambiguated_scan',
-                                                        Number(scanForm.data.quantity) || 1
-                                                    )
-                                                }
+                                                onClick={() => handleSelectCandidateToModal(cand, 'disambiguated_scan')}
                                             >
-                                                Elegir esta autoparte (+{Number(scanForm.data.quantity) || 1})
+                                                Elegir esta autoparte
                                             </button>
                                         )
                                     ) : (
@@ -379,14 +534,15 @@ export default function ReceiptShow({
                 </div>
             )}
 
+            {/* Formulario para resolver identidad cuando hay permisos */}
             {canResolveIdentity && verifyingCandidate && (
                 <form className={`${card} border-2 border-indigo-400 space-y-4`} onSubmit={handleVerifyCandidate}>
                     <div className="flex items-start justify-between gap-4">
                         <div>
-                            <h3 className="font-semibold">
+                            <h3 className="font-semibold text-slate-900 dark:text-white">
                                 Resolver ambigüedad / Verificar etiqueta · {verifyingCandidate.code} (Fila Excel #{verifyingCandidate.source_row_number})
                             </h3>
-                            <p className="text-sm text-slate-600">
+                            <p className="text-sm text-slate-600 dark:text-neutral-400">
                                 Item #: {verifyingCandidate.item_number} · MFG Part #: {verifyingCandidate.manufacturer_part_number} ·{' '}
                                 {verifyingCandidate.description}
                             </p>
@@ -428,13 +584,14 @@ export default function ReceiptShow({
                 </form>
             )}
 
+            {/* Tabla de partidas del borrador */}
             <div className={card}>
-                <h2 className="mb-3 text-base font-semibold">
+                <h2 className="mb-3 text-base font-semibold text-slate-900 dark:text-white">
                     Partidas en esta sesión de recepción ({items.length})
                 </h2>
                 <div className="overflow-x-auto">
                     <table className="w-full text-left text-sm">
-                        <thead className="border-b border-slate-200 text-xs uppercase text-slate-500">
+                        <thead className="border-b border-slate-200 text-xs uppercase text-slate-500 dark:border-neutral-800 dark:text-neutral-400">
                             <tr>
                                 <th className="p-3">SKU / Códigos</th>
                                 <th className="p-3">Descripción / Proveedor</th>
@@ -450,35 +607,35 @@ export default function ReceiptShow({
                             {items.map(item => (
                                 <tr key={item.id} className="border-b border-slate-100 align-top dark:border-neutral-800">
                                     <td className="p-3">
-                                        <p className="font-mono text-xs font-semibold text-indigo-700">{item.code}</p>
-                                        <p className="text-xs">
+                                        <p className="font-mono text-xs font-semibold text-indigo-700 dark:text-indigo-400">{item.code}</p>
+                                        <p className="text-xs text-slate-800 dark:text-neutral-200">
                                             Item #: <strong className="font-mono">{item.item_number || '—'}</strong>
                                         </p>
-                                        <p className="text-xs">
+                                        <p className="text-xs text-slate-800 dark:text-neutral-200">
                                             MFG: <strong className="font-mono">{item.manufacturer_part_number || '—'}</strong>
                                         </p>
                                         {item.scanned_code && (
-                                            <p className="mt-1 text-xs text-slate-500">
+                                            <p className="mt-1 text-xs text-slate-500 dark:text-neutral-400">
                                                 Escaneado: <code className="font-mono">{item.scanned_code}</code>
                                             </p>
                                         )}
                                     </td>
                                     <td className="max-w-sm p-3">
-                                        <p className="whitespace-pre-wrap font-medium">{item.description}</p>
-                                        <p className="mt-1 text-xs text-slate-500">
+                                        <p className="whitespace-pre-wrap font-medium text-slate-900 dark:text-white">{item.description}</p>
+                                        <p className="mt-1 text-xs text-slate-500 dark:text-neutral-400">
                                             {item.vendor_name} · {item.category} · Fila #{item.source_row_number}
                                         </p>
                                         <div className="mt-1">
                                             <IdentityBadge status={item.identity_status} />
                                         </div>
-                                        {item.notes && <p className="mt-1 text-xs text-slate-600">Nota: {item.notes}</p>}
+                                        {item.notes && <p className="mt-1 text-xs text-slate-600 dark:text-neutral-400">Nota: {item.notes}</p>}
                                     </td>
                                     <td className="p-3 text-xs">
-                                        <span className="font-medium">{item.entry_mode}</span>
-                                        <p className="text-slate-500">{item.scan_events_count} evento(s) consolidados</p>
+                                        <span className="font-medium text-slate-900 dark:text-white">{item.entry_mode}</span>
+                                        <p className="text-slate-500 dark:text-neutral-400">{item.scan_events_count} evento(s) consolidados</p>
                                     </td>
-                                    <td className="p-3 font-mono text-xs text-slate-500">{item.excel_qty}</td>
-                                    <td className="p-3 font-mono font-semibold">{item.stock_before}</td>
+                                    <td className="p-3 font-mono text-xs text-slate-500 dark:text-neutral-400">{item.excel_qty}</td>
+                                    <td className="p-3 font-mono font-semibold text-slate-800 dark:text-neutral-200">{item.stock_before}</td>
                                     <td className="p-3">
                                         {isDraft && canDraft ? (
                                             <div className="flex items-center gap-2">
@@ -504,10 +661,10 @@ export default function ReceiptShow({
                                                 </button>
                                             </div>
                                         ) : (
-                                            <span className="font-mono text-base font-bold text-emerald-700">+{item.quantity}</span>
+                                            <span className="font-mono text-base font-bold text-emerald-700 dark:text-emerald-400">+{item.quantity}</span>
                                         )}
                                     </td>
-                                    <td className="p-3 font-mono text-base font-bold text-indigo-700">{item.stock_after}</td>
+                                    <td className="p-3 font-mono text-base font-bold text-indigo-700 dark:text-indigo-400">{item.stock_after}</td>
                                     {isDraft && canDraft && (
                                         <td className="p-3">
                                             <button
@@ -524,13 +681,14 @@ export default function ReceiptShow({
                         </tbody>
                     </table>
                     {items.length === 0 && (
-                        <p className="p-8 text-center text-slate-500">
+                        <p className="p-8 text-center text-slate-500 dark:text-neutral-400">
                             El borrador aún no tiene partidas. Escanee una etiqueta o use la búsqueda manual asistida.
                         </p>
                     )}
                 </div>
             </div>
 
+            {/* Confirmación definitiva autorizada */}
             {isDraft && canConfirm && items.length > 0 && (
                 <form
                     className={`${card} border-2 border-emerald-500 space-y-4`}
@@ -560,7 +718,7 @@ export default function ReceiptShow({
                     <div>
                         <button
                             type="submit"
-                            className="inline-flex items-center rounded-lg bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
+                            className="inline-flex items-center rounded-2xl bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-emerald-700 active:scale-95 disabled:opacity-50 transition"
                             disabled={!confirmForm.data.confirmed || confirmForm.processing}
                         >
                             {confirmForm.processing
@@ -570,6 +728,29 @@ export default function ReceiptShow({
                     </div>
                 </form>
             )}
+
+            {/* Componente modal de cámara */}
+            <CameraBarcodeScanner
+                isOpen={isCameraOpen}
+                isPaused={isModalOpen || isLookingUp}
+                onScan={handleCameraScan}
+                onClose={() => setIsCameraOpen(false)}
+                title="Escanear Autoparte con Cámara"
+            />
+
+            {/* Modal de recepción con producto detectado y selector grande */}
+            <ReceiptItemModal
+                isOpen={isModalOpen}
+                candidate={modalCandidate}
+                receipt={receipt}
+                branch={branch}
+                entryMode={modalEntryMode}
+                scannedCode={modalScannedCode}
+                onClose={handleModalClose}
+                onAdd={handleModalAdd}
+                isSubmitting={isAddingItem}
+                maxQuantity={5000}
+            />
         </Layout>
     )
 }

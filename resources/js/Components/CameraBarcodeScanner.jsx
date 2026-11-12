@@ -6,6 +6,7 @@ export default function CameraBarcodeScanner({
     onScan,
     onClose,
     title = 'Escanear Código de Barras con Cámara',
+    isPaused = false,
 }) {
     const [cameras, setCameras] = useState([])
     const [selectedCameraId, setSelectedCameraId] = useState(null)
@@ -72,6 +73,22 @@ export default function CameraBarcodeScanner({
         }
     }, [isOpen])
 
+    // Pausar o reanudar el procesamiento del video según isPaused
+    useEffect(() => {
+        if (!scannerRef.current || !isScanning) return
+        try {
+            const state = typeof scannerRef.current.getState === 'function' ? scannerRef.current.getState() : null
+            // Html5QrcodeScannerState: SCANNING = 2, PAUSED = 3
+            if (isPaused && state === 2) {
+                scannerRef.current.pause(true)
+            } else if (!isPaused && state === 3) {
+                scannerRef.current.resume()
+            }
+        } catch (err) {
+            console.warn('No se pudo cambiar estado de pausa de la cámara:', err)
+        }
+    }, [isPaused, isScanning])
+
     const startScanner = async (cameraId) => {
         try {
             if (scannerRef.current) {
@@ -108,9 +125,13 @@ export default function CameraBarcodeScanner({
                 cameraId,
                 config,
                 (decodedText) => {
+                    // Si está pausado, ignorar cuadros entrantes
+                    if (isPaused) return
                     // Éxito en lectura
                     if (navigator.vibrate) {
-                        navigator.vibrate(100)
+                        try {
+                            navigator.vibrate(100)
+                        } catch {}
                     }
                     onScan(decodedText)
                 },
@@ -201,9 +222,16 @@ export default function CameraBarcodeScanner({
                 {/* Viewfinder area */}
                 <div className="relative bg-black min-h-[300px] flex items-center justify-center overflow-hidden">
                     {errorMessage ? (
-                        <div className="p-6 text-center text-xs text-rose-400">
-                            <span className="text-2xl block mb-2">⚠️</span>
-                            {errorMessage}
+                        <div className="p-6 text-center text-xs text-rose-400 space-y-3">
+                            <span className="text-2xl block">⚠️</span>
+                            <p>{errorMessage}</p>
+                            <button
+                                type="button"
+                                onClick={onClose}
+                                className="inline-block rounded-xl bg-neutral-800 px-4 py-2 text-xs font-semibold text-white hover:bg-neutral-700 active:scale-95 transition"
+                            >
+                                Usar entrada manual / lector USB
+                            </button>
                         </div>
                     ) : (
                         <div id={containerId} className="w-full h-full overflow-hidden" />

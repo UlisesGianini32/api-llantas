@@ -207,9 +207,17 @@ class ReceiptController extends Controller
         return back()->with('lookup_disambiguation', $result);
     }
 
-    public function addItem(Request $request, AutomotiveBranch $branch, AutomotiveReceipt $receipt): RedirectResponse
+    public function addItem(Request $request, AutomotiveBranch $branch, AutomotiveReceipt $receipt): JsonResponse|RedirectResponse
     {
         $result = $this->receipts->addItem($request->user(), $branch, $receipt, $request->all());
+
+        if ($request->wantsJson() && ! $request->header('X-Inertia')) {
+            if (! $result['added']) {
+                return response()->json($result, 422);
+            }
+
+            return response()->json($result);
+        }
 
         if (! $result['added']) {
             return back()
