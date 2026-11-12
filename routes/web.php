@@ -71,6 +71,8 @@ use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Route;
 use Laravel\Fortify\Features;
 
+require __DIR__.'/autopartes.php';
+
 // CALLBACK (fuera de auth)
 Route::get('/auth/meli/callback', [AuthController::class, 'handleMeliCallback'])
     ->name('meli.callback');
@@ -868,7 +870,16 @@ Route::middleware(['auth', 'role'])->group(function () {
 });
 
 Route::get('/', fn () => redirect()->route('login'));
-Route::get('/home', fn () => redirect('/dashboard'))->name('home');
+Route::get('/home', function (Request $request) {
+    $user = $request->user();
+    if (! $user) {
+        return redirect('/dashboard');
+    }
+
+    return redirect()->to(
+        app(\App\Services\Autopartes\AutopartesLoginRedirector::class)->resolveAuthenticatedHome($user)
+    );
+})->name('home');
 
 Route::post('/logout', function (Request $request) {
     $user = $request->user();

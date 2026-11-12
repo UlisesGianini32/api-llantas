@@ -61,6 +61,12 @@ final class UserAccess
 
     public static function canAccessRoute(User $user, ?string $routeName): bool
     {
+        // Foundation only: no legacy routes (including dashboard/POS) for this profile.
+        // Future routes must authorize a branch and capability before being enabled.
+        if ($user->isBranchRestricted()) {
+            return false;
+        }
+
         if ($user->isAdmin()) {
             return true;
         }

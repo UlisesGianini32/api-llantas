@@ -14,6 +14,11 @@ return Application::configure(basePath: dirname(__DIR__))
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware): void {
+        $middleware->prependToPriorityList(
+            \Illuminate\Routing\Middleware\SubstituteBindings::class,
+            \App\Http\Middleware\RequireAutopartesEnabled::class,
+        );
+
         $middleware->alias([
             'role' => RequireRole::class,
         ]);
@@ -21,6 +26,15 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->web(append: [
             HandleInertiaRequests::class,
         ]);
+
+        $middleware->redirectUsersTo(function (\Illuminate\Http\Request $request): string {
+            $user = $request->user();
+            if (! $user) {
+                return '/dashboard';
+            }
+
+            return app(\App\Services\Autopartes\AutopartesLoginRedirector::class)->resolveAuthenticatedHome($user);
+        });
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         //

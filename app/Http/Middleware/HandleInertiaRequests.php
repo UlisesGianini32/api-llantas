@@ -20,8 +20,36 @@ class HandleInertiaRequests extends Middleware
     {
         $user = $request->user();
 
+        $isRestrictedOrAutopartes = $user && ($user->isBranchRestricted() || $request->is('autopartes/*'));
+        $autopartes = [];
+        if ($user && ($isRestrictedOrAutopartes || (config('autopartes.enabled') && config('autopartes.controllers_enabled', false)))) {
+            $autopartes = app(\App\Services\Autopartes\AutopartesLoginRedirector::class)->authorizedBranchAccessEntries($user);
+        }
+
+        // Fail closed even if a future account/settings route uses this middleware.
+        // Do not query or serialize accounts, channel configuration or notifications.
+        if ($isRestrictedOrAutopartes) {
+            return [
+                ...parent::share($request),
+                'auth' => ['user' => [
+                    'id' => $user->id, 'name' => $user->name,
+                    'email' => $user->email, 'role' => $user->role,
+                ]],
+                'channels' => [],
+                'meli_questions_pending' => 0,
+                'notifications_summary' => null,
+                'autopartes_access' => $autopartes,
+                'flash' => [
+                    'success' => fn () => $request->hasSession() ? $request->session()->get('success') : null,
+                    'error' => fn () => $request->hasSession() ? $request->session()->get('error') : null,
+                    'warning' => fn () => $request->hasSession() ? $request->session()->get('warning') : null,
+                ],
+            ];
+        }
+
         return [
             ...parent::share($request),
+            'autopartes_access' => $autopartes,
             'auth' => [
                 'user' => $user
                     ? [

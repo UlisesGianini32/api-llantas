@@ -22,11 +22,14 @@ class User extends Authenticatable
 
     public const ROLE_WAREHOUSE = 'warehouse';
 
+    public const ROLE_BRANCH_RESTRICTED = 'branch_restricted';
+
     public const ROLES = [
         self::ROLE_ADMIN,
         self::ROLE_OPERATIONS,
         self::ROLE_POS,
         self::ROLE_WAREHOUSE,
+        self::ROLE_BRANCH_RESTRICTED,
     ];
 
     protected $fillable = [
@@ -102,6 +105,11 @@ class User extends Authenticatable
     public function isWarehouse(): bool
     {
         return $this->hasRole(self::ROLE_WAREHOUSE);
+    }
+
+    public function isBranchRestricted(): bool
+    {
+        return $this->hasRole(self::ROLE_BRANCH_RESTRICTED);
     }
 
     /** @return HasMany<MeliAccount, User> */

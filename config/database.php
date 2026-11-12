@@ -83,6 +83,28 @@ return [
             ]) : [],
         ],
 
+        // Conexión física exclusiva del módulo independiente Autopartes Hermosillo (sin acceso a api_llantas / inventory_*).
+        'autopartes' => [
+            'driver' => env('DB_AUTOPARTES_CONNECTION', 'mariadb'),
+            'url' => env('DB_AUTOPARTES_URL'),
+            'host' => env('DB_AUTOPARTES_HOST', '127.0.0.1'),
+            'port' => env('DB_AUTOPARTES_PORT', '3306'),
+            'database' => env('DB_AUTOPARTES_DATABASE', 'api_llantas_autopartes'),
+            'username' => env('DB_AUTOPARTES_USERNAME', 'autopartes'),
+            'password' => env('DB_AUTOPARTES_PASSWORD', ''),
+            'unix_socket' => env('DB_AUTOPARTES_SOCKET', ''),
+            'charset' => env('DB_AUTOPARTES_CHARSET', 'utf8mb4'),
+            'collation' => env('DB_AUTOPARTES_COLLATION', 'utf8mb4_unicode_ci'),
+            'prefix' => '',
+            'prefix_indexes' => true,
+            'strict' => true,
+            'engine' => 'InnoDB',
+            'foreign_key_constraints' => env('DB_AUTOPARTES_FOREIGN_KEYS', true),
+            'options' => extension_loaded('pdo_mysql') ? array_filter([
+                (PHP_VERSION_ID >= 80500 ? \Pdo\Mysql::ATTR_SSL_CA : \PDO::MYSQL_ATTR_SSL_CA) => env('DB_AUTOPARTES_SSL_CA'),
+            ]) : [],
+        ],
+
         'pgsql' => [
             'driver' => 'pgsql',
             'url' => env('DB_URL'),

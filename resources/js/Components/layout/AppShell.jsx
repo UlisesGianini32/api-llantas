@@ -541,9 +541,21 @@ const ALL_SEARCH_ITEMS = [
 ]
 
 function CommandPalette({ open, onClose }) {
+    const { auth, autopartes_access = [] } = usePage().props
     const [query, setQuery] = useState('')
     const [selectedIndex, setSelectedIndex] = useState(0)
     const inputRef = useRef(null)
+
+    const availableItems =
+        auth?.user?.role === 'branch_restricted'
+            ? autopartes_access.map((entry) => ({
+                  title: entry.name,
+                  desc: `Módulo Autopartes (${entry.code})`,
+                  href: entry.url,
+                  category: 'Autopartes',
+                  icon: IconDatabase,
+              }))
+            : ALL_SEARCH_ITEMS
 
     useEffect(() => {
         if (open) {
@@ -554,12 +566,12 @@ function CommandPalette({ open, onClose }) {
     }, [open])
 
     const filtered = query.trim()
-        ? ALL_SEARCH_ITEMS.filter((item) =>
+        ? availableItems.filter((item) =>
               item.title.toLowerCase().includes(query.toLowerCase()) ||
               item.desc.toLowerCase().includes(query.toLowerCase()) ||
               item.category.toLowerCase().includes(query.toLowerCase())
           )
-        : ALL_SEARCH_ITEMS.slice(0, 8)
+        : availableItems.slice(0, 8)
 
     useEffect(() => {
         setSelectedIndex(0)
@@ -849,14 +861,42 @@ function SidebarBrand() {
    SIDEBAR NAVIGATION
    ========================================================================= */
 function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
-    const { notifications_summary = null } = usePage().props
+    const { notifications_summary = null, autopartes_access = [] } = usePage().props
     const isAdmin = role === 'admin'
     const canOperate = isAdmin || role === 'operations'
+    const isBranchRestricted = role === 'branch_restricted'
     const totalUnreadNotifs = notifications_summary?.total_unread ?? 0
     const hasCriticalNotifs = notifications_summary?.has_critical ?? false
 
+    if (isBranchRestricted) {
+        return (
+            <nav className="space-y-5">
+                {autopartes_access.length > 0 && (
+                    <div>
+                        <p className="mb-1.5 px-3 text-[10px] font-bold uppercase tracking-wider text-slate-400">Autopartes</p>
+                        {autopartes_access.map((entry) => (
+                            <NavItem
+                                key={entry.url}
+                                href={entry.url}
+                                icon={IconDatabase}
+                                active={currentPath.startsWith('/autopartes')}
+                                onNavigate={onNavigate}
+                            >
+                                {entry.name}
+                            </NavItem>
+                        ))}
+                    </div>
+                )}
+            </nav>
+        )
+    }
+
     return (
         <nav className="space-y-5">
+            {autopartes_access.length > 0 && <div>
+                <p className="mb-1.5 px-3 text-[10px] font-bold uppercase tracking-wider text-slate-400">Autopartes</p>
+                {autopartes_access.map(entry => <NavItem key={entry.url} href={entry.url} icon={IconDatabase} active={currentPath.startsWith('/autopartes')} onNavigate={onNavigate}>{entry.name}</NavItem>)}
+            </div>}
             {/* GENERAL */}
             <div>
                 <p className="mb-1.5 px-3 text-[10px] font-bold uppercase tracking-wider text-slate-400 dark:text-neutral-500">

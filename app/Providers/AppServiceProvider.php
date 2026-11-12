@@ -3,7 +3,10 @@
 namespace App\Providers;
 
 use App\Services\TelegramAlertService;
+use App\Support\PilotDatabaseGuard;
+use App\Support\StagingExternalHttpGuard;
 use Illuminate\Queue\Events\JobFailed;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\ServiceProvider;
 
@@ -22,7 +25,22 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
+        PilotDatabaseGuard::enforceIfConfigured();
+
+        if (StagingExternalHttpGuard::shouldBlock() && ! app()->runningUnitTests()) {
+            Http::preventStrayRequests();
+        }
+
         Queue::failing(function (JobFailed $event): void {
+            if (StagingExternalHttpGuard::shouldBlock()) {
+                return;
+            }
+
+            if ($event->job->resolveName() === \App\Jobs\ProcessAutomotiveImport::class) {
+                // Import failures are reviewed locally; never alert through an external integration.
+                return;
+            }
+
             /** @var TelegramAlertService $alerts */
             $alerts = app(TelegramAlertService::class);
 
