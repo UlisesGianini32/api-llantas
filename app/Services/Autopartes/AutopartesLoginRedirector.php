@@ -3,6 +3,7 @@
 namespace App\Services\Autopartes;
 
 use App\Models\AutomotiveBranch;
+use App\Models\AutomotiveBranchCommercialPolicy;
 use App\Models\AutomotiveBranchMembership;
 use App\Models\User;
 use App\Support\AutopartesConnectionGuard;
@@ -147,6 +148,82 @@ class AutopartesLoginRedirector
             ]);
 
             return [];
+        }
+    }
+
+    /**
+     * Resolve read-only branch navigation routes, RBAC capabilities, and POS commercial status
+     * for the active Autopartes branch layout without modifying commercial policy or POS flags.
+     */
+    public function branchNavigationContext(User $user, AutomotiveBranch|string $branch): ?array
+    {
+        try {
+            if (! $this->isAutopartesSchemaReady()) {
+                return null;
+            }
+
+            $branchModel = $branch instanceof AutomotiveBranch
+                ? ($branch->is_active ? $branch : null)
+                : AutomotiveBranch::query()
+                    ->where('code', strtoupper(trim($branch)))
+                    ->where('is_active', true)
+                    ->first();
+
+            if (! $branchModel) {
+                return null;
+            }
+
+            $capabilities = $this->access->capabilities($user, $branchModel);
+            if ($capabilities === []) {
+                return null;
+            }
+
+            $conn = AutopartesConnectionGuard::assertDedicatedConnectionSafe()['connection'];
+            $policy = Schema::connection($conn)->hasTable('automotive_branch_commercial_policies')
+                ? AutomotiveBranchCommercialPolicy::query()
+                    ->where('branch_id', $branchModel->getKey())
+                    ->first()
+                : null;
+
+            $posSalesEnabled = $policy
+                ? (bool) $policy->pos_sales_enabled
+                : (bool) config('autopartes.pos.sales_enabled_by_default', false);
+            $fiscalPolicyValidated = $policy
+                ? (bool) $policy->fiscal_policy_validated
+                : (bool) config('autopartes.pos.fiscal_policy_validated_by_default', false);
+
+            $code = $branchModel->code;
+
+            return [
+                'branch' => $branchModel->only(['code', 'name']),
+                'capabilities' => $capabilities,
+                'pos_policy' => [
+                    'pos_sales_enabled' => $posSalesEnabled,
+                    'fiscal_policy_validated' => $fiscalPolicyValidated,
+                    'ready_for_real_sales' => $posSalesEnabled && $fiscalPolicyValidated,
+                ],
+                'routes' => [
+                    'catalog' => route('autopartes.index', $code, false),
+                    'inventory' => route('autopartes.inventory.index', $code, false),
+                    'receipts' => route('autopartes.receipts.index', $code, false),
+                    'movements' => route('autopartes.movements.index', $code, false),
+                    'pos' => route('autopartes.pos.index', $code, false),
+                    'sales' => route('autopartes.sales.index', $code, false),
+                    'prices' => route('autopartes.prices.index', $code, false),
+                    'discounts' => route('autopartes.discounts.index', $code, false),
+                    'sellers' => route('autopartes.sellers.index', $code, false),
+                    'reports' => route('autopartes.reports.index', $code, false),
+                    'imports' => route('autopartes.imports.index', $code, false),
+                ],
+            ];
+        } catch (Throwable $e) {
+            Log::warning('Autopartes branch navigation context degraded gracefully.', [
+                'user_id' => $user->getKey(),
+                'exception' => $e::class,
+                'message' => $e->getMessage(),
+            ]);
+
+            return null;
         }
     }
 

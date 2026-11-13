@@ -29,6 +29,13 @@ class HandleInertiaRequests extends Middleware
         // Fail closed even if a future account/settings route uses this middleware.
         // Do not query or serialize accounts, channel configuration or notifications.
         if ($isRestrictedOrAutopartes) {
+            $autopartesNav = null;
+            $routeBranch = $request->route('branch');
+            if ($request->is('autopartes/*') && $routeBranch !== null) {
+                $autopartesNav = app(\App\Services\Autopartes\AutopartesLoginRedirector::class)
+                    ->branchNavigationContext($user, $routeBranch);
+            }
+
             return [
                 ...parent::share($request),
                 'auth' => ['user' => [
@@ -39,6 +46,7 @@ class HandleInertiaRequests extends Middleware
                 'meli_questions_pending' => 0,
                 'notifications_summary' => null,
                 'autopartes_access' => $autopartes,
+                'autopartes_nav' => $autopartesNav,
                 'flash' => [
                     'success' => fn () => $request->hasSession() ? $request->session()->get('success') : null,
                     'error' => fn () => $request->hasSession() ? $request->session()->get('error') : null,
