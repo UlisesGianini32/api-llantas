@@ -11,7 +11,10 @@ use App\Services\Purchasing\PurchaseOrderService;
 use Carbon\Carbon;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Facades\URL;
+use Inertia\Testing\AssertableInertia as Assert;
 use Tests\TestCase;
 
 class PurchaseOrderTest extends TestCase
@@ -419,11 +422,159 @@ class PurchaseOrderTest extends TestCase
         $response->assertSee('T.O. THE BEAUTY SHOP');
         $response->assertSee($order->order_number);
         $response->assertSee('Michelin Mexico SA');
+        $internalCacheControl = (string) $response->headers->get('Cache-Control');
+        $this->assertStringContainsString('private', $internalCacheControl);
+        $this->assertStringContainsString('no-store', $internalCacheControl);
+        $this->assertStringContainsString('no-cache', (string) $response->headers->get('Pragma'));
+        $this->assertStringContainsString('noindex', (string) $response->headers->get('X-Robots-Tag'));
 
-        // Public route for suppliers
-        $publicResponse = $this->get("/orden-compra/{$order->id}/pdf");
+        // Signed temporary route for external suppliers (relative signature compatible with reverse proxies)
+        $signedUrl = URL::temporarySignedRoute(
+            'purchasing.orders.public-pdf',
+            now()->addDays(7),
+            ['purchaseOrder' => $order->id],
+            absolute: false
+        );
+        $publicResponse = $this->get($signedUrl);
         $publicResponse->assertOk();
         $publicResponse->assertSee('T.O. THE BEAUTY SHOP');
+        $publicCacheControl = (string) $publicResponse->headers->get('Cache-Control');
+        $this->assertStringContainsString('private', $publicCacheControl);
+        $this->assertStringContainsString('no-store', $publicCacheControl);
+        $this->assertStringContainsString('no-cache', (string) $publicResponse->headers->get('Pragma'));
+        $this->assertStringContainsString('noindex', (string) $publicResponse->headers->get('X-Robots-Tag'));
+    }
+
+    public function test_unauthenticated_and_unsigned_requests_cannot_access_purchase_order_pdf(): void
+    {
+        $orderA = $this->service->createOrder([
+            'supplier_name' => 'Michelin Mexico SA',
+            'inventory_location_id' => $this->location->id,
+            'items' => [
+                [
+                    'inventory_product_id' => $this->productA->id,
+                    'quantity_ordered' => 3,
+                    'unit_cost' => 1500.00,
+                ],
+            ],
+        ], $this->admin);
+
+        $orderB = $this->service->createOrder([
+            'supplier_name' => 'Proveedor Confidencial',
+            'inventory_location_id' => $this->location->id,
+            'items' => [
+                [
+                    'inventory_product_id' => $this->productB->id,
+                    'quantity_ordered' => 4,
+                    'unit_cost' => 980.00,
+                ],
+            ],
+        ], $this->admin);
+
+        // Unauthenticated requests to internal route must redirect to login or return 401 for JSON
+        $this->get("/compras/ordenes/{$orderA->id}/pdf")->assertRedirect('/login');
+        $this->getJson("/compras/ordenes/{$orderA->id}/pdf")->assertUnauthorized();
+
+        // Unsigned or tampered requests to public PDF route must be rejected
+        $this->get("/orden-compra/{$orderA->id}/pdf")->assertForbidden();
+        $this->get("/orden-compra/{$orderA->id}/pdf?expires=9999999999&signature=invalid")->assertForbidden();
+
+        // Valid signature for orderA must NOT allow enumerating orderB
+        $signedUrlA = URL::temporarySignedRoute(
+            'purchasing.orders.public-pdf',
+            now()->addDays(7),
+            ['purchaseOrder' => $orderA->id],
+            absolute: false
+        );
+        $queryString = parse_url($signedUrlA, PHP_URL_QUERY);
+        $this->get("/orden-compra/{$orderB->id}/pdf?{$queryString}")->assertForbidden();
+
+        // Expired signed URL must be rejected
+        $this->travel(8)->days();
+        $this->get($signedUrlA)->assertForbidden();
+        $this->travelBack();
+    }
+
+    public function test_role_authorization_for_purchase_order_pdf_and_signed_share_url(): void
+    {
+        $order = $this->service->createOrder([
+            'supplier_name' => 'Michelin Mexico SA',
+            'inventory_location_id' => $this->location->id,
+            'items' => [
+                [
+                    'inventory_product_id' => $this->productA->id,
+                    'quantity_ordered' => 2,
+                    'unit_cost' => 1500.00,
+                ],
+            ],
+        ], $this->admin);
+
+        $operationsUser = User::forceCreate([
+            'name' => 'Operaciones Compras',
+            'email' => 'ops-po@sbs.com',
+            'password' => bcrypt('secret123'),
+            'role' => User::ROLE_OPERATIONS,
+        ]);
+
+        $warehouseUser = User::forceCreate([
+            'name' => 'Almacen Recepcion',
+            'email' => 'warehouse-po@sbs.com',
+            'password' => bcrypt('secret123'),
+            'role' => User::ROLE_WAREHOUSE,
+        ]);
+
+        $posUser = User::forceCreate([
+            'name' => 'Cajero POS',
+            'email' => 'pos-po@sbs.com',
+            'password' => bcrypt('secret123'),
+            'role' => User::ROLE_POS,
+        ]);
+
+        $restrictedUser = User::forceCreate([
+            'name' => 'Sucursal Restringida',
+            'email' => 'restricted-po@sbs.com',
+            'password' => bcrypt('secret123'),
+            'role' => User::ROLE_BRANCH_RESTRICTED,
+        ]);
+
+        // Authorized roles: admin & operations
+        $this->assertTrue(Gate::forUser($this->admin)->allows('viewPdf', $order));
+        $this->assertTrue(Gate::forUser($operationsUser)->allows('viewPdf', $order));
+        $this->actingAs($operationsUser)->get("/compras/ordenes/{$order->id}/pdf")->assertOk();
+
+        // Show page exposes temporary signed sharing URL only to roles allowed to view/share PDFs
+        // Even behind an HTTPS reverse proxy (X-Forwarded-Proto: https -> internal HTTP), URL validates cleanly
+        $opsShow = $this->actingAs($operationsUser)
+            ->withHeaders(['X-Forwarded-Proto' => 'https'])
+            ->get("http://mrpoolhmo.com/compras/ordenes/{$order->id}");
+        $opsShow->assertOk();
+        $opsShow->assertInertia(fn (Assert $page) => $page
+            ->where('canViewPdf', true)
+            ->where('sharedPdfUrl', fn ($url) => is_string($url)
+                && str_starts_with($url, 'https://mrpoolhmo.com/orden-compra/')
+                && str_contains($url, 'signature='))
+        );
+
+        // Extract and verify sharedPdfUrl works for an unauthenticated external supplier even if PHP receives internal HTTP
+        $props = $opsShow->viewData('page')['props'];
+        $this->app['auth']->forgetGuards();
+        $relativePathWithQuery = parse_url($props['sharedPdfUrl'], PHP_URL_PATH).'?'.parse_url($props['sharedPdfUrl'], PHP_URL_QUERY);
+        $this->get("http://mrpoolhmo.com{$relativePathWithQuery}")->assertOk();
+
+        // Unauthorized roles: warehouse, pos, branch_restricted
+        foreach ([$warehouseUser, $posUser, $restrictedUser] as $unauthorizedUser) {
+            $this->assertFalse(Gate::forUser($unauthorizedUser)->allows('viewPdf', $order));
+            $this->actingAs($unauthorizedUser)->get("/compras/ordenes/{$order->id}/pdf")->assertForbidden();
+            $this->actingAs($unauthorizedUser)->get("/orden-compra/{$order->id}/pdf")->assertForbidden();
+        }
+
+        // Warehouse can view order for receiving, but must NOT receive PDF permission or signed link
+        $warehouseShow = $this->actingAs($warehouseUser)->get("/compras/ordenes/{$order->id}");
+        $warehouseShow->assertOk();
+        $warehouseShow->assertInertia(fn (Assert $page) => $page
+            ->where('canViewPdf', false)
+            ->where('sharedPdfUrl', null)
+        );
     }
 
     public function test_can_create_order_without_explicit_location_and_routes_to_default(): void

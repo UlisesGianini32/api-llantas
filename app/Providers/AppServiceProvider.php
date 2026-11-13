@@ -2,11 +2,14 @@
 
 namespace App\Providers;
 
+use App\Models\PurchaseOrder;
+use App\Policies\PurchaseOrderPolicy;
 use App\Services\TelegramAlertService;
 use App\Support\AutopartesFailedJobProvider;
 use App\Support\PilotDatabaseGuard;
 use App\Support\StagingExternalHttpGuard;
 use Illuminate\Queue\Events\JobFailed;
+use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\ServiceProvider;
@@ -26,6 +29,8 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
+        Gate::policy(PurchaseOrder::class, PurchaseOrderPolicy::class);
+
         PilotDatabaseGuard::enforceIfConfigured();
 
         $this->app->extend('queue.failer', function ($defaultFailer, $app) {

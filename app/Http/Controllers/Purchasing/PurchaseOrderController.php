@@ -12,6 +12,9 @@ use App\Services\Purchasing\PurchaseOrderService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Http\Response as HttpResponse;
+use Illuminate\Support\Facades\Gate;
+use Illuminate\Support\Facades\URL;
 use Inertia\Inertia;
 use Inertia\Response;
 use Throwable;
@@ -223,7 +226,7 @@ class PurchaseOrderController extends Controller
         }
     }
 
-    public function show(PurchaseOrder $purchaseOrder): Response
+    public function show(Request $request, PurchaseOrder $purchaseOrder): Response
     {
         $purchaseOrder->load([
             'location:id,code,name',
@@ -248,15 +251,30 @@ class PurchaseOrderController extends Controller
                 ->first(['id', 'name', 'phone', 'contact_name', 'email']);
         }
 
+        $user = $request->user();
+        $canViewPdf = $user !== null && $user->can('viewPdf', $purchaseOrder);
+        $sharedPdfUrl = ($user !== null && $user->can('sharePdf', $purchaseOrder))
+            ? $this->buildExternalSignedPdfUrl($request, $purchaseOrder)
+            : null;
+
         return Inertia::render('Purchasing/Show', [
             'order' => $purchaseOrder,
             'locations' => $locations,
             'supplier' => $supplier,
+            'canViewPdf' => $canViewPdf,
+            'sharedPdfUrl' => $sharedPdfUrl,
         ]);
     }
 
-    public function pdf(PurchaseOrder $purchaseOrder): \Illuminate\View\View
+    public function pdf(Request $request, PurchaseOrder $purchaseOrder): HttpResponse
     {
+        $isSignedPublicAccess = $request->routeIs('purchasing.orders.public-pdf')
+            && $request->hasValidRelativeSignature();
+
+        if (! $isSignedPublicAccess) {
+            Gate::authorize('viewPdf', $purchaseOrder);
+        }
+
         $purchaseOrder->load([
             'location:id,code,name',
             'buyer:id,name,email',
@@ -271,10 +289,38 @@ class PurchaseOrderController extends Controller
                 ->first(['id', 'name', 'phone', 'contact_name', 'email']);
         }
 
-        return view('purchasing.order-pdf', [
-            'order' => $purchaseOrder,
-            'supplier' => $supplier,
-        ]);
+        return response()
+            ->view('purchasing.order-pdf', [
+                'order' => $purchaseOrder,
+                'supplier' => $supplier,
+            ])
+            ->withHeaders([
+                'Cache-Control' => 'private, no-store, max-age=0, must-revalidate',
+                'Pragma' => 'no-cache',
+                'X-Robots-Tag' => 'noindex, nofollow, noarchive',
+            ]);
+    }
+
+    /**
+     * Build a temporary signed external PDF URL that stays valid behind Cloudflare/Nginx TLS termination.
+     */
+    private function buildExternalSignedPdfUrl(Request $request, PurchaseOrder $purchaseOrder): string
+    {
+        $relativeSignedPath = URL::temporarySignedRoute(
+            'purchasing.orders.public-pdf',
+            now()->addDays(7),
+            ['purchaseOrder' => $purchaseOrder->id],
+            absolute: false
+        );
+
+        $forwardedProto = strtolower((string) $request->header('X-Forwarded-Proto', ''));
+        $isHttps = $request->isSecure()
+            || str_contains($forwardedProto, 'https')
+            || (app()->isProduction() && str_starts_with((string) config('app.url'), 'https://'));
+
+        $scheme = $isHttps ? 'https' : $request->getScheme();
+
+        return "{$scheme}://{$request->getHttpHost()}{$relativeSignedPath}";
     }
 
     public function searchProducts(Request $request): JsonResponse

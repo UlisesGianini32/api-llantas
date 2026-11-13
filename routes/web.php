@@ -79,6 +79,7 @@ Route::get('/auth/meli/callback', [AuthController::class, 'handleMeliCallback'])
 Route::get('/auth/shopify/callback', [ChannelSettingsController::class, 'handleShopifyCallback'])
     ->name('shopify.callback');
 Route::get('/orden-compra/{purchaseOrder}/pdf', [PurchaseOrderController::class, 'pdf'])
+    ->middleware('signed:relative')
     ->whereNumber('purchaseOrder')
     ->name('purchasing.orders.public-pdf');
 
