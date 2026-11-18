@@ -1269,30 +1269,83 @@ class IgoraGroupingAssistantService
                     ?? $context['products_by_code'][ltrim($normCode, '0')]
                     ?? collect();
 
-                $validCandidates = $candidates->filter(function (InventoryProduct $p) use ($line, &$conflicts): bool {
+                if ($candidates->isEmpty()) {
+                    continue;
+                }
+
+                $verifiedCandidates = collect();
+                $skuToneMismatch = false;
+                $skuLineMismatch = false;
+                $toneUnverified = false;
+
+                foreach ($candidates as $p) {
                     if ($p->isKit() || $p->isBundleOrKit()) {
-                        return false;
+                        continue;
                     }
                     if (! $this->inventoryProductCompatibleWithLine($p, $line)) {
                         $conflicts[] = 'INVENTORY_LINE_MISMATCH';
+                        $skuLineMismatch = true;
 
-                        return false;
+                        continue;
                     }
 
-                    return true;
-                })->values();
+                    $productTones = $this->extractTonesFromText(
+                        trim((string) $p->name.' '.(string) $p->sku),
+                        (string) ($p->barcode ?? ''),
+                        $p->barcode_secondary,
+                    );
 
-                if ($validCandidates->count() === 1) {
+                    // Si falta el tono en la publicación o en el producto físico, no aprobar
+                    // automáticamente por SKU/EAN sin revisión humana.
+                    if ($normalizedTone === null || $productTones === []) {
+                        $conflicts[] = 'INVENTORY_TONE_UNVERIFIED';
+                        $toneUnverified = true;
+                        $requiresReview = true;
+
+                        continue;
+                    }
+
+                    if (count($productTones) > 1) {
+                        $conflicts[] = 'AMBIGUOUS_INVENTORY_MATCH';
+                        $requiresReview = true;
+
+                        continue;
+                    }
+
+                    if ($productTones[0] !== $normalizedTone) {
+                        $conflicts[] = 'SKU_TONE_MISMATCH';
+                        $skuToneMismatch = true;
+                        $requiresReview = true;
+
+                        continue;
+                    }
+
+                    $verifiedCandidates->push($p);
+                }
+
+                if ($skuToneMismatch || $skuLineMismatch || $toneUnverified) {
                     return [
-                        'product' => $validCandidates->first(),
-                        'conflicts' => $conflicts,
-                        'requires_review' => $conflicts !== [],
+                        'product' => null,
+                        'conflicts' => array_values(array_unique($conflicts)),
+                        'requires_review' => true,
                     ];
                 }
-                if ($validCandidates->count() > 1) {
+
+                if ($verifiedCandidates->count() === 1) {
+                    return [
+                        'product' => $verifiedCandidates->first(),
+                        'conflicts' => array_values(array_unique($conflicts)),
+                        'requires_review' => $requiresReview || $conflicts !== [],
+                    ];
+                }
+                if ($verifiedCandidates->count() > 1) {
                     $conflicts[] = 'AMBIGUOUS_INVENTORY_MATCH';
 
-                    return ['product' => null, 'conflicts' => $conflicts, 'requires_review' => true];
+                    return [
+                        'product' => null,
+                        'conflicts' => array_values(array_unique($conflicts)),
+                        'requires_review' => true,
+                    ];
                 }
             }
         }
@@ -1533,6 +1586,15 @@ class IgoraGroupingAssistantService
                     $conflicts[] = 'DUPLICATE_SKU_CROSS_LINE';
                     $requiresReview = true;
                 }
+                $sameLineTones = $sameSkuRows
+                    ->filter(fn (array $candidate): bool => $candidate['line'] === $row['line'])
+                    ->pluck('normalized_tone')
+                    ->filter(fn (mixed $tone): bool => is_string($tone) && trim($tone) !== '')
+                    ->unique();
+                if ($sameLineTones->count() > 1) {
+                    $conflicts[] = 'DUPLICATE_SKU_CROSS_TONE';
+                    $requiresReview = true;
+                }
             }
 
             if (filled($row['account_key']) && filled($row['user_product_id'])) {
@@ -1606,10 +1668,12 @@ class IgoraGroupingAssistantService
             'TONE_MISMATCH_ATTRIBUTE_VS_TITLE',
             'AMBIGUOUS_KIT_PRESENTATION',
             'INVENTORY_LINE_MISMATCH',
+            'SKU_TONE_MISMATCH',
             'AMBIGUOUS_INVENTORY_MATCH',
             'EXISTING_LINK_CONFLICT',
             'USER_PRODUCT_SHARED_DIFFERENT_GROUPS',
             'DUPLICATE_SKU_CROSS_LINE',
+            'DUPLICATE_SKU_CROSS_TONE',
         ];
 
         if ($presentation === self::PRES_UNKNOWN || array_intersect($conflicts, $severe) !== []) {
@@ -1617,6 +1681,7 @@ class IgoraGroupingAssistantService
         }
 
         if ($requiresHumanReview
+            || in_array('INVENTORY_TONE_UNVERIFIED', $conflicts, true)
             || in_array('DUPLICATE_SKU_CROSS_PRESENTATION', $conflicts, true)
             || in_array('GROUP_HAS_MULTIPLE_SKUS', $conflicts, true)
             || in_array('MISSING_SKU', $conflicts, true)
@@ -1661,6 +1726,9 @@ class IgoraGroupingAssistantService
         }
         if (in_array('EXISTING_LINK_CONFLICT', $conflicts, true)) {
             return 'REVISAR_VINCULO_EXISTENTE_EN_CANAL';
+        }
+        if (in_array('SKU_TONE_MISMATCH', $conflicts, true) || in_array('DUPLICATE_SKU_CROSS_TONE', $conflicts, true)) {
+            return 'REVISAR_CONFLICTO_SKU_TONO';
         }
         if ($presentation === self::PRES_DYE_WITH_PEROXIDE) {
             return 'CONFIRMAR_COMPONENTES_KIT_CON_PEROXIDO';
