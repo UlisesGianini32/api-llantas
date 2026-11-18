@@ -517,6 +517,7 @@ const ALL_SEARCH_ITEMS = [
     { title: 'Códigos de Proveedor', desc: 'Asignar códigos de catálogo a cada proveedor sin alterar SKUs', href: '/compras/proveedores/codigos', category: 'Inventario', icon: IconBarcode },
     { title: 'Vincular Publicaciones', desc: 'Vincular catálogo con Mercado Libre, Amazon y Shopify', href: '/almacen/canales/importar', category: 'Inventario', icon: IconLinkChain },
     { title: 'Stock Mercado Libre', desc: 'Monitoreo de existencias publicadas en MeLi', href: '/almacen/canales/mercado-libre/stock', category: 'Inventario', icon: IconMeli },
+    { title: 'Agrupador Igora Royal', desc: 'Vista previa y auditoría de tintes Schwarzkopf Igora Royal', href: '/almacen/canales/mercado-libre/igora-royal', category: 'Inventario', icon: IconMeli },
     { title: 'Comparar ML', desc: 'Comparativa de precios y competidores en ML', href: '/ml/compare', category: 'Inventario', icon: IconCompareScale },
     { title: 'Llantas Compuestas', desc: 'Combos de 2 y 4 llantas', href: '/productos', category: 'Inventario', icon: IconLayersBundle },
     { title: 'Fórmulas de Precios', desc: 'Reglas y márgenes para cálculo de precios', href: '/price-rules', category: 'Inventario', icon: IconCalculator },
@@ -1058,6 +1059,14 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                             Stock ML
                         </NavItem>
                         <NavItem
+                            href="/almacen/canales/mercado-libre/igora-royal"
+                            icon={IconMeli}
+                            active={currentPath.startsWith('/almacen/canales/mercado-libre/igora-royal')}
+                            onNavigate={onNavigate}
+                        >
+                            Igora Royal (Preview)
+                        </NavItem>
+                        <NavItem
                             href="/ml/compare"
                             icon={IconCompareScale}
                             active={currentPath.startsWith('/ml/compare')}
@@ -1310,6 +1319,14 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                                 onNavigate={onNavigate}
                             >
                                 Stock ML
+                            </NavItem>
+                            <NavItem
+                                href="/almacen/canales/mercado-libre/igora-royal"
+                                icon={IconMeli}
+                                active={currentPath.startsWith('/almacen/canales/mercado-libre/igora-royal')}
+                                onNavigate={onNavigate}
+                            >
+                                Igora Royal (Preview)
                             </NavItem>
                             <NavItem
                                 href="/reabastecimiento/pronostico"
