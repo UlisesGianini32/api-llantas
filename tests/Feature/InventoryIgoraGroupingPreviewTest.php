@@ -1595,6 +1595,340 @@ class InventoryIgoraGroupingPreviewTest extends TestCase
         Http::assertNothingSent();
     }
 
+    public function test_case_a_mlm4465279226_solo_tinte_with_is_kit_yes_and_no_activator_is_single_dye_candidate_requiring_review_unless_unit_confirmed(): void
+    {
+        $product011 = $this->createSimpleProduct('7702045539202', 'Tinte Schwarzkopf Igora Royal 0-11 60ml', 'SCHWARZKOPF', 7, '7702045539202');
+
+        // Caso A real (MLM4465279226): IS_KIT=Sí, INCLUDES_ACTIVATOR=No, KIT_CONTENT=Solo tinte, OXIDANT_VOLUMES=20 (sin UNITS_PER_PACK=1)
+        $this->createPublication($this->accountOne, 'MLM4465279226', '7702045539202', [
+            'id' => 'MLM4465279226',
+            'title' => 'Tinte Schwarzkopf Igora Royal 0-11 Concentrado Antiamarillo 60ml',
+            'seller_custom_field' => '7702045539202',
+            'available_quantity' => 5,
+            'status' => 'active',
+            'attributes' => [
+                ['id' => 'HAIR_TONE', 'value_name' => '0-11'],
+                ['id' => 'IS_KIT', 'value_name' => 'Sí'],
+                ['id' => 'INCLUDES_ACTIVATOR', 'value_name' => 'No'],
+                ['id' => 'KIT_CONTENT', 'value_name' => 'Solo tinte'],
+                ['id' => 'OXIDANT_VOLUMES', 'value_name' => '20'],
+            ],
+        ]);
+
+        // Variante con UNITS_PER_PACK=1 y sin texto de kit: confirmación explícita de presentación unitaria
+        $this->createPublication($this->accountOne, 'MLM4465279227', '7702045539202', [
+            'id' => 'MLM4465279227',
+            'title' => 'Tinte Schwarzkopf Igora Royal 0-11 60ml',
+            'seller_custom_field' => '7702045539202',
+            'available_quantity' => 5,
+            'status' => 'active',
+            'attributes' => [
+                ['id' => 'HAIR_TONE', 'value_name' => '0-11'],
+                ['id' => 'IS_KIT', 'value_name' => 'Sí'],
+                ['id' => 'INCLUDES_ACTIVATOR', 'value_name' => 'No'],
+                ['id' => 'KIT_CONTENT', 'value_name' => 'Solo tinte'],
+                ['id' => 'OXIDANT_VOLUMES', 'value_name' => '20'],
+                ['id' => 'UNITS_PER_PACK', 'value_name' => '1'],
+            ],
+        ]);
+
+        // Variante con UNITS_PER_PACK=1 PERO título menciona "Kit": conserva revisión humana obligatoria
+        $this->createPublication($this->accountOne, 'MLM4465279228', '7702045539202', [
+            'id' => 'MLM4465279228',
+            'title' => 'Kit Tinte Schwarzkopf Igora Royal 0-11 60ml',
+            'seller_custom_field' => '7702045539202',
+            'available_quantity' => 5,
+            'status' => 'active',
+            'attributes' => [
+                ['id' => 'HAIR_TONE', 'value_name' => '0-11'],
+                ['id' => 'IS_KIT', 'value_name' => 'Sí'],
+                ['id' => 'INCLUDES_ACTIVATOR', 'value_name' => 'No'],
+                ['id' => 'KIT_CONTENT', 'value_name' => 'Solo tinte'],
+                ['id' => 'OXIDANT_VOLUMES', 'value_name' => '20'],
+                ['id' => 'UNITS_PER_PACK', 'value_name' => '1'],
+            ],
+        ]);
+
+        $preview = app(IgoraGroupingAssistantService::class)->preview();
+        $rows = collect($preview['rows'])->keyBy('mlm');
+
+        // Caso A real: candidato SINGLE_DYE con revisión humana obligatoria (sin contradicción de oxidante ni vínculo automático)
+        $caseA = $rows['MLM4465279226'];
+        $this->assertSame('0-11', $caseA['normalized_tone']);
+        $this->assertSame(IgoraGroupingAssistantService::PRES_SINGLE_DYE, $caseA['presentation_type']);
+        $this->assertFalse($caseA['peroxide_info']['included']);
+        $this->assertSame(1, $caseA['dye_quantity']);
+        $this->assertSame('IGORA_ROYAL|0-11|SIMPLE', $caseA['proposed_group_key']);
+        $this->assertSame($product011->id, $caseA['proposed_inventory_product_id']);
+        $this->assertNotContains('KIT_ATTRIBUTES_CONTRADICTORY', $caseA['conflicts']);
+        $this->assertContains('IS_KIT_FLAG_INCONSISTENT', $caseA['conflicts']);
+        $this->assertTrue($caseA['requires_human_review']);
+        $this->assertTrue($caseA['is_ambiguous_or_conflicted']);
+        $this->assertSame(IgoraGroupingAssistantService::CONFIDENCE_MEDIUM, $caseA['confidence']);
+        $this->assertSame('REVISAR_INDICADOR_KIT_EN_TINTE_INDIVIDUAL', $caseA['recommended_action']);
+        $this->assertNotSame('CANDIDATO_A_VINCULAR_A_INVENTORY_EXISTENTE', $caseA['recommended_action']);
+
+        // Variante con UNITS_PER_PACK=1 sin texto de kit: presentación unitaria confirmada
+        $unitConfirmed = $rows['MLM4465279227'];
+        $this->assertSame(IgoraGroupingAssistantService::PRES_SINGLE_DYE, $unitConfirmed['presentation_type']);
+        $this->assertFalse($unitConfirmed['peroxide_info']['included']);
+        $this->assertNotContains('KIT_ATTRIBUTES_CONTRADICTORY', $unitConfirmed['conflicts']);
+        $this->assertNotContains('IS_KIT_FLAG_INCONSISTENT', $unitConfirmed['conflicts']);
+        $this->assertContains('IS_KIT_FLAG_OVERRIDDEN_BY_UNIT_SOLO_TINTE', $unitConfirmed['notes']);
+        $this->assertFalse($unitConfirmed['requires_human_review']);
+        $this->assertSame(IgoraGroupingAssistantService::CONFIDENCE_HIGH, $unitConfirmed['confidence']);
+        $this->assertSame('CANDIDATO_A_VINCULAR_A_INVENTORY_EXISTENTE', $unitConfirmed['recommended_action']);
+
+        // Variante con texto "Kit" en título aunque UNITS_PER_PACK=1: conserva revisión humana
+        $titleKit = $rows['MLM4465279228'];
+        $this->assertSame(IgoraGroupingAssistantService::PRES_SINGLE_DYE, $titleKit['presentation_type']);
+        $this->assertContains('IS_KIT_FLAG_INCONSISTENT', $titleKit['conflicts']);
+        $this->assertTrue($titleKit['requires_human_review']);
+        $this->assertSame('REVISAR_INDICADOR_KIT_EN_TINTE_INDIVIDUAL', $titleKit['recommended_action']);
+
+        $this->assertDatabaseCount('inventory_kit_components', 0);
+        $this->assertDatabaseCount('inventory_channel_links', 0);
+        Http::assertNothingSent();
+    }
+
+    public function test_case_b_mlm2597365379_oxigenta_and_developer_synonyms_with_includes_activator_no_remain_contradictory(): void
+    {
+        $this->createSimpleProduct('7702045539202', 'Tinte Schwarzkopf Igora Royal 0-11 60ml', 'SCHWARZKOPF', 7, '7702045539202');
+
+        // Caso B real: MLM2597365379 con KIT_CONTENT = Oxigenta e INCLUDES_ACTIVATOR = No
+        $this->createPublication($this->accountOne, 'MLM2597365379', '7702045539202', [
+            'id' => 'MLM2597365379',
+            'title' => 'Tinte Schwarzkopf Igora Royal 0-11 60ml',
+            'seller_custom_field' => '7702045539202',
+            'available_quantity' => 3,
+            'status' => 'active',
+            'attributes' => [
+                ['id' => 'HAIR_TONE', 'value_name' => '0-11'],
+                ['id' => 'IS_KIT', 'value_name' => 'Sí'],
+                ['id' => 'INCLUDES_ACTIVATOR', 'value_name' => 'No'],
+                ['id' => 'KIT_CONTENT', 'value_name' => 'Oxigenta'],
+                ['id' => 'OXIDANT_VOLUMES', 'value_name' => '20'],
+            ],
+        ]);
+
+        // Sinónimos adicionales: Oxygenta y Loción reveladora
+        $this->createPublication($this->accountOne, 'MLM2597365380', '7702045539202', [
+            'id' => 'MLM2597365380',
+            'title' => 'Tinte Schwarzkopf Igora Royal 0-11 60ml',
+            'seller_custom_field' => '7702045539202',
+            'available_quantity' => 3,
+            'status' => 'active',
+            'attributes' => [
+                ['id' => 'HAIR_TONE', 'value_name' => '0-11'],
+                ['id' => 'IS_KIT', 'value_name' => 'Sí'],
+                ['id' => 'INCLUDES_ACTIVATOR', 'value_name' => 'No'],
+                ['id' => 'KIT_CONTENT', 'value_name' => 'Oxygenta'],
+            ],
+        ]);
+
+        $this->createPublication($this->accountOne, 'MLM2597365381', '7702045539202', [
+            'id' => 'MLM2597365381',
+            'title' => 'Tinte Schwarzkopf Igora Royal 0-11 60ml',
+            'seller_custom_field' => '7702045539202',
+            'available_quantity' => 3,
+            'status' => 'active',
+            'attributes' => [
+                ['id' => 'HAIR_TONE', 'value_name' => '0-11'],
+                ['id' => 'IS_KIT', 'value_name' => 'Sí'],
+                ['id' => 'INCLUDES_ACTIVATOR', 'value_name' => 'No'],
+                ['id' => 'KIT_CONTENT', 'value_name' => 'Tinte + loción reveladora'],
+            ],
+        ]);
+
+        $preview = app(IgoraGroupingAssistantService::class)->preview();
+        $rows = collect($preview['rows'])->keyBy('mlm');
+
+        foreach (['MLM2597365379', 'MLM2597365380', 'MLM2597365381'] as $mlm) {
+            $row = $rows[$mlm];
+            $this->assertSame('0-11', $row['normalized_tone']);
+            $this->assertSame(IgoraGroupingAssistantService::PRES_UNKNOWN, $row['presentation_type'], "Fallo en {$mlm}");
+            $this->assertSame([], $row['candidate_components'], "No debe armar BOM en {$mlm}");
+            $this->assertNull($row['proposed_inventory_product_id'], "No debe proponer producto en {$mlm}");
+            $this->assertContains('KIT_ATTRIBUTES_CONTRADICTORY', $row['conflicts'], "Debe ser contradictorio en {$mlm}");
+            $this->assertTrue($row['requires_human_review']);
+            $this->assertSame(IgoraGroupingAssistantService::CONFIDENCE_LOW, $row['confidence']);
+            $this->assertSame('REVISAR_ATRIBUTOS_KIT_CONTRADICTORIOS', $row['recommended_action']);
+        }
+
+        $this->assertDatabaseCount('inventory_kit_components', 0);
+        $this->assertDatabaseCount('inventory_channel_links', 0);
+        Http::assertNothingSent();
+    }
+
+    public function test_case_c_mlm3302742302_consistent_kit_with_oxidant_classifies_as_dye_with_peroxide_and_requires_component_confirmation(): void
+    {
+        $dyeL89 = $this->createSimpleProduct('7702045556940', 'Tinte Igora Royal Fashion Lights L-89 60ml', 'SCHWARZKOPF', 5, '7702045556940');
+
+        $this->createPublication($this->accountOne, 'MLM3302742302', 'KIT-L89-20V', [
+            'id' => 'MLM3302742302',
+            'title' => 'Tinte Schwarzkopf Professional Igora Royal Fashion Lights Tono L-89 Mechas Rojo Violeta',
+            'seller_custom_field' => 'KIT-L89-20V',
+            'available_quantity' => 3,
+            'status' => 'active',
+            'attributes' => [
+                ['id' => 'HAIR_TONE', 'value_name' => 'L-89'],
+                ['id' => 'IS_KIT', 'value_name' => 'Sí'],
+                ['id' => 'INCLUDES_ACTIVATOR', 'value_name' => 'Sí'],
+                ['id' => 'KIT_CONTENT', 'value_name' => 'Coloración + oxidante'],
+                ['id' => 'OXIDANT_VOLUMES', 'value_name' => '20'],
+            ],
+        ]);
+
+        $preview = app(IgoraGroupingAssistantService::class)->preview();
+        $row = $preview['rows'][0];
+
+        $this->assertSame(IgoraGroupingAssistantService::LINE_ROYAL, $row['line']);
+        $this->assertSame('L-89', $row['normalized_tone']);
+        $this->assertSame(IgoraGroupingAssistantService::PRES_DYE_WITH_PEROXIDE, $row['presentation_type']);
+        $this->assertTrue($row['peroxide_info']['included']);
+        $this->assertSame(20, $row['peroxide_info']['concentration_vol']);
+        $this->assertNull($row['peroxide_info']['volume_ml']);
+        $this->assertNotContains('KIT_ATTRIBUTES_CONTRADICTORY', $row['conflicts']);
+        $this->assertContains('PEROXIDE_COMPOSITION_INCOMPLETE', $row['conflicts']);
+        $this->assertTrue($row['requires_human_review']);
+        $this->assertSame('CONFIRMAR_COMPONENTES_KIT_CON_PEROXIDO', $row['recommended_action']);
+
+        $components = collect($row['candidate_components'])->keyBy('role');
+        $this->assertSame($dyeL89->id, $components['tinte_componente']['inventory_product_id']);
+        $this->assertSame('NEEDS_HUMAN_REVIEW', $components['peroxido_componente']['status']);
+
+        $this->assertDatabaseCount('inventory_kit_components', 0);
+        $this->assertDatabaseCount('inventory_channel_links', 0);
+        Http::assertNothingSent();
+    }
+
+    public function test_multipack_of_multiple_dyes_with_is_kit_yes_and_includes_activator_no_is_not_contradictory(): void
+    {
+        $this->createSimpleProduct('IG-022', 'Tinte Schwarzkopf Igora Royal 0-22 60ml', 'SCHWARZKOPF', 10);
+
+        // Multipack indicado en título y UNITS_PER_PACK=2 con IS_KIT=Sí e INCLUDES_ACTIVATOR=No
+        $this->createPublication($this->accountOne, 'MLM-MP-KIT-1', 'PACK2-022', [
+            'id' => 'MLM-MP-KIT-1',
+            'title' => 'Pack 2 Tintes Schwarzkopf Igora Royal 0-22 60ml',
+            'seller_custom_field' => 'PACK2-022',
+            'available_quantity' => 4,
+            'status' => 'active',
+            'attributes' => [
+                ['id' => 'IS_KIT', 'value_name' => 'Sí'],
+                ['id' => 'INCLUDES_ACTIVATOR', 'value_name' => 'No'],
+                ['id' => 'UNITS_PER_PACK', 'value_name' => '2'],
+            ],
+        ]);
+
+        // Multipack indicado únicamente en KIT_CONTENT="2 tintes" con IS_KIT=Sí e INCLUDES_ACTIVATOR=No
+        $this->createPublication($this->accountOne, 'MLM-MP-KIT-2', 'PACK2B-022', [
+            'id' => 'MLM-MP-KIT-2',
+            'title' => 'Tinte Schwarzkopf Igora Royal 0-22 60ml',
+            'seller_custom_field' => 'PACK2B-022',
+            'available_quantity' => 4,
+            'status' => 'active',
+            'attributes' => [
+                ['id' => 'IS_KIT', 'value_name' => 'Sí'],
+                ['id' => 'INCLUDES_ACTIVATOR', 'value_name' => 'No'],
+                ['id' => 'KIT_CONTENT', 'value_name' => '2 tintes'],
+            ],
+        ]);
+
+        // Palabra de oxidante no explicada en el título incluso con INCLUDES_ACTIVATOR=No debe seguir exigiendo revisión
+        $this->createPublication($this->accountOne, 'MLM-BARE-OXIGENTA', 'BARE-022', [
+            'id' => 'MLM-BARE-OXIGENTA',
+            'title' => 'Tinte Schwarzkopf Igora Royal 0-22 Oxigenta 20 vol 60ml',
+            'seller_custom_field' => 'BARE-022',
+            'available_quantity' => 2,
+            'status' => 'active',
+            'attributes' => [
+                ['id' => 'INCLUDES_ACTIVATOR', 'value_name' => 'No'],
+            ],
+        ]);
+
+        $preview = app(IgoraGroupingAssistantService::class)->preview();
+        $rows = collect($preview['rows'])->keyBy('mlm');
+
+        foreach (['MLM-MP-KIT-1', 'MLM-MP-KIT-2'] as $mlm) {
+            $row = $rows[$mlm];
+            $this->assertSame(IgoraGroupingAssistantService::PRES_MULTIPACK, $row['presentation_type'], "Multipack esperado en {$mlm}");
+            $this->assertSame(2, $row['dye_quantity']);
+            $this->assertFalse($row['peroxide_info']['included']);
+            $this->assertNotContains('KIT_ATTRIBUTES_CONTRADICTORY', $row['conflicts']);
+            $this->assertNotContains('IS_KIT_FLAG_INCONSISTENT', $row['conflicts']);
+        }
+
+        $bareRow = $rows['MLM-BARE-OXIGENTA'];
+        $this->assertSame(IgoraGroupingAssistantService::PRES_UNKNOWN, $bareRow['presentation_type']);
+        $this->assertContains('AMBIGUOUS_KIT_PRESENTATION', $bareRow['conflicts']);
+        $this->assertTrue($bareRow['requires_human_review']);
+    }
+
+    public function test_attribute_combinations_summary_and_audit_command_flag_remain_read_only(): void
+    {
+        $this->createPublication($this->accountOne, 'MLM-SUM-1', '7702045539202', [
+            'id' => 'MLM-SUM-1',
+            'title' => 'Tinte Schwarzkopf Igora Royal 0-11 60ml',
+            'seller_custom_field' => '7702045539202',
+            'available_quantity' => 3,
+            'status' => 'active',
+            'attributes' => [
+                ['id' => 'IS_KIT', 'value_name' => 'Sí'],
+                ['id' => 'INCLUDES_ACTIVATOR', 'value_name' => 'No'],
+                ['id' => 'KIT_CONTENT', 'value_name' => 'Solo tinte'],
+                ['id' => 'OXIDANT_VOLUMES', 'value_name' => '20'],
+            ],
+        ]);
+        $this->createPublication($this->accountOne, 'MLM-SUM-2', '7702045539203', [
+            'id' => 'MLM-SUM-2',
+            'title' => 'Tinte Schwarzkopf Igora Royal 0-22 60ml',
+            'seller_custom_field' => '7702045539203',
+            'available_quantity' => 4,
+            'status' => 'active',
+            'attributes' => [
+                ['id' => 'IS_KIT', 'value_name' => 'Sí'],
+                ['id' => 'INCLUDES_ACTIVATOR', 'value_name' => 'No'],
+                ['id' => 'KIT_CONTENT', 'value_name' => 'Solo tinte'],
+                ['id' => 'OXIDANT_VOLUMES', 'value_name' => '20'],
+            ],
+        ]);
+        $this->createPublication($this->accountOne, 'MLM-SUM-3', '7702045539204', [
+            'id' => 'MLM-SUM-3',
+            'title' => 'Tinte Schwarzkopf Igora Royal 0-11 60ml',
+            'seller_custom_field' => '7702045539204',
+            'available_quantity' => 2,
+            'status' => 'active',
+            'attributes' => [
+                ['id' => 'IS_KIT', 'value_name' => 'Sí'],
+                ['id' => 'INCLUDES_ACTIVATOR', 'value_name' => 'No'],
+                ['id' => 'KIT_CONTENT', 'value_name' => 'Oxigenta'],
+                ['id' => 'OXIDANT_VOLUMES', 'value_name' => '20'],
+            ],
+        ]);
+
+        $preview = app(IgoraGroupingAssistantService::class)->preview();
+        $combos = $preview['attribute_combinations'];
+
+        $this->assertCount(2, $combos);
+        $this->assertSame('Solo tinte', $combos[0]['kit_content']);
+        $this->assertSame(2, $combos[0]['count']);
+        $this->assertSame(IgoraGroupingAssistantService::PRES_SINGLE_DYE, $combos[0]['presentation_type']);
+        $this->assertSame('Oxigenta', $combos[1]['kit_content']);
+        $this->assertSame(1, $combos[1]['count']);
+        $this->assertSame(IgoraGroupingAssistantService::PRES_UNKNOWN, $combos[1]['presentation_type']);
+
+        $exitCode = Artisan::call('inventory:igora-audit', ['--attributes-summary' => true]);
+        $this->assertSame(0, $exitCode);
+        $output = Artisan::output();
+        $this->assertStringContainsString('Combinaciones de Atributos Estructurados', $output);
+        $this->assertStringContainsString('Solo tinte', $output);
+        $this->assertStringContainsString('Oxigenta', $output);
+
+        $this->assertDatabaseCount('inventory_channel_links', 0);
+        $this->assertDatabaseCount('inventory_kit_components', 0);
+        Http::assertNothingSent();
+    }
+
     private function createSimpleProduct(
         string $sku,
         string $name,

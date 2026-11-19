@@ -16,6 +16,7 @@ class InventoryIgoraAuditCommand extends Command
         {--status= : Filtra por estado remoto en Mercado Libre (active, paused, under_review, etc.)}
         {--search= : Búsqueda por SKU, MLM, variación o título}
         {--ambiguous : Muestra únicamente filas ambiguas, con conflictos o revisión humana}
+        {--attributes-summary : Muestra el resumen read-only de combinaciones de atributos estructurados (IS_KIT, INCLUDES_ACTIVATOR, KIT_CONTENT, OXIDANT_VOLUMES)}
         {--limit=100 : Máximo de filas a imprimir en tabla}
         {--json : Imprime la salida completa en JSON}';
 
@@ -61,6 +62,31 @@ class InventoryIgoraAuditCommand extends Command
                 ['Pausadas / Moderadas', $counts['paused_rows'].' / '.$counts['moderated_rows']],
             ]
         );
+
+        if ($this->option('attributes-summary')) {
+            $combos = $preview['attribute_combinations'] ?? [];
+            $this->newLine();
+            $this->info('=== Combinaciones de Atributos Estructurados (Read-Only) ===');
+
+            if ($combos === []) {
+                $this->warn('Sin combinaciones de atributos para los filtros aplicados.');
+            } else {
+                $this->table(
+                    ['IS_KIT', 'INCLUDES_ACTIVATOR', 'KIT_CONTENT', 'OXIDANT_VOLUMES', 'UNITS_PER_PACK', 'Presentación', 'Filas', 'Conflictos', 'Ejemplos MLM'],
+                    array_map(fn (array $combo): array => [
+                        $combo['is_kit'],
+                        $combo['includes_activator'],
+                        Str::limit((string) $combo['kit_content'], 32),
+                        (string) $combo['oxidant_volumes'],
+                        (string) $combo['units_per_pack'],
+                        (string) $combo['presentation_type'],
+                        (int) $combo['count'],
+                        implode(',', $combo['conflicts']) ?: '—',
+                        implode(',', $combo['sample_mlms']) ?: '—',
+                    ], $combos)
+                );
+            }
+        }
 
         $limit = max(1, min(500, (int) $this->option('limit')));
         $rows = array_slice($preview['rows'], 0, $limit);

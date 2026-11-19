@@ -107,6 +107,7 @@ class IgoraGroupingAssistantService
                 ],
                 'filters' => $normalizedFilters,
                 'pagination' => $this->buildPaginationPayload(collect(), $normalizedFilters),
+                'attribute_combinations' => [],
                 'read_only' => true,
             ];
         }
@@ -131,6 +132,7 @@ class IgoraGroupingAssistantService
         $filtered = $sorted->filter(fn (array $row): bool => $this->matchesFilters($row, $normalizedFilters))->values();
         $groups = $this->buildGroupSummaries($filtered);
         $counts = $this->computeCounts($filtered, $groups);
+        $attributeCombinations = $this->buildAttributeCombinationSummary($filtered);
         $pagination = $this->buildPaginationPayload($filtered, $normalizedFilters);
         $pagedRows = $pagination !== null
             ? $filtered->slice(($pagination['current_page'] - 1) * $pagination['per_page'], $pagination['per_page'])->values()->all()
@@ -143,6 +145,7 @@ class IgoraGroupingAssistantService
             'facets' => $facets,
             'filters' => $normalizedFilters,
             'pagination' => $pagination,
+            'attribute_combinations' => $attributeCombinations,
             'read_only' => true,
         ];
     }
@@ -397,6 +400,8 @@ class IgoraGroupingAssistantService
         $dyeQuantity = $presentationResult['dye_quantity'];
         $requiresHumanReview = $presentationResult['requires_human_review'];
         $conflicts = array_merge($conflicts, $presentationResult['conflicts']);
+        $notes = array_merge($notes, $presentationResult['notes'] ?? []);
+        $structuredAttributes = $presentationResult['structured_attributes'];
 
         if (in_array($presentation, [self::PRES_STANDALONE_PEROXIDE], true)) {
             // Un peróxido independiente no requiere tono de tinte; removemos TONE_NOT_DETECTED si se hubiera marcado.
@@ -510,6 +515,7 @@ class IgoraGroupingAssistantService
             'presentation_label' => self::PRESENTATION_LABELS[$presentation] ?? $presentation,
             'dye_quantity' => $dyeQuantity,
             'peroxide_info' => $peroxideInfo,
+            'structured_attributes' => $structuredAttributes,
             'candidate_components' => $matchResult['candidate_components'],
             'proposed_group_key' => $groupInfo['key'],
             'proposed_group_label' => $groupInfo['label'],
@@ -770,19 +776,22 @@ class IgoraGroupingAssistantService
      *     peroxide: array<string, mixed>,
      *     dye_quantity: ?int,
      *     requires_human_review: bool,
-     *     conflicts: list<string>
+     *     conflicts: list<string>,
+     *     notes: list<string>,
+     *     structured_attributes: array<string, mixed>
      * }
      */
     private function classifyPresentation(array $row, ?string $normalizedTone, ?MeliPriceManagerItem $pmItem): array
     {
         $conflicts = [];
+        $notes = [];
         $text = Str::ascii(mb_strtolower(implode(' ', array_filter([
             (string) ($row['title'] ?? ''),
             (string) ($row['variation_label'] ?? ''),
             (string) ($row['description'] ?? ''),
         ])), 'UTF-8'));
 
-        $peroxideNoun = '(?:peroxido|oxidante|revelador|activador|locion\s+activadora|developer|agua\s+oxigenada)';
+        $peroxideNoun = '(?:peroxido|oxidante|revelador|activador|locion\s+activadora|locion\s+reveladora|developer|agua\s+oxigenada|oxigenta|oxygenta)';
 
         // 1) Señales explícitas de exclusión o venta como tinte solo
         $hasPeroxideExclusion = preg_match(
@@ -825,29 +834,42 @@ class IgoraGroupingAssistantService
         $structuredPackQty = $this->extractStructuredPackQuantity($row, $pmItem);
         $structuredKit = $this->analyzeStructuredKitAndActivatorAttributes($row, $pmItem);
         $textPackQty = $this->extractTextPackQuantity($text);
-        $hasGenericKitWord = preg_match('/\b(?:kit|combo|set|paquete)\b/', $text) === 1
+        $kitContentPackQty = ! $structuredKit['kit_content_mentions_peroxide'] && $structuredKit['kit_content'] !== ''
+            ? $this->extractTextPackQuantity(Str::ascii(mb_strtolower($structuredKit['kit_content'], 'UTF-8')))
+            : null;
+        $hasTextKitWord = preg_match('/\b(?:kit|combo|set|paquete)\b/', $text) === 1;
+        $hasGenericKitWord = $hasTextKitWord
             || $structuredKit['is_kit'] === true
             || $structuredKit['sale_format_is_kit']
             || $structuredKit['pm_detector_is_kit'];
         $hasMultipackWord = preg_match('/\b(?:duo|trio|pack|multipack|lote|caja)\b/', $text) === 1
             || $textPackQty !== null
+            || $kitContentPackQty !== null
             || ($structuredPackQty !== null && $structuredPackQty > 1);
+
+        $structuredAttributes = [
+            'is_kit' => $structuredKit['is_kit'],
+            'includes_activator' => $structuredKit['includes_activator'],
+            'kit_content' => $structuredKit['kit_content'] !== '' ? $structuredKit['kit_content'] : null,
+            'oxidant_volumes' => $structuredKit['oxidant_volumes'] !== '' ? $structuredKit['oxidant_volumes'] : null,
+            'units_per_pack' => $structuredPackQty,
+        ];
 
         $hasStructuredPeroxideInclusion = $structuredKit['includes_activator'] === true
             || ($structuredKit['kit_content_mentions_peroxide'] && $structuredKit['includes_activator'] !== false);
 
         $hasPositivePeroxideInclusion = ! $hasPeroxideExclusion
+            && ! $structuredKit['kit_content_is_dye_only']
             && $structuredKit['includes_activator'] !== false
             && ($hasPositivePeroxideInclusionText || $hasStructuredPeroxideInclusion);
 
-        // Solo marcar contradicción real cuando una negación (INCLUDES_ACTIVATOR=No, IS_KIT=No o exclusión textual)
-        // choca con una afirmación positiva de kit o inclusión de peróxido (nunca por una simple recomendación de concentración).
+        // Separar presencia de activador de la bandera IS_KIT:
+        // IS_KIT=Sí + INCLUDES_ACTIVATOR=No NO es contradicción automática (puede ser multipack de tintes o "Solo tinte").
+        // Solo es contradicción real cuando una negación de activador/kit choca con evidencia positiva de oxidante/activador.
         $hasContradictoryKitAttributes =
             ($structuredKit['includes_activator'] === false && (
-                $structuredKit['is_kit'] === true
-                || $structuredKit['kit_content_mentions_peroxide']
+                $structuredKit['kit_content_mentions_peroxide']
                 || $hasPositivePeroxideInclusionText
-                || $hasGenericKitWord
             ))
             || ($structuredKit['is_kit'] === false && (
                 $structuredKit['includes_activator'] === true
@@ -855,9 +877,12 @@ class IgoraGroupingAssistantService
                 || ($hasPositivePeroxideInclusionText && $hasDyeWord)
             ))
             || ($hasPeroxideExclusion && (
-                $structuredKit['is_kit'] === true
-                || $structuredKit['includes_activator'] === true
+                $structuredKit['includes_activator'] === true
                 || $structuredKit['kit_content_mentions_peroxide']
+                || $hasPositivePeroxideInclusionText
+            ))
+            || ($structuredKit['kit_content_is_dye_only'] && (
+                $structuredKit['includes_activator'] === true
                 || $hasPositivePeroxideInclusionText
             ));
 
@@ -891,10 +916,12 @@ class IgoraGroupingAssistantService
                 'dye_quantity' => null,
                 'requires_human_review' => $requiresReview,
                 'conflicts' => $conflicts,
+                'notes' => $notes,
+                'structured_attributes' => $structuredAttributes,
             ];
         }
 
-        // 2. Atributos de kit/activador contradictorios: nunca asumir tinte individual ni proponer BOM completo.
+        // 2. Atributos de kit/activador realmente contradictorios (ej. INCLUDES_ACTIVATOR=No con KIT_CONTENT=Oxigenta o coloración + oxidante)
         if ($hasContradictoryKitAttributes) {
             $conflicts[] = 'KIT_ATTRIBUTES_CONTRADICTORY';
 
@@ -907,6 +934,8 @@ class IgoraGroupingAssistantService
                 'dye_quantity' => null,
                 'requires_human_review' => true,
                 'conflicts' => $conflicts,
+                'notes' => $notes,
+                'structured_attributes' => $structuredAttributes,
             ];
         }
 
@@ -914,6 +943,20 @@ class IgoraGroupingAssistantService
         if ($hasPositivePeroxideInclusion && $hasDyeWord) {
             $peroxideDetailsText = trim($text.' '.Str::ascii(mb_strtolower($structuredKit['kit_content'], 'UTF-8')));
             $peroxideDetails = $this->extractPeroxideDetails($peroxideDetailsText, standalone: false);
+
+            // Aprovechar OXIDANT_VOLUMES estructurado únicamente cuando la inclusión de peróxido ya está confirmada.
+            if ($structuredKit['oxidant_volumes'] !== '' && preg_match_all('/\b(10|20|30|40)\b/', $structuredKit['oxidant_volumes'], $ovMatches)) {
+                $attrVols = array_values(array_unique(array_map('intval', $ovMatches[1])));
+                if ($peroxideDetails['concentration_vol'] === null && ! $peroxideDetails['multiple_concentrations'] && count($attrVols) === 1) {
+                    $peroxideDetails['concentration_vol'] = $attrVols[0];
+                    $peroxideDetails['concentration_label'] = $attrVols[0].' Vol';
+                } elseif ($peroxideDetails['concentration_vol'] !== null && ! in_array($peroxideDetails['concentration_vol'], $attrVols, true)) {
+                    $peroxideDetails['multiple_concentrations'] = true;
+                    $peroxideDetails['concentration_vol'] = null;
+                    $peroxideDetails['concentration_label'] = null;
+                }
+            }
+
             $dyeQty = $this->extractDyeQuantityInKit($text, $textPackQty);
 
             $ambiguousDetails = $peroxideDetails['concentration_vol'] === null
@@ -939,14 +982,19 @@ class IgoraGroupingAssistantService
                 'dye_quantity' => $dyeQty,
                 'requires_human_review' => true, // Todo kit con peróxido exige confirmación humana de componentes antes de activar.
                 'conflicts' => $conflicts,
+                'notes' => $notes,
+                'structured_attributes' => $structuredAttributes,
             ];
         }
 
         // 4. Mención ambigua de peróxido o concentración sin confirmación de inclusión ni exclusión explícita
-        //    (si INCLUDES_ACTIVATOR=No o hay exclusión/instrucción clara y no es kit, no bloquear como ambiguo).
-        $confirmedNoPeroxide = $hasPeroxideExclusion || $structuredKit['includes_activator'] === false;
-        $hasAmbiguousUnexplainedSignal = ! $confirmedNoPeroxide
-            && ($hasUnexplainedPeroxideWord || $hasUnexplainedTextConcentration || $structuredKit['oxidant_volumes'] !== '');
+        //    (una palabra de peróxido no explicada en el texto siempre exige revisión; en cambio, si INCLUDES_ACTIVATOR=No,
+        //    KIT_CONTENT=Solo tinte o hay exclusión clara, una referencia aislada de concentración/OXIDANT_VOLUMES no bloquea).
+        $confirmedNoPeroxide = $hasPeroxideExclusion
+            || $structuredKit['includes_activator'] === false
+            || $structuredKit['kit_content_is_dye_only'];
+        $hasAmbiguousUnexplainedSignal = $hasUnexplainedPeroxideWord
+            || (! $confirmedNoPeroxide && ($hasUnexplainedTextConcentration || $structuredKit['oxidant_volumes'] !== ''));
         if ($hasAmbiguousUnexplainedSignal && $hasDyeWord) {
             $conflicts[] = 'AMBIGUOUS_KIT_PRESENTATION';
 
@@ -959,12 +1007,14 @@ class IgoraGroupingAssistantService
                 'dye_quantity' => null,
                 'requires_human_review' => true,
                 'conflicts' => $conflicts,
+                'notes' => $notes,
+                'structured_attributes' => $structuredAttributes,
             ];
         }
 
-        // 5. Multipack sin peróxido
+        // 5. Multipack sin peróxido (incluye kits de varios tintes con IS_KIT=Sí e INCLUDES_ACTIVATOR=No)
         if ($hasMultipackWord && ! $hasPositivePeroxideInclusion) {
-            $qty = $textPackQty ?? ($structuredPackQty !== null && $structuredPackQty > 1 ? $structuredPackQty : null);
+            $qty = $textPackQty ?? $kitContentPackQty ?? ($structuredPackQty !== null && $structuredPackQty > 1 ? $structuredPackQty : null);
             $requiresReview = $qty === null;
             if ($requiresReview) {
                 $conflicts[] = 'MULTIPACK_QUANTITY_AMBIGUOUS';
@@ -976,10 +1026,48 @@ class IgoraGroupingAssistantService
                 'dye_quantity' => $qty,
                 'requires_human_review' => $requiresReview,
                 'conflicts' => $conflicts,
+                'notes' => $notes,
+                'structured_attributes' => $structuredAttributes,
             ];
         }
 
-        // 6. Dice "kit/combo/paquete/set" o tiene IS_KIT=Sí, pero no aclara si incluye peróxido o cuántas piezas trae
+        // 6. KIT_CONTENT="Solo tinte" sin activador ni señales de multipack:
+        //    candidato a SINGLE_DYE, pero conserva revisión humana si IS_KIT=Sí carece de confirmación de unidad individual.
+        if ($structuredKit['kit_content_is_dye_only'] && ! $hasPositivePeroxideInclusion && $hasDyeWord) {
+            $hasConfirmedSingleUnit = $structuredPackQty === 1
+                && ! $hasTextKitWord
+                && ! $structuredKit['sale_format_is_kit'];
+
+            if ($hasGenericKitWord && ! $hasConfirmedSingleUnit) {
+                $conflicts[] = 'IS_KIT_FLAG_INCONSISTENT';
+
+                return [
+                    'presentation' => self::PRES_SINGLE_DYE,
+                    'peroxide' => $peroxideInfo,
+                    'dye_quantity' => 1,
+                    'requires_human_review' => true,
+                    'conflicts' => $conflicts,
+                    'notes' => $notes,
+                    'structured_attributes' => $structuredAttributes,
+                ];
+            }
+
+            if ($hasGenericKitWord && $hasConfirmedSingleUnit) {
+                $notes[] = 'IS_KIT_FLAG_OVERRIDDEN_BY_UNIT_SOLO_TINTE';
+            }
+
+            return [
+                'presentation' => self::PRES_SINGLE_DYE,
+                'peroxide' => $peroxideInfo,
+                'dye_quantity' => 1,
+                'requires_human_review' => false,
+                'conflicts' => $conflicts,
+                'notes' => $notes,
+                'structured_attributes' => $structuredAttributes,
+            ];
+        }
+
+        // 7. Dice "kit/combo/paquete/set" o tiene IS_KIT=Sí, pero no aclara si incluye peróxido, "Solo tinte" o cuántas piezas trae
         if ($hasGenericKitWord) {
             $conflicts[] = 'AMBIGUOUS_KIT_PRESENTATION';
 
@@ -989,10 +1077,12 @@ class IgoraGroupingAssistantService
                 'dye_quantity' => null,
                 'requires_human_review' => true,
                 'conflicts' => $conflicts,
+                'notes' => $notes,
+                'structured_attributes' => $structuredAttributes,
             ];
         }
 
-        // 7. Tinte individual claramente confirmado
+        // 8. Tinte individual claramente confirmado
         if ($hasDyeWord || $normalizedTone !== null) {
             return [
                 'presentation' => self::PRES_SINGLE_DYE,
@@ -1000,6 +1090,8 @@ class IgoraGroupingAssistantService
                 'dye_quantity' => 1,
                 'requires_human_review' => false,
                 'conflicts' => $conflicts,
+                'notes' => $notes,
+                'structured_attributes' => $structuredAttributes,
             ];
         }
 
@@ -1011,6 +1103,8 @@ class IgoraGroupingAssistantService
             'dye_quantity' => null,
             'requires_human_review' => true,
             'conflicts' => $conflicts,
+            'notes' => $notes,
+            'structured_attributes' => $structuredAttributes,
         ];
     }
 
@@ -1051,13 +1145,13 @@ class IgoraGroupingAssistantService
                 $volumeMl = str_starts_with($m[2], 'l') ? (int) round($val * 1000) : (int) round($val);
             }
         } else {
-            if (preg_match('/(?:peroxido|oxidante|activador|revelador|developer)\s*(?:de\s*)?(\d+(?:[.,]\d+)?)\s*(ml|lt|l)\b/', $textForVol, $m)) {
+            if (preg_match('/(?:peroxido|oxidante|activador|revelador|locion\s+reveladora|developer|oxigenta|oxygenta)\s*(?:de\s*)?(\d+(?:[.,]\d+)?)\s*(ml|lt|l)\b/', $textForVol, $m)) {
                 $val = (float) str_replace(',', '.', $m[1]);
                 $volumeMl = str_starts_with($m[2], 'l') ? (int) round($val * 1000) : (int) round($val);
-            } elseif (preg_match('/\b(\d+(?:[.,]\d+)?)\s*(ml|lt|l)\s*(?:de\s+)?(?:peroxido|oxidante|activador|revelador)\b/', $textForVol, $m)) {
+            } elseif (preg_match('/\b(\d+(?:[.,]\d+)?)\s*(ml|lt|l)\s*(?:de\s+)?(?:peroxido|oxidante|activador|revelador|locion\s+reveladora|oxigenta|oxygenta)\b/', $textForVol, $m)) {
                 $val = (float) str_replace(',', '.', $m[1]);
                 $volumeMl = str_starts_with($m[2], 'l') ? (int) round($val * 1000) : (int) round($val);
-            } elseif (preg_match('/\+\s*(?:peroxido|oxidante|activador)[^0-9]{0,25}(\d+)\s*ml\b/', $textForVol, $m)) {
+            } elseif (preg_match('/\+\s*(?:peroxido|oxidante|activador|revelador|oxigenta|oxygenta)[^0-9]{0,25}(\d+)\s*ml\b/', $textForVol, $m)) {
                 $volumeMl = (int) $m[1];
             } elseif (preg_match_all('/\b(\d+)\s*ml\b/', $textForVol, $mlMatches) && count($mlMatches[1]) >= 2) {
                 // Ej: "tinte 60ml + peroxido 60ml" o "60ml + 90ml"
@@ -1066,7 +1160,7 @@ class IgoraGroupingAssistantService
         }
 
         $peroxideQuantity = null;
-        if (preg_match('/\b([1-9])\s*(?:peroxidos?|oxidantes?|activadores?)\b/', $text, $qm)) {
+        if (preg_match('/\b([1-9])\s*(?:peroxidos?|oxidantes?|activadores?|reveladores?|oxigentas?|oxygentas?)\b/', $text, $qm)) {
             $peroxideQuantity = (int) $qm[1];
         } elseif ($concentrationVol !== null && $volumeMl !== null) {
             $peroxideQuantity = 1;
@@ -1151,6 +1245,7 @@ class IgoraGroupingAssistantService
      *     includes_activator: ?bool,
      *     kit_content: string,
      *     kit_content_mentions_peroxide: bool,
+     *     kit_content_is_dye_only: bool,
      *     oxidant_volumes: string,
      *     sale_format_is_kit: bool,
      *     pm_detector_is_kit: bool
@@ -1210,13 +1305,18 @@ class IgoraGroupingAssistantService
 
         $kitContentAscii = Str::ascii(mb_strtolower($kitContent, 'UTF-8'));
         $kitContentMentionsPeroxide = $kitContentAscii !== ''
-            && preg_match('/\b(?:peroxido|oxidante|activador|revelador|developer|agua\s+oxigenada)\b/', $kitContentAscii) === 1;
+            && preg_match('/\b(?:peroxido|oxidante|activador|revelador|locion\s+activadora|locion\s+reveladora|developer|agua\s+oxigenada|oxigenta|oxygenta)\b/', $kitContentAscii) === 1;
+        $kitContentTrimmed = trim(preg_replace('/\s+/', ' ', $kitContentAscii) ?? $kitContentAscii);
+        $kitContentIsDyeOnly = $kitContentTrimmed !== ''
+            && ! $kitContentMentionsPeroxide
+            && preg_match('/^(?:(?:solo|unicamente)\s+(?:el\s+)?(?:tinte|coloracion|tubo(?:\s+de\s+tinte)?)|tinte\s+solo|1\s*(?:tinte|tubo(?:\s+de\s+tinte)?|pza|pieza)(?:\s+de\s+\d+\s*(?:ml|g|gr))?)$/', $kitContentTrimmed) === 1;
 
         return [
             'is_kit' => $isKit,
             'includes_activator' => $includesActivator,
             'kit_content' => $kitContent,
             'kit_content_mentions_peroxide' => $kitContentMentionsPeroxide,
+            'kit_content_is_dye_only' => $kitContentIsDyeOnly,
             'oxidant_volumes' => $oxidantVolumes,
             'sale_format_is_kit' => $saleFormatIsKit,
             'pm_detector_is_kit' => $pmItem !== null && $this->kitDetector->isKit($pmItem),
@@ -1934,6 +2034,7 @@ class IgoraGroupingAssistantService
         }
 
         if ($requiresHumanReview
+            || in_array('IS_KIT_FLAG_INCONSISTENT', $conflicts, true)
             || in_array('INVENTORY_TONE_UNVERIFIED', $conflicts, true)
             || in_array('DUPLICATE_SKU_CROSS_PRESENTATION', $conflicts, true)
             || in_array('GROUP_HAS_MULTIPLE_SKUS', $conflicts, true)
@@ -2016,6 +2117,9 @@ class IgoraGroupingAssistantService
         if (in_array('MISSING_SKU', $conflicts, true) || in_array('DATA_INCOMPLETE', $conflicts, true)) {
             return 'VALIDAR_IDENTIDAD_Y_DATOS_INCOMPLETOS';
         }
+        if (in_array('IS_KIT_FLAG_INCONSISTENT', $conflicts, true)) {
+            return 'REVISAR_INDICADOR_KIT_EN_TINTE_INDIVIDUAL';
+        }
         if ($requiresHumanReview) {
             return 'REVISION_HUMANA_CLASIFICACION';
         }
@@ -2076,6 +2180,51 @@ class IgoraGroupingAssistantService
                     'mlms' => $groupRows->pluck('mlm')->unique()->values()->all(),
                 ];
             })
+            ->values()
+            ->all();
+    }
+
+    /**
+     * Genera un resumen read-only de combinaciones de atributos estructurados de kit/activador
+     * para auditar patrones frecuentes del catálogo de Mercado Libre.
+     *
+     * @param  Collection<int, array<string, mixed>>  $rows
+     * @return list<array<string, mixed>>
+     */
+    private function buildAttributeCombinationSummary(Collection $rows): array
+    {
+        return $rows
+            ->groupBy(function (array $row): string {
+                $attrs = (array) ($row['structured_attributes'] ?? []);
+                $boolLabel = static fn (mixed $v): string => $v === true ? 'Sí' : ($v === false ? 'No' : 'N/D');
+
+                return implode('|', [
+                    $boolLabel($attrs['is_kit'] ?? null),
+                    $boolLabel($attrs['includes_activator'] ?? null),
+                    trim((string) ($attrs['kit_content'] ?? '')) ?: 'N/D',
+                    trim((string) ($attrs['oxidant_volumes'] ?? '')) ?: 'N/D',
+                    isset($attrs['units_per_pack']) && $attrs['units_per_pack'] !== null ? (string) $attrs['units_per_pack'] : 'N/D',
+                    (string) ($row['presentation_type'] ?? self::PRES_UNKNOWN),
+                ]);
+            })
+            ->map(function (Collection $groupRows): array {
+                $first = $groupRows->first();
+                $attrs = (array) ($first['structured_attributes'] ?? []);
+                $boolLabel = static fn (mixed $v): string => $v === true ? 'Sí' : ($v === false ? 'No' : 'N/D');
+
+                return [
+                    'is_kit' => $boolLabel($attrs['is_kit'] ?? null),
+                    'includes_activator' => $boolLabel($attrs['includes_activator'] ?? null),
+                    'kit_content' => trim((string) ($attrs['kit_content'] ?? '')) ?: 'N/D',
+                    'oxidant_volumes' => trim((string) ($attrs['oxidant_volumes'] ?? '')) ?: 'N/D',
+                    'units_per_pack' => isset($attrs['units_per_pack']) && $attrs['units_per_pack'] !== null ? (string) $attrs['units_per_pack'] : 'N/D',
+                    'presentation_type' => (string) ($first['presentation_type'] ?? self::PRES_UNKNOWN),
+                    'count' => $groupRows->count(),
+                    'conflicts' => $groupRows->flatMap(fn (array $r): array => $r['conflicts'])->unique()->values()->all(),
+                    'sample_mlms' => $groupRows->pluck('mlm')->unique()->take(3)->values()->all(),
+                ];
+            })
+            ->sortByDesc('count')
             ->values()
             ->all();
     }
@@ -2285,7 +2434,7 @@ class IgoraGroupingAssistantService
     {
         $normalized = Str::ascii(mb_strtolower($text, 'UTF-8'));
 
-        return preg_match('/\b(?:peroxido|oxidante|revelador|activador|locion\s+activadora|developer)\b/', $normalized) === 1;
+        return preg_match('/\b(?:peroxido|oxidante|revelador|activador|locion\s+activadora|locion\s+reveladora|developer|oxigenta|oxygenta)\b/', $normalized) === 1;
     }
 
     private function normalizeCode(string $code): string
