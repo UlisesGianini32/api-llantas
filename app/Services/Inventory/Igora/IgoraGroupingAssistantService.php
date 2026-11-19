@@ -782,16 +782,49 @@ class IgoraGroupingAssistantService
             (string) ($row['description'] ?? ''),
         ])), 'UTF-8'));
 
-        $explicitNoPeroxide = preg_match('/\bsin\s+peroxido\b|\bsolo\s+tinte\b|\btinte\s+solo\b/', $text) === 1;
-        $hasExplicitPeroxideWord = preg_match('/\b(?:peroxido|oxidante|revelador|activador|locion\s+activadora|developer|agua\s+oxigenada|c\/\s*perox)\b/', $text) === 1;
-        $hasTextConcentration = preg_match('/\b(?:10|20|30|40)\s*(?:vol(?:umenes|umen)?|v)\b/', $text) === 1
-            || preg_match('/(?<!\d)(?:3|6|9|12)\s*%(?!\d)/', $text) === 1;
+        $peroxideNoun = '(?:peroxido|oxidante|revelador|activador|locion\s+activadora|developer|agua\s+oxigenada)';
+
+        // 1) Señales explícitas de exclusión o venta como tinte solo
+        $hasPeroxideExclusion = preg_match(
+            '/\bsin\s+(?:el\s+|la\s+)?'.$peroxideNoun.'\b'
+            .'|\b(?:solo\s+tinte|tinte\s+solo|tinte\s+individual)\b'
+            .'|\bno\s+(?:incluye|trae|contiene)\s+(?:el\s+|la\s+)?'.$peroxideNoun.'\b'
+            .'|\b(?:el\s+|la\s+)?'.$peroxideNoun.'\s+no\s+(?:esta\s+)?incluido\b'
+            .'|\b(?:se\s+vende|vendido)\s+por\s+separado\b/u',
+            $text
+        ) === 1;
+
+        // 2) Lenguaje de instrucciones, mezcla o compatibilidad (NO demuestra inclusión física)
+        $nonInclusionPatterns = [
+            '/\b(?:para\s+)?(?:mezclar|usar|utilizar|aplicar|combinar|compatible|recomendado|requiere|necesita|para\s+uso)\s+(?:con\s+)?(?:el\s+|la\s+|un\s+|una\s+)?'.$peroxideNoun.'(?:\s+(?:de|al))?(?:\s+(?:(?:10|20|30|40)\s*(?:vol(?:umenes|umen)?|v)|(?:3|6|9|12)\s*%(?!\d)))?/u',
+            '/\b(?:para\s+)?(?:mezclar|usar|utilizar|aplicar|combinar|compatible|recomendado)\s+(?:con\s+)?(?:(?:10|20|30|40)\s*(?:vol(?:umenes|umen)?|v)|(?:3|6|9|12)\s*%(?!\d))/u',
+            '/\bno\s+(?:incluye|trae|contiene)\s+(?:el\s+|la\s+)?'.$peroxideNoun.'\b/u',
+            '/\b(?:el\s+|la\s+)?'.$peroxideNoun.'\s+no\s+(?:esta\s+)?incluido\b/u',
+            '/\b(?:el\s+|la\s+)?'.$peroxideNoun.'\s+(?:se\s+vende|vendido)\s+por\s+separado\b/u',
+            '/\bsin\s+(?:el\s+|la\s+)?'.$peroxideNoun.'\b/u',
+        ];
+        $textForInclusion = preg_replace($nonInclusionPatterns, ' ', $text) ?? $text;
+
+        $hasAnyPeroxideWord = preg_match('/\b(?:'.$peroxideNoun.'|c\/\s*perox)\b/u', $text) === 1;
+        $hasUnexplainedPeroxideWord = preg_match('/\b(?:'.$peroxideNoun.'|c\/\s*perox)\b/u', $textForInclusion) === 1;
+        $hasTextConcentration = preg_match('/\b(?:10|20|30|40)\s*(?:vol(?:umenes|umen)?|v)\b/u', $text) === 1
+            || preg_match('/(?<!\d)(?:3|6|9|12)\s*%(?!\d)/u', $text) === 1;
+        $hasUnexplainedTextConcentration = preg_match('/\b(?:10|20|30|40)\s*(?:vol(?:umenes|umen)?|v)\b/u', $textForInclusion) === 1
+            || preg_match('/(?<!\d)(?:3|6|9|12)\s*%(?!\d)/u', $textForInclusion) === 1;
+
+        // 3) Evidencia positiva inequívoca de inclusión física de peróxido en texto
+        $hasPositivePeroxideInclusionText = ! $hasPeroxideExclusion && (
+            preg_match('/\+\s*(?:[1-9]\s*)?'.$peroxideNoun.'\b/u', $textForInclusion) === 1
+            || preg_match('/\b(?:con|c\/)\s*(?:[1-9]\s*)?(?:'.$peroxideNoun.'|perox)\b/u', $textForInclusion) === 1
+            || preg_match('/\b(?:incluye|trae|contiene)\s+(?:[^,.]{0,35}\s+)?'.$peroxideNoun.'\b/u', $textForInclusion) === 1
+            || preg_match('/\b'.$peroxideNoun.'\s+incluido\b/u', $textForInclusion) === 1
+            || preg_match('/\b(?:tinte|tubo|coloracion)\s+(?:y|\+)\s+(?:[1-9]\s*)?'.$peroxideNoun.'\b/u', $textForInclusion) === 1
+        );
 
         $hasDyeWord = preg_match('/\b(?:tinte|coloracion|crema\s+colorante|tubo)\b/', $text) === 1 || $normalizedTone !== null;
         $structuredPackQty = $this->extractStructuredPackQuantity($row, $pmItem);
         $structuredKit = $this->analyzeStructuredKitAndActivatorAttributes($row, $pmItem);
         $textPackQty = $this->extractTextPackQuantity($text);
-        $hasConcentrationReference = $hasTextConcentration || $structuredKit['oxidant_volumes'] !== '';
         $hasGenericKitWord = preg_match('/\b(?:kit|combo|set|paquete)\b/', $text) === 1
             || $structuredKit['is_kit'] === true
             || $structuredKit['sale_format_is_kit']
@@ -800,29 +833,32 @@ class IgoraGroupingAssistantService
             || $textPackQty !== null
             || ($structuredPackQty !== null && $structuredPackQty > 1);
 
-        $hasExplicitPeroxideInclusion = ! $explicitNoPeroxide && (
-            $hasExplicitPeroxideWord
-            || $structuredKit['includes_activator'] === true
-            || ($structuredKit['kit_content_mentions_peroxide'] && $structuredKit['includes_activator'] !== false)
-        );
+        $hasStructuredPeroxideInclusion = $structuredKit['includes_activator'] === true
+            || ($structuredKit['kit_content_mentions_peroxide'] && $structuredKit['includes_activator'] !== false);
 
+        $hasPositivePeroxideInclusion = ! $hasPeroxideExclusion
+            && $structuredKit['includes_activator'] !== false
+            && ($hasPositivePeroxideInclusionText || $hasStructuredPeroxideInclusion);
+
+        // Solo marcar contradicción real cuando una negación (INCLUDES_ACTIVATOR=No, IS_KIT=No o exclusión textual)
+        // choca con una afirmación positiva de kit o inclusión de peróxido (nunca por una simple recomendación de concentración).
         $hasContradictoryKitAttributes =
             ($structuredKit['includes_activator'] === false && (
                 $structuredKit['is_kit'] === true
                 || $structuredKit['kit_content_mentions_peroxide']
-                || $hasExplicitPeroxideWord
-                || $hasConcentrationReference
+                || $hasPositivePeroxideInclusionText
                 || $hasGenericKitWord
             ))
             || ($structuredKit['is_kit'] === false && (
                 $structuredKit['includes_activator'] === true
                 || $structuredKit['kit_content_mentions_peroxide']
-                || ($hasExplicitPeroxideWord && ! $explicitNoPeroxide && $hasDyeWord)
+                || ($hasPositivePeroxideInclusionText && $hasDyeWord)
             ))
-            || ($explicitNoPeroxide && (
+            || ($hasPeroxideExclusion && (
                 $structuredKit['is_kit'] === true
                 || $structuredKit['includes_activator'] === true
                 || $structuredKit['kit_content_mentions_peroxide']
+                || $hasPositivePeroxideInclusionText
             ));
 
         $peroxideInfo = [
@@ -835,7 +871,7 @@ class IgoraGroupingAssistantService
         ];
 
         // 1. Peróxido independiente (sin tinte ni tono)
-        if (($hasExplicitPeroxideWord || $hasTextConcentration) && ! $explicitNoPeroxide && ! $hasDyeWord) {
+        if (($hasAnyPeroxideWord || $hasTextConcentration) && ! $hasPeroxideExclusion && ! $hasDyeWord) {
             $peroxideDetails = $this->extractPeroxideDetails($text, standalone: true);
             $requiresReview = $peroxideDetails['concentration_vol'] === null || $peroxideDetails['volume_ml'] === null;
             if ($requiresReview) {
@@ -874,9 +910,10 @@ class IgoraGroupingAssistantService
             ];
         }
 
-        // 3. Tinte con peróxido confirmado por evidencia explícita (no solo mención de concentración "20vol")
-        if ($hasExplicitPeroxideInclusion && $hasDyeWord) {
-            $peroxideDetails = $this->extractPeroxideDetails($text, standalone: false);
+        // 3. Tinte con peróxido confirmado por evidencia positiva inequívoca y consistente
+        if ($hasPositivePeroxideInclusion && $hasDyeWord) {
+            $peroxideDetailsText = trim($text.' '.Str::ascii(mb_strtolower($structuredKit['kit_content'], 'UTF-8')));
+            $peroxideDetails = $this->extractPeroxideDetails($peroxideDetailsText, standalone: false);
             $dyeQty = $this->extractDyeQuantityInKit($text, $textPackQty);
 
             $ambiguousDetails = $peroxideDetails['concentration_vol'] === null
@@ -905,8 +942,12 @@ class IgoraGroupingAssistantService
             ];
         }
 
-        // 4. Referencia a concentración de oxidante ("20vol", OXIDANT_VOLUMES) sin confirmación de inclusión física
-        if ($hasConcentrationReference && ! $explicitNoPeroxide && $hasDyeWord) {
+        // 4. Mención ambigua de peróxido o concentración sin confirmación de inclusión ni exclusión explícita
+        //    (si INCLUDES_ACTIVATOR=No o hay exclusión/instrucción clara y no es kit, no bloquear como ambiguo).
+        $confirmedNoPeroxide = $hasPeroxideExclusion || $structuredKit['includes_activator'] === false;
+        $hasAmbiguousUnexplainedSignal = ! $confirmedNoPeroxide
+            && ($hasUnexplainedPeroxideWord || $hasUnexplainedTextConcentration || $structuredKit['oxidant_volumes'] !== '');
+        if ($hasAmbiguousUnexplainedSignal && $hasDyeWord) {
             $conflicts[] = 'AMBIGUOUS_KIT_PRESENTATION';
 
             return [
@@ -922,7 +963,7 @@ class IgoraGroupingAssistantService
         }
 
         // 5. Multipack sin peróxido
-        if ($hasMultipackWord && ! $hasExplicitPeroxideInclusion) {
+        if ($hasMultipackWord && ! $hasPositivePeroxideInclusion) {
             $qty = $textPackQty ?? ($structuredPackQty !== null && $structuredPackQty > 1 ? $structuredPackQty : null);
             $requiresReview = $qty === null;
             if ($requiresReview) {
@@ -951,7 +992,7 @@ class IgoraGroupingAssistantService
             ];
         }
 
-        // 7. Tinte individual
+        // 7. Tinte individual claramente confirmado
         if ($hasDyeWord || $normalizedTone !== null) {
             return [
                 'presentation' => self::PRES_SINGLE_DYE,
