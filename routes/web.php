@@ -14,6 +14,7 @@ use App\Http\Controllers\InventoryLocationController;
 use App\Http\Controllers\InventoryMovementController;
 use App\Http\Controllers\InventoryProductController;
 use App\Http\Controllers\InventoryReservationController;
+use App\Http\Controllers\Inventory\IgoraGroupingPreviewController;
 use App\Http\Controllers\Inventory\ShelfAuditController;
 use App\Http\Controllers\LlantaComparisonController;
 use App\Http\Controllers\LlantaController;
@@ -382,6 +383,8 @@ Route::middleware(['auth', 'role'])->group(function () {
         Route::post('/amazon/limpiar-reporte', [InventoryChannelLinkController::class, 'clearAmazonReport'])->name('amazon.clear-report');
         Route::get('/mercado-libre/stock', [InventoryChannelLinkController::class, 'stock'])->name('mercado-libre.stock');
         Route::post('/mercado-libre/stock/sync', [InventoryChannelLinkController::class, 'syncMeliStock'])->name('mercado-libre.stock.sync');
+        Route::get('/mercado-libre/igora-royal', [IgoraGroupingPreviewController::class, 'index'])->name('mercado-libre.igora-royal');
+        Route::get('/mercado-libre/igora-royal/exportar', [IgoraGroupingPreviewController::class, 'export'])->name('mercado-libre.igora-royal.export');
         Route::get('/{inventoryChannelLink}', [InventoryChannelLinkController::class, 'show'])
             ->whereNumber('inventoryChannelLink')->name('show');
         Route::get('/{inventoryChannelLink}/editar', [InventoryChannelLinkController::class, 'edit'])
