@@ -409,6 +409,12 @@ class IgoraGroupingAssistantService
 
         if ($row['sku'] === '') {
             $conflicts[] = 'MISSING_SKU';
+            $requiresHumanReview = true;
+        }
+        $skuGtinConflict = $this->detectSkuGtinInconsistency((string) ($row['sku'] ?? ''), $row['ean'] ?? null);
+        if ($skuGtinConflict !== null) {
+            $conflicts[] = $skuGtinConflict;
+            $requiresHumanReview = true;
         }
         if ($row['is_full']) {
             $conflicts[] = 'FULFILLMENT_MANAGED_BY_MELI';
@@ -418,12 +424,14 @@ class IgoraGroupingAssistantService
         }
         if ($row['is_moderated_or_denounced']) {
             $conflicts[] = 'PUBLICATION_MODERATED_OR_DENOUNCED';
+            $requiresHumanReview = true;
         }
         if ($row['snapshot_stale']) {
             $conflicts[] = 'SNAPSHOT_STALE';
         }
         if ($row['data_incomplete']) {
             $conflicts[] = 'DATA_INCOMPLETE';
+            $requiresHumanReview = true;
         }
 
         $identityTuple = $this->linkIdentityTuple(
@@ -440,6 +448,7 @@ class IgoraGroupingAssistantService
         );
         if ($hasActiveLegacyShared) {
             $conflicts[] = 'LEGACY_SHARED_STOCK_ACTIVE';
+            $requiresHumanReview = true;
         }
 
         $matchResult = $this->resolveInventoryCandidate(
@@ -451,6 +460,7 @@ class IgoraGroupingAssistantService
             $dyeQuantity,
             $existingLink,
             $context,
+            skuIsSuspicious: $skuGtinConflict !== null,
         );
 
         $conflicts = array_merge($conflicts, $matchResult['conflicts']);
@@ -595,11 +605,11 @@ class IgoraGroupingAssistantService
         $conflicts = [];
 
         $attrToneRaw = $this->attributeValue((array) ($row['variation_attributes'] ?? []), [
-            'TONO', 'TONE', 'SHADE', 'COLOR', 'MAIN_COLOR', 'COLOR_NAME', 'TONE_NAME', 'FABRIC_DESIGN',
+            'HAIR_TONE', 'TONO', 'TONE', 'SHADE', 'COLOR', 'MAIN_COLOR', 'COLOR_NAME', 'TONE_NAME', 'FABRIC_DESIGN',
         ]);
         if ($attrToneRaw === '') {
             $attrToneRaw = $this->attributeValue((array) ($row['item_attributes'] ?? []), [
-                'TONO', 'TONE', 'SHADE', 'COLOR', 'MAIN_COLOR', 'COLOR_NAME', 'TONE_NAME',
+                'HAIR_TONE', 'TONO', 'TONE', 'SHADE', 'COLOR', 'MAIN_COLOR', 'COLOR_NAME', 'TONE_NAME',
             ]);
         }
 
@@ -716,8 +726,16 @@ class IgoraGroupingAssistantService
             }
         }
 
-        // Tonos especiales con prefijo de letra (E-0, E-1, L-00, L-44, S-00, D-0).
-        if (preg_match_all('/(?<![\dA-Za-z])(E|L|S|D)\s*[-\/]\s*(0|00|1|44)(?![\dA-Za-z])/iu', $clean, $letterMatches, PREG_SET_ORDER)) {
+        // Tonos especiales con prefijo de letra:
+        // - Fashion Lights: L-00, L-44, L-57, L-77, L-88, L-89, L-99, etc. (L- + 2 dígitos)
+        // - Extracts / Specialities: E-0, E-1, E-111, S-00, D-0
+        if (preg_match_all('/(?<![\dA-Za-z])(L)\s*[-\/]\s*(\d{2})(?![\dA-Za-z])/iu', $clean, $fashionMatches, PREG_SET_ORDER)) {
+            foreach ($fashionMatches as $m) {
+                $normalized = 'L-'.$m[2];
+                $found[$normalized] = true;
+            }
+        }
+        if (preg_match_all('/(?<![\dA-Za-z])(E|S|D)\s*[-\/]\s*(0|00|1|111)(?![\dA-Za-z])/iu', $clean, $letterMatches, PREG_SET_ORDER)) {
             foreach ($letterMatches as $m) {
                 $normalized = strtoupper($m[1]).'-'.$m[2];
                 $found[$normalized] = true;
@@ -733,7 +751,10 @@ class IgoraGroupingAssistantService
         if (preg_match('/^(0|1|2|3|4|5|6|7|8|9\.5|9|10|11|12)-(\d{1,3})$/', $raw, $m) === 1) {
             return $m[1].'-'.$m[2];
         }
-        if (preg_match('/^(E|L|S|D)-(0|00|1|44)$/i', $raw, $m) === 1) {
+        if (preg_match('/^L-(\d{2})$/i', $raw, $m) === 1) {
+            return 'L-'.$m[1];
+        }
+        if (preg_match('/^(E|S|D)-(0|00|1|111)$/i', $raw, $m) === 1) {
             return strtoupper($m[1]).'-'.$m[2];
         }
 
@@ -762,20 +783,47 @@ class IgoraGroupingAssistantService
         ])), 'UTF-8'));
 
         $explicitNoPeroxide = preg_match('/\bsin\s+peroxido\b|\bsolo\s+tinte\b|\btinte\s+solo\b/', $text) === 1;
-        $hasPeroxideKeyword = ! $explicitNoPeroxide && (
-            preg_match('/\b(?:peroxido|oxidante|revelador|activador|locion\s+activadora|developer|agua\s+oxigenada|c\/\s*perox)\b/', $text) === 1
-            || preg_match('/\b(?:10|20|30|40)\s*(?:vol(?:umenes|umen)?|v)\b/', $text) === 1
-            || preg_match('/(?<!\d)(?:3|6|9|12)\s*%(?!\d)/', $text) === 1
-        );
+        $hasExplicitPeroxideWord = preg_match('/\b(?:peroxido|oxidante|revelador|activador|locion\s+activadora|developer|agua\s+oxigenada|c\/\s*perox)\b/', $text) === 1;
+        $hasTextConcentration = preg_match('/\b(?:10|20|30|40)\s*(?:vol(?:umenes|umen)?|v)\b/', $text) === 1
+            || preg_match('/(?<!\d)(?:3|6|9|12)\s*%(?!\d)/', $text) === 1;
 
         $hasDyeWord = preg_match('/\b(?:tinte|coloracion|crema\s+colorante|tubo)\b/', $text) === 1 || $normalizedTone !== null;
         $structuredPackQty = $this->extractStructuredPackQuantity($row, $pmItem);
-        $structuredIsKit = $this->hasStructuredKitFlag($row, $pmItem);
+        $structuredKit = $this->analyzeStructuredKitAndActivatorAttributes($row, $pmItem);
         $textPackQty = $this->extractTextPackQuantity($text);
-        $hasGenericKitWord = preg_match('/\b(?:kit|combo|set|paquete)\b/', $text) === 1 || $structuredIsKit;
+        $hasConcentrationReference = $hasTextConcentration || $structuredKit['oxidant_volumes'] !== '';
+        $hasGenericKitWord = preg_match('/\b(?:kit|combo|set|paquete)\b/', $text) === 1
+            || $structuredKit['is_kit'] === true
+            || $structuredKit['sale_format_is_kit']
+            || $structuredKit['pm_detector_is_kit'];
         $hasMultipackWord = preg_match('/\b(?:duo|trio|pack|multipack|lote|caja)\b/', $text) === 1
             || $textPackQty !== null
             || ($structuredPackQty !== null && $structuredPackQty > 1);
+
+        $hasExplicitPeroxideInclusion = ! $explicitNoPeroxide && (
+            $hasExplicitPeroxideWord
+            || $structuredKit['includes_activator'] === true
+            || ($structuredKit['kit_content_mentions_peroxide'] && $structuredKit['includes_activator'] !== false)
+        );
+
+        $hasContradictoryKitAttributes =
+            ($structuredKit['includes_activator'] === false && (
+                $structuredKit['is_kit'] === true
+                || $structuredKit['kit_content_mentions_peroxide']
+                || $hasExplicitPeroxideWord
+                || $hasConcentrationReference
+                || $hasGenericKitWord
+            ))
+            || ($structuredKit['is_kit'] === false && (
+                $structuredKit['includes_activator'] === true
+                || $structuredKit['kit_content_mentions_peroxide']
+                || ($hasExplicitPeroxideWord && ! $explicitNoPeroxide && $hasDyeWord)
+            ))
+            || ($explicitNoPeroxide && (
+                $structuredKit['is_kit'] === true
+                || $structuredKit['includes_activator'] === true
+                || $structuredKit['kit_content_mentions_peroxide']
+            ));
 
         $peroxideInfo = [
             'included' => false,
@@ -787,7 +835,7 @@ class IgoraGroupingAssistantService
         ];
 
         // 1. Peróxido independiente (sin tinte ni tono)
-        if ($hasPeroxideKeyword && ! $hasDyeWord) {
+        if (($hasExplicitPeroxideWord || $hasTextConcentration) && ! $explicitNoPeroxide && ! $hasDyeWord) {
             $peroxideDetails = $this->extractPeroxideDetails($text, standalone: true);
             $requiresReview = $peroxideDetails['concentration_vol'] === null || $peroxideDetails['volume_ml'] === null;
             if ($requiresReview) {
@@ -810,8 +858,24 @@ class IgoraGroupingAssistantService
             ];
         }
 
-        // 2. Tinte con peróxido
-        if ($hasPeroxideKeyword && $hasDyeWord) {
+        // 2. Atributos de kit/activador contradictorios: nunca asumir tinte individual ni proponer BOM completo.
+        if ($hasContradictoryKitAttributes) {
+            $conflicts[] = 'KIT_ATTRIBUTES_CONTRADICTORY';
+
+            return [
+                'presentation' => self::PRES_UNKNOWN,
+                'peroxide' => [
+                    ...$peroxideInfo,
+                    'ambiguous_details' => true,
+                ],
+                'dye_quantity' => null,
+                'requires_human_review' => true,
+                'conflicts' => $conflicts,
+            ];
+        }
+
+        // 3. Tinte con peróxido confirmado por evidencia explícita (no solo mención de concentración "20vol")
+        if ($hasExplicitPeroxideInclusion && $hasDyeWord) {
             $peroxideDetails = $this->extractPeroxideDetails($text, standalone: false);
             $dyeQty = $this->extractDyeQuantityInKit($text, $textPackQty);
 
@@ -841,8 +905,24 @@ class IgoraGroupingAssistantService
             ];
         }
 
-        // 3. Multipack sin peróxido
-        if ($hasMultipackWord && ! $hasPeroxideKeyword) {
+        // 4. Referencia a concentración de oxidante ("20vol", OXIDANT_VOLUMES) sin confirmación de inclusión física
+        if ($hasConcentrationReference && ! $explicitNoPeroxide && $hasDyeWord) {
+            $conflicts[] = 'AMBIGUOUS_KIT_PRESENTATION';
+
+            return [
+                'presentation' => self::PRES_UNKNOWN,
+                'peroxide' => [
+                    ...$peroxideInfo,
+                    'ambiguous_details' => true,
+                ],
+                'dye_quantity' => null,
+                'requires_human_review' => true,
+                'conflicts' => $conflicts,
+            ];
+        }
+
+        // 5. Multipack sin peróxido
+        if ($hasMultipackWord && ! $hasExplicitPeroxideInclusion) {
             $qty = $textPackQty ?? ($structuredPackQty !== null && $structuredPackQty > 1 ? $structuredPackQty : null);
             $requiresReview = $qty === null;
             if ($requiresReview) {
@@ -858,7 +938,7 @@ class IgoraGroupingAssistantService
             ];
         }
 
-        // 4. Dice "kit/combo/paquete/set" o tiene IS_KIT=true, pero no aclara si incluye peróxido o cuántas piezas trae
+        // 6. Dice "kit/combo/paquete/set" o tiene IS_KIT=Sí, pero no aclara si incluye peróxido o cuántas piezas trae
         if ($hasGenericKitWord) {
             $conflicts[] = 'AMBIGUOUS_KIT_PRESENTATION';
 
@@ -871,7 +951,7 @@ class IgoraGroupingAssistantService
             ];
         }
 
-        // 5. Tinte individual
+        // 7. Tinte individual
         if ($hasDyeWord || $normalizedTone !== null) {
             return [
                 'presentation' => self::PRES_SINGLE_DYE,
@@ -1021,26 +1101,147 @@ class IgoraGroupingAssistantService
     }
 
     /**
+     * Analiza atributos estructurados de kit y activador (IS_KIT, KIT_CONTENT, INCLUDES_ACTIVATOR,
+     * OXIDANT_VOLUMES, SALE_FORMAT) soportando valores booleanos en español e inglés.
+     *
      * @param  array<string, mixed>  $row
+     * @return array{
+     *     is_kit: ?bool,
+     *     includes_activator: ?bool,
+     *     kit_content: string,
+     *     kit_content_mentions_peroxide: bool,
+     *     oxidant_volumes: string,
+     *     sale_format_is_kit: bool,
+     *     pm_detector_is_kit: bool
+     * }
      */
-    private function hasStructuredKitFlag(array $row, ?MeliPriceManagerItem $pmItem): bool
+    private function analyzeStructuredKitAndActivatorAttributes(array $row, ?MeliPriceManagerItem $pmItem): array
     {
-        if ($pmItem && $this->kitDetector->isKit($pmItem)) {
+        $isKit = null;
+        $includesActivator = null;
+        $kitContent = '';
+        $oxidantVolumes = '';
+        $saleFormatIsKit = false;
+
+        $attributeSets = [
+            (array) ($row['variation_attributes'] ?? []),
+            (array) ($row['item_attributes'] ?? []),
+            (array) ($pmItem?->raw_attributes ?? []),
+        ];
+
+        foreach ($attributeSets as $attrs) {
+            if ($isKit === null) {
+                $rawIsKit = $this->attributeValue($attrs, ['IS_KIT', 'KIT']);
+                if ($rawIsKit !== '') {
+                    $isKit = $this->parseLocalizedBool($rawIsKit);
+                }
+            }
+
+            if ($includesActivator === null) {
+                $rawIncludes = $this->attributeValue($attrs, [
+                    'INCLUDES_ACTIVATOR',
+                    'INCLUDES_OXIDANT',
+                    'INCLUDES_PEROXIDE',
+                    'INCLUYE_ACTIVADOR',
+                    'INCLUYE_OXIDANTE',
+                    'INCLUYE_PEROXIDO',
+                ]);
+                if ($rawIncludes !== '') {
+                    $includesActivator = $this->parseLocalizedBool($rawIncludes);
+                }
+            }
+
+            if ($kitContent === '') {
+                $kitContent = $this->attributeValue($attrs, ['KIT_CONTENT', 'PACKAGE_CONTENT', 'CONTENIDO_DEL_KIT']);
+            }
+
+            if ($oxidantVolumes === '') {
+                $oxidantVolumes = $this->attributeValue($attrs, ['OXIDANT_VOLUMES', 'OXIDANT_VOLUME', 'PEROXIDE_VOLUME']);
+            }
+
+            if (! $saleFormatIsKit) {
+                $saleFormat = $this->attributeValue($attrs, ['SALE_FORMAT']);
+                if ($saleFormat !== '' && preg_match('/kit|combo|pack|set|duo|trio/i', $saleFormat) === 1) {
+                    $saleFormatIsKit = true;
+                }
+            }
+        }
+
+        $kitContentAscii = Str::ascii(mb_strtolower($kitContent, 'UTF-8'));
+        $kitContentMentionsPeroxide = $kitContentAscii !== ''
+            && preg_match('/\b(?:peroxido|oxidante|activador|revelador|developer|agua\s+oxigenada)\b/', $kitContentAscii) === 1;
+
+        return [
+            'is_kit' => $isKit,
+            'includes_activator' => $includesActivator,
+            'kit_content' => $kitContent,
+            'kit_content_mentions_peroxide' => $kitContentMentionsPeroxide,
+            'oxidant_volumes' => $oxidantVolumes,
+            'sale_format_is_kit' => $saleFormatIsKit,
+            'pm_detector_is_kit' => $pmItem !== null && $this->kitDetector->isKit($pmItem),
+        ];
+    }
+
+    private function parseLocalizedBool(string $raw): ?bool
+    {
+        $normalized = Str::ascii(mb_strtolower(trim($raw), 'UTF-8'));
+
+        if (in_array($normalized, ['1', 'true', 'yes', 'si', 'y', 's', 'on'], true)) {
             return true;
         }
-
-        foreach ([$row['variation_attributes'] ?? [], $row['item_attributes'] ?? []] as $attrs) {
-            $isKit = $this->attributeValue((array) $attrs, ['IS_KIT', 'KIT']);
-            if ($isKit !== '' && (filter_var($isKit, FILTER_VALIDATE_BOOL, FILTER_NULL_ON_FAILURE) === true)) {
-                return true;
-            }
-            $saleFormat = $this->attributeValue((array) $attrs, ['SALE_FORMAT']);
-            if ($saleFormat !== '' && preg_match('/kit|combo|pack|set|duo|trio/i', $saleFormat) === 1) {
-                return true;
-            }
+        if (in_array($normalized, ['0', 'false', 'no', 'n', 'off'], true)) {
+            return false;
         }
 
-        return false;
+        return null;
+    }
+
+    /**
+     * Detecta inconsistencias sospechosas entre Seller SKU y GTIN únicamente cuando ambos
+     * son códigos numéricos de 13 dígitos y difieren con señales claras de error de captura
+     * (distancia <= 2, dígito verificador EAN-13 inválido o mismo prefijo de fabricante GS1).
+     * Mantiene total compatibilidad con SKUs internos alfanuméricos o de otra longitud.
+     */
+    private function detectSkuGtinInconsistency(string $sku, ?string $gtin): ?string
+    {
+        $skuClean = trim($sku);
+        $gtinClean = trim((string) ($gtin ?? ''));
+
+        if ($skuClean === '' || $gtinClean === '' || $skuClean === $gtinClean) {
+            return null;
+        }
+
+        if (preg_match('/^\d{13}$/', $skuClean) !== 1 || preg_match('/^\d{13}$/', $gtinClean) !== 1) {
+            return null;
+        }
+
+        $distance = levenshtein($skuClean, $gtinClean);
+        $skuValidEan = $this->isValidEan13($skuClean);
+        $gtinValidEan = $this->isValidEan13($gtinClean);
+        $sameGs1Prefix = substr($skuClean, 0, 7) === substr($gtinClean, 0, 7);
+
+        if ($distance <= 2 || ! $skuValidEan || ! $gtinValidEan || $sameGs1Prefix) {
+            return 'SKU_GTIN_MISMATCH_SUSPECT';
+        }
+
+        return null;
+    }
+
+    private function isValidEan13(string $digits): bool
+    {
+        if (preg_match('/^\d{13}$/', $digits) !== 1) {
+            return false;
+        }
+
+        $sum = 0;
+        for ($i = 0; $i < 12; $i++) {
+            $digit = (int) $digits[$i];
+            $sum += ($i % 2 === 0) ? $digit : ($digit * 3);
+        }
+
+        $expectedCheck = (10 - ($sum % 10)) % 10;
+
+        return $expectedCheck === (int) $digits[12];
     }
 
     /**
@@ -1068,13 +1269,14 @@ class IgoraGroupingAssistantService
         ?int $dyeQuantity,
         ?InventoryChannelLink $existingLink,
         array $context,
+        bool $skuIsSuspicious = false,
     ): array {
         $conflicts = [];
         $requiresHumanReview = false;
         $candidateComponents = [];
 
         if ($presentation === self::PRES_SINGLE_DYE) {
-            $dyeMatch = $this->matchSimpleDye($row, $line, $normalizedTone, $context);
+            $dyeMatch = $this->matchSimpleDye($row, $line, $normalizedTone, $context, allowSkuFallback: ! $skuIsSuspicious, skuIsSuspicious: $skuIsSuspicious);
             $matchedProduct = $dyeMatch['product'];
             $conflicts = array_merge($conflicts, $dyeMatch['conflicts']);
 
@@ -1115,13 +1317,15 @@ class IgoraGroupingAssistantService
                 'name' => trim((self::LINE_LABELS[$line] ?? 'Igora').' '.($normalizedTone ?? '')),
                 'quantity' => 1,
                 'local_available_stock' => null,
-                'status' => 'PROPOSE_CREATE_SIMPLE',
+                'status' => $skuIsSuspicious ? 'NEEDS_HUMAN_REVIEW' : 'PROPOSE_CREATE_SIMPLE',
             ];
 
             return [
                 'matched_product' => null,
-                'match_type' => 'PROPOSE_CREATE_SIMPLE',
-                'match_label' => 'Proponer alta/vínculo de SIMPLE central ('.($normalizedTone ?? 'sin tono').')',
+                'match_type' => $skuIsSuspicious ? 'MANUAL_REVIEW_REQUIRED' : 'PROPOSE_CREATE_SIMPLE',
+                'match_label' => $skuIsSuspicious
+                    ? 'SKU/GTIN inconsistente — requiere validación humana antes de vincular'
+                    : 'Proponer alta/vínculo de SIMPLE central ('.($normalizedTone ?? 'sin tono').')',
                 'candidate_components' => $candidateComponents,
                 'requires_human_review' => $requiresHumanReview || $dyeMatch['requires_review'],
                 'conflicts' => $conflicts,
@@ -1129,7 +1333,7 @@ class IgoraGroupingAssistantService
         }
 
         if ($presentation === self::PRES_STANDALONE_PEROXIDE) {
-            $peroxMatch = $this->matchSimplePeroxide($row, $peroxideInfo, $context);
+            $peroxMatch = $this->matchSimplePeroxide($row, $peroxideInfo, $context, allowSkuFallback: ! $skuIsSuspicious);
             $matchedProduct = $peroxMatch['product'];
             $conflicts = array_merge($conflicts, $peroxMatch['conflicts']);
 
@@ -1255,9 +1459,14 @@ class IgoraGroupingAssistantService
         ?string $normalizedTone,
         array $context,
         bool $allowSkuFallback = true,
+        bool $skuIsSuspicious = false,
     ): array {
         $conflicts = [];
         $requiresReview = false;
+
+        if ($skuIsSuspicious) {
+            return ['product' => null, 'conflicts' => $conflicts, 'requires_review' => true];
+        }
 
         if ($allowSkuFallback) {
             foreach (array_filter([$row['sku'], $row['ean'] ?? null]) as $code) {
@@ -1667,13 +1876,16 @@ class IgoraGroupingAssistantService
             'MULTIPLE_TONES_IN_SINGLE_LISTING',
             'TONE_MISMATCH_ATTRIBUTE_VS_TITLE',
             'AMBIGUOUS_KIT_PRESENTATION',
+            'KIT_ATTRIBUTES_CONTRADICTORY',
             'INVENTORY_LINE_MISMATCH',
             'SKU_TONE_MISMATCH',
+            'SKU_GTIN_MISMATCH_SUSPECT',
             'AMBIGUOUS_INVENTORY_MATCH',
             'EXISTING_LINK_CONFLICT',
             'USER_PRODUCT_SHARED_DIFFERENT_GROUPS',
             'DUPLICATE_SKU_CROSS_LINE',
             'DUPLICATE_SKU_CROSS_TONE',
+            'PUBLICATION_MODERATED_OR_DENOUNCED',
         ];
 
         if ($presentation === self::PRES_UNKNOWN || array_intersect($conflicts, $severe) !== []) {
@@ -1686,6 +1898,7 @@ class IgoraGroupingAssistantService
             || in_array('GROUP_HAS_MULTIPLE_SKUS', $conflicts, true)
             || in_array('MISSING_SKU', $conflicts, true)
             || in_array('DATA_INCOMPLETE', $conflicts, true)
+            || in_array('SNAPSHOT_STALE', $conflicts, true)
             || $line === self::LINE_OTHER) {
             return self::CONFIDENCE_MEDIUM;
         }
@@ -1730,14 +1943,46 @@ class IgoraGroupingAssistantService
         if (in_array('SKU_TONE_MISMATCH', $conflicts, true) || in_array('DUPLICATE_SKU_CROSS_TONE', $conflicts, true)) {
             return 'REVISAR_CONFLICTO_SKU_TONO';
         }
+        if (in_array('KIT_ATTRIBUTES_CONTRADICTORY', $conflicts, true)) {
+            return 'REVISAR_ATRIBUTOS_KIT_CONTRADICTORIOS';
+        }
+        if (in_array('SKU_GTIN_MISMATCH_SUSPECT', $conflicts, true)) {
+            return 'REVISAR_CONFLICTO_SKU_GTIN';
+        }
+        if (in_array('PUBLICATION_MODERATED_OR_DENOUNCED', $conflicts, true)) {
+            return 'REVISAR_PUBLICACION_MODERADA';
+        }
         if ($presentation === self::PRES_DYE_WITH_PEROXIDE) {
             return 'CONFIRMAR_COMPONENTES_KIT_CON_PEROXIDO';
         }
-        if ($presentation === self::PRES_UNKNOWN || $requiresHumanReview) {
+
+        $classificationConflicts = [
+            'TONE_NOT_DETECTED',
+            'INVENTORY_TONE_UNVERIFIED',
+            'MULTIPLE_TONES_IN_SINGLE_LISTING',
+            'TONE_MISMATCH_ATTRIBUTE_VS_TITLE',
+            'AMBIGUOUS_KIT_PRESENTATION',
+            'MULTIPACK_QUANTITY_AMBIGUOUS',
+            'AMBIGUOUS_INVENTORY_MATCH',
+            'AMBIGUOUS_PEROXIDE_INVENTORY_MATCH',
+            'DUPLICATE_SKU_CROSS_PRESENTATION',
+            'GROUP_HAS_MULTIPLE_SKUS',
+            'LINE_AMBIGUOUS',
+        ];
+        if ($presentation === self::PRES_UNKNOWN || array_intersect($conflicts, $classificationConflicts) !== []) {
+            return 'REVISION_HUMANA_CLASIFICACION';
+        }
+        if (in_array('MISSING_SKU', $conflicts, true) || in_array('DATA_INCOMPLETE', $conflicts, true)) {
+            return 'VALIDAR_IDENTIDAD_Y_DATOS_INCOMPLETOS';
+        }
+        if ($requiresHumanReview) {
             return 'REVISION_HUMANA_CLASIFICACION';
         }
         if ($existingLink !== null || $hasExistingLink) {
             return 'YA_VINCULADO_VALIDAR_ACTIVACION_FUTURA';
+        }
+        if (in_array('SNAPSHOT_STALE', $conflicts, true)) {
+            return 'REFRESCAR_SNAPSHOT_ANTES_DE_VINCULAR';
         }
         if (! empty($matchResult['matched_product'])) {
             return 'CANDIDATO_A_VINCULAR_A_INVENTORY_EXISTENTE';

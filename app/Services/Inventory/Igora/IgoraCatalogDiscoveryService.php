@@ -321,7 +321,9 @@ class IgoraCatalogDiscoveryService
         $snapshotAt = $publication->last_sync_at ?? $pmItem?->last_synced_at;
         $isStaleSnapshot = $snapshotAt === null || $snapshotAt->lt(now()->subHours($staleAfterHours));
 
-        $itemAttributes = is_array($rawItem['attributes'] ?? null) ? $rawItem['attributes'] : (array) ($pmItem?->raw_attributes ?? []);
+        $rawAttributes = is_array($rawItem['attributes'] ?? null) ? $rawItem['attributes'] : [];
+        $pmAttributes = is_array($pmItem?->raw_attributes ?? null) ? $pmItem->raw_attributes : [];
+        $itemAttributes = $rawAttributes !== [] ? $rawAttributes : $pmAttributes;
         $description = $this->extractDescription($rawItem, $rawArray);
 
         $itemLevelUserProductId = $this->nullableTrim($rawItem['user_product_id'] ?? $pmItem?->user_product_id ?? null);
@@ -335,7 +337,7 @@ class IgoraCatalogDiscoveryService
 
         if ($variations->isEmpty()) {
             $sku = $this->extractSimpleSku($publication, $rawItem, $pmItem);
-            $ean = $this->extractEan($itemAttributes);
+            $ean = $this->extractEan($itemAttributes) ?: ($pmAttributes !== [] ? $this->extractEan($pmAttributes) : null);
             $pubStock = is_numeric($rawItem['available_quantity'] ?? null) ? (int) $rawItem['available_quantity'] : null;
             $fullRow = $fullRows->first(fn (MeliFullStock $f): bool => blank($f->variation_id));
             $isFull = $baseIsFull || $fullRow !== null;
