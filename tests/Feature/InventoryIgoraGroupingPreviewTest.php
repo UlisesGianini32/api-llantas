@@ -1127,6 +1127,330 @@ class InventoryIgoraGroupingPreviewTest extends TestCase
         Http::assertNothingSent();
     }
 
+    public function test_detects_fashion_lights_l89_tone_from_hair_tone_attribute_and_title_without_false_positives(): void
+    {
+        $productL89 = $this->createSimpleProduct(
+            sku: '7702045556940',
+            name: 'Tinte Schwarzkopf Igora Royal Fashion Lights L-89 60ml',
+            brand: 'SCHWARZKOPF',
+            stock: 5,
+            barcode: '7702045556940',
+        );
+
+        // Publicación limpia con atributo HAIR_TONE y tono L-89
+        $this->createPublication($this->accountOne, 'MLM-FL-L89', '7702045556940', [
+            'id' => 'MLM-FL-L89',
+            'title' => 'Tinte Schwarzkopf Igora Royal Fashion Lights Mechas Rojo Violeta 60ml',
+            'seller_custom_field' => '7702045556940',
+            'available_quantity' => 3,
+            'status' => 'active',
+            'attributes' => [
+                ['id' => 'HAIR_TONE', 'value_name' => 'L-89 mechas rojo violeta'],
+                ['id' => 'GTIN', 'value_name' => '7702045556940'],
+            ],
+        ]);
+
+        // Publicación con L-44 en título y sin falsos positivos por EAN/ml
+        $this->createPublication($this->accountOne, 'MLM-FL-L44', '7702045556100', [
+            'id' => 'MLM-FL-L44',
+            'title' => 'Schwarzkopf Igora Royal Fashion Lights Tono L/44 60ml EAN 7702045556100',
+            'seller_custom_field' => '7702045556100',
+            'available_quantity' => 2,
+            'status' => 'active',
+        ]);
+
+        $preview = app(IgoraGroupingAssistantService::class)->preview();
+        $rows = collect($preview['rows'])->keyBy('mlm');
+
+        $this->assertSame('L-89', $rows['MLM-FL-L89']['normalized_tone']);
+        $this->assertSame('attribute', $rows['MLM-FL-L89']['tone_source']);
+        $this->assertSame(IgoraGroupingAssistantService::LINE_ROYAL, $rows['MLM-FL-L89']['line']);
+        $this->assertSame(IgoraGroupingAssistantService::PRES_SINGLE_DYE, $rows['MLM-FL-L89']['presentation_type']);
+        $this->assertSame($productL89->id, $rows['MLM-FL-L89']['proposed_inventory_product_id']);
+        $this->assertSame('IGORA_ROYAL|L-89|SIMPLE', $rows['MLM-FL-L89']['proposed_group_key']);
+        $this->assertSame(IgoraGroupingAssistantService::CONFIDENCE_HIGH, $rows['MLM-FL-L89']['confidence']);
+        $this->assertSame('CANDIDATO_A_VINCULAR_A_INVENTORY_EXISTENTE', $rows['MLM-FL-L89']['recommended_action']);
+
+        $this->assertSame('L-44', $rows['MLM-FL-L44']['normalized_tone']);
+        $this->assertSame('IGORA_ROYAL|L-44|SIMPLE', $rows['MLM-FL-L44']['proposed_group_key']);
+    }
+
+    public function test_contradictory_kit_and_activator_attributes_on_mlm3302781080_flag_conflict_and_avoid_bom_or_single_dye(): void
+    {
+        $this->createSimpleProduct('7702045556940', 'Tinte Igora Royal Fashion Lights L-89 60ml', 'SCHWARZKOPF', 4, '7702045556940');
+
+        $this->createPublication($this->accountOne, 'MLM3302781080', '7704045556940', [
+            'id' => 'MLM3302781080',
+            'title' => 'Tinte Schwarzkopf Professional Igora Royal Specialities Fashion Lights Tono L-89 Mechas Rojo Violeta 20vol. Para Cabello',
+            'seller_custom_field' => '7704045556940',
+            'available_quantity' => 2,
+            'status' => 'active',
+            'attributes' => [
+                ['id' => 'HAIR_TONE', 'value_name' => 'L-89 mechas rojo violeta'],
+                ['id' => 'IS_KIT', 'value_name' => 'Sí'],
+                ['id' => 'KIT_CONTENT', 'value_name' => 'coloración + oxidante'],
+                ['id' => 'INCLUDES_ACTIVATOR', 'value_name' => 'No'],
+                ['id' => 'OXIDANT_VOLUMES', 'value_name' => '20'],
+                ['id' => 'GTIN', 'value_name' => '7702045556940'],
+            ],
+        ]);
+
+        $preview = app(IgoraGroupingAssistantService::class)->preview();
+        $row = $preview['rows'][0];
+
+        $this->assertSame(IgoraGroupingAssistantService::LINE_ROYAL, $row['line']);
+        $this->assertSame('L-89', $row['normalized_tone']);
+        $this->assertSame(IgoraGroupingAssistantService::PRES_UNKNOWN, $row['presentation_type']);
+        $this->assertSame([], $row['candidate_components']);
+        $this->assertNull($row['proposed_inventory_product_id']);
+        $this->assertContains('KIT_ATTRIBUTES_CONTRADICTORY', $row['conflicts']);
+        $this->assertContains('SKU_GTIN_MISMATCH_SUSPECT', $row['conflicts']);
+        $this->assertTrue($row['requires_human_review']);
+        $this->assertSame(IgoraGroupingAssistantService::CONFIDENCE_LOW, $row['confidence']);
+        $this->assertSame('REVISAR_ATRIBUTOS_KIT_CONTRADICTORIOS', $row['recommended_action']);
+
+        // Verificar que panel, CSV y comando de auditoría reflejen los conflictos
+        $this->actingAs($this->user)
+            ->get(route('inventory.channels.mercado-libre.igora-royal', ['ambiguous_only' => 1]))
+            ->assertOk()
+            ->assertInertia(fn (Assert $page) => $page
+                ->component('Inventory/Channels/IgoraRoyalPreview')
+                ->where('preview.rows.0.mlm', 'MLM3302781080')
+                ->where('preview.rows.0.normalized_tone', 'L-89')
+                ->where('preview.rows.0.presentation_type', IgoraGroupingAssistantService::PRES_UNKNOWN)
+            );
+
+        $csv = $this->actingAs($this->user)
+            ->get(route('inventory.channels.mercado-libre.igora-royal.export', ['ambiguous_only' => 1]))
+            ->assertOk()
+            ->streamedContent();
+        $this->assertStringContainsString('KIT_ATTRIBUTES_CONTRADICTORY', $csv);
+        $this->assertStringContainsString('SKU_GTIN_MISMATCH_SUSPECT', $csv);
+        $this->assertStringContainsString('L-89', $csv);
+
+        $exitCode = Artisan::call('inventory:igora-audit', ['--ambiguous' => true, '--json' => true]);
+        $this->assertSame(0, $exitCode);
+        $auditOutput = Artisan::output();
+        $this->assertStringContainsString('KIT_ATTRIBUTES_CONTRADICTORY', $auditOutput);
+        $this->assertStringContainsString('SKU_GTIN_MISMATCH_SUSPECT', $auditOutput);
+
+        $this->assertDatabaseCount('inventory_channel_links', 0);
+        $this->assertDatabaseCount('inventory_kit_components', 0);
+        Http::assertNothingSent();
+    }
+
+    public function test_bare_oxidant_volume_mention_without_peroxide_inclusion_never_builds_kit_bom(): void
+    {
+        $this->createPublication($this->accountOne, 'MLM-20VOL-ONLY', '7702045556940', [
+            'id' => 'MLM-20VOL-ONLY',
+            'title' => 'Tinte Schwarzkopf Igora Royal Fashion Lights L-89 20vol. 60ml',
+            'seller_custom_field' => '7702045556940',
+            'available_quantity' => 3,
+            'status' => 'active',
+            'attributes' => [
+                ['id' => 'HAIR_TONE', 'value_name' => 'L-89'],
+                ['id' => 'OXIDANT_VOLUMES', 'value_name' => '20'],
+            ],
+        ]);
+
+        $preview = app(IgoraGroupingAssistantService::class)->preview();
+        $row = $preview['rows'][0];
+
+        $this->assertSame('L-89', $row['normalized_tone']);
+        $this->assertSame(IgoraGroupingAssistantService::PRES_UNKNOWN, $row['presentation_type']);
+        $this->assertSame([], $row['candidate_components']);
+        $this->assertContains('AMBIGUOUS_KIT_PRESENTATION', $row['conflicts']);
+        $this->assertTrue($row['requires_human_review']);
+        $this->assertSame(IgoraGroupingAssistantService::CONFIDENCE_LOW, $row['confidence']);
+        $this->assertSame('REVISION_HUMANA_CLASIFICACION', $row['recommended_action']);
+    }
+
+    public function test_suspicious_13_digit_sku_vs_gtin_blocks_safe_match_while_preserving_internal_sku_compatibility(): void
+    {
+        // Producto físico con SKU sospechoso o GTIN real
+        $this->createSimpleProduct('7704045556940', 'Tinte Igora Royal L-89 60ml', 'SCHWARZKOPF', 5, '7702045556940');
+        // Producto físico con SKU interno distinto de su EAN-13
+        $internalProduct = $this->createSimpleProduct('IGORA-INT-022', 'Tinte Igora Royal 0-22 60ml', 'SCHWARZKOPF', 6, '7702045539196');
+
+        // Caso A: Dos códigos de 13 dígitos con posible error de captura (7704045556940 vs 7702045556940)
+        $this->createPublication($this->accountOne, 'MLM-SKU-TYPO', '7704045556940', [
+            'id' => 'MLM-SKU-TYPO',
+            'title' => 'Tinte Schwarzkopf Igora Royal Fashion Lights L-89 60ml',
+            'seller_custom_field' => '7704045556940',
+            'available_quantity' => 2,
+            'status' => 'active',
+            'attributes' => [
+                ['id' => 'HAIR_TONE', 'value_name' => 'L-89'],
+                ['id' => 'GTIN', 'value_name' => '7702045556940'],
+            ],
+        ]);
+
+        // Caso B: SKU interno alfanumérico diferente del GTIN-13 válido -> totalmente compatible
+        $this->createPublication($this->accountOne, 'MLM-SKU-INTERNAL', 'IGORA-INT-022', [
+            'id' => 'MLM-SKU-INTERNAL',
+            'title' => 'Tinte Schwarzkopf Igora Royal 0-22 60ml',
+            'seller_custom_field' => 'IGORA-INT-022',
+            'available_quantity' => 2,
+            'status' => 'active',
+            'attributes' => [
+                ['id' => 'GTIN', 'value_name' => '7702045539196'],
+            ],
+        ]);
+
+        $preview = app(IgoraGroupingAssistantService::class)->preview();
+        $rows = collect($preview['rows'])->keyBy('mlm');
+
+        $typoRow = $rows['MLM-SKU-TYPO'];
+        $this->assertContains('SKU_GTIN_MISMATCH_SUSPECT', $typoRow['conflicts']);
+        $this->assertNull($typoRow['proposed_inventory_product_id']);
+        $this->assertTrue($typoRow['requires_human_review']);
+        $this->assertSame(IgoraGroupingAssistantService::CONFIDENCE_LOW, $typoRow['confidence']);
+        $this->assertSame('REVISAR_CONFLICTO_SKU_GTIN', $typoRow['recommended_action']);
+
+        $internalRow = $rows['MLM-SKU-INTERNAL'];
+        $this->assertNotContains('SKU_GTIN_MISMATCH_SUSPECT', $internalRow['conflicts']);
+        $this->assertSame($internalProduct->id, $internalRow['proposed_inventory_product_id']);
+        $this->assertFalse($internalRow['requires_human_review']);
+        $this->assertSame(IgoraGroupingAssistantService::CONFIDENCE_HIGH, $internalRow['confidence']);
+        $this->assertSame('CANDIDATO_A_VINCULAR_A_INVENTORY_EXISTENTE', $internalRow['recommended_action']);
+    }
+
+    public function test_real_production_duplicate_sku_7702045539127_across_tones_1_0_and_1_1_never_groups_together(): void
+    {
+        $product10 = $this->createSimpleProduct('7702045539127', 'Tinte Schwarzkopf Igora Royal 1-0 Negro 60ml', 'SCHWARZKOPF', 8, '7702045539127');
+
+        $this->createPublication($this->accountOne, 'MLM4448275366', '7702045539127', [
+            'id' => 'MLM4448275366',
+            'title' => 'Tinte Schwarzkopf Igora Royal 1-0 Negro Natural 60ml',
+            'seller_custom_field' => '7702045539127',
+            'available_quantity' => 3,
+            'status' => 'active',
+        ]);
+        $this->createPublication($this->accountOne, 'MLM4465586278', '7702045539127', [
+            'id' => 'MLM4465586278',
+            'title' => 'Igora Royal Tono 1-0 Negro Permanente 60ml',
+            'seller_custom_field' => '7702045539127',
+            'available_quantity' => 2,
+            'status' => 'active',
+        ]);
+        $this->createPublication($this->accountOne, 'MLM2597401685', '7702045539127', [
+            'id' => 'MLM2597401685',
+            'title' => 'Tinte Schwarzkopf Igora Royal 1-1 Negro Azulado 60ml',
+            'seller_custom_field' => '7702045539127',
+            'available_quantity' => 4,
+            'status' => 'active',
+        ]);
+        $this->createPublication($this->accountOne, 'MLM4465586276', '7702045539127', [
+            'id' => 'MLM4465586276',
+            'title' => 'Igora Royal Tono 1-1 Negro Cenizo 60ml',
+            'seller_custom_field' => '7702045539127',
+            'available_quantity' => 1,
+            'status' => 'active',
+        ]);
+
+        $preview = app(IgoraGroupingAssistantService::class)->preview();
+        $rows = collect($preview['rows'])->keyBy('mlm');
+
+        $this->assertCount(4, $preview['rows']);
+        $this->assertCount(2, $preview['groups']);
+
+        $this->assertSame('1-0', $rows['MLM4448275366']['normalized_tone']);
+        $this->assertSame('1-0', $rows['MLM4465586278']['normalized_tone']);
+        $this->assertSame('IGORA_ROYAL|1-0|SIMPLE', $rows['MLM4448275366']['proposed_group_key']);
+        $this->assertSame('IGORA_ROYAL|1-0|SIMPLE', $rows['MLM4465586278']['proposed_group_key']);
+
+        $this->assertSame('1-1', $rows['MLM2597401685']['normalized_tone']);
+        $this->assertSame('1-1', $rows['MLM4465586276']['normalized_tone']);
+        $this->assertSame('IGORA_ROYAL|1-1|SIMPLE', $rows['MLM2597401685']['proposed_group_key']);
+        $this->assertSame('IGORA_ROYAL|1-1|SIMPLE', $rows['MLM4465586276']['proposed_group_key']);
+
+        // Los registros 1-1 jamás coinciden con el producto físico 1-0
+        foreach (['MLM2597401685', 'MLM4465586276'] as $mlm11) {
+            $this->assertNull($rows[$mlm11]['proposed_inventory_product_id']);
+            $this->assertNotSame($product10->id, $rows[$mlm11]['proposed_inventory_product_id']);
+            $this->assertContains('SKU_TONE_MISMATCH', $rows[$mlm11]['conflicts']);
+        }
+
+        // Los 4 registros quedan bloqueados por DUPLICATE_SKU_CROSS_TONE y nunca se recomiendan como agrupación segura
+        foreach (['MLM4448275366', 'MLM4465586278', 'MLM2597401685', 'MLM4465586276'] as $mlm) {
+            $this->assertContains('DUPLICATE_SKU_CROSS_TONE', $rows[$mlm]['conflicts']);
+            $this->assertTrue($rows[$mlm]['requires_human_review']);
+            $this->assertSame(IgoraGroupingAssistantService::CONFIDENCE_LOW, $rows[$mlm]['confidence']);
+            $this->assertSame('REVISAR_CONFLICTO_SKU_TONO', $rows[$mlm]['recommended_action']);
+        }
+
+        $this->assertDatabaseCount('inventory_channel_links', 0);
+        $this->assertDatabaseCount('inventory_movements', 1);
+        Http::assertNothingSent();
+    }
+
+    public function test_unsafe_recommendations_blocked_for_missing_sku_incomplete_moderated_and_stale_snapshots(): void
+    {
+        // 1. MISSING_SKU
+        $this->createPublication($this->accountOne, 'MLM-UNSAFE-SKU', '', [
+            'id' => 'MLM-UNSAFE-SKU',
+            'title' => 'Tinte Schwarzkopf Igora Royal 0-22 60ml',
+            'available_quantity' => 3,
+            'status' => 'active',
+        ]);
+
+        // 2. DATA_INCOMPLETE (sin available_quantity en raw)
+        $this->createPublication($this->accountOne, 'MLM-UNSAFE-INC', 'IG-INC-777', [
+            'id' => 'MLM-UNSAFE-INC',
+            'title' => 'Tinte Schwarzkopf Igora Royal 7-77 60ml',
+            'seller_custom_field' => 'IG-INC-777',
+            'status' => 'active',
+        ]);
+
+        // 3. PUBLICATION_MODERATED_OR_DENOUNCED
+        $this->createPublication($this->accountOne, 'MLM-UNSAFE-MOD', 'IG-MOD-10', [
+            'id' => 'MLM-UNSAFE-MOD',
+            'title' => 'Tinte Schwarzkopf Igora Royal 1-0 60ml',
+            'seller_custom_field' => 'IG-MOD-10',
+            'available_quantity' => 4,
+            'status' => 'under_review',
+            'sub_status' => ['forbidden'],
+        ], status: 'under_review', subStatus: ['forbidden']);
+
+        // 4. SNAPSHOT_STALE únicamente (identidad completa, sin conflictos de identidad)
+        $this->createPublication($this->accountOne, 'MLM-STALE-ONLY', 'IG-STALE-951', [
+            'id' => 'MLM-STALE-ONLY',
+            'title' => 'Tinte Schwarzkopf Igora Royal 9.5-1 60ml',
+            'seller_custom_field' => 'IG-STALE-951',
+            'available_quantity' => 5,
+            'status' => 'active',
+        ], lastSyncAt: now()->subDays(3));
+
+        $preview = app(IgoraGroupingAssistantService::class)->preview();
+        $rows = collect($preview['rows'])->keyBy('mlm');
+
+        foreach (['MLM-UNSAFE-SKU', 'MLM-UNSAFE-INC', 'MLM-UNSAFE-MOD', 'MLM-STALE-ONLY'] as $mlm) {
+            $this->assertNotSame('CANDIDATO_A_CREAR_Y_AGRUPAR_EN_INVENTORY', $rows[$mlm]['recommended_action']);
+            $this->assertNotSame('CANDIDATO_A_VINCULAR_A_INVENTORY_EXISTENTE', $rows[$mlm]['recommended_action']);
+        }
+
+        $this->assertTrue($rows['MLM-UNSAFE-SKU']['requires_human_review']);
+        $this->assertSame('VALIDAR_IDENTIDAD_Y_DATOS_INCOMPLETOS', $rows['MLM-UNSAFE-SKU']['recommended_action']);
+
+        $this->assertTrue($rows['MLM-UNSAFE-INC']['requires_human_review']);
+        $this->assertSame('VALIDAR_IDENTIDAD_Y_DATOS_INCOMPLETOS', $rows['MLM-UNSAFE-INC']['recommended_action']);
+
+        $this->assertTrue($rows['MLM-UNSAFE-MOD']['requires_human_review']);
+        $this->assertSame(IgoraGroupingAssistantService::CONFIDENCE_LOW, $rows['MLM-UNSAFE-MOD']['confidence']);
+        $this->assertSame('REVISAR_PUBLICACION_MODERADA', $rows['MLM-UNSAFE-MOD']['recommended_action']);
+
+        // SNAPSHOT_STALE se distingue de un conflicto de identidad y no usa stock remoto como físico
+        $staleRow = $rows['MLM-STALE-ONLY'];
+        $this->assertSame(['SNAPSHOT_STALE'], $staleRow['conflicts']);
+        $this->assertFalse($staleRow['requires_human_review']);
+        $this->assertFalse($staleRow['is_ambiguous_or_conflicted']);
+        $this->assertSame(IgoraGroupingAssistantService::CONFIDENCE_MEDIUM, $staleRow['confidence']);
+        $this->assertSame('REFRESCAR_SNAPSHOT_ANTES_DE_VINCULAR', $staleRow['recommended_action']);
+        $this->assertNull($staleRow['local_physical_stock']);
+        $this->assertSame(5, $staleRow['remote_publication_stock']);
+        $this->assertSame('sin_producto_en_inventory', $staleRow['local_stock_source']);
+    }
+
     private function createSimpleProduct(
         string $sku,
         string $name,
