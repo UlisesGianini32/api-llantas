@@ -5,6 +5,8 @@ namespace App\Services\Purchasing;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
+use OverflowException;
+use Psr\Http\Message\StreamInterface;
 use Throwable;
 
 /**
@@ -18,7 +20,9 @@ class PurchaseOrderMeliImageCacheService
 
     private const CACHE_TTL_SECONDS = 604800; // 7 days
 
-    private const MAX_BYTES = 5_242_880; // 5 MB
+    public const MAX_BYTES = 5_242_880; // 5 MB
+
+    private const READ_CHUNK_BYTES = 65_536; // 64 KB
 
     private const MAX_REDIRECTS = 2;
 
@@ -96,8 +100,23 @@ class PurchaseOrderMeliImageCacheService
                         'Accept' => 'image/jpeg,image/png,image/webp,image/gif,*/*;q=0.5',
                         'User-Agent' => 'SBS-Purchasing/1.0',
                     ])
-                    ->withOptions(['allow_redirects' => false])
+                    ->withOptions([
+                        'allow_redirects' => false,
+                        'stream' => true,
+                        'progress' => static function (int $downloadTotal, int $downloadedBytes): void {
+                            if ($downloadTotal > self::MAX_BYTES || $downloadedBytes > self::MAX_BYTES) {
+                                throw new OverflowException('Remote photo exceeded maximum allowed download size.');
+                            }
+                        },
+                    ])
                     ->get($currentUrl);
+            } catch (OverflowException) {
+                Log::warning('[Purchasing][MeliPhotos] Aborted oversized remote photo during transfer', [
+                    'host' => parse_url($currentUrl, PHP_URL_HOST),
+                    'max_bytes' => self::MAX_BYTES,
+                ]);
+
+                return null;
             } catch (Throwable $e) {
                 Log::warning('[Purchasing][MeliPhotos] Failed fetching remote photo', [
                     'host' => parse_url($currentUrl, PHP_URL_HOST),
@@ -107,8 +126,12 @@ class PurchaseOrderMeliImageCacheService
                 return null;
             }
 
+            $psrResponse = $response->toPsrResponse();
+            $stream = $psrResponse->getBody();
             $status = $response->status();
+
             if (in_array($status, [301, 302, 303, 307, 308], true)) {
+                $stream->close();
                 $location = $this->resolver->trustedUrl($response->header('Location'));
                 if ($location === null) {
                     return null;
@@ -118,11 +141,25 @@ class PurchaseOrderMeliImageCacheService
             }
 
             if ($status !== 200) {
+                $stream->close();
+
                 return null;
             }
 
-            $body = $response->body();
-            if ($body === '' || strlen($body) > self::MAX_BYTES) {
+            $contentLengthHeader = trim((string) $response->header('Content-Length'));
+            if ($contentLengthHeader !== '' && ctype_digit($contentLengthHeader) && (int) $contentLengthHeader > self::MAX_BYTES) {
+                $stream->close();
+                Log::warning('[Purchasing][MeliPhotos] Rejected remote photo with oversized Content-Length', [
+                    'host' => parse_url($currentUrl, PHP_URL_HOST),
+                    'content_length' => (int) $contentLengthHeader,
+                    'max_bytes' => self::MAX_BYTES,
+                ]);
+
+                return null;
+            }
+
+            $body = $this->readBoundedStream($stream, $currentUrl);
+            if ($body === null || $body === '') {
                 return null;
             }
 
@@ -138,6 +175,52 @@ class PurchaseOrderMeliImageCacheService
         }
 
         return null;
+    }
+
+    /**
+     * Incrementally read up to MAX_BYTES from a PSR-7 stream and abort/close immediately if exceeded,
+     * protecting memory even for chunked transfers without a Content-Length header.
+     */
+    private function readBoundedStream(StreamInterface $stream, string $currentUrl): ?string
+    {
+        $chunks = [];
+        $totalBytes = 0;
+
+        try {
+            while (! $stream->eof()) {
+                $remainingAllowed = self::MAX_BYTES - $totalBytes;
+                $bytesToRead = min(self::READ_CHUNK_BYTES, $remainingAllowed + 1);
+                $chunk = $stream->read($bytesToRead);
+
+                if ($chunk === '') {
+                    break;
+                }
+
+                $totalBytes += strlen($chunk);
+                if ($totalBytes > self::MAX_BYTES) {
+                    Log::warning('[Purchasing][MeliPhotos] Aborted oversized streamed remote photo', [
+                        'host' => parse_url($currentUrl, PHP_URL_HOST),
+                        'bytes_read' => $totalBytes,
+                        'max_bytes' => self::MAX_BYTES,
+                    ]);
+
+                    return null;
+                }
+
+                $chunks[] = $chunk;
+            }
+        } catch (Throwable $e) {
+            Log::warning('[Purchasing][MeliPhotos] Error reading remote photo stream', [
+                'host' => parse_url($currentUrl, PHP_URL_HOST),
+                'error' => $e->getMessage(),
+            ]);
+
+            return null;
+        } finally {
+            $stream->close();
+        }
+
+        return implode('', $chunks);
     }
 
     private function detectValidatedImageMime(string $bytes): ?string
