@@ -6,10 +6,12 @@ use App\Http\Controllers\Controller;
 use App\Models\InventoryLocation;
 use App\Models\InventoryProduct;
 use App\Models\PurchaseOrder;
+use App\Models\PurchaseOrderItem;
 use App\Models\PurchaseOrderReceipt;
 use App\Models\Supplier;
-use App\Services\Purchasing\PurchaseOrderService;
+use App\Services\Purchasing\PurchaseOrderMeliImageCacheService;
 use App\Services\Purchasing\PurchaseOrderMeliImageResolver;
+use App\Services\Purchasing\PurchaseOrderService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -24,7 +26,8 @@ class PurchaseOrderController extends Controller
 {
     public function __construct(
         private readonly PurchaseOrderService $poService,
-        private readonly PurchaseOrderMeliImageResolver $meliImageResolver
+        private readonly PurchaseOrderMeliImageResolver $meliImageResolver,
+        private readonly PurchaseOrderMeliImageCacheService $meliImageCache,
     ) {}
 
     public function index(Request $request): Response
@@ -261,7 +264,7 @@ class PurchaseOrderController extends Controller
 
         return Inertia::render('Purchasing/Show', [
             'order' => $purchaseOrder,
-            'imageUrlByItemId' => $this->meliImageResolver->forOrder($purchaseOrder),
+            'imageUrlByItemId' => $this->buildItemPhotoUrls($purchaseOrder, false),
             'locations' => $locations,
             'supplier' => $supplier,
             'canViewPdf' => $canViewPdf,
@@ -295,7 +298,7 @@ class PurchaseOrderController extends Controller
         return response()
             ->view('purchasing.order-pdf', [
                 'order' => $purchaseOrder,
-                'imageUrlByItemId' => $this->meliImageResolver->forOrder($purchaseOrder),
+                'imageUrlByItemId' => $this->buildItemPhotoUrls($purchaseOrder, $isSignedPublicAccess),
                 'supplier' => $supplier,
             ])
             ->withHeaders([
@@ -303,6 +306,72 @@ class PurchaseOrderController extends Controller
                 'Pragma' => 'no-cache',
                 'X-Robots-Tag' => 'noindex, nofollow, noarchive',
             ]);
+    }
+
+    public function itemPhoto(Request $request, PurchaseOrder $purchaseOrder, PurchaseOrderItem $item): HttpResponse
+    {
+        if ((int) $item->purchase_order_id !== (int) $purchaseOrder->id) {
+            abort(404);
+        }
+
+        $isSignedPublicAccess = $request->routeIs('purchasing.orders.public-item-photo')
+            && $request->hasValidRelativeSignature();
+
+        if (! $isSignedPublicAccess && $request->user() === null) {
+            abort(403);
+        }
+
+        $resolution = $this->meliImageResolver->resolveForItem($purchaseOrder, $item);
+        if (! is_string($resolution['url']) || $resolution['url'] === '') {
+            abort(404);
+        }
+
+        $asset = $this->meliImageCache->fetch($resolution['url']);
+        if ($asset === null) {
+            abort(404);
+        }
+
+        return response($asset['bytes'], 200)
+            ->withHeaders([
+                'Content-Type' => $asset['mime'],
+                'X-Content-Type-Options' => 'nosniff',
+                'Cache-Control' => 'private, max-age=86400',
+                'X-Robots-Tag' => 'noindex, nofollow, noarchive',
+            ]);
+    }
+
+    /**
+     * Build same-origin cached photo URLs for items that resolved to a verified Mercado Libre picture.
+     *
+     * @return array<int, string>
+     */
+    private function buildItemPhotoUrls(PurchaseOrder $purchaseOrder, bool $useSignedPublicUrls): array
+    {
+        $resolved = $this->meliImageResolver->resolveForOrder($purchaseOrder);
+        $urls = [];
+
+        foreach ($resolved as $itemId => $entry) {
+            if (! is_string($entry['url']) || $entry['url'] === '') {
+                continue;
+            }
+
+            if ($useSignedPublicUrls) {
+                $urls[(int) $itemId] = URL::temporarySignedRoute(
+                    'purchasing.orders.public-item-photo',
+                    now()->addDays(7),
+                    ['purchaseOrder' => $purchaseOrder->id, 'item' => (int) $itemId],
+                    absolute: false
+                );
+            } else {
+                $urls[(int) $itemId] = route(
+                    'purchasing.orders.item-photo',
+                    ['purchaseOrder' => $purchaseOrder->id, 'item' => (int) $itemId],
+                    false
+                );
+            }
+        }
+
+        return $urls;
     }
 
     /**

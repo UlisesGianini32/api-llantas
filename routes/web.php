@@ -83,6 +83,11 @@ Route::get('/orden-compra/{purchaseOrder}/pdf', [PurchaseOrderController::class,
     ->middleware('signed:relative')
     ->whereNumber('purchaseOrder')
     ->name('purchasing.orders.public-pdf');
+Route::get('/orden-compra/{purchaseOrder}/partidas/{item}/foto', [PurchaseOrderController::class, 'itemPhoto'])
+    ->middleware('signed:relative')
+    ->whereNumber('purchaseOrder')
+    ->whereNumber('item')
+    ->name('purchasing.orders.public-item-photo');
 
 Route::middleware(['auth', 'role'])->group(function () {
     // SISTEMA
@@ -226,6 +231,8 @@ Route::middleware(['auth', 'role'])->group(function () {
             ->whereNumber('purchaseOrder')->whereNumber('item')->name('destroy-item');
         Route::get('/{purchaseOrder}/pdf', [PurchaseOrderController::class, 'pdf'])
             ->whereNumber('purchaseOrder')->name('pdf');
+        Route::get('/{purchaseOrder}/partidas/{item}/foto', [PurchaseOrderController::class, 'itemPhoto'])
+            ->whereNumber('purchaseOrder')->whereNumber('item')->name('item-photo');
         Route::post('/{purchaseOrder}/ordenar', [PurchaseOrderController::class, 'order'])
             ->whereNumber('purchaseOrder')->name('order');
         Route::post('/{purchaseOrder}/recibir', [PurchaseOrderController::class, 'receive'])
