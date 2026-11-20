@@ -180,6 +180,56 @@ class PurchaseOrderMeliImageCacheServiceTest extends TestCase
         $this->expectException(OverflowException::class);
         $capturedProgress(0, PurchaseOrderMeliImageCacheService::MAX_BYTES + 1);
     }
+
+    public function test_manual_photo_storage_supports_jpg_png_webp_gif_and_rejects_oversized_fake_and_path_traversal(): void
+    {
+        Storage::fake('public');
+
+        $samples = [
+            'image/png' => $this->tinyPngBytes,
+            'image/gif' => base64_decode('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', true) ?: '',
+            'image/jpeg' => base64_decode('/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA=', true) ?: '',
+            'image/webp' => base64_decode('UklGRh4AAABXRUJQVlA4TBEAAAAvAAAAAAfQ//73v/+BiOh/AAA=', true) ?: '',
+        ];
+
+        foreach ($samples as $expectedMime => $bytes) {
+            $stored = $this->service->storeManualPhoto(24, 475, $bytes);
+            $this->assertNotNull($stored, "Expected valid [{$expectedMime}] payload to be stored.");
+            $this->assertSame($expectedMime, $stored['mime']);
+            $this->assertStringStartsWith(PurchaseOrderMeliImageCacheService::MANUAL_DIR.'/po-24/item-475-', $stored['path']);
+
+            // Stored strictly on private 'local' disk, never on 'public' disk
+            $this->assertTrue(Storage::disk('local')->exists($stored['path']));
+            $this->assertFalse(Storage::disk('public')->exists($stored['path']));
+
+            $loaded = $this->service->readManualPhoto($stored['path']);
+            $this->assertNotNull($loaded);
+            $this->assertSame($expectedMime, $loaded['mime']);
+            $this->assertSame($bytes, $loaded['bytes']);
+
+            $this->service->deleteManualPhoto($stored['path']);
+            $this->assertFalse(Storage::disk('local')->exists($stored['path']));
+        }
+
+        // Rejects oversized payload (> 5 MB)
+        $oversized = $this->tinyPngBytes.str_repeat("\0", PurchaseOrderMeliImageCacheService::MAX_BYTES);
+        $this->assertNull($this->service->storeManualPhoto(24, 475, $oversized));
+
+        // Rejects fake/non-image payloads (HTML, PHP, SVG)
+        $this->assertNull($this->service->storeManualPhoto(24, 475, '<html><script>alert(1)</script></html>'));
+        $this->assertNull($this->service->storeManualPhoto(24, 475, '<?php echo 1; ?>'));
+        $this->assertNull($this->service->storeManualPhoto(24, 475, '<svg xmlns="http://www.w3.org/2000/svg"></svg>'));
+
+        // Rejects path traversal and arbitrary private paths
+        Storage::disk('local')->put('secret/private.png', $this->tinyPngBytes);
+        $this->assertNull($this->service->readManualPhoto('secret/private.png'));
+        $this->assertNull($this->service->readManualPhoto('purchasing/manual-photos/../../secret/private.png'));
+        $this->assertNull($this->service->readManualPhoto('/etc/passwd'));
+
+        // deleteManualPhoto refuses to delete outside MANUAL_DIR
+        $this->service->deleteManualPhoto('secret/private.png');
+        $this->assertTrue(Storage::disk('local')->exists('secret/private.png'));
+    }
 }
 
 /**

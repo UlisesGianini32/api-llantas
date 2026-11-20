@@ -1436,6 +1436,326 @@ class PurchaseOrderMeliImageResolverTest extends TestCase
         $this->assertSame($manualPath, $resolvedManual[$item->id]['manual_path']);
     }
 
+    public function test_keyset_paginated_variation_scan_handles_more_than_500_matching_rows_in_publications_and_price_manager(): void
+    {
+        $acc = $this->createMeliAccount('600100', 'SBS_CHINA', true);
+
+        $prodPubDeep = $this->createProduct('VAR-DEEP-550', 'Producto Variación En Fila 551');
+        $prodPmDeep = $this->createProduct('PM-DEEP-550', 'Producto Price Manager En Fila 551');
+        $prodUnrelated = $this->createProduct('UNRELATED-550', 'Producto Sin Coincidencia Real');
+
+        $order = $this->createOrderWithItems([$prodPubDeep, $prodPmDeep, $prodUnrelated]);
+        [$itemPubDeep, $itemPmDeep, $itemUnrelated] = [$order->items[0], $order->items[1], $order->items[2]];
+
+        $now = now()->toDateTimeString();
+
+        // Insert 550 noisy meli_publications rows mentioning the SKUs inside description (not seller_sku),
+        // so a naive LIMIT 500 query would completely miss the real match at row #551!
+        $pubBatch = [];
+        for ($i = 1; $i <= 550; $i++) {
+            $pubBatch[] = [
+                'user_id' => $this->user->id,
+                'meli_account_id' => $acc->id,
+                'sku' => "NOISE-PUB-{$i}",
+                'mlm' => sprintf('MLM700%04d', $i),
+                'status' => 'active',
+                'is_current' => 1,
+                'last_sync_at' => $now,
+                'raw' => json_encode([
+                    'item' => [
+                        'title' => "Ruido {$i}",
+                        'tags' => ['VAR-DEEP-550', 'UNRELATED-550'],
+                        'seller_custom_field' => "NOISE-PUB-{$i}",
+                        'pictures' => [['secure_url' => "https://http2.mlstatic.com/noise-pub-{$i}.jpg"]],
+                    ],
+                ]),
+                'created_at' => $now,
+                'updated_at' => $now,
+            ];
+
+            if (count($pubBatch) === 100) {
+                DB::table('meli_publications')->insert($pubBatch);
+                $pubBatch = [];
+            }
+        }
+        if ($pubBatch !== []) {
+            DB::table('meli_publications')->insert($pubBatch);
+        }
+
+        // Row #551: the real secondary variation match for VAR-DEEP-550!
+        MeliPublication::create([
+            'user_id' => $this->user->id,
+            'meli_account_id' => $acc->id,
+            'sku' => 'PARENT-PUB-551',
+            'mlm' => 'MLM7009999',
+            'status' => 'active',
+            'last_sync_at' => now(),
+            'raw' => [
+                'item' => [
+                    'title' => 'Publicación Real Más Allá De 500',
+                    'pictures' => [
+                        ['id' => 'cover-551', 'secure_url' => 'https://http2.mlstatic.com/cover-wrong-551.jpg'],
+                        ['id' => 'var-551', 'secure_url' => 'https://http2.mlstatic.com/real-deep-pub-551.jpg'],
+                    ],
+                    'variations' => [
+                        ['id' => 88551, 'seller_custom_field' => 'VAR-DEEP-550', 'picture_ids' => ['var-551']],
+                    ],
+                ],
+            ],
+        ]);
+
+        // Insert 550 noisy meli_price_manager_items rows mentioning "PM-DEEP-550"
+        $pmBatch = [];
+        for ($i = 1; $i <= 550; $i++) {
+            $pmBatch[] = [
+                'meli_account_id' => $acc->id,
+                'meli_item_id' => sprintf('MLM800%04d', $i),
+                'sku' => "NOISE-PM-{$i}",
+                'title' => "Ruido PM {$i}",
+                'current_price' => 100,
+                'status' => 'active',
+                'last_synced_at' => $now,
+                'raw_item' => json_encode([
+                    'title' => "Ruido PM {$i}",
+                    'tags' => ['PM-DEEP-550', 'UNRELATED-550'],
+                    'seller_custom_field' => "NOISE-PM-{$i}",
+                    'pictures' => [['secure_url' => "https://http2.mlstatic.com/noise-pm-{$i}.jpg"]],
+                ]),
+                'created_at' => $now,
+                'updated_at' => $now,
+            ];
+
+            if (count($pmBatch) === 100) {
+                DB::table('meli_price_manager_items')->insert($pmBatch);
+                $pmBatch = [];
+            }
+        }
+        if ($pmBatch !== []) {
+            DB::table('meli_price_manager_items')->insert($pmBatch);
+        }
+
+        // Row #551 in meli_price_manager_items: real variation match for PM-DEEP-550!
+        MeliPriceManagerItem::create([
+            'meli_account_id' => $acc->id,
+            'meli_item_id' => 'MLM8009999',
+            'sku' => 'PARENT-PM-551',
+            'title' => 'Price Manager Real Más Allá De 500',
+            'status' => 'active',
+            'last_synced_at' => now(),
+            'raw_item' => [
+                'title' => 'Price Manager Real Más Allá De 500',
+                'pictures' => [
+                    ['id' => 'pm-var-551', 'secure_url' => 'https://http2.mlstatic.com/real-deep-pm-551.jpg'],
+                ],
+                'variations' => [
+                    ['id' => 99551, 'seller_custom_field' => 'PM-DEEP-550', 'picture_ids' => ['pm-var-551']],
+                ],
+            ],
+        ]);
+
+        DB::flushQueryLog();
+        DB::enableQueryLog();
+        $resolved = $this->resolver->resolveForOrder($order, false);
+        $queries = DB::getQueryLog();
+        DB::disableQueryLog();
+
+        $pubCursorQueries = array_filter($queries, static fn (array $q): bool => str_contains($q['query'], 'meli_publications') && str_contains($q['query'], '"id" > ?'));
+        $pmCursorQueries = array_filter($queries, static fn (array $q): bool => str_contains($q['query'], 'meli_price_manager_items') && str_contains($q['query'], '"id" > ?'));
+        $this->assertGreaterThanOrEqual(3, count($pubCursorQueries), 'Expected at least 3 keyset pages to scan >550 meli_publications rows.');
+        $this->assertGreaterThanOrEqual(3, count($pmCursorQueries), 'Expected at least 3 keyset pages to scan >550 meli_price_manager_items rows.');
+
+        $this->assertSame('https://http2.mlstatic.com/real-deep-pub-551.jpg', $resolved[$itemPubDeep->id]['url']);
+        $this->assertSame('MLM7009999', $resolved[$itemPubDeep->id]['mlm']);
+        $this->assertSame('88551', $resolved[$itemPubDeep->id]['variation_id']);
+        $this->assertFalse($resolved[$itemPubDeep->id]['variation_scan_truncated']);
+
+        $this->assertSame('https://http2.mlstatic.com/real-deep-pm-551.jpg', $resolved[$itemPmDeep->id]['url']);
+        $this->assertSame('MLM8009999', $resolved[$itemPmDeep->id]['mlm']);
+        $this->assertSame('99551', $resolved[$itemPmDeep->id]['variation_id']);
+        $this->assertFalse($resolved[$itemPmDeep->id]['variation_scan_truncated']);
+
+        // Strict SKU isolation preserved across all 1,100+ scanned rows
+        $this->assertNull($resolved[$itemUnrelated->id]['url']);
+        $this->assertNull($resolved[$itemUnrelated->id]['mlm']);
+        $this->assertSame('no_listing_found', $resolved[$itemUnrelated->id]['reason']);
+        $this->assertFalse($resolved[$itemUnrelated->id]['variation_scan_truncated']);
+    }
+
+    public function test_variation_scan_detects_and_reports_operational_ceiling_truncation_without_silent_loss(): void
+    {
+        Log::spy();
+
+        $acc = $this->createMeliAccount('600200', 'SBS_CHINA', true);
+        $prod = $this->createProduct('TRUNC-SKU-1', 'Producto Con Techo Operativo');
+        $order = $this->createOrderWithItems([$prod]);
+        $item = $order->items->firstOrFail();
+
+        $now = now()->toDateTimeString();
+        $rows = [];
+        for ($i = 1; $i <= 65; $i++) {
+            $rows[] = [
+                'user_id' => $this->user->id,
+                'meli_account_id' => $acc->id,
+                'sku' => "NOISE-CAP-{$i}",
+                'mlm' => sprintf('MLM710%04d', $i),
+                'status' => 'active',
+                'is_current' => 1,
+                'last_sync_at' => $now,
+                'raw' => json_encode([
+                    'item' => [
+                        'tags' => ['TRUNC-SKU-1'],
+                        'seller_custom_field' => "NOISE-CAP-{$i}",
+                    ],
+                ]),
+                'created_at' => $now,
+                'updated_at' => $now,
+            ];
+        }
+        DB::table('meli_publications')->insert($rows);
+
+        // Configure small operational ceiling (25 rows x 2 pages = 50 rows max) to verify detectable truncation
+        $boundedResolver = new PurchaseOrderMeliImageResolver(
+            variationScanPageSize: 25,
+            variationScanMaxPages: 2,
+        );
+
+        $resolved = $boundedResolver->resolveForOrder($order, false);
+
+        $this->assertNull($resolved[$item->id]['url']);
+        $this->assertTrue($resolved[$item->id]['variation_scan_truncated']);
+        $this->assertTrue($resolved[$item->id]['scan_diagnostics']['meli_publications_truncated']);
+        $this->assertSame(50, $resolved[$item->id]['scan_diagnostics']['meli_publications_scanned']);
+
+        Log::shouldHaveReceived('warning')->once();
+    }
+
+    public function test_approved_photo_is_preserved_even_when_ml_snapshot_changes_or_disappears(): void
+    {
+        $acc = $this->createMeliAccount('600300', 'SBS_CHINA', true);
+        $prod = $this->createProduct('VAPOR-OZONO', 'Vaporizador facial con ozono');
+        $order = $this->createOrderWithItems([$prod]);
+        $item = $order->items->firstOrFail();
+
+        $pub = MeliPublication::create([
+            'user_id' => $this->user->id,
+            'meli_account_id' => $acc->id,
+            'sku' => 'ML-VAPOR',
+            'mlm' => 'MLM2611925824',
+            'status' => 'active',
+            'last_sync_at' => now(),
+            'raw' => [
+                'item' => [
+                    'title' => 'Vaporizador Facial Con Ozono Profesional',
+                    'pictures' => [['secure_url' => 'https://http2.mlstatic.com/vapor-approved.jpg']],
+                ],
+            ],
+        ]);
+
+        // Admin approves MLM2611925824 locking in approved_photo_url
+        $item->update([
+            'photo_source_mode' => PurchaseOrderItem::PHOTO_MODE_APPROVED_ML,
+            'approved_mlm' => 'MLM2611925824',
+            'approved_meli_account_id' => $acc->id,
+            'approved_photo_url' => 'https://http2.mlstatic.com/vapor-approved.jpg',
+            'photo_notes' => 'Foto validada por usuario',
+        ]);
+
+        // Later ML sync overwrites listing pictures with a different promotional banner
+        $pub->update([
+            'raw' => [
+                'item' => [
+                    'title' => 'Vaporizador Facial Con Ozono Profesional',
+                    'pictures' => [['secure_url' => 'https://http2.mlstatic.com/vapor-changed-promo.jpg']],
+                ],
+            ],
+        ]);
+
+        $resolvedAfterMutation = $this->resolver->resolveForOrder($order->fresh('items.product'), false);
+        $this->assertSame('https://http2.mlstatic.com/vapor-approved.jpg', $resolvedAfterMutation[$item->id]['url']);
+        $this->assertSame('resolved_approved_preserved', $resolvedAfterMutation[$item->id]['reason']);
+        $this->assertSame('Vaporizador Facial Con Ozono Profesional', $resolvedAfterMutation[$item->id]['listing_title']);
+
+        // Even if the publication row disappears from synced table, approved photo is still preserved
+        $pub->delete();
+        $resolvedAfterDelete = $this->resolver->resolveForOrder($order->fresh('items.product'), false);
+        $this->assertSame('https://http2.mlstatic.com/vapor-approved.jpg', $resolvedAfterDelete[$item->id]['url']);
+        $this->assertSame('resolved_approved_preserved', $resolvedAfterDelete[$item->id]['reason']);
+    }
+
+    public function test_all_ten_color_variations_resolve_to_exact_variation_pictures_not_cover(): void
+    {
+        $acc = $this->createMeliAccount('600400', 'SBS_CHINA', true);
+
+        $cases = [
+            // Atomizadores MLM3373409704
+            ['sku' => 'CHN-TMP-001', 'mlm' => 'MLM3373409704', 'var' => '185902990943', 'color' => 'Blanco Azul', 'pic' => 'p-atom-1'],
+            ['sku' => 'ATOMIZADORBCOAF', 'mlm' => 'MLM3373409704', 'var' => '186105657167', 'color' => 'Blanco azul fuerte', 'pic' => 'p-atom-2'],
+            ['sku' => 'ATOMIZADORBR', 'mlm' => 'MLM3373409704', 'var' => '186106913357', 'color' => 'Blanco rosa', 'pic' => 'p-atom-3'],
+            ['sku' => 'ATOMIZADORBCO', 'mlm' => 'MLM3373409704', 'var' => '186105773881', 'color' => 'Blanco/Transparente', 'pic' => 'p-atom-4'],
+            ['sku' => 'AtomizadorN', 'mlm' => 'MLM3373409704', 'var' => '185902990945', 'color' => 'Negro', 'pic' => 'p-atom-5'],
+            // Pinzas acrílico MLM2187850857
+            ['sku' => 'CHN-TMP-008', 'mlm' => 'MLM2187850857', 'var' => '186372997505', 'color' => 'Rosa', 'pic' => 'p-pinza-1'],
+            ['sku' => 'CHN-TMP-009', 'mlm' => 'MLM2187850857', 'var' => '186372997501', 'color' => 'Naranja', 'pic' => 'p-pinza-2'],
+            ['sku' => 'BNAILR', 'mlm' => 'MLM2187850857', 'var' => '186372997495', 'color' => 'Negro', 'pic' => 'p-pinza-3'],
+            // Camillas MLM2124053049
+            ['sku' => 'CAMILLAPROFB', 'mlm' => 'MLM2124053049', 'var' => '184371561379', 'color' => 'Blanco', 'pic' => 'p-camilla-1'],
+            ['sku' => 'CAMILLAPROFN', 'mlm' => 'MLM2124053049', 'var' => '184371561381', 'color' => 'Negro', 'pic' => 'p-camilla-2'],
+        ];
+
+        $byMlm = collect($cases)->groupBy('mlm');
+        foreach ($byMlm as $mlm => $group) {
+            $pictures = [['id' => 'cover-generic', 'secure_url' => "https://http2.mlstatic.com/{$mlm}-cover-generic.jpg"]];
+            $variations = [];
+            foreach ($group as $c) {
+                $pictures[] = ['id' => $c['pic'], 'secure_url' => "https://http2.mlstatic.com/{$c['pic']}.jpg"];
+                $variations[] = [
+                    'id' => $c['var'],
+                    'seller_custom_field' => str_starts_with($c['sku'], 'CHN-TMP-') ? 'LEGACY-ML-SKU' : $c['sku'],
+                    'picture_ids' => [$c['pic']],
+                    'attribute_combinations' => [['id' => 'COLOR', 'name' => 'Color', 'value_name' => $c['color']]],
+                ];
+            }
+
+            MeliPublication::create([
+                'user_id' => $this->user->id,
+                'meli_account_id' => $acc->id,
+                'sku' => $group[0]['sku'],
+                'mlm' => $mlm,
+                'status' => 'active',
+                'last_sync_at' => now(),
+                'raw' => ['item' => ['title' => "Publicación {$mlm}", 'pictures' => $pictures, 'variations' => $variations]],
+            ]);
+        }
+
+        $products = array_map(fn (array $c) => $this->createProduct($c['sku'], "Prod {$c['sku']} {$c['color']}"), $cases);
+        $order = $this->createOrderWithItems($products);
+
+        // Approve the 3 temporary SKUs explicitly by variation_id; leave the other 7 to auto-resolve by variation SKU
+        foreach ($order->items as $idx => $item) {
+            $c = $cases[$idx];
+            if (str_starts_with($c['sku'], 'CHN-TMP-')) {
+                $item->update([
+                    'photo_source_mode' => PurchaseOrderItem::PHOTO_MODE_APPROVED_ML,
+                    'approved_mlm' => $c['mlm'],
+                    'approved_variation_id' => $c['var'],
+                    'approved_meli_account_id' => $acc->id,
+                ]);
+            }
+        }
+
+        $resolved = $this->resolver->resolveForOrder($order->fresh('items.product'), false);
+
+        foreach ($order->items as $idx => $item) {
+            $c = $cases[$idx];
+            $entry = $resolved[$item->id];
+            $this->assertSame("https://http2.mlstatic.com/{$c['pic']}.jpg", $entry['url'], "SKU {$c['sku']} must resolve to its exact variation picture, not cover.");
+            $this->assertSame($c['mlm'], $entry['mlm']);
+            $this->assertSame($c['var'], $entry['variation_id']);
+            $this->assertSame("Color: {$c['color']}", $entry['variation_label']);
+            $this->assertSame(PurchaseOrderMeliImageResolver::AUDIT_RESOLVED_VARIATION, $entry['audit_category']);
+        }
+    }
+
     private function createMeliAccount(string $meliUserId, string $nickname, bool $isDefault): MeliAccount
     {
         return MeliAccount::create([
