@@ -91,6 +91,26 @@ export default function PurchasingShow({ order, locations = [], supplier = null,
     const [pdfSentAlert, setPdfSentAlert] = useState(null)
     const pdfSheetRef = useRef(null)
 
+    // Lightbox & broken photo fallback state
+    const [previewPhoto, setPreviewPhoto] = useState(null)
+    const [failedPhotoIds, setFailedPhotoIds] = useState({})
+
+    const markPhotoFailed = (itemId) => {
+        if (itemId == null) return
+        setFailedPhotoIds((prev) => (prev[itemId] ? prev : { ...prev, [itemId]: true }))
+    }
+
+    useEffect(() => {
+        if (!previewPhoto) return undefined
+        const onKeyDown = (event) => {
+            if (event.key === 'Escape') {
+                setPreviewPhoto(null)
+            }
+        }
+        window.addEventListener('keydown', onKeyDown)
+        return () => window.removeEventListener('keydown', onKeyDown)
+    }, [previewPhoto])
+
     // Modal states: Recepción física
     const [receiveModalOpen, setReceiveModalOpen] = useState(
         typeof window !== 'undefined' && window.location.hash === '#recibir' && (order.status === 'ORDERED' || order.status === 'PARTIAL')
@@ -367,6 +387,45 @@ export default function PurchasingShow({ order, locations = [], supplier = null,
         })
     }
 
+    const waitForSheetImages = (container, timeoutMs = 8000) => {
+        if (!container) return Promise.resolve()
+        const imgs = Array.from(container.querySelectorAll('img'))
+        const pending = imgs.filter((img) => !img.complete)
+        if (pending.length === 0) return Promise.resolve()
+
+        return new Promise((resolve) => {
+            let settled = false
+            const finish = () => {
+                if (!settled) {
+                    settled = true
+                    resolve()
+                }
+            }
+            const timer = setTimeout(finish, timeoutMs)
+            let remaining = pending.length
+            const onDone = () => {
+                remaining -= 1
+                if (remaining <= 0) {
+                    clearTimeout(timer)
+                    finish()
+                }
+            }
+            pending.forEach((img) => {
+                img.addEventListener('load', onDone, { once: true })
+                img.addEventListener('error', onDone, { once: true })
+            })
+        })
+    }
+
+    const buildPdfOptions = (filename) => ({
+        margin: [8, 8, 8, 8],
+        filename,
+        image: { type: 'jpeg', quality: 0.98 },
+        html2canvas: { scale: 2, useCORS: true, allowTaint: false, logging: false },
+        pagebreak: { mode: ['avoid-all', 'css', 'legacy'], avoid: ['tr', '.pdf-avoid-break'] },
+        jsPDF: { unit: 'mm', format: 'letter', orientation: 'portrait' },
+    })
+
     // Generate and download PDF from rendered sheet
     const handleDownloadPdf = async () => {
         if (!pdfSheetRef.current) return
@@ -374,13 +433,8 @@ export default function PurchasingShow({ order, locations = [], supplier = null,
         try {
             const html2pdf = await getHtml2Pdf()
             const element = pdfSheetRef.current
-            const opt = {
-                margin: [8, 8, 8, 8],
-                filename: `Orden-de-Compra-${order.order_number}.pdf`,
-                image: { type: 'jpeg', quality: 0.98 },
-                html2canvas: { scale: 2, useCORS: true, logging: false },
-                jsPDF: { unit: 'mm', format: 'letter', orientation: 'portrait' },
-            }
+            await waitForSheetImages(element)
+            const opt = buildPdfOptions(`Orden-de-Compra-${order.order_number}.pdf`)
             await html2pdf().set(opt).from(element).save()
         } catch (err) {
             console.error('Error al generar PDF:', err)
@@ -434,13 +488,8 @@ export default function PurchasingShow({ order, locations = [], supplier = null,
         try {
             const html2pdf = await getHtml2Pdf()
             const element = pdfSheetRef.current
-            const opt = {
-                margin: [8, 8, 8, 8],
-                filename: filename,
-                image: { type: 'jpeg', quality: 0.98 },
-                html2canvas: { scale: 2, useCORS: true, logging: false },
-                jsPDF: { unit: 'mm', format: 'letter', orientation: 'portrait' },
-            }
+            await waitForSheetImages(element)
+            const opt = buildPdfOptions(filename)
 
             // Generate blob
             const pdfBlob = await html2pdf().set(opt).from(element).outputPdf('blob')
@@ -823,6 +872,13 @@ export default function PurchasingShow({ order, locations = [], supplier = null,
                         margin: 0 !important;
                         width: 100% !important;
                     }
+                    .print-sheet thead {
+                        display: table-header-group;
+                    }
+                    .print-sheet tr {
+                        break-inside: avoid;
+                        page-break-inside: avoid;
+                    }
                 }
             `}</style>
 
@@ -1171,7 +1227,7 @@ export default function PurchasingShow({ order, locations = [], supplier = null,
                                 <tr>
                                     <th className="px-3 py-3 w-12 text-center">#</th>
                                     <th className="px-3 py-3 w-36 text-indigo-600 dark:text-indigo-400">Cód. Proveedor</th>
-                                    <th className="px-3 py-3 w-20 text-center">Foto ML</th>
+                                    <th className="px-3 py-3 w-20 text-center">Foto</th>
                                     <th className="px-3 py-3 w-32">SKU Interno</th>
                                     <th className="px-3 py-3">Producto / Descripción</th>
                                     <th className="px-3 py-3 text-center w-28">Pedidas</th>
@@ -1189,8 +1245,11 @@ export default function PurchasingShow({ order, locations = [], supplier = null,
                             <tbody className="divide-y divide-slate-100 dark:divide-neutral-800">
                                 {currentDisplayItems.map((item, idx) => {
                                     const pending = Math.max(0, item.quantity_ordered - (item.quantity_received || 0))
+                                    const photoUrl = item.id != null && !failedPhotoIds[item.id] ? imageUrlByItemId[item.id] : null
+                                    const displayName = item.product?.name || item.product_name || 'Producto'
+                                    const displaySku = item.product?.sku || item.sku || '-'
                                     return (
-                                        <tr key={item.id || `new-item-${idx}`} className="hover:bg-slate-50/30 dark:hover:bg-neutral-800/30">
+                                        <tr key={item.id || `new-item-${idx}`} className="break-inside-avoid hover:bg-slate-50/30 dark:hover:bg-neutral-800/30">
                                             <td className="px-3 py-3 text-center text-xs text-slate-400">{idx + 1}</td>
                                             <td className="px-3 py-3 font-mono font-extrabold text-indigo-600 dark:text-indigo-400">
                                                 {item.supplier_sku || (
@@ -1198,12 +1257,32 @@ export default function PurchasingShow({ order, locations = [], supplier = null,
                                                 )}
                                             </td>
                                             <td className="px-3 py-3 text-center">
-                                                {imageUrlByItemId[item.id] ? (
-                                                    <a href={imageUrlByItemId[item.id]} target="_blank" rel="noopener noreferrer" title="Ver fotografía de Mercado Libre">
-                                                        <img src={imageUrlByItemId[item.id]} alt={item.product?.name || item.product_name || 'Producto'} loading="lazy" className="mx-auto h-16 w-16 rounded-lg border border-slate-200 bg-white object-contain" />
-                                                    </a>
+                                                {photoUrl ? (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() =>
+                                                            setPreviewPhoto({
+                                                                src: photoUrl,
+                                                                title: displayName,
+                                                                sku: displaySku,
+                                                                supplierSku: item.supplier_sku || null,
+                                                            })
+                                                        }
+                                                        title="Clic para ampliar fotografía"
+                                                        className="group relative inline-flex items-center justify-center rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                                    >
+                                                        <img
+                                                            src={photoUrl}
+                                                            alt={displayName}
+                                                            loading="lazy"
+                                                            onError={() => markPhotoFailed(item.id)}
+                                                            className="mx-auto h-14 w-14 sm:h-16 sm:w-16 rounded-lg border border-slate-200 bg-white object-contain shadow-xs transition group-hover:scale-105 group-hover:border-indigo-400"
+                                                        />
+                                                    </button>
                                                 ) : (
-                                                    <span className="text-[10px] text-slate-400">Sin foto</span>
+                                                    <span className="inline-block rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-400 dark:bg-neutral-800 dark:text-slate-500">
+                                                        Sin foto
+                                                    </span>
                                                 )}
                                             </td>
                                             <td className="px-3 py-3 font-mono text-xs text-slate-500 dark:text-slate-400">
@@ -1682,44 +1761,59 @@ export default function PurchasingShow({ order, locations = [], supplier = null,
                                             <tr className="border-b-2 border-slate-200 bg-slate-50 text-[11px] font-bold uppercase tracking-wider text-slate-600">
                                                 <th className="py-2.5 px-3 w-10 text-center">#</th>
                                                 <th className="py-2.5 px-3 w-32 text-indigo-700">Cód. Proveedor</th>
-                                                <th className="py-2.5 px-3 w-20 text-center">Foto ML</th>
+                                                <th className="py-2.5 px-3 w-20 text-center">Foto</th>
                                                 <th className="py-2.5 px-3 w-28">SKU Interno</th>
                                                 <th className="py-2.5 px-3">Producto / Descripción</th>
                                                 <th className="py-2.5 px-3 w-28 text-center">Cantidad Pedida</th>
                                             </tr>
                                         </thead>
                                         <tbody className="divide-y divide-slate-100">
-                                            {(order.items || []).map((it, idx) => (
-                                                <tr key={it.id || idx}>
-                                                    <td className="py-2.5 px-3 text-center text-slate-400 font-mono text-[11px]">{idx + 1}</td>
-                                                    <td className="py-2.5 px-3 font-mono font-bold text-indigo-700 text-xs">
-                                                        {it.supplier_sku || '—'}
-                                                    </td>
-                                                    <td className="py-2.5 px-3 text-center">
-                                                        {imageUrlByItemId[it.id] ? (
-                                                            <img src={imageUrlByItemId[it.id]} crossOrigin="anonymous" alt={it.product?.name || it.product_name || 'Producto'} className="mx-auto h-14 w-14 rounded border border-slate-200 bg-white object-contain" />
-                                                        ) : <span className="text-[10px] text-slate-400">Sin foto</span>}
-                                                    </td>
-                                                    <td className="py-2.5 px-3 font-mono text-slate-500 text-[11px]">
-                                                        {it.product?.sku || it.sku || '-'}
-                                                    </td>
-                                                    <td className="py-2.5 px-3 text-slate-800">
-                                                        <span className="font-semibold">{it.product?.name || it.product_name || '-'}</span>
-                                                        {it.product?.brand && (
-                                                            <span className="text-[10px] text-slate-400 block">Marca: {it.product.brand}</span>
-                                                        )}
-                                                    </td>
-                                                    <td className="py-2.5 px-3 text-center font-bold text-slate-900 text-sm">
-                                                        {it.quantity_ordered} pzas
-                                                    </td>
-                                                </tr>
-                                            ))}
+                                            {(order.items || []).map((it, idx) => {
+                                                const pdfPhotoUrl = it.id != null && !failedPhotoIds[it.id] ? imageUrlByItemId[it.id] : null
+                                                return (
+                                                    <tr
+                                                        key={it.id || idx}
+                                                        className="pdf-avoid-break"
+                                                        style={{ breakInside: 'avoid', pageBreakInside: 'avoid' }}
+                                                    >
+                                                        <td className="py-2.5 px-3 text-center text-slate-400 font-mono text-[11px]">{idx + 1}</td>
+                                                        <td className="py-2.5 px-3 font-mono font-bold text-indigo-700 text-xs">
+                                                            {it.supplier_sku || '—'}
+                                                        </td>
+                                                        <td className="py-2.5 px-3 text-center">
+                                                            {pdfPhotoUrl ? (
+                                                                <img
+                                                                    src={pdfPhotoUrl}
+                                                                    loading="eager"
+                                                                    onError={() => markPhotoFailed(it.id)}
+                                                                    alt={it.product?.name || it.product_name || 'Producto'}
+                                                                    className="mx-auto h-14 w-14 rounded border border-slate-200 bg-white object-contain"
+                                                                />
+                                                            ) : (
+                                                                <span className="text-[10px] text-slate-400">Sin foto</span>
+                                                            )}
+                                                        </td>
+                                                        <td className="py-2.5 px-3 font-mono text-slate-500 text-[11px]">
+                                                            {it.product?.sku || it.sku || '-'}
+                                                        </td>
+                                                        <td className="py-2.5 px-3 text-slate-800">
+                                                            <span className="font-semibold">{it.product?.name || it.product_name || '-'}</span>
+                                                            {it.product?.brand && (
+                                                                <span className="text-[10px] text-slate-400 block">Marca: {it.product.brand}</span>
+                                                            )}
+                                                        </td>
+                                                        <td className="py-2.5 px-3 text-center font-bold text-slate-900 text-sm">
+                                                            {it.quantity_ordered} pzas
+                                                        </td>
+                                                    </tr>
+                                                )
+                                            })}
                                         </tbody>
                                     </table>
                                 </div>
 
                                 {/* Summary & Signatures */}
-                                <div className="mt-6 flex justify-between items-start gap-4 border-t-2 border-slate-200 pt-4 text-xs">
+                                <div className="pdf-avoid-break mt-6 flex justify-between items-start gap-4 border-t-2 border-slate-200 pt-4 text-xs" style={{ breakInside: 'avoid', pageBreakInside: 'avoid' }}>
                                     <div className="flex-1">
                                         <p className="font-bold uppercase tracking-wider text-slate-500">Observaciones</p>
                                         <p className="mt-1 text-slate-600">
@@ -1739,7 +1833,7 @@ export default function PurchasingShow({ order, locations = [], supplier = null,
                                     </div>
                                 </div>
 
-                                <div className="mt-10 grid grid-cols-2 gap-8 text-center text-xs pt-4">
+                                <div className="pdf-avoid-break mt-10 grid grid-cols-2 gap-8 text-center text-xs pt-4" style={{ breakInside: 'avoid', pageBreakInside: 'avoid' }}>
                                     <div className="border-t border-slate-300 pt-2">
                                         <p className="font-bold text-slate-800">Autorizado por Compras</p>
                                         <p className="text-[10px] text-slate-500">T.O. THE BEAUTY SHOP (SBS)</p>
@@ -2689,6 +2783,57 @@ export default function PurchasingShow({ order, locations = [], supplier = null,
                                 </button>
                             </div>
                         </form>
+                    </div>
+                </div>
+            )}
+
+            {/* Modal Lightbox: Ampliación de Fotografía de Producto */}
+            {previewPhoto && (
+                <div
+                    className="print:hidden fixed inset-0 z-[60] flex items-center justify-center bg-black/75 p-4 backdrop-blur-xs"
+                    onClick={() => setPreviewPhoto(null)}
+                    role="dialog"
+                    aria-modal="true"
+                    aria-label="Fotografía ampliada del producto"
+                >
+                    <div
+                        className="relative w-full max-w-2xl overflow-hidden rounded-2xl bg-white shadow-2xl dark:bg-neutral-900"
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div className="flex items-start justify-between gap-4 border-b border-slate-200 px-5 py-3.5 dark:border-neutral-800">
+                            <div className="min-w-0">
+                                <h3 className="truncate text-sm font-bold text-slate-900 dark:text-white">
+                                    {previewPhoto.title}
+                                </h3>
+                                <div className="mt-0.5 flex flex-wrap items-center gap-3 text-xs text-slate-500 dark:text-slate-400">
+                                    <span>
+                                        SKU: <strong className="font-mono text-slate-700 dark:text-slate-200">{previewPhoto.sku}</strong>
+                                    </span>
+                                    {previewPhoto.supplierSku && (
+                                        <span>
+                                            Cód. Proveedor: <strong className="font-mono text-indigo-600 dark:text-indigo-400">{previewPhoto.supplierSku}</strong>
+                                        </span>
+                                    )}
+                                </div>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => setPreviewPhoto(null)}
+                                className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-neutral-800 dark:hover:text-slate-200"
+                                title="Cerrar (Esc)"
+                            >
+                                <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                                </svg>
+                            </button>
+                        </div>
+                        <div className="flex items-center justify-center bg-slate-50 p-6 dark:bg-neutral-950">
+                            <img
+                                src={previewPhoto.src}
+                                alt={previewPhoto.title}
+                                className="max-h-[70vh] w-auto max-w-full rounded-xl border border-slate-200 bg-white object-contain shadow-sm"
+                            />
+                        </div>
                     </div>
                 </div>
             )}

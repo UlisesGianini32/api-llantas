@@ -217,8 +217,8 @@
 
         .product-photo {
             display: block;
-            width: 64px;
-            height: 64px;
+            width: 60px;
+            height: 60px;
             object-fit: contain;
             margin: 0 auto;
             background: #ffffff;
@@ -229,6 +229,7 @@
         .photo-cell {
             width: 76px;
             text-align: center;
+            vertical-align: middle;
         }
 
         .photo-missing {
@@ -236,8 +237,19 @@
             color: #94a3b8;
         }
 
+        .items-table thead {
+            display: table-header-group;
+        }
+
         .items-table tr {
             break-inside: avoid;
+            page-break-inside: avoid;
+        }
+
+        .footer-summary,
+        .signatures {
+            break-inside: avoid;
+            page-break-inside: avoid;
         }
 
         .sku-cell {
@@ -331,6 +343,10 @@
             color: #64748b;
         }
 
+        @page {
+            margin: 10mm;
+        }
+
         @media print {
             body {
                 background: #ffffff !important;
@@ -412,12 +428,12 @@
         <table class="items-table">
             <thead>
                 <tr>
-                    <th style="width: 32px; text-align: center;">#</th>
-                    <th style="width: 130px;">Cód. Proveedor</th>
-                    <th style="width: 76px; text-align: center;">Foto ML</th>
+                    <th style="width: 30px; text-align: center;">#</th>
+                    <th style="width: 118px;">Cód. Proveedor</th>
+                    <th style="width: 76px; text-align: center;">Foto</th>
                     <th style="width: 100px;">SKU Interno</th>
                     <th>Producto / Descripción</th>
-                    <th style="width: 110px; text-align: center;">Cantidad Pedida</th>
+                    <th style="width: 100px; text-align: center;">Cantidad Pedida</th>
                 </tr>
             </thead>
             <tbody>
@@ -429,7 +445,13 @@
                         </td>
                         <td class="photo-cell">
                             @if(!empty($imageUrlByItemId[$item->id]))
-                                <img src="{{ $imageUrlByItemId[$item->id] }}" alt="Fotografía de {{ $item->product?->name ?? $item->product_name }}" class="product-photo" loading="eager">
+                                <img
+                                    src="{{ $imageUrlByItemId[$item->id] }}"
+                                    alt="Fotografía de {{ $item->product?->name ?? $item->product_name }}"
+                                    class="product-photo"
+                                    loading="eager"
+                                    onerror="this.style.display='none'; if (this.nextElementSibling) { this.nextElementSibling.style.display='inline'; }"
+                                ><span class="photo-missing" style="display: none;">Sin foto</span>
                             @else
                                 <span class="photo-missing">Sin foto</span>
                             @endif
