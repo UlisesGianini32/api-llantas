@@ -295,7 +295,7 @@ class PurchaseOrderController extends Controller
         return response()
             ->view('purchasing.order-pdf', [
                 'order' => $purchaseOrder,
-            'imageUrlByItemId' => $this->meliImageResolver->forOrder($purchaseOrder),
+                'imageUrlByItemId' => $this->meliImageResolver->forOrder($purchaseOrder),
                 'supplier' => $supplier,
             ])
             ->withHeaders([
