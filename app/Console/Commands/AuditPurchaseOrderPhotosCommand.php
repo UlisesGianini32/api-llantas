@@ -3,6 +3,7 @@
 namespace App\Console\Commands;
 
 use App\Models\PurchaseOrder;
+use App\Models\PurchaseOrderItem;
 use App\Services\Purchasing\PurchaseOrderMeliImageResolver;
 use Illuminate\Console\Command;
 
@@ -44,7 +45,16 @@ class AuditPurchaseOrderPhotosCommand extends Command
         $rows = [];
         $missing = [];
         $ambiguous = [];
+        $pendingApprovalItems = [];
         $foundCount = 0;
+
+        $categoryCounts = [
+            PurchaseOrderMeliImageResolver::AUDIT_RESOLVED_SKU_LINK => 0,
+            PurchaseOrderMeliImageResolver::AUDIT_RESOLVED_VARIATION => 0,
+            PurchaseOrderMeliImageResolver::AUDIT_PENDING_MANUAL_APPROVAL => 0,
+            PurchaseOrderMeliImageResolver::AUDIT_PENDING_NO_CANDIDATE => 0,
+            PurchaseOrderMeliImageResolver::AUDIT_MANUAL_OVERRIDE => 0,
+        ];
 
         foreach ($items as $index => $item) {
             $entry = $resolvedByItemId[(int) $item->id] ?? [
@@ -53,14 +63,47 @@ class AuditPurchaseOrderPhotosCommand extends Command
                 'source' => null,
                 'mlm' => null,
                 'variation_id' => null,
+                'variation_label' => null,
+                'listing_title' => null,
                 'meli_account_id' => null,
                 'listing_status' => null,
+                'photo_source_mode' => $item->getAttribute('photo_source_mode'),
                 'reason' => 'unresolved',
+                'audit_category' => PurchaseOrderMeliImageResolver::AUDIT_PENDING_NO_CANDIDATE,
                 'ambiguous' => false,
                 'ambiguous_matches' => [],
             ];
 
             $hasPhoto = is_string($entry['url']) && $entry['url'] !== '';
+            $auditCategory = (string) ($entry['audit_category'] ?? (
+                $hasPhoto
+                    ? PurchaseOrderMeliImageResolver::AUDIT_RESOLVED_SKU_LINK
+                    : PurchaseOrderMeliImageResolver::AUDIT_PENDING_NO_CANDIDATE
+            ));
+            $reason = (string) ($entry['reason'] ?? 'unresolved');
+            $discoveryCandidates = [];
+
+            if (
+                ! $hasPhoto
+                && $auditCategory === PurchaseOrderMeliImageResolver::AUDIT_PENDING_NO_CANDIDATE
+                && ($entry['photo_source_mode'] ?? null) !== PurchaseOrderItem::PHOTO_MODE_NONE
+            ) {
+                $discoveryCandidates = $resolver->discoverCandidatesForItem($item, null, 5);
+                if ($discoveryCandidates !== []) {
+                    $auditCategory = PurchaseOrderMeliImageResolver::AUDIT_PENDING_MANUAL_APPROVAL;
+                    if ($reason === 'no_listing_found') {
+                        $reason = 'title_candidates_found';
+                    }
+                }
+            }
+
+            if (! array_key_exists($auditCategory, $categoryCounts)) {
+                $auditCategory = $hasPhoto
+                    ? PurchaseOrderMeliImageResolver::AUDIT_RESOLVED_SKU_LINK
+                    : PurchaseOrderMeliImageResolver::AUDIT_PENDING_NO_CANDIDATE;
+            }
+            $categoryCounts[$auditCategory]++;
+
             if ($hasPhoto) {
                 $foundCount++;
             } else {
@@ -70,7 +113,8 @@ class AuditPurchaseOrderPhotosCommand extends Command
                     'product_name' => $item->product?->name ?? $item->product_name,
                     'mlm' => $entry['mlm'],
                     'variation_id' => $entry['variation_id'],
-                    'reason' => $entry['reason'],
+                    'audit_category' => $auditCategory,
+                    'reason' => $reason,
                 ];
             }
 
@@ -78,10 +122,26 @@ class AuditPurchaseOrderPhotosCommand extends Command
                 $ambiguous[] = [
                     'item_id' => (int) $item->id,
                     'sku' => $entry['sku'],
-                    'reason' => $entry['reason'],
+                    'reason' => $reason,
                     'matches' => $entry['ambiguous_matches'],
                 ];
             }
+
+            if ($auditCategory === PurchaseOrderMeliImageResolver::AUDIT_PENDING_MANUAL_APPROVAL) {
+                $candidateMatches = ! empty($entry['ambiguous_matches'])
+                    ? $entry['ambiguous_matches']
+                    : $discoveryCandidates;
+
+                $pendingApprovalItems[] = [
+                    'item_id' => (int) $item->id,
+                    'sku' => $entry['sku'],
+                    'product_name' => $item->product?->name ?? $item->product_name,
+                    'reason' => $reason,
+                    'candidates' => $candidateMatches,
+                ];
+            }
+
+            $categoryLabel = $this->categoryLabel($auditCategory);
 
             $rows[] = [
                 'line' => $index + 1,
@@ -92,13 +152,19 @@ class AuditPurchaseOrderPhotosCommand extends Command
                 'quantity_ordered' => (int) $item->quantity_ordered,
                 'quantity_received' => (int) $item->quantity_received,
                 'has_photo' => $hasPhoto,
+                'audit_category' => $auditCategory,
+                'audit_category_label' => $categoryLabel,
                 'source' => $entry['source'],
                 'mlm' => $entry['mlm'],
                 'variation_id' => $entry['variation_id'],
+                'variation_label' => $entry['variation_label'] ?? null,
+                'listing_title' => $entry['listing_title'] ?? null,
                 'meli_account_id' => $entry['meli_account_id'],
                 'listing_status' => $entry['listing_status'],
-                'reason' => $entry['reason'],
+                'photo_source_mode' => $entry['photo_source_mode'] ?? null,
+                'reason' => $reason,
                 'ambiguous' => (bool) $entry['ambiguous'],
+                'discovery_candidates_count' => count($discoveryCandidates),
             ];
         }
 
@@ -117,9 +183,16 @@ class AuditPurchaseOrderPhotosCommand extends Command
                 'with_photo' => $foundCount,
                 'without_photo' => $items->count() - $foundCount,
                 'ambiguous_count' => count($ambiguous),
+                'resolved_by_sku_or_link' => $categoryCounts[PurchaseOrderMeliImageResolver::AUDIT_RESOLVED_SKU_LINK],
+                'resolved_by_variation' => $categoryCounts[PurchaseOrderMeliImageResolver::AUDIT_RESOLVED_VARIATION],
+                'pending_manual_approval' => $categoryCounts[PurchaseOrderMeliImageResolver::AUDIT_PENDING_MANUAL_APPROVAL],
+                'pending_without_candidate' => $categoryCounts[PurchaseOrderMeliImageResolver::AUDIT_PENDING_NO_CANDIDATE],
+                'manual_override' => $categoryCounts[PurchaseOrderMeliImageResolver::AUDIT_MANUAL_OVERRIDE],
+                'by_category' => $categoryCounts,
             ],
             'missing_skus' => $missing,
             'ambiguous_matches' => $ambiguous,
+            'pending_manual_approval_items' => $pendingApprovalItems,
             'items' => $rows,
         ];
 
@@ -143,51 +216,69 @@ class AuditPurchaseOrderPhotosCommand extends Command
             $report['summary']['without_photo'],
             $report['summary']['ambiguous_count'],
         ));
+        $this->line(sprintf(
+            'Desglose -> SKU/vínculo: %d | Variación: %d | Manual/override: %d | Pendiente aprobación: %d | Pendiente sin candidato: %d',
+            $report['summary']['resolved_by_sku_or_link'],
+            $report['summary']['resolved_by_variation'],
+            $report['summary']['manual_override'],
+            $report['summary']['pending_manual_approval'],
+            $report['summary']['pending_without_candidate'],
+        ));
 
         $this->newLine();
         $this->table(
-            ['#', 'SKU', 'Foto', 'Fuente', 'MLM', 'Variación', 'Cuenta', 'Diagnóstico', 'Ambigua'],
+            ['#', 'SKU', 'Foto', 'Categoría', 'Fuente', 'MLM', 'Variación', 'Diagnóstico'],
             array_map(static fn (array $r): array => [
                 $r['line'],
                 $r['sku'] ?: '—',
                 $r['has_photo'] ? 'SÍ' : 'NO',
+                $r['audit_category_label'],
                 $r['source'] ?? '—',
                 $r['mlm'] ?? '—',
-                $r['variation_id'] ?? '—',
-                $r['meli_account_id'] ?? '—',
+                $r['variation_id'] ? ($r['variation_id'].($r['variation_label'] ? " ({$r['variation_label']})" : '')) : '—',
                 $r['reason'],
-                $r['ambiguous'] ? 'SÍ' : 'NO',
             ], $rows),
         );
 
         if ($missing !== []) {
             $this->newLine();
-            $this->warn('SKUs sin fotografía encontrada:');
+            $this->warn('Partidas sin fotografía asignada:');
             $this->table(
-                ['SKU', 'Producto', 'MLM', 'Variación', 'Motivo'],
-                array_map(static fn (array $m): array => [
+                ['SKU', 'Producto', 'Categoría', 'Motivo'],
+                array_map(fn (array $m): array => [
                     $m['sku'] ?: '—',
                     mb_substr((string) ($m['product_name'] ?? ''), 0, 50),
-                    $m['mlm'] ?? '—',
-                    $m['variation_id'] ?? '—',
+                    $this->categoryLabel($m['audit_category']),
                     $m['reason'],
                 ], $missing),
             );
         }
 
-        if ($ambiguous !== []) {
+        if ($pendingApprovalItems !== []) {
             $this->newLine();
-            $this->warn('Coincidencias ambiguas detectadas:');
-            foreach ($ambiguous as $entry) {
+            $this->warn('Partidas pendientes de aprobación manual (candidatos propuestos):');
+            foreach ($pendingApprovalItems as $entry) {
                 $this->line(sprintf(
-                    ' - SKU %s (%s): %d candidatos',
+                    ' - SKU %s (%s): %d candidato(s)',
                     $entry['sku'] ?: '—',
                     $entry['reason'],
-                    count($entry['matches']),
+                    count($entry['candidates']),
                 ));
             }
         }
 
         return self::SUCCESS;
+    }
+
+    private function categoryLabel(string $category): string
+    {
+        return match ($category) {
+            PurchaseOrderMeliImageResolver::AUDIT_RESOLVED_SKU_LINK => 'Resuelto por SKU/vínculo',
+            PurchaseOrderMeliImageResolver::AUDIT_RESOLVED_VARIATION => 'Resuelto por variación',
+            PurchaseOrderMeliImageResolver::AUDIT_PENDING_MANUAL_APPROVAL => 'Pendiente por aprobación manual',
+            PurchaseOrderMeliImageResolver::AUDIT_PENDING_NO_CANDIDATE => 'Pendiente sin candidato',
+            PurchaseOrderMeliImageResolver::AUDIT_MANUAL_OVERRIDE => 'Imagen manual/override',
+            default => $category,
+        };
     }
 }

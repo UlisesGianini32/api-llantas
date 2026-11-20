@@ -6,11 +6,13 @@ use App\Models\InventoryChannelLink;
 use App\Models\InventoryLocation;
 use App\Models\InventoryProduct;
 use App\Models\MeliAccount;
+use App\Models\MeliPriceManagerItem;
 use App\Models\MeliPublication;
 use App\Models\PurchaseOrder;
 use App\Models\PurchaseOrderItem;
 use App\Models\User;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
@@ -368,6 +370,394 @@ class PurchaseOrderMeliPhotosFeatureTest extends TestCase
         $this->assertSame('multiple_publications_conflicting_photos', $report['ambiguous_matches'][0]['reason']);
     }
 
+    public function test_admin_can_search_candidates_and_approve_ambiguous_publication_or_variation_and_render_in_show_and_pdf(): void
+    {
+        $prodPinzas = InventoryProduct::create([
+            'sku' => 'BSHC003',
+            'name' => 'Pinzas mariposa 12 piezas negro',
+            'product_type' => InventoryProduct::SIMPLE,
+            'is_active' => true,
+            'cost' => 30,
+            'brand' => 'CHINA',
+        ]);
+
+        $prodAtom = InventoryProduct::create([
+            'sku' => 'CHN-TMP-001',
+            'name' => 'Atomizador Blanco Azul',
+            'product_type' => InventoryProduct::SIMPLE,
+            'is_active' => true,
+            'cost' => 25,
+            'brand' => 'CHINA',
+        ]);
+
+        MeliPublication::create([
+            'user_id' => $this->admin->id,
+            'meli_account_id' => $this->account->id,
+            'sku' => 'BSHC003',
+            'mlm' => 'MLM1964933341',
+            'status' => 'active',
+            'last_sync_at' => now(),
+            'raw' => [
+                'item' => [
+                    'title' => 'Pinzas Mariposa 12 Piezas Negro Salon',
+                    'seller_custom_field' => 'BSHC003',
+                    'pictures' => [['secure_url' => 'https://http2.mlstatic.com/pinzas-1964.png']],
+                ],
+            ],
+        ]);
+
+        MeliPublication::create([
+            'user_id' => $this->admin->id,
+            'meli_account_id' => $this->account->id,
+            'sku' => 'BSHC003',
+            'mlm' => 'MLM3049813228',
+            'status' => 'paused',
+            'last_sync_at' => now()->subDay(),
+            'raw' => [
+                'item' => [
+                    'title' => 'Pinzas Mariposa Negro Paquete 12',
+                    'seller_custom_field' => 'BSHC003',
+                    'pictures' => [['secure_url' => 'https://http2.mlstatic.com/pinzas-3049.png']],
+                ],
+            ],
+        ]);
+
+        MeliPublication::create([
+            'user_id' => $this->admin->id,
+            'meli_account_id' => $this->account->id,
+            'sku' => 'ATOMIZADORBCOAF',
+            'mlm' => 'MLM3373409704',
+            'status' => 'active',
+            'last_sync_at' => now(),
+            'raw' => [
+                'item' => [
+                    'title' => 'Atomizador Spray 300ml Colores',
+                    'pictures' => [
+                        ['id' => 'cover', 'secure_url' => 'https://http2.mlstatic.com/atom-cover.png'],
+                        ['id' => 'p-blue', 'secure_url' => 'https://http2.mlstatic.com/atom-blanco-azul.png'],
+                    ],
+                    'variations' => [
+                        [
+                            'id' => 185902990943,
+                            'seller_custom_field' => 'OTHER-ATOM-SKU',
+                            'picture_ids' => ['p-blue'],
+                            'attribute_combinations' => [
+                                ['id' => 'COLOR', 'name' => 'Color', 'value_name' => 'Blanco Azul'],
+                            ],
+                        ],
+                    ],
+                ],
+            ],
+        ]);
+
+        $order = PurchaseOrder::create([
+            'order_number' => 'OC-20261113-0001',
+            'supplier_name' => 'Compras China',
+            'inventory_location_id' => $this->location->id,
+            'user_id' => $this->admin->id,
+            'status' => PurchaseOrder::STATUS_DRAFT,
+            'total_items_count' => 2,
+            'total_units_ordered' => 100,
+            'total_units_received' => 0,
+            'subtotal' => 2750,
+            'total_cost' => 2750,
+        ]);
+
+        $itemPinzas = PurchaseOrderItem::create([
+            'purchase_order_id' => $order->id,
+            'inventory_product_id' => $prodPinzas->id,
+            'sku' => $prodPinzas->sku,
+            'product_name' => $prodPinzas->name,
+            'quantity_ordered' => 50,
+            'quantity_received' => 0,
+            'unit_cost' => 30,
+            'subtotal' => 1500,
+            'status' => 'PENDING',
+        ]);
+
+        $itemAtom = PurchaseOrderItem::create([
+            'purchase_order_id' => $order->id,
+            'inventory_product_id' => $prodAtom->id,
+            'sku' => $prodAtom->sku,
+            'product_name' => $prodAtom->name,
+            'quantity_ordered' => 50,
+            'quantity_received' => 0,
+            'unit_cost' => 25,
+            'subtotal' => 1250,
+            'status' => 'PENDING',
+        ]);
+
+        // Admin searches candidates for Pinzas
+        $candResp = $this->actingAs($this->admin)
+            ->getJson("/compras/ordenes/{$order->id}/partidas/{$itemPinzas->id}/foto-candidatos");
+        $candResp->assertOk()
+            ->assertJsonPath('ok', true)
+            ->assertJsonCount(2, 'candidates');
+
+        // Admin approves MLM1964933341 for BSHC003
+        $approvePinzas = $this->actingAs($this->admin)
+            ->postJson("/compras/ordenes/{$order->id}/partidas/{$itemPinzas->id}/foto-aprobar", [
+                'mlm' => 'MLM1964933341',
+                'notes' => 'Publicación validada visualmente',
+            ]);
+        $approvePinzas->assertOk()
+            ->assertJsonPath('ok', true)
+            ->assertJsonPath('resolution.mlm', 'MLM1964933341')
+            ->assertJsonPath('resolution.source', 'approved_publication');
+
+        // Admin searches Atomizador by title and approves variation 185902990943
+        $atomCandResp = $this->actingAs($this->admin)
+            ->getJson("/compras/ordenes/{$order->id}/partidas/{$itemAtom->id}/foto-candidatos?q=Atomizador");
+        $atomCandResp->assertOk()
+            ->assertJsonPath('candidates.0.mlm', 'MLM3373409704')
+            ->assertJsonPath('candidates.0.variation_id', '185902990943')
+            ->assertJsonPath('candidates.0.variation_label', 'Color: Blanco Azul');
+
+        $approveAtom = $this->actingAs($this->admin)
+            ->postJson("/compras/ordenes/{$order->id}/partidas/{$itemAtom->id}/foto-aprobar", [
+                'mlm' => 'MLM3373409704',
+                'variation_id' => '185902990943',
+                'notes' => 'Color Blanco Azul',
+            ]);
+        $approveAtom->assertOk()
+            ->assertJsonPath('ok', true)
+            ->assertJsonPath('resolution.source', 'approved_variation')
+            ->assertJsonPath('resolution.url', 'https://http2.mlstatic.com/atom-blanco-azul.png');
+
+        $this->withoutVite();
+        $showResp = $this->actingAs($this->admin)->get("/compras/ordenes/{$order->id}");
+        $showResp->assertOk();
+        $showResp->assertInertia(fn (Assert $page) => $page
+            ->where('canManagePhotos', true)
+            ->has("imageUrlByItemId.{$itemPinzas->id}")
+            ->has("imageUrlByItemId.{$itemAtom->id}")
+            ->where("photoStatusByItemId.{$itemAtom->id}.variation_label", 'Color: Blanco Azul')
+        );
+
+        Http::fake([
+            'https://http2.mlstatic.com/atom-blanco-azul.png' => Http::response($this->tinyPngBytes, 200, ['Content-Type' => 'image/png']),
+        ]);
+
+        $pdfResp = $this->actingAs($this->admin)->get("/compras/ordenes/{$order->id}/pdf");
+        $pdfResp->assertOk();
+        $pdfResp->assertSee("/compras/ordenes/{$order->id}/partidas/{$itemAtom->id}/foto", false);
+
+        $itemAtom->refresh();
+        $photoUrl = "/compras/ordenes/{$order->id}/partidas/{$itemAtom->id}/foto?v={$itemAtom->photo_updated_at->timestamp}";
+        $this->actingAs($this->admin)->get($photoUrl)
+            ->assertOk()
+            ->assertHeader('Content-Type', 'image/png');
+    }
+
+    public function test_admin_can_upload_manual_photo_for_bubble_mailers_reject_mlm_and_enforce_rbac(): void
+    {
+        $prodSobre = InventoryProduct::create([
+            'sku' => 'SOBRE-26X36X4',
+            'name' => 'Sobre tipo burbuja blanco 26 x 36 x 4',
+            'product_type' => InventoryProduct::SIMPLE,
+            'is_active' => true,
+            'cost' => 5,
+            'brand' => 'CHINA',
+        ]);
+
+        MeliPublication::create([
+            'user_id' => $this->admin->id,
+            'meli_account_id' => $this->account->id,
+            'sku' => 'SOBRE-26X36X4',
+            'mlm' => 'MLM3446472074',
+            'status' => 'active',
+            'raw' => [
+                'item' => [
+                    'title' => 'Sobre burbuja blanco 28 x 18 cm',
+                    'seller_custom_field' => 'SOBRE-26X36X4',
+                    'pictures' => [['secure_url' => 'https://http2.mlstatic.com/sobre-28x18-wrong.png']],
+                ],
+            ],
+        ]);
+
+        $order = PurchaseOrder::create([
+            'order_number' => 'OC-20261113-0001',
+            'supplier_name' => 'Compras China',
+            'inventory_location_id' => $this->location->id,
+            'user_id' => $this->admin->id,
+            'status' => PurchaseOrder::STATUS_DRAFT,
+            'total_items_count' => 1,
+            'total_units_ordered' => 2000,
+            'total_units_received' => 0,
+            'subtotal' => 10000,
+            'total_cost' => 10000,
+        ]);
+
+        $item = PurchaseOrderItem::create([
+            'purchase_order_id' => $order->id,
+            'inventory_product_id' => $prodSobre->id,
+            'sku' => $prodSobre->sku,
+            'product_name' => $prodSobre->name,
+            'quantity_ordered' => 2000,
+            'quantity_received' => 0,
+            'unit_cost' => 5,
+            'subtotal' => 10000,
+            'status' => 'PENDING',
+        ]);
+
+        // Warehouse & POS cannot manage/upload item photos
+        $this->actingAs($this->warehouse)
+            ->postJson("/compras/ordenes/{$order->id}/partidas/{$item->id}/foto-rechazar", ['mlm' => 'MLM3446472074'])
+            ->assertForbidden();
+
+        // Reject MLM3446472074
+        $this->actingAs($this->admin)
+            ->postJson("/compras/ordenes/{$order->id}/partidas/{$item->id}/foto-rechazar", [
+                'mlm' => 'MLM3446472074',
+                'mark_no_photo' => true,
+            ])
+            ->assertOk()
+            ->assertJsonPath('resolution.url', null)
+            ->assertJsonPath('resolution.reason', 'manual_rejected_no_photo');
+
+        // Upload invalid non-image payload must fail validation (422)
+        $fakeTxt = UploadedFile::fake()->create('evil.png', 1, 'image/png');
+        $this->actingAs($this->admin)
+            ->post("/compras/ordenes/{$order->id}/partidas/{$item->id}/foto-manual", ['image' => $fakeTxt], ['Accept' => 'application/json'])
+            ->assertStatus(422);
+
+        // Upload valid PNG image for bubble mailer
+        $validPng = UploadedFile::fake()->createWithContent('sobre-26x36.png', $this->tinyPngBytes);
+        $uploadResp = $this->actingAs($this->admin)
+            ->post("/compras/ordenes/{$order->id}/partidas/{$item->id}/foto-manual", [
+                'image' => $validPng,
+                'notes' => 'Foto referencia sobre 26x36x4',
+            ], ['Accept' => 'application/json']);
+
+        $uploadResp->assertOk()
+            ->assertJsonPath('ok', true)
+            ->assertJsonPath('resolution.source', 'manual_upload')
+            ->assertJsonPath('resolution.audit_category', 'manual_override');
+
+        // Served through internal itemPhoto and signed supplier PDF
+        $item->refresh();
+        $photoPath = "/compras/ordenes/{$order->id}/partidas/{$item->id}/foto?v={$item->photo_updated_at->timestamp}";
+        $this->actingAs($this->admin)->get($photoPath)
+            ->assertOk()
+            ->assertHeader('Content-Type', 'image/png')
+            ->assertSee($this->tinyPngBytes, false);
+
+        $signedPdfUrl = URL::temporarySignedRoute('purchasing.orders.public-pdf', now()->addDays(7), ['purchaseOrder' => $order->id], absolute: false);
+        $this->app['auth']->forgetGuards();
+        $publicPdf = $this->get($signedPdfUrl);
+        $publicPdf->assertOk();
+        preg_match('/src="([^"]*\/orden-compra\/'.$order->id.'\/partidas\/'.$item->id.'\/foto\?[^"]+)"/', $publicPdf->getContent(), $matches);
+        $this->assertNotEmpty($matches[1] ?? '');
+
+        $publicPhotoUrl = html_entity_decode($matches[1], ENT_QUOTES | ENT_HTML5);
+        $this->get($publicPhotoUrl)
+            ->assertOk()
+            ->assertHeader('Content-Type', 'image/png');
+
+        // Reset restores automatic resolution
+        $this->actingAs($this->admin)
+            ->deleteJson("/compras/ordenes/{$order->id}/partidas/{$item->id}/foto-seleccion?clear_rejected=1")
+            ->assertOk()
+            ->assertJsonPath('resolution.mlm', 'MLM3446472074');
+    }
+
+    public function test_audit_command_distinguishes_all_five_photo_categories(): void
+    {
+        $pSku = InventoryProduct::create(['sku' => 'SIMPLE-OK', 'name' => 'Producto Simple', 'product_type' => InventoryProduct::SIMPLE, 'is_active' => true, 'cost' => 10, 'brand' => 'CHINA']);
+        $pVar = InventoryProduct::create(['sku' => 'VAR-OK', 'name' => 'Atomizador Negro', 'product_type' => InventoryProduct::SIMPLE, 'is_active' => true, 'cost' => 10, 'brand' => 'CHINA']);
+        $pManual = InventoryProduct::create(['sku' => 'SOBRE-MAN', 'name' => 'Sobre Burbuja Manual', 'product_type' => InventoryProduct::SIMPLE, 'is_active' => true, 'cost' => 5, 'brand' => 'CHINA']);
+        $pPendingTitle = InventoryProduct::create(['sku' => 'TMP-VAPOR', 'name' => 'Vaporizador facial con ozono', 'product_type' => InventoryProduct::SIMPLE, 'is_active' => true, 'cost' => 100, 'brand' => 'CHINA']);
+        $pNoCand = InventoryProduct::create(['sku' => 'SIN-NADA-XYZ', 'name' => 'Artículo Sin Coincidencias', 'product_type' => InventoryProduct::SIMPLE, 'is_active' => true, 'cost' => 20, 'brand' => 'CHINA']);
+
+        MeliPublication::create([
+            'user_id' => $this->admin->id,
+            'meli_account_id' => $this->account->id,
+            'sku' => 'SIMPLE-OK',
+            'mlm' => 'MLM-SIMPLE-1',
+            'status' => 'active',
+            'raw' => ['item' => ['seller_custom_field' => 'SIMPLE-OK', 'pictures' => [['secure_url' => 'https://http2.mlstatic.com/simple.png']]]],
+        ]);
+
+        MeliPublication::create([
+            'user_id' => $this->admin->id,
+            'meli_account_id' => $this->account->id,
+            'sku' => 'VAR-OK',
+            'mlm' => 'MLM-VAR-1',
+            'status' => 'active',
+            'raw' => [
+                'item' => [
+                    'pictures' => [['id' => 'v1', 'secure_url' => 'https://http2.mlstatic.com/var-negro.png']],
+                    'variations' => [['id' => 901, 'seller_custom_field' => 'VAR-OK', 'picture_ids' => ['v1']]],
+                ],
+            ],
+        ]);
+
+        MeliPriceManagerItem::create([
+            'meli_account_id' => $this->account->id,
+            'meli_item_id' => 'MLM2611925824',
+            'sku' => 'OTRO-SKU',
+            'title' => 'Vaporizador Facial Con Ozono',
+            'status' => 'active',
+            'raw_item' => [
+                'title' => 'Vaporizador Facial Con Ozono',
+                'pictures' => [['secure_url' => 'https://http2.mlstatic.com/vapor.png']],
+            ],
+        ]);
+
+        $order = PurchaseOrder::create([
+            'order_number' => 'OC-20261113-0001',
+            'supplier_name' => 'Compras China',
+            'inventory_location_id' => $this->location->id,
+            'user_id' => $this->admin->id,
+            'status' => PurchaseOrder::STATUS_DRAFT,
+            'total_items_count' => 5,
+            'total_units_ordered' => 50,
+            'total_units_received' => 0,
+            'subtotal' => 500,
+            'total_cost' => 500,
+        ]);
+
+        foreach ([$pSku, $pVar, $pManual, $pPendingTitle, $pNoCand] as $prod) {
+            PurchaseOrderItem::create([
+                'purchase_order_id' => $order->id,
+                'inventory_product_id' => $prod->id,
+                'sku' => $prod->sku,
+                'product_name' => $prod->name,
+                'quantity_ordered' => 10,
+                'quantity_received' => 0,
+                'unit_cost' => $prod->cost,
+                'subtotal' => $prod->cost * 10,
+                'status' => 'PENDING',
+            ]);
+        }
+
+        $manualItem = $order->items()->where('sku', 'SOBRE-MAN')->firstOrFail();
+        $manualPath = "purchasing/manual-photos/po-{$order->id}/item-{$manualItem->id}.png";
+        Storage::disk('local')->put($manualPath, $this->tinyPngBytes);
+        $manualItem->update([
+            'photo_source_mode' => PurchaseOrderItem::PHOTO_MODE_MANUAL,
+            'manual_photo_path' => $manualPath,
+            'manual_photo_mime' => 'image/png',
+        ]);
+
+        $exitCode = Artisan::call('purchasing:audit-order-photos', [
+            'order' => 'OC-20261113-0001',
+            '--json' => true,
+        ]);
+
+        $this->assertSame(0, $exitCode);
+        $report = json_decode(Artisan::output(), true);
+
+        $this->assertSame(5, $report['summary']['total_items']);
+        $this->assertSame(3, $report['summary']['with_photo']);
+        $this->assertSame(2, $report['summary']['without_photo']);
+        $this->assertSame(1, $report['summary']['resolved_by_sku_or_link']);
+        $this->assertSame(1, $report['summary']['resolved_by_variation']);
+        $this->assertSame(1, $report['summary']['manual_override']);
+        $this->assertSame(1, $report['summary']['pending_manual_approval']);
+        $this->assertSame(1, $report['summary']['pending_without_candidate']);
+    }
+
     /** @return array{0: PurchaseOrder, 1: PurchaseOrderItem, 2: PurchaseOrderItem} */
     private function seedChinaOrderScenario(): array
     {
@@ -499,6 +889,22 @@ class PurchaseOrderMeliPhotosFeatureTest extends TestCase
             $table->timestamps();
         });
 
+        Schema::create('meli_price_manager_items', function (Blueprint $table): void {
+            $table->id();
+            $table->foreignId('meli_account_id');
+            $table->string('meli_item_id', 64);
+            $table->string('sku', 191)->nullable();
+            $table->string('title');
+            $table->decimal('current_price', 15, 2)->default(0);
+            $table->string('status', 64)->nullable();
+            $table->string('permalink', 2048)->nullable();
+            $table->string('thumbnail', 2048)->nullable();
+            $table->json('raw_attributes')->nullable();
+            $table->json('raw_item')->nullable();
+            $table->timestamp('last_synced_at')->nullable();
+            $table->timestamps();
+        });
+
         foreach (glob(database_path('migrations/2026_09_24_00000*.php')) as $path) {
             (require $path)->up();
         }
@@ -510,5 +916,6 @@ class PurchaseOrderMeliPhotosFeatureTest extends TestCase
         (require database_path('migrations/2026_09_30_000004_create_purchase_orders_tables.php'))->up();
         (require database_path('migrations/2026_10_07_193000_create_suppliers_and_supplier_brands_tables.php'))->up();
         (require database_path('migrations/2026_10_21_160000_create_supplier_products_table.php'))->up();
+        (require database_path('migrations/2026_11_20_000001_add_photo_selection_fields_to_purchase_order_items_table.php'))->up();
     }
 }

@@ -2,16 +2,25 @@
 
 ## 1. Reglas de resolución y prevención de asignaciones incorrectas
 
-El servicio `App\Services\Purchasing\PurchaseOrderMeliImageResolver` resuelve las fotografías únicamente a partir de datos ya sincronizados en SBS (sin llamadas a la API de Mercado Libre ni coincidencias por nombre):
+El servicio `App\Services\Purchasing\PurchaseOrderMeliImageResolver` resuelve las fotografías únicamente a partir de datos locales/sincronizados en SBS (sin llamadas a la API de Mercado Libre y sin asignación automática por coincidencia de nombre):
 
-1. **Prioridad 1 — Vínculo explícito (`inventory_channel_links`)**
+1. **Prioridad 1 — Imagen manual / override en la partida (`photo_source_mode = 'manual'` o `'none'`)**
+   - Permite subir una imagen local (JPG, PNG, WEBP, GIF hasta 5 MB almacenada en disco privado `local`) cuando no existe una publicación confiable en Mercado Libre (ej. sobres tipo burbuja).
+   - También permite marcar explícitamente una partida sin foto (`photo_source_mode = 'none'`) o registrar MLMs rechazados (`rejected_mlms`, ej. `MLM3446472074`) para que no vuelvan a asignarse.
+
+2. **Prioridad 2 — Publicación o variación aprobada manualmente por partida (`photo_source_mode = 'approved_ml'`)**
+   - Almacena `approved_mlm`, `approved_variation_id` (opcional), `approved_meli_account_id`, `approved_photo_url`, `photo_notes`, `photo_updated_by` y `photo_updated_at`.
+   - Cuando existe `approved_variation_id`, resuelve estrictamente `variation.picture_ids` contra `item.pictures[*].id` y **nunca** usa la portada del anuncio.
+   - Permite desambiguar publicaciones compartidas (ej. `BSHC003`, `3783374192379`, `3783374192386`, `KSC02` Rose Gold/Silver) o variaciones con SKU temporal (`CHN-TMP-*`) de forma auditable.
+
+3. **Prioridad 3 — Vínculo explícito (`inventory_channel_links`)**
    - Respeta cuenta (`account_key` validado estrictamente contra `meli_accounts.id`, `meli_user_id`, `nickname` o `default` únicamente si existe exactamente una cuenta predeterminada), publicación (`external_listing_id`) y variación (`external_variant_id`).
-   - Consulta `meli_publications` y `meli_price_manager_items` por el MLM vinculado.
+   - Consulta `meli_publications` y `meli_price_manager_items` por el MLM vinculado (omitiendo MLMs presentes en `rejected_mlms`).
    - Si existe vínculo explícito válido, prevalece de forma determinista y evita ambigüedades por SKU compartido.
    - Un `account_key` desconocido, ambiguo o que no coincida con `meli_account_id` es rechazado (`account_mismatch`).
 
-2. **Prioridad 2 — Resolución unificada por SKU exacto (`meli_publications` + `meli_price_manager_items`)**
-   - Para partidas sin vínculo explícito válido, recolecta candidatos verificados en **ambas** tablas:
+4. **Prioridad 4 — Resolución unificada por SKU exacto (`meli_publications` + `meli_price_manager_items`)**
+   - Para partidas sin override manual, aprobación explícita ni vínculo válido, indexa las filas masivas estrictamente por sus SKUs verificados en PHP (evitando que un MLM de otro SKU contamine diagnósticos no relacionados) y recolecta candidatos verificados en **ambas** tablas:
      - Coincidencia por columna `sku` (`meli_publications.sku` / `meli_price_manager_items.sku`) con verificación estricta en el payload `raw` / `raw_item`.
      - Coincidencia por variación secundaria dentro de `raw` / `raw_item` mediante consulta masiva acotada (sin N+1) verificada en PHP.
    - **Reconciliación de snapshots de la misma publicación (`mlm + variation_id`):**
@@ -21,8 +30,17 @@ El servicio `App\Services\Purchasing\PurchaseOrderMeliImageResolver` resuelve la
      - **Entre tablas:** Si el mismo SKU aparece en `meli_publications` bajo `MLM-A` y en `meli_price_manager_items` bajo `MLM-B` con fotografías distintas (sin vínculo explícito), no se elige automáticamente la primera; se devuelve `url = null`, `ambiguous = true` y `reason = multiple_publications_conflicting_photos`.
      - **Publicación simple vs. variación secundaria de otra publicación:** Si el mismo SKU aparece como publicación simple (`MLM-SIMPLE`) y simultáneamente como variación secundaria dentro de otra publicación multi-variación (`MLM-MULTI`, variación `V`), ambos candidatos entran al mismo conjunto unificado:
        - Si ambas apuntan a la **misma URL** verificada, se resuelve limpiamente.
-       - Si apuntan a **URLs distintas** y no hay vínculo explícito en `inventory_channel_links`, se rechaza la auto-selección (`multiple_publications_conflicting_photos`), se registra la ambigüedad en logs, `/compras/ordenes/{id}` muestra **«Requiere revisión»**, el PDF muestra **«Sin foto»** y el proxy `/foto` responde `404`.
-       - Para desambiguar, basta crear/activar el vínculo explícito correspondiente en `inventory_channel_links` (con su `external_variant_id` si aplica).
+       - Si apuntan a **URLs distintas** y no hay aprobación o vínculo explícito, se rechaza la auto-selección (`multiple_publications_conflicting_photos`), `/compras/ordenes/{id}` muestra **«Requiere revisión»**, el PDF muestra **«Sin foto»** y el proxy `/foto` responde `404`.
+
+5. **Capa de descubrimiento por título/nombre (solo propuesta, nunca auto-asignación)**
+   - El modal administrativo en `/compras/ordenes/{id}` permite buscar candidatos por título, MLM o SKU en `meli_publications` y `meli_price_manager_items`, mostrando foto, título, MLM, variación/color y estado para aprobación manual.
+
+6. **Categorías de auditoría (`purchasing:audit-order-photos`)**
+   - `resolved_by_sku_or_link` (Resuelto por SKU/vínculo)
+   - `resolved_by_variation` (Resuelto por variación)
+   - `manual_override` (Imagen manual/override)
+   - `pending_manual_approval` (Pendiente por aprobación manual: conflictos ambiguos o candidatos propuestos por título)
+   - `pending_without_candidate` (Pendiente sin candidato)
 
 ---
 

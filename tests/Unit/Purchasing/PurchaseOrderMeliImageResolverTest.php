@@ -16,6 +16,7 @@ use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 
 class PurchaseOrderMeliImageResolverTest extends TestCase
@@ -1143,6 +1144,298 @@ class PurchaseOrderMeliImageResolverTest extends TestCase
         $this->assertLessThanOrEqual(16, count($largeQueries), 'Expected constant bulk query count without N+1, got '.count($largeQueries));
     }
 
+    public function test_bulk_variation_query_does_not_contaminate_unrelated_skus_with_false_mlm_diagnostics(): void
+    {
+        $acc = $this->createMeliAccount('111222', 'SBS_MAIN', true);
+
+        $matchedProd = $this->createProduct('MATCH-VAR-1', 'Producto Con Variación');
+        $missingProdA = $this->createProduct('SOBRE-28X19', 'Sobre tipo burbuja blanco 28 x 19 x 4');
+        $missingProdB = $this->createProduct('VAPOR-OZONO', 'Vaporizador facial con ozono');
+
+        $order = $this->createOrderWithItems([$matchedProd, $missingProdA, $missingProdB]);
+        $itemMatched = $order->items[0];
+        $itemMissingA = $order->items[1];
+        $itemMissingB = $order->items[2];
+
+        // Publication matching MATCH-VAR-1 inside variations, plus an unverified/incomplete
+        // publication MLM1848766998 whose raw payload mentions MATCH-VAR-1 or description text.
+        MeliPublication::create([
+            'user_id' => $this->user->id,
+            'meli_account_id' => $acc->id,
+            'sku' => 'OTHER-TOP-SKU',
+            'mlm' => 'MLM1848766998',
+            'status' => 'active',
+            'raw' => [
+                'item' => [
+                    'title' => 'Publicación global no relacionada',
+                    'description' => 'Compatible con SOBRE-28X19 y VAPOR-OZONO',
+                    'pictures' => [['secure_url' => 'https://http2.mlstatic.com/false-global.jpg']],
+                ],
+            ],
+        ]);
+
+        MeliPriceManagerItem::create([
+            'meli_account_id' => $acc->id,
+            'meli_item_id' => 'MLM1848766998',
+            'sku' => 'OTHER-PM-SKU',
+            'title' => 'Snapshot truncado no relacionado',
+            'status' => 'active',
+            'raw_item' => [
+                'truncated' => true,
+                'description' => 'SOBRE-28X19',
+            ],
+        ]);
+
+        MeliPublication::create([
+            'user_id' => $this->user->id,
+            'meli_account_id' => $acc->id,
+            'sku' => 'MATCH-VAR-1',
+            'mlm' => 'MLM999111',
+            'status' => 'active',
+            'raw' => [
+                'item' => [
+                    'pictures' => [['id' => 'p1', 'secure_url' => 'https://http2.mlstatic.com/match-var.jpg']],
+                    'variations' => [
+                        ['id' => 9001, 'seller_custom_field' => 'MATCH-VAR-1', 'picture_ids' => ['p1']],
+                    ],
+                ],
+            ],
+        ]);
+
+        $resolved = $this->resolver->resolveForOrder($order, false);
+
+        $this->assertSame('https://http2.mlstatic.com/match-var.jpg', $resolved[$itemMatched->id]['url']);
+
+        // Unrelated items must NEVER receive MLM1848766998 in diagnostics!
+        $this->assertNull($resolved[$itemMissingA->id]['url']);
+        $this->assertNull($resolved[$itemMissingA->id]['mlm']);
+        $this->assertSame('no_listing_found', $resolved[$itemMissingA->id]['reason']);
+
+        $this->assertNull($resolved[$itemMissingB->id]['url']);
+        $this->assertNull($resolved[$itemMissingB->id]['mlm']);
+        $this->assertSame('no_listing_found', $resolved[$itemMissingB->id]['reason']);
+    }
+
+    public function test_resolves_approved_variation_pictures_never_falling_back_to_listing_cover(): void
+    {
+        $acc = $this->createMeliAccount('333444', 'SBS_CHINA', true);
+
+        // Temporary SKU that differs from ML's variation SKU
+        $prodBlue = $this->createProduct('CHN-TMP-001', 'Atomizador Blanco Azul');
+        $prodPink = $this->createProduct('ATOMIZADORBR', 'Atomizador Blanco Rosa');
+        $prodMissingPic = $this->createProduct('ATOM-NO-VAR-PIC', 'Atomizador Sin Foto En Variación');
+
+        $order = $this->createOrderWithItems([$prodBlue, $prodPink, $prodMissingPic]);
+        [$itemBlue, $itemPink, $itemMissingPic] = [$order->items[0], $order->items[1], $order->items[2]];
+
+        MeliPublication::create([
+            'user_id' => $this->user->id,
+            'meli_account_id' => $acc->id,
+            'sku' => 'ATOMIZADORBCOAF',
+            'mlm' => 'MLM3373409704',
+            'status' => 'active',
+            'last_sync_at' => now(),
+            'raw' => [
+                'item' => [
+                    'title' => 'Atomizador Spray Botella 300ml Colores',
+                    'pictures' => [
+                        ['id' => 'cover-pic', 'secure_url' => 'https://http2.mlstatic.com/cover-wrong.jpg'],
+                        ['id' => 'pic-blue', 'secure_url' => 'https://http2.mlstatic.com/atom-blanco-azul.jpg'],
+                        ['id' => 'pic-pink', 'secure_url' => 'https://http2.mlstatic.com/atom-blanco-rosa.jpg'],
+                    ],
+                    'variations' => [
+                        [
+                            'id' => 185902990943,
+                            'seller_custom_field' => 'OLD-ML-SKU-BLUE',
+                            'picture_ids' => ['pic-blue'],
+                            'attribute_combinations' => [
+                                ['id' => 'COLOR', 'name' => 'Color', 'value_name' => 'Blanco Azul'],
+                            ],
+                        ],
+                        [
+                            'id' => 186106913357,
+                            'seller_custom_field' => 'ATOMIZADORBR',
+                            'picture_ids' => ['pic-pink'],
+                            'attribute_combinations' => [
+                                ['id' => 'COLOR', 'name' => 'Color', 'value_name' => 'Blanco rosa'],
+                            ],
+                        ],
+                        [
+                            'id' => 185902990999,
+                            'seller_custom_field' => 'ATOM-NO-VAR-PIC',
+                            'picture_ids' => [],
+                            'attribute_combinations' => [
+                                ['id' => 'COLOR', 'name' => 'Color', 'value_name' => 'Sin Imagen'],
+                            ],
+                        ],
+                    ],
+                ],
+            ],
+        ]);
+
+        // Admin approves variation 185902990943 for CHN-TMP-001
+        $itemBlue->update([
+            'photo_source_mode' => PurchaseOrderItem::PHOTO_MODE_APPROVED_ML,
+            'approved_mlm' => 'MLM3373409704',
+            'approved_variation_id' => '185902990943',
+            'approved_meli_account_id' => $acc->id,
+            'photo_notes' => 'Color Blanco Azul confirmado',
+        ]);
+
+        // Admin approves variation 185902990999 (which has empty picture_ids) -> must NOT fallback to cover!
+        $itemMissingPic->update([
+            'photo_source_mode' => PurchaseOrderItem::PHOTO_MODE_APPROVED_ML,
+            'approved_mlm' => 'MLM3373409704',
+            'approved_variation_id' => '185902990999',
+            'approved_meli_account_id' => $acc->id,
+        ]);
+
+        $order->refresh()->load('items.product');
+        $resolved = $this->resolver->resolveForOrder($order, false);
+
+        $this->assertSame('https://http2.mlstatic.com/atom-blanco-azul.jpg', $resolved[$itemBlue->id]['url']);
+        $this->assertSame(PurchaseOrderMeliImageResolver::SOURCE_APPROVED_VARIATION, $resolved[$itemBlue->id]['source']);
+        $this->assertSame(PurchaseOrderMeliImageResolver::AUDIT_RESOLVED_VARIATION, $resolved[$itemBlue->id]['audit_category']);
+        $this->assertSame('185902990943', $resolved[$itemBlue->id]['variation_id']);
+        $this->assertSame('Color: Blanco Azul', $resolved[$itemBlue->id]['variation_label']);
+
+        // ATOMIZADORBR auto-resolves via exact variation SKU
+        $this->assertSame('https://http2.mlstatic.com/atom-blanco-rosa.jpg', $resolved[$itemPink->id]['url']);
+        $this->assertSame('186106913357', $resolved[$itemPink->id]['variation_id']);
+        $this->assertSame(PurchaseOrderMeliImageResolver::AUDIT_RESOLVED_VARIATION, $resolved[$itemPink->id]['audit_category']);
+
+        // Variation without picture_ids must NOT fallback to cover-wrong.jpg
+        $this->assertNull($resolved[$itemMissingPic->id]['url']);
+    }
+
+    public function test_title_discovery_proposes_candidates_without_auto_assigning_and_ranks_chair_colors(): void
+    {
+        $acc = $this->createMeliAccount('555666', 'SBS_CHINA', true);
+
+        $vapor = $this->createProduct('CHN-VAP-01', 'Vaporizador facial con ozono');
+        $chairRose = $this->createProduct('KSC02', 'Silla director Rose Gold');
+        $chairSilver = $this->createProduct('KSC02-SILVER', 'Silla director Silver');
+
+        $order = $this->createOrderWithItems([$vapor, $chairRose, $chairSilver]);
+        [$itemVapor, $itemChairRose, $itemChairSilver] = [$order->items[0], $order->items[1], $order->items[2]];
+
+        MeliPriceManagerItem::create([
+            'meli_account_id' => $acc->id,
+            'meli_item_id' => 'MLM2611925824',
+            'sku' => 'ML-VAP-1',
+            'title' => 'Vaporizador Facial Con Ozono Profesional',
+            'status' => 'active',
+            'raw_item' => [
+                'title' => 'Vaporizador Facial Con Ozono Profesional',
+                'seller_custom_field' => 'ML-VAP-1',
+                'pictures' => [['secure_url' => 'https://http2.mlstatic.com/vaporizador.jpg']],
+            ],
+        ]);
+
+        // Both chairs share KSC02 -> auto-resolution MUST refuse to guess
+        MeliPublication::create([
+            'user_id' => $this->user->id,
+            'meli_account_id' => $acc->id,
+            'sku' => 'KSC02',
+            'mlm' => 'MLM2996756220',
+            'status' => 'active',
+            'raw' => [
+                'item' => [
+                    'title' => 'Silla Director Maquillaje Aluminio Rose Gold',
+                    'seller_custom_field' => 'KSC02',
+                    'pictures' => [['secure_url' => 'https://http2.mlstatic.com/silla-rose-gold.jpg']],
+                ],
+            ],
+        ]);
+
+        MeliPublication::create([
+            'user_id' => $this->user->id,
+            'meli_account_id' => $acc->id,
+            'sku' => 'KSC02',
+            'mlm' => 'MLM5479377652',
+            'status' => 'active',
+            'raw' => [
+                'item' => [
+                    'title' => 'Silla Director Maquillaje Aluminio Silver',
+                    'seller_custom_field' => 'KSC02',
+                    'pictures' => [['secure_url' => 'https://http2.mlstatic.com/silla-silver.jpg']],
+                ],
+            ],
+        ]);
+
+        $resolved = $this->resolver->resolveForOrder($order, false);
+
+        // Vaporizador is NOT auto-assigned by title
+        $this->assertNull($resolved[$itemVapor->id]['url']);
+        // Shared KSC02 is ambiguous and KSC02-SILVER does not auto-guess
+        $this->assertNull($resolved[$itemChairRose->id]['url']);
+        $this->assertTrue($resolved[$itemChairRose->id]['ambiguous']);
+        $this->assertNull($resolved[$itemChairSilver->id]['url']);
+        $this->assertFalse($resolved[$itemChairSilver->id]['ambiguous']);
+
+        // Discovery proposes Vaporizador candidate and ranks Rose Gold / Silver accurately
+        $vaporCandidates = $this->resolver->discoverCandidatesForItem($itemVapor);
+        $this->assertCount(1, $vaporCandidates);
+        $this->assertSame('MLM2611925824', $vaporCandidates[0]['mlm']);
+        $this->assertSame('title_match', $vaporCandidates[0]['match_type']);
+
+        $roseCandidates = $this->resolver->discoverCandidatesForItem($itemChairRose);
+        $this->assertSame('MLM2996756220', $roseCandidates[0]['mlm']);
+
+        $silverCandidates = $this->resolver->discoverCandidatesForItem($itemChairSilver);
+        $this->assertSame('MLM5479377652', $silverCandidates[0]['mlm']);
+    }
+
+    public function test_rejected_mlm_is_excluded_and_manual_override_takes_priority(): void
+    {
+        Storage::fake('local');
+        $acc = $this->createMeliAccount('777888', 'SBS_CHINA', true);
+
+        $sobre = $this->createProduct('SOBRE-BLANCO-28X19', 'Sobre tipo burbuja blanco 28 x 19 x 4');
+        $order = $this->createOrderWithItems([$sobre]);
+        $item = $order->items->firstOrFail();
+
+        // Rejected ML listing MLM3446472074 (28 x 18 cm) happens to share SKU
+        MeliPublication::create([
+            'user_id' => $this->user->id,
+            'meli_account_id' => $acc->id,
+            'sku' => 'SOBRE-BLANCO-28X19',
+            'mlm' => 'MLM3446472074',
+            'status' => 'active',
+            'raw' => [
+                'item' => [
+                    'title' => 'Sobre tipo burbuja blanco 28 x 18 cm',
+                    'seller_custom_field' => 'SOBRE-BLANCO-28X19',
+                    'pictures' => [['secure_url' => 'https://http2.mlstatic.com/sobre-28x18-wrong.jpg']],
+                ],
+            ],
+        ]);
+
+        // Reject MLM3446472074 -> must NOT auto-assign it
+        $item->update([
+            'rejected_mlms' => ['MLM3446472074'],
+        ]);
+
+        $resolvedAfterReject = $this->resolver->resolveForOrder($order->fresh('items.product'), false);
+        $this->assertNull($resolvedAfterReject[$item->id]['url']);
+
+        // Store manual uploaded image -> takes priority and resolves cleanly
+        $manualPath = 'purchasing/manual-photos/po-'.$order->id.'/item-'.$item->id.'-sobre.png';
+        Storage::disk('local')->put($manualPath, 'fake-png-content');
+
+        $item->update([
+            'photo_source_mode' => PurchaseOrderItem::PHOTO_MODE_MANUAL,
+            'manual_photo_path' => $manualPath,
+            'manual_photo_mime' => 'image/png',
+            'photo_notes' => 'Referencia real sobre 28x19x4',
+        ]);
+
+        $resolvedManual = $this->resolver->resolveForOrder($order->fresh('items.product'), false);
+        $this->assertSame(PurchaseOrderMeliImageResolver::SOURCE_MANUAL_UPLOAD, $resolvedManual[$item->id]['source']);
+        $this->assertSame(PurchaseOrderMeliImageResolver::AUDIT_MANUAL_OVERRIDE, $resolvedManual[$item->id]['audit_category']);
+        $this->assertSame($manualPath, $resolvedManual[$item->id]['manual_path']);
+    }
+
     private function createMeliAccount(string $meliUserId, string $nickname, bool $isDefault): MeliAccount
     {
         return MeliAccount::create([
@@ -1259,5 +1552,7 @@ class PurchaseOrderMeliImageResolverTest extends TestCase
         (require database_path('migrations/2026_09_26_000001_add_remote_user_product_id_to_inventory_channel_links.php'))->up();
         (require database_path('migrations/2026_09_30_000003_create_restock_configurations_table.php'))->up();
         (require database_path('migrations/2026_09_30_000004_create_purchase_orders_tables.php'))->up();
+        (require database_path('migrations/2026_10_21_160000_create_supplier_products_table.php'))->up();
+        (require database_path('migrations/2026_11_20_000001_add_photo_selection_fields_to_purchase_order_items_table.php'))->up();
     }
 }
