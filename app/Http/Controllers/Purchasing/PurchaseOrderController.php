@@ -9,6 +9,7 @@ use App\Models\PurchaseOrder;
 use App\Models\PurchaseOrderReceipt;
 use App\Models\Supplier;
 use App\Services\Purchasing\PurchaseOrderService;
+use App\Services\Purchasing\PurchaseOrderMeliImageResolver;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -22,7 +23,8 @@ use Throwable;
 class PurchaseOrderController extends Controller
 {
     public function __construct(
-        private readonly PurchaseOrderService $poService
+        private readonly PurchaseOrderService $poService,
+        private readonly PurchaseOrderMeliImageResolver $meliImageResolver
     ) {}
 
     public function index(Request $request): Response
@@ -259,6 +261,7 @@ class PurchaseOrderController extends Controller
 
         return Inertia::render('Purchasing/Show', [
             'order' => $purchaseOrder,
+            'imageUrlByItemId' => $this->meliImageResolver->forOrder($purchaseOrder),
             'locations' => $locations,
             'supplier' => $supplier,
             'canViewPdf' => $canViewPdf,
@@ -292,6 +295,7 @@ class PurchaseOrderController extends Controller
         return response()
             ->view('purchasing.order-pdf', [
                 'order' => $purchaseOrder,
+            'imageUrlByItemId' => $this->meliImageResolver->forOrder($purchaseOrder),
                 'supplier' => $supplier,
             ])
             ->withHeaders([
