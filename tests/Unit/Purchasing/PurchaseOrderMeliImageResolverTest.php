@@ -354,7 +354,7 @@ class PurchaseOrderMeliImageResolverTest extends TestCase
         $this->assertSame('702', $entry['variation_id']);
     }
 
-    public function test_prefers_active_over_paused_and_falls_back_to_historical_publications(): void
+    public function test_prefers_active_over_paused_when_photos_agree_and_falls_back_to_historical_publications(): void
     {
         $acc = $this->createMeliAccount('444444', 'SBS_MAIN', true);
         $prodActive = $this->createProduct('SKU-MULTI', 'Producto Multi');
@@ -364,7 +364,7 @@ class PurchaseOrderMeliImageResolverTest extends TestCase
         $itemActive = $order->items->firstWhere('inventory_product_id', $prodActive->id);
         $itemHist = $order->items->firstWhere('inventory_product_id', $prodHistorical->id);
 
-        // Closed/newer vs active/older for SKU-MULTI -> must pick active!
+        // Closed/newer vs active/older for SKU-MULTI with the SAME agreed photo -> must pick active!
         MeliPublication::create([
             'user_id' => $this->user->id,
             'meli_account_id' => $acc->id,
@@ -375,7 +375,7 @@ class PurchaseOrderMeliImageResolverTest extends TestCase
             'raw' => [
                 'item' => [
                     'seller_custom_field' => 'SKU-MULTI',
-                    'pictures' => [['secure_url' => 'https://http2.mlstatic.com/closed.jpg']],
+                    'pictures' => [['secure_url' => 'https://http2.mlstatic.com/agreed.jpg']],
                 ],
             ],
         ]);
@@ -390,7 +390,7 @@ class PurchaseOrderMeliImageResolverTest extends TestCase
             'raw' => [
                 'item' => [
                     'seller_custom_field' => 'SKU-MULTI',
-                    'pictures' => [['secure_url' => 'https://http2.mlstatic.com/active.jpg']],
+                    'pictures' => [['secure_url' => 'https://http2.mlstatic.com/agreed.jpg']],
                 ],
             ],
         ]);
@@ -414,13 +414,232 @@ class PurchaseOrderMeliImageResolverTest extends TestCase
 
         $resolved = $this->resolver->resolveForOrder($order, false);
 
-        $this->assertSame('https://http2.mlstatic.com/active.jpg', $resolved[$itemActive->id]['url']);
+        $this->assertSame('https://http2.mlstatic.com/agreed.jpg', $resolved[$itemActive->id]['url']);
         $this->assertSame('MLM-ACTIVE', $resolved[$itemActive->id]['mlm']);
-        $this->assertTrue($resolved[$itemActive->id]['ambiguous']); // Two distinct URLs across publications flagged for audit
-        $this->assertCount(2, $resolved[$itemActive->id]['ambiguous_matches']);
+        $this->assertFalse($resolved[$itemActive->id]['ambiguous']);
 
         $this->assertSame('https://http2.mlstatic.com/paused.jpg', $resolved[$itemHist->id]['url']);
         $this->assertSame('paused', $resolved[$itemHist->id]['listing_status']);
+    }
+
+    public function test_account_key_matching_rejects_unknown_ambiguous_and_invalid_default_accounts(): void
+    {
+        $acc1 = $this->createMeliAccount('100001', 'TIENDA_UNO', false);
+        $acc2 = $this->createMeliAccount('100002', 'TIENDA_DOS', false);
+        $accountsWithoutDefault = collect([$acc1, $acc2]);
+
+        // Unknown identifiers (string or numeric) must NEVER be accepted silently
+        $this->assertFalse($this->resolver->accountKeyMatchesAccount('CUENTA_DESCONOCIDA', $acc1->id, $accountsWithoutDefault));
+        $this->assertFalse($this->resolver->accountKeyMatchesAccount('999999', $acc1->id, $accountsWithoutDefault));
+        $this->assertFalse($this->resolver->accountKeyMatchesAccount('CUENTA_DESCONOCIDA', $acc1->id, collect()));
+
+        // Publication without meli_account_id cannot match a link requiring a specific account
+        $this->assertFalse($this->resolver->accountKeyMatchesAccount('TIENDA_UNO', null, $accountsWithoutDefault));
+        $this->assertTrue($this->resolver->accountKeyMatchesAccount('', null, $accountsWithoutDefault));
+
+        // 'default' without any account marked is_default=true must be rejected
+        $this->assertFalse($this->resolver->accountKeyMatchesAccount('default', $acc1->id, $accountsWithoutDefault));
+        $this->assertFalse($this->resolver->accountKeyMatchesAccount('default', $acc2->id, $accountsWithoutDefault));
+        $this->assertFalse($this->resolver->accountKeyMatchesAccount('default', $acc1->id, collect()));
+
+        // 'default' with MULTIPLE accounts marked is_default=true is ambiguous and must be rejected
+        $acc1->update(['is_default' => true]);
+        $acc2->update(['is_default' => true]);
+        $accountsWithMultipleDefaults = collect([$acc1->fresh(), $acc2->fresh()]);
+        $this->assertFalse($this->resolver->accountKeyMatchesAccount('default', $acc1->id, $accountsWithMultipleDefaults));
+        $this->assertFalse($this->resolver->accountKeyMatchesAccount('default', $acc2->id, $accountsWithMultipleDefaults));
+
+        // 'default' with EXACTLY ONE valid default account accepts only that account
+        $acc2->update(['is_default' => false]);
+        $accountsWithSingleDefault = collect([$acc1->fresh(), $acc2->fresh()]);
+        $this->assertTrue($this->resolver->accountKeyMatchesAccount('default', $acc1->id, $accountsWithSingleDefault));
+        $this->assertFalse($this->resolver->accountKeyMatchesAccount('default', $acc2->id, $accountsWithSingleDefault));
+
+        // Multi-account exact matches by ID, meli_user_id, and nickname (case-insensitive)
+        $this->assertTrue($this->resolver->accountKeyMatchesAccount((string) $acc2->id, $acc2->id, $accountsWithSingleDefault));
+        $this->assertFalse($this->resolver->accountKeyMatchesAccount((string) $acc2->id, $acc1->id, $accountsWithSingleDefault));
+        $this->assertTrue($this->resolver->accountKeyMatchesAccount('100002', $acc2->id, $accountsWithSingleDefault));
+        $this->assertFalse($this->resolver->accountKeyMatchesAccount('100002', $acc1->id, $accountsWithSingleDefault));
+        $this->assertTrue($this->resolver->accountKeyMatchesAccount('tienda_dos', $acc2->id, $accountsWithSingleDefault));
+        $this->assertFalse($this->resolver->accountKeyMatchesAccount('tienda_dos', $acc1->id, $accountsWithSingleDefault));
+
+        // End-to-end check: link with unknown account_key or invalid 'default' does not resolve to another account's listing
+        $acc1->update(['is_default' => false]);
+        $prodUnknown = $this->createProduct('LINK-UNK-ACC', 'Producto Cuenta Desconocida');
+        $prodBadDefault = $this->createProduct('LINK-BAD-DEF', 'Producto Default Inválido');
+        $order = $this->createOrderWithItems([$prodUnknown, $prodBadDefault]);
+        $itemUnknown = $order->items->firstWhere('inventory_product_id', $prodUnknown->id);
+        $itemBadDefault = $order->items->firstWhere('inventory_product_id', $prodBadDefault->id);
+
+        InventoryChannelLink::create([
+            'inventory_product_id' => $prodUnknown->id,
+            'channel' => InventoryChannelLink::MERCADO_LIBRE,
+            'account_key' => 'CUENTA_INEXISTENTE',
+            'external_listing_id' => 'MLM-UNK-1',
+            'is_active' => true,
+            'identity_key' => 'ml:CUENTA_INEXISTENTE:MLM-UNK-1',
+        ]);
+
+        InventoryChannelLink::create([
+            'inventory_product_id' => $prodBadDefault->id,
+            'channel' => InventoryChannelLink::MERCADO_LIBRE,
+            'account_key' => 'default',
+            'external_listing_id' => 'MLM-DEF-1',
+            'is_active' => true,
+            'identity_key' => 'ml:default:MLM-DEF-1',
+        ]);
+
+        MeliPublication::create([
+            'user_id' => $this->user->id,
+            'meli_account_id' => $acc1->id,
+            'sku' => 'OTHER-1',
+            'mlm' => 'MLM-UNK-1',
+            'status' => 'active',
+            'raw' => [
+                'item' => [
+                    'pictures' => [['secure_url' => 'https://http2.mlstatic.com/should-not-match-1.jpg']],
+                ],
+            ],
+        ]);
+
+        MeliPublication::create([
+            'user_id' => $this->user->id,
+            'meli_account_id' => $acc2->id,
+            'sku' => 'OTHER-2',
+            'mlm' => 'MLM-DEF-1',
+            'status' => 'active',
+            'raw' => [
+                'item' => [
+                    'pictures' => [['secure_url' => 'https://http2.mlstatic.com/should-not-match-2.jpg']],
+                ],
+            ],
+        ]);
+
+        $resolved = $this->resolver->resolveForOrder($order, false);
+        $this->assertNull($resolved[$itemUnknown->id]['url']);
+        $this->assertSame('account_mismatch', $resolved[$itemUnknown->id]['reason']);
+        $this->assertNull($resolved[$itemBadDefault->id]['url']);
+        $this->assertSame('account_mismatch', $resolved[$itemBadDefault->id]['reason']);
+    }
+
+    public function test_shared_sku_across_multiple_publications_with_different_photos_requires_review_without_explicit_link(): void
+    {
+        Log::spy();
+
+        $acc1 = $this->createMeliAccount('300001', 'CUENTA_A', true);
+        $acc2 = $this->createMeliAccount('300002', 'CUENTA_B', false);
+
+        $prodPubConflict = $this->createProduct('SKU-CONFLICT-PUB', 'Producto SKU Compartido Pubs');
+        $prodPmConflict = $this->createProduct('SKU-CONFLICT-PM', 'Producto SKU Compartido PM');
+        $order = $this->createOrderWithItems([$prodPubConflict, $prodPmConflict]);
+        $itemPub = $order->items->firstWhere('inventory_product_id', $prodPubConflict->id);
+        $itemPm = $order->items->firstWhere('inventory_product_id', $prodPmConflict->id);
+
+        // Two publications with the SAME SKU but DIFFERENT photos (no explicit channel link)
+        MeliPublication::create([
+            'user_id' => $this->user->id,
+            'meli_account_id' => $acc1->id,
+            'sku' => 'SKU-CONFLICT-PUB',
+            'mlm' => 'MLM-CONF-1',
+            'status' => 'active',
+            'last_sync_at' => now(),
+            'raw' => [
+                'item' => [
+                    'seller_custom_field' => 'SKU-CONFLICT-PUB',
+                    'pictures' => [['secure_url' => 'https://http2.mlstatic.com/conflict-a.jpg']],
+                ],
+            ],
+        ]);
+
+        MeliPublication::create([
+            'user_id' => $this->user->id,
+            'meli_account_id' => $acc2->id,
+            'sku' => 'SKU-CONFLICT-PUB',
+            'mlm' => 'MLM-CONF-2',
+            'status' => 'active',
+            'last_sync_at' => now()->subHour(),
+            'raw' => [
+                'item' => [
+                    'seller_custom_field' => 'SKU-CONFLICT-PUB',
+                    'pictures' => [['secure_url' => 'https://http2.mlstatic.com/conflict-b.jpg']],
+                ],
+            ],
+        ]);
+
+        // Even if price manager has one entry for SKU-CONFLICT-PUB, ambiguity in meli_publications must NOT be bypassed
+        MeliPriceManagerItem::create([
+            'meli_account_id' => $acc1->id,
+            'meli_item_id' => 'MLM-CONF-1',
+            'sku' => 'SKU-CONFLICT-PUB',
+            'title' => 'Producto Conflicto',
+            'current_price' => 150,
+            'status' => 'active',
+            'raw_item' => [
+                'id' => 'MLM-CONF-1',
+                'seller_custom_field' => 'SKU-CONFLICT-PUB',
+                'pictures' => [['secure_url' => 'https://http2.mlstatic.com/conflict-a.jpg']],
+            ],
+        ]);
+
+        // Two price manager items with the SAME SKU and DIFFERENT photos
+        MeliPriceManagerItem::create([
+            'meli_account_id' => $acc1->id,
+            'meli_item_id' => 'MLM-PM-CONF-1',
+            'sku' => 'SKU-CONFLICT-PM',
+            'title' => 'PM Conflicto 1',
+            'current_price' => 120,
+            'status' => 'active',
+            'raw_item' => [
+                'id' => 'MLM-PM-CONF-1',
+                'seller_custom_field' => 'SKU-CONFLICT-PM',
+                'pictures' => [['secure_url' => 'https://http2.mlstatic.com/pm-conflict-1.jpg']],
+            ],
+        ]);
+
+        MeliPriceManagerItem::create([
+            'meli_account_id' => $acc2->id,
+            'meli_item_id' => 'MLM-PM-CONF-2',
+            'sku' => 'SKU-CONFLICT-PM',
+            'title' => 'PM Conflicto 2',
+            'current_price' => 125,
+            'status' => 'active',
+            'raw_item' => [
+                'id' => 'MLM-PM-CONF-2',
+                'seller_custom_field' => 'SKU-CONFLICT-PM',
+                'pictures' => [['secure_url' => 'https://http2.mlstatic.com/pm-conflict-2.jpg']],
+            ],
+        ]);
+
+        $resolved = $this->resolver->resolveForOrder($order, true);
+
+        // Neither item auto-selects the first photo
+        $this->assertNull($resolved[$itemPub->id]['url']);
+        $this->assertTrue($resolved[$itemPub->id]['ambiguous']);
+        $this->assertSame('multiple_publications_conflicting_photos', $resolved[$itemPub->id]['reason']);
+        $this->assertCount(2, $resolved[$itemPub->id]['ambiguous_matches']);
+
+        $this->assertNull($resolved[$itemPm->id]['url']);
+        $this->assertTrue($resolved[$itemPm->id]['ambiguous']);
+        $this->assertSame('multiple_publications_conflicting_photos', $resolved[$itemPm->id]['reason']);
+        $this->assertCount(2, $resolved[$itemPm->id]['ambiguous_matches']);
+
+        $this->assertSame([], $this->resolver->forOrder($order));
+        Log::shouldHaveReceived('info')->atLeast()->once();
+
+        // Adding an explicit channel link disambiguates cleanly
+        InventoryChannelLink::create([
+            'inventory_product_id' => $prodPubConflict->id,
+            'channel' => InventoryChannelLink::MERCADO_LIBRE,
+            'account_key' => (string) $acc2->id,
+            'external_listing_id' => 'MLM-CONF-2',
+            'is_active' => true,
+            'identity_key' => "ml:{$acc2->id}:MLM-CONF-2",
+        ]);
+
+        $disambiguated = $this->resolver->resolveForOrder($order, false);
+        $this->assertSame('https://http2.mlstatic.com/conflict-b.jpg', $disambiguated[$itemPub->id]['url']);
+        $this->assertFalse($disambiguated[$itemPub->id]['ambiguous']);
+        $this->assertSame(PurchaseOrderMeliImageResolver::SOURCE_CHANNEL_LINK_PUBLICATION, $disambiguated[$itemPub->id]['source']);
     }
 
     public function test_price_manager_fallback_requires_verified_identity_and_rejects_truncated_snapshots(): void

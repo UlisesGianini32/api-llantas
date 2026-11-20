@@ -202,10 +202,8 @@ class PurchaseOrderMeliImageResolver
                 $priceBySku,
             );
 
-            if ($resolution['url'] !== null) {
-                $results[(int) $item->id] = $resolution;
-            } else {
-                $results[(int) $item->id] = $resolution;
+            $results[(int) $item->id] = $resolution;
+            if ($resolution['url'] === null && ! $resolution['ambiguous']) {
                 $unmatchedItems[] = ['item' => $item, 'sku' => $sku];
             }
         }
@@ -373,6 +371,15 @@ class PurchaseOrderMeliImageResolver
             // 1a. Check synced meli_publications for this linked MLM.
             foreach ($pubByMlm->get($mlm, collect()) as $publication) {
                 if (! $this->accountKeyMatchesAccount($link->account_key, $publication->meli_account_id, $accounts)) {
+                    if ($lastFailureReason === 'no_listing_found') {
+                        $lastFailureReason = 'account_mismatch';
+                        $lastContext = [
+                            'mlm' => $mlm,
+                            'variation_id' => $variationId,
+                            'meli_account_id' => $publication->meli_account_id ? (int) $publication->meli_account_id : null,
+                            'listing_status' => $publication->status,
+                        ];
+                    }
                     continue;
                 }
 
@@ -411,6 +418,15 @@ class PurchaseOrderMeliImageResolver
             // 1b. Check synced meli_price_manager_items for this linked MLM.
             foreach ($priceByMlm->get($mlm, collect()) as $priceItem) {
                 if (! $this->accountKeyMatchesAccount($link->account_key, $priceItem->meli_account_id, $accounts)) {
+                    if ($lastFailureReason === 'no_listing_found') {
+                        $lastFailureReason = 'account_mismatch';
+                        $lastContext = [
+                            'mlm' => $mlm,
+                            'variation_id' => $variationId,
+                            'meli_account_id' => $priceItem->meli_account_id ? (int) $priceItem->meli_account_id : null,
+                            'listing_status' => $priceItem->status,
+                        ];
+                    }
                     continue;
                 }
 
@@ -456,7 +472,7 @@ class PurchaseOrderMeliImageResolver
                 $pubCandidates,
                 self::SOURCE_MELI_PUBLICATION_SKU,
             );
-            if ($pubResolution['url'] !== null) {
+            if ($pubResolution['url'] !== null || $pubResolution['ambiguous']) {
                 return $pubResolution;
             }
             if ($pubResolution['reason'] !== 'no_listing_found') {
@@ -467,10 +483,6 @@ class PurchaseOrderMeliImageResolver
                     'meli_account_id' => $pubResolution['meli_account_id'],
                     'listing_status' => $pubResolution['listing_status'],
                 ];
-            }
-            if ($pubResolution['ambiguous']) {
-                $ambiguousFlag = true;
-                $ambiguousMatches = array_merge($ambiguousMatches, $pubResolution['ambiguous_matches']);
             }
         }
 
@@ -483,7 +495,7 @@ class PurchaseOrderMeliImageResolver
                 $pmCandidates,
                 self::SOURCE_MELI_PRICE_MANAGER_SKU,
             );
-            if ($pmResolution['url'] !== null) {
+            if ($pmResolution['url'] !== null || $pmResolution['ambiguous']) {
                 return $pmResolution;
             }
             if ($pmResolution['reason'] !== 'no_listing_found' && $lastFailureReason === 'no_listing_found') {
@@ -494,10 +506,6 @@ class PurchaseOrderMeliImageResolver
                     'meli_account_id' => $pmResolution['meli_account_id'],
                     'listing_status' => $pmResolution['listing_status'],
                 ];
-            }
-            if ($pmResolution['ambiguous']) {
-                $ambiguousFlag = true;
-                $ambiguousMatches = array_merge($ambiguousMatches, $pmResolution['ambiguous_matches']);
             }
         }
 
@@ -570,19 +578,39 @@ class PurchaseOrderMeliImageResolver
         }
 
         if ($resolvedMatches !== []) {
-            $best = $resolvedMatches[0];
             $distinctUrls = array_values(array_unique(array_column($resolvedMatches, 'url')));
             $crossListingDiff = count($distinctUrls) > 1;
-            $extraMatches = $crossListingDiff
-                ? array_map(fn (array $m): array => [
-                    'source' => $source,
-                    'mlm' => $m['mlm'],
-                    'variation_id' => $m['variation_id'],
-                    'meli_account_id' => $m['meli_account_id'],
-                    'listing_status' => $m['listing_status'],
-                    'url' => $m['url'],
-                ], $resolvedMatches)
-                : [];
+
+            if ($crossListingDiff || $hasIntraListingAmbiguity) {
+                $conflictMatches = array_merge(
+                    $ambiguousMatches,
+                    array_map(fn (array $m): array => [
+                        'source' => $source,
+                        'mlm' => $m['mlm'],
+                        'variation_id' => $m['variation_id'],
+                        'meli_account_id' => $m['meli_account_id'],
+                        'listing_status' => $m['listing_status'],
+                        'url' => $m['url'],
+                    ], $resolvedMatches),
+                );
+
+                return [
+                    'item_id' => (int) $item->id,
+                    'inventory_product_id' => $item->inventory_product_id ? (int) $item->inventory_product_id : null,
+                    'sku' => $sku,
+                    'url' => null,
+                    'source' => null,
+                    'mlm' => null,
+                    'variation_id' => null,
+                    'meli_account_id' => null,
+                    'listing_status' => null,
+                    'reason' => $crossListingDiff ? 'multiple_publications_conflicting_photos' : 'variation_ambiguous',
+                    'ambiguous' => true,
+                    'ambiguous_matches' => $conflictMatches,
+                ];
+            }
+
+            $best = $resolvedMatches[0];
 
             return $this->resolvedResult(
                 $item,
@@ -593,8 +621,8 @@ class PurchaseOrderMeliImageResolver
                 $best['variation_id'],
                 $best['meli_account_id'],
                 $best['listing_status'],
-                $crossListingDiff,
-                $extraMatches,
+                false,
+                [],
             );
         }
 
@@ -667,19 +695,39 @@ class PurchaseOrderMeliImageResolver
         }
 
         if ($resolvedMatches !== []) {
-            $best = $resolvedMatches[0];
             $distinctUrls = array_values(array_unique(array_column($resolvedMatches, 'url')));
             $crossListingDiff = count($distinctUrls) > 1;
-            $extraMatches = $crossListingDiff
-                ? array_map(fn (array $m): array => [
-                    'source' => $source,
-                    'mlm' => $m['mlm'],
-                    'variation_id' => $m['variation_id'],
-                    'meli_account_id' => $m['meli_account_id'],
-                    'listing_status' => $m['listing_status'],
-                    'url' => $m['url'],
-                ], $resolvedMatches)
-                : [];
+
+            if ($crossListingDiff || $hasIntraListingAmbiguity) {
+                $conflictMatches = array_merge(
+                    $ambiguousMatches,
+                    array_map(fn (array $m): array => [
+                        'source' => $source,
+                        'mlm' => $m['mlm'],
+                        'variation_id' => $m['variation_id'],
+                        'meli_account_id' => $m['meli_account_id'],
+                        'listing_status' => $m['listing_status'],
+                        'url' => $m['url'],
+                    ], $resolvedMatches),
+                );
+
+                return [
+                    'item_id' => (int) $item->id,
+                    'inventory_product_id' => $item->inventory_product_id ? (int) $item->inventory_product_id : null,
+                    'sku' => $sku,
+                    'url' => null,
+                    'source' => null,
+                    'mlm' => null,
+                    'variation_id' => null,
+                    'meli_account_id' => null,
+                    'listing_status' => null,
+                    'reason' => $crossListingDiff ? 'multiple_publications_conflicting_photos' : 'variation_ambiguous',
+                    'ambiguous' => true,
+                    'ambiguous_matches' => $conflictMatches,
+                ];
+            }
+
+            $best = $resolvedMatches[0];
 
             return $this->resolvedResult(
                 $item,
@@ -690,8 +738,8 @@ class PurchaseOrderMeliImageResolver
                 $best['variation_id'],
                 $best['meli_account_id'],
                 $best['listing_status'],
-                $crossListingDiff,
-                $extraMatches,
+                false,
+                [],
             );
         }
 
@@ -1138,10 +1186,11 @@ class PurchaseOrderMeliImageResolver
     /**
      * Match an InventoryChannelLink.account_key against a listing's meli_account_id.
      * Supports numeric account IDs, numeric meli_user_id values, nicknames, and 'default'.
+     * Unknown, ambiguous, or mismatched account keys are strictly rejected.
      *
      * @param  Collection<int, MeliAccount>  $accounts
      */
-    private function accountKeyMatchesAccount(mixed $accountKey, mixed $publicationAccountId, Collection $accounts): bool
+    public function accountKeyMatchesAccount(mixed $accountKey, mixed $publicationAccountId, Collection $accounts): bool
     {
         $key = trim((string) ($accountKey ?? ''));
         if ($key === '') {
@@ -1150,39 +1199,42 @@ class PurchaseOrderMeliImageResolver
 
         $pubAccountId = is_numeric($publicationAccountId) ? (int) $publicationAccountId : null;
         if ($pubAccountId === null) {
-            return true;
+            return false;
+        }
+
+        if (strtolower($key) === 'default') {
+            $defaultAccounts = $accounts
+                ->filter(static fn (MeliAccount $account): bool => (bool) $account->is_default)
+                ->values();
+
+            return $defaultAccounts->count() === 1
+                && (int) $defaultAccounts->first()->id === $pubAccountId;
         }
 
         if ($accounts->isEmpty()) {
-            return ! ctype_digit($key) || (int) $key === $pubAccountId;
+            return ctype_digit($key) && (int) $key === $pubAccountId;
         }
 
         $matchedAccountIds = [];
 
-        if (strtolower($key) === 'default') {
-            $defaultAccount = $accounts->firstWhere('is_default', true) ?? $accounts->first();
-            if ($defaultAccount) {
-                $matchedAccountIds[] = (int) $defaultAccount->id;
+        foreach ($accounts as $account) {
+            if (ctype_digit($key) && (int) $key === (int) $account->id) {
+                $matchedAccountIds[] = (int) $account->id;
             }
-        } else {
-            foreach ($accounts as $account) {
-                if (ctype_digit($key) && (int) $key === (int) $account->id) {
-                    $matchedAccountIds[] = (int) $account->id;
-                }
-                if (trim((string) ($account->meli_user_id ?? '')) !== '' && (string) $account->meli_user_id === $key) {
-                    $matchedAccountIds[] = (int) $account->id;
-                }
-                if (trim((string) ($account->nickname ?? '')) !== '' && strcasecmp((string) $account->nickname, $key) === 0) {
-                    $matchedAccountIds[] = (int) $account->id;
-                }
+            if (trim((string) ($account->meli_user_id ?? '')) !== '' && (string) $account->meli_user_id === $key) {
+                $matchedAccountIds[] = (int) $account->id;
+            }
+            if (trim((string) ($account->nickname ?? '')) !== '' && strcasecmp((string) $account->nickname, $key) === 0) {
+                $matchedAccountIds[] = (int) $account->id;
             }
         }
 
-        if ($matchedAccountIds === []) {
-            return ! ctype_digit($key) || (int) $key === $pubAccountId;
+        $uniqueMatchedIds = array_values(array_unique($matchedAccountIds));
+        if (count($uniqueMatchedIds) !== 1) {
+            return false;
         }
 
-        return in_array($pubAccountId, array_unique($matchedAccountIds), true);
+        return $pubAccountId === $uniqueMatchedIds[0];
     }
 
     private function itemSku(PurchaseOrderItem $item): string

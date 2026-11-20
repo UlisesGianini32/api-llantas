@@ -261,6 +261,113 @@ class PurchaseOrderMeliPhotosFeatureTest extends TestCase
         $this->assertSame('channel_link_publication', $report['items'][0]['source']);
     }
 
+    public function test_ambiguous_shared_sku_renders_needs_review_in_show_sin_foto_in_pdf_and_404_on_proxy(): void
+    {
+        $secondAccount = MeliAccount::create([
+            'user_id' => $this->admin->id,
+            'meli_user_id' => '55443322',
+            'nickname' => 'SBS_SECUNDARIA',
+            'is_default' => false,
+        ]);
+
+        $product = InventoryProduct::create([
+            'sku' => 'SKU-AMBIG-1',
+            'name' => 'Producto Compartido Multi-MLM',
+            'product_type' => InventoryProduct::SIMPLE,
+            'is_active' => true,
+            'cost' => 40,
+            'brand' => 'CHINA',
+        ]);
+
+        MeliPublication::create([
+            'user_id' => $this->admin->id,
+            'meli_account_id' => $this->account->id,
+            'sku' => 'SKU-AMBIG-1',
+            'mlm' => 'MLM-AMB-1',
+            'status' => 'active',
+            'last_sync_at' => now(),
+            'raw' => [
+                'item' => [
+                    'seller_custom_field' => 'SKU-AMBIG-1',
+                    'pictures' => [['secure_url' => 'https://http2.mlstatic.com/ambig-1.png']],
+                ],
+            ],
+        ]);
+
+        MeliPublication::create([
+            'user_id' => $this->admin->id,
+            'meli_account_id' => $secondAccount->id,
+            'sku' => 'SKU-AMBIG-1',
+            'mlm' => 'MLM-AMB-2',
+            'status' => 'active',
+            'last_sync_at' => now()->subMinute(),
+            'raw' => [
+                'item' => [
+                    'seller_custom_field' => 'SKU-AMBIG-1',
+                    'pictures' => [['secure_url' => 'https://http2.mlstatic.com/ambig-2.png']],
+                ],
+            ],
+        ]);
+
+        $order = PurchaseOrder::create([
+            'order_number' => 'OC-20261119-0099',
+            'supplier_name' => 'Compras China',
+            'inventory_location_id' => $this->location->id,
+            'user_id' => $this->admin->id,
+            'status' => PurchaseOrder::STATUS_ORDERED,
+            'total_items_count' => 1,
+            'total_units_ordered' => 50,
+            'total_units_received' => 0,
+            'subtotal' => 2000,
+            'total_cost' => 2000,
+        ]);
+
+        $item = PurchaseOrderItem::create([
+            'purchase_order_id' => $order->id,
+            'inventory_product_id' => $product->id,
+            'sku' => $product->sku,
+            'product_name' => $product->name,
+            'quantity_ordered' => 50,
+            'quantity_received' => 0,
+            'unit_cost' => 40,
+            'subtotal' => 2000,
+            'status' => 'PENDING',
+        ]);
+
+        $this->withoutVite();
+
+        $showResponse = $this->actingAs($this->admin)->get("/compras/ordenes/{$order->id}");
+        $showResponse->assertOk();
+        $showResponse->assertInertia(fn (Assert $page) => $page
+            ->component('Purchasing/Show')
+            ->missing("imageUrlByItemId.{$item->id}")
+            ->where("photoStatusByItemId.{$item->id}.status", 'needs_review')
+            ->where("photoStatusByItemId.{$item->id}.reason", 'multiple_publications_conflicting_photos')
+            ->where("photoStatusByItemId.{$item->id}.candidates_count", 2)
+        );
+
+        $pdfResponse = $this->actingAs($this->admin)->get("/compras/ordenes/{$order->id}/pdf");
+        $pdfResponse->assertOk();
+        $pdfResponse->assertSee('Sin foto');
+        $pdfResponse->assertDontSee("/compras/ordenes/{$order->id}/partidas/{$item->id}/foto", false);
+
+        $this->actingAs($this->admin)
+            ->get("/compras/ordenes/{$order->id}/partidas/{$item->id}/foto")
+            ->assertNotFound();
+
+        $exitCode = Artisan::call('purchasing:audit-order-photos', [
+            'order' => 'OC-20261119-0099',
+            '--json' => true,
+        ]);
+        $this->assertSame(0, $exitCode);
+
+        $report = json_decode(Artisan::output(), true);
+        $this->assertSame(0, $report['summary']['with_photo']);
+        $this->assertSame(1, $report['summary']['without_photo']);
+        $this->assertSame(1, $report['summary']['ambiguous_count']);
+        $this->assertSame('multiple_publications_conflicting_photos', $report['ambiguous_matches'][0]['reason']);
+    }
+
     /** @return array{0: PurchaseOrder, 1: PurchaseOrderItem, 2: PurchaseOrderItem} */
     private function seedChinaOrderScenario(): array
     {

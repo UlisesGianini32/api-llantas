@@ -262,9 +262,12 @@ class PurchaseOrderController extends Controller
             ? $this->buildExternalSignedPdfUrl($request, $purchaseOrder)
             : null;
 
+        $resolvedPhotos = $this->meliImageResolver->resolveForOrder($purchaseOrder);
+
         return Inertia::render('Purchasing/Show', [
             'order' => $purchaseOrder,
-            'imageUrlByItemId' => $this->buildItemPhotoUrls($purchaseOrder, false),
+            'imageUrlByItemId' => $this->buildItemPhotoUrlsFromResolution($purchaseOrder, $resolvedPhotos, false),
+            'photoStatusByItemId' => $this->buildItemPhotoStatusesFromResolution($resolvedPhotos),
             'locations' => $locations,
             'supplier' => $supplier,
             'canViewPdf' => $canViewPdf,
@@ -295,10 +298,12 @@ class PurchaseOrderController extends Controller
                 ->first(['id', 'name', 'phone', 'contact_name', 'email']);
         }
 
+        $resolvedPhotos = $this->meliImageResolver->resolveForOrder($purchaseOrder);
+
         return response()
             ->view('purchasing.order-pdf', [
                 'order' => $purchaseOrder,
-                'imageUrlByItemId' => $this->buildItemPhotoUrls($purchaseOrder, $isSignedPublicAccess),
+                'imageUrlByItemId' => $this->buildItemPhotoUrlsFromResolution($purchaseOrder, $resolvedPhotos, $isSignedPublicAccess),
                 'supplier' => $supplier,
             ])
             ->withHeaders([
@@ -343,11 +348,14 @@ class PurchaseOrderController extends Controller
     /**
      * Build same-origin cached photo URLs for items that resolved to a verified Mercado Libre picture.
      *
+     * @param  array<int, array<string, mixed>>  $resolved
      * @return array<int, string>
      */
-    private function buildItemPhotoUrls(PurchaseOrder $purchaseOrder, bool $useSignedPublicUrls): array
-    {
-        $resolved = $this->meliImageResolver->resolveForOrder($purchaseOrder);
+    private function buildItemPhotoUrlsFromResolution(
+        PurchaseOrder $purchaseOrder,
+        array $resolved,
+        bool $useSignedPublicUrls,
+    ): array {
         $urls = [];
 
         foreach ($resolved as $itemId => $entry) {
@@ -372,6 +380,29 @@ class PurchaseOrderController extends Controller
         }
 
         return $urls;
+    }
+
+    /**
+     * Build UI photo diagnostic badges (e.g., ambiguous multi-publication conflicts requiring review).
+     *
+     * @param  array<int, array<string, mixed>>  $resolved
+     * @return array<int, array{status: string, reason: string, candidates_count: int}>
+     */
+    private function buildItemPhotoStatusesFromResolution(array $resolved): array
+    {
+        $statuses = [];
+
+        foreach ($resolved as $itemId => $entry) {
+            if (! empty($entry['ambiguous']) && empty($entry['url'])) {
+                $statuses[(int) $itemId] = [
+                    'status' => 'needs_review',
+                    'reason' => (string) ($entry['reason'] ?? 'ambiguous'),
+                    'candidates_count' => count((array) ($entry['ambiguous_matches'] ?? [])),
+                ];
+            }
+        }
+
+        return $statuses;
     }
 
     /**

@@ -69,7 +69,7 @@ const STATUS_BADGES = {
     },
 }
 
-export default function PurchasingShow({ order, locations = [], supplier = null, canViewPdf = false, sharedPdfUrl = null, imageUrlByItemId = {} }) {
+export default function PurchasingShow({ order, locations = [], supplier = null, canViewPdf = false, sharedPdfUrl = null, imageUrlByItemId = {}, photoStatusByItemId = {} }) {
     const badge = STATUS_BADGES[order.status] || STATUS_BADGES.DRAFT
 
     // Autofill defaults
@@ -1246,6 +1246,7 @@ export default function PurchasingShow({ order, locations = [], supplier = null,
                                 {currentDisplayItems.map((item, idx) => {
                                     const pending = Math.max(0, item.quantity_ordered - (item.quantity_received || 0))
                                     const photoUrl = item.id != null && !failedPhotoIds[item.id] ? imageUrlByItemId[item.id] : null
+                                    const photoStatus = item.id != null ? photoStatusByItemId[item.id] : null
                                     const displayName = item.product?.name || item.product_name || 'Producto'
                                     const displaySku = item.product?.sku || item.sku || '-'
                                     return (
@@ -1279,6 +1280,13 @@ export default function PurchasingShow({ order, locations = [], supplier = null,
                                                             className="mx-auto h-14 w-14 sm:h-16 sm:w-16 rounded-lg border border-slate-200 bg-white object-contain shadow-xs transition group-hover:scale-105 group-hover:border-indigo-400"
                                                         />
                                                     </button>
+                                                ) : photoStatus?.status === 'needs_review' ? (
+                                                    <span
+                                                        title="Múltiples publicaciones o variaciones de Mercado Libre con fotografías distintas para este SKU. Vincula la publicación exacta en canales de inventario."
+                                                        className="inline-block rounded border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-300"
+                                                    >
+                                                        Requiere revisión
+                                                    </span>
                                                 ) : (
                                                     <span className="inline-block rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-400 dark:bg-neutral-800 dark:text-slate-500">
                                                         Sin foto
