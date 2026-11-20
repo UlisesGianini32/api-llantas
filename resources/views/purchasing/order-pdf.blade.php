@@ -215,6 +215,31 @@
             background-color: #f8fafc;
         }
 
+        .product-photo {
+            display: block;
+            width: 64px;
+            height: 64px;
+            object-fit: contain;
+            margin: 0 auto;
+            background: #ffffff;
+            border: 1px solid #e2e8f0;
+            border-radius: 4px;
+        }
+
+        .photo-cell {
+            width: 76px;
+            text-align: center;
+        }
+
+        .photo-missing {
+            font-size: 10px;
+            color: #94a3b8;
+        }
+
+        .items-table tr {
+            break-inside: avoid;
+        }
+
         .sku-cell {
             font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
             font-weight: 700;
@@ -389,6 +414,7 @@
                 <tr>
                     <th style="width: 32px; text-align: center;">#</th>
                     <th style="width: 130px;">Cód. Proveedor</th>
+                    <th style="width: 76px; text-align: center;">Foto ML</th>
                     <th style="width: 100px;">SKU Interno</th>
                     <th>Producto / Descripción</th>
                     <th style="width: 110px; text-align: center;">Cantidad Pedida</th>
@@ -400,6 +426,13 @@
                         <td style="text-align: center; color: #94a3b8; font-size: 11px;">{{ $index + 1 }}</td>
                         <td class="sku-cell" style="color: #4338ca; font-weight: 800; font-size: 13px;">
                             {{ $item->supplier_sku ?: '—' }}
+                        </td>
+                        <td class="photo-cell">
+                            @if(!empty($imageUrlByItemId[$item->id]))
+                                <img src="{{ $imageUrlByItemId[$item->id] }}" alt="Fotografía de {{ $item->product?->name ?? $item->product_name }}" class="product-photo" loading="eager">
+                            @else
+                                <span class="photo-missing">Sin foto</span>
+                            @endif
                         </td>
                         <td class="sku-cell" style="color: #64748b; font-size: 11px;">
                             {{ $item->product?->sku ?? $item->sku }}
