@@ -69,7 +69,7 @@ const STATUS_BADGES = {
     },
 }
 
-export default function PurchasingShow({ order, locations = [], supplier = null, canViewPdf = false, sharedPdfUrl = null, imageUrlByItemId = {}, photoStatusByItemId = {} }) {
+export default function PurchasingShow({ order, locations = [], supplier = null, canViewPdf = false, canManagePhotos = false, sharedPdfUrl = null, imageUrlByItemId = {}, photoStatusByItemId = {} }) {
     const badge = STATUS_BADGES[order.status] || STATUS_BADGES.DRAFT
 
     // Autofill defaults
@@ -95,9 +95,222 @@ export default function PurchasingShow({ order, locations = [], supplier = null,
     const [previewPhoto, setPreviewPhoto] = useState(null)
     const [failedPhotoIds, setFailedPhotoIds] = useState({})
 
+    // Photo manager modal state (approve candidate / search by title / manual override)
+    const [photoModalItem, setPhotoModalItem] = useState(null)
+    const [photoModalTab, setPhotoModalTab] = useState('candidates') // 'candidates' | 'manual'
+    const [photoSearchQuery, setPhotoSearchQuery] = useState('')
+    const [photoCandidates, setPhotoCandidates] = useState([])
+    const [photoCandidatesLoading, setPhotoCandidatesLoading] = useState(false)
+    const [photoActionSubmitting, setPhotoActionSubmitting] = useState(false)
+    const [photoModalFeedback, setPhotoModalFeedback] = useState(null)
+    const [photoNotesInput, setPhotoNotesInput] = useState('')
+    const [manualPhotoFile, setManualPhotoFile] = useState(null)
+    const [manualPhotoPreviewUrl, setManualPhotoPreviewUrl] = useState(null)
+
     const markPhotoFailed = (itemId) => {
         if (itemId == null) return
         setFailedPhotoIds((prev) => (prev[itemId] ? prev : { ...prev, [itemId]: true }))
+    }
+
+    const clearPhotoFailed = (itemId) => {
+        if (itemId == null) return
+        setFailedPhotoIds((prev) => {
+            if (!prev[itemId]) return prev
+            const next = { ...prev }
+            delete next[itemId]
+            return next
+        })
+    }
+
+    const csrfToken = () => document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || ''
+
+    const fetchPhotoCandidates = async (itemId, query = '') => {
+        setPhotoCandidatesLoading(true)
+        try {
+            const url = `/compras/ordenes/${order.id}/partidas/${itemId}/foto-candidatos${query.trim() ? `?q=${encodeURIComponent(query.trim())}` : ''}`
+            const res = await fetch(url, { headers: { Accept: 'application/json' } })
+            const data = await res.json()
+            if (data?.ok) {
+                setPhotoCandidates(data.candidates || [])
+            } else {
+                setPhotoCandidates([])
+            }
+        } catch {
+            setPhotoCandidates([])
+        } finally {
+            setPhotoCandidatesLoading(false)
+        }
+    }
+
+    const openPhotoManager = (item, initialTab = 'candidates') => {
+        if (!item?.id) return
+        const statusInfo = photoStatusByItemId[item.id]
+        setPhotoModalItem(item)
+        setPhotoModalTab(initialTab)
+        setPhotoSearchQuery('')
+        setPhotoCandidates([])
+        setPhotoModalFeedback(null)
+        setPhotoNotesInput(statusInfo?.photo_notes || item.photo_notes || '')
+        setManualPhotoFile(null)
+        if (manualPhotoPreviewUrl) {
+            URL.revokeObjectURL(manualPhotoPreviewUrl)
+        }
+        setManualPhotoPreviewUrl(null)
+        fetchPhotoCandidates(item.id, '')
+    }
+
+    const closePhotoManager = () => {
+        if (manualPhotoPreviewUrl) {
+            URL.revokeObjectURL(manualPhotoPreviewUrl)
+        }
+        setManualPhotoPreviewUrl(null)
+        setManualPhotoFile(null)
+        setPhotoModalItem(null)
+        setPhotoModalFeedback(null)
+    }
+
+    const reloadOrderPhotos = () => {
+        router.reload({
+            only: ['order', 'imageUrlByItemId', 'photoStatusByItemId'],
+            preserveScroll: true,
+        })
+    }
+
+    const handleApproveCandidate = async (candidate) => {
+        if (!photoModalItem?.id) return
+        setPhotoActionSubmitting(true)
+        setPhotoModalFeedback(null)
+        try {
+            const res = await fetch(`/compras/ordenes/${order.id}/partidas/${photoModalItem.id}/foto-aprobar`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRF-TOKEN': csrfToken(),
+                    Accept: 'application/json',
+                },
+                body: JSON.stringify({
+                    mlm: candidate.mlm,
+                    variation_id: candidate.variation_id || null,
+                    meli_account_id: candidate.meli_account_id || null,
+                    notes: photoNotesInput || null,
+                }),
+            })
+            const data = await res.json()
+            if (!res.ok || !data?.ok) {
+                setPhotoModalFeedback({ type: 'error', text: data?.error || 'No se pudo aprobar la fotografía.' })
+                return
+            }
+            clearPhotoFailed(photoModalItem.id)
+            reloadOrderPhotos()
+            await fetchPhotoCandidates(photoModalItem.id, photoSearchQuery)
+            setPhotoModalFeedback({
+                type: 'success',
+                text: `Foto aprobada (${candidate.mlm}${candidate.variation_id ? ` / var ${candidate.variation_id}` : ''}).`,
+            })
+        } catch {
+            setPhotoModalFeedback({ type: 'error', text: 'Error de comunicación al aprobar la fotografía.' })
+        } finally {
+            setPhotoActionSubmitting(false)
+        }
+    }
+
+    const handleRejectCandidateOrMarkNone = async (mlm = null, markNoPhoto = false) => {
+        if (!photoModalItem?.id) return
+        setPhotoActionSubmitting(true)
+        setPhotoModalFeedback(null)
+        try {
+            const res = await fetch(`/compras/ordenes/${order.id}/partidas/${photoModalItem.id}/foto-rechazar`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRF-TOKEN': csrfToken(),
+                    Accept: 'application/json',
+                },
+                body: JSON.stringify({
+                    mlm,
+                    mark_no_photo: markNoPhoto,
+                    notes: photoNotesInput || null,
+                }),
+            })
+            const data = await res.json()
+            if (!res.ok || !data?.ok) {
+                setPhotoModalFeedback({ type: 'error', text: data?.error || 'No se pudo registrar el rechazo.' })
+                return
+            }
+            clearPhotoFailed(photoModalItem.id)
+            reloadOrderPhotos()
+            await fetchPhotoCandidates(photoModalItem.id, photoSearchQuery)
+            setPhotoModalFeedback({ type: 'success', text: data.message || 'Actualizado.' })
+        } catch {
+            setPhotoModalFeedback({ type: 'error', text: 'Error de comunicación al rechazar candidato.' })
+        } finally {
+            setPhotoActionSubmitting(false)
+        }
+    }
+
+    const handleUploadManualPhoto = async (e) => {
+        e.preventDefault()
+        if (!photoModalItem?.id || !manualPhotoFile) {
+            setPhotoModalFeedback({ type: 'error', text: 'Selecciona una imagen JPG, PNG, WEBP o GIF (máx. 5 MB).' })
+            return
+        }
+        setPhotoActionSubmitting(true)
+        setPhotoModalFeedback(null)
+        try {
+            const formData = new FormData()
+            formData.append('image', manualPhotoFile)
+            if (photoNotesInput.trim()) {
+                formData.append('notes', photoNotesInput.trim())
+            }
+            const res = await fetch(`/compras/ordenes/${order.id}/partidas/${photoModalItem.id}/foto-manual`, {
+                method: 'POST',
+                headers: {
+                    'X-CSRF-TOKEN': csrfToken(),
+                    Accept: 'application/json',
+                },
+                body: formData,
+            })
+            const data = await res.json()
+            if (!res.ok || !data?.ok) {
+                setPhotoModalFeedback({ type: 'error', text: data?.error || 'No se pudo guardar la imagen manual.' })
+                return
+            }
+            clearPhotoFailed(photoModalItem.id)
+            reloadOrderPhotos()
+            setPhotoModalFeedback({ type: 'success', text: data.message || 'Imagen manual guardada.' })
+        } catch {
+            setPhotoModalFeedback({ type: 'error', text: 'Error de comunicación al subir la imagen manual.' })
+        } finally {
+            setPhotoActionSubmitting(false)
+        }
+    }
+
+    const handleResetItemPhoto = async () => {
+        if (!photoModalItem?.id) return
+        setPhotoActionSubmitting(true)
+        setPhotoModalFeedback(null)
+        try {
+            const res = await fetch(`/compras/ordenes/${order.id}/partidas/${photoModalItem.id}/foto-seleccion?clear_rejected=1`, {
+                method: 'DELETE',
+                headers: {
+                    'X-CSRF-TOKEN': csrfToken(),
+                    Accept: 'application/json',
+                },
+            })
+            const data = await res.json()
+            if (!res.ok || !data?.ok) {
+                setPhotoModalFeedback({ type: 'error', text: data?.error || 'No se pudo restablecer.' })
+                return
+            }
+            clearPhotoFailed(photoModalItem.id)
+            reloadOrderPhotos()
+            await fetchPhotoCandidates(photoModalItem.id, photoSearchQuery)
+            setPhotoModalFeedback({ type: 'success', text: data.message || 'Selección restablecida.' })
+        } catch {
+            setPhotoModalFeedback({ type: 'error', text: 'Error al restablecer selección automática.' })
+        } finally {
+            setPhotoActionSubmitting(false)
+        }
     }
 
     useEffect(() => {
@@ -1258,40 +1471,76 @@ export default function PurchasingShow({ order, locations = [], supplier = null,
                                                 )}
                                             </td>
                                             <td className="px-3 py-3 text-center">
-                                                {photoUrl ? (
-                                                    <button
-                                                        type="button"
-                                                        onClick={() =>
-                                                            setPreviewPhoto({
-                                                                src: photoUrl,
-                                                                title: displayName,
-                                                                sku: displaySku,
-                                                                supplierSku: item.supplier_sku || null,
-                                                            })
-                                                        }
-                                                        title="Clic para ampliar fotografía"
-                                                        className="group relative inline-flex items-center justify-center rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                                                    >
-                                                        <img
-                                                            src={photoUrl}
-                                                            alt={displayName}
-                                                            loading="lazy"
-                                                            onError={() => markPhotoFailed(item.id)}
-                                                            className="mx-auto h-14 w-14 sm:h-16 sm:w-16 rounded-lg border border-slate-200 bg-white object-contain shadow-xs transition group-hover:scale-105 group-hover:border-indigo-400"
-                                                        />
-                                                    </button>
-                                                ) : photoStatus?.status === 'needs_review' ? (
-                                                    <span
-                                                        title="Múltiples publicaciones o variaciones de Mercado Libre con fotografías distintas para este SKU. Vincula la publicación exacta en canales de inventario."
-                                                        className="inline-block rounded border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-300"
-                                                    >
-                                                        Requiere revisión
-                                                    </span>
-                                                ) : (
-                                                    <span className="inline-block rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-400 dark:bg-neutral-800 dark:text-slate-500">
-                                                        Sin foto
-                                                    </span>
-                                                )}
+                                                <div className="flex flex-col items-center gap-1">
+                                                    {photoUrl ? (
+                                                        <button
+                                                            type="button"
+                                                            onClick={() =>
+                                                                setPreviewPhoto({
+                                                                    src: photoUrl,
+                                                                    title: displayName,
+                                                                    sku: displaySku,
+                                                                    supplierSku: item.supplier_sku || null,
+                                                                })
+                                                            }
+                                                            title="Clic para ampliar fotografía"
+                                                            className="group relative inline-flex items-center justify-center rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                                        >
+                                                            <img
+                                                                src={photoUrl}
+                                                                alt={displayName}
+                                                                loading="lazy"
+                                                                onError={() => markPhotoFailed(item.id)}
+                                                                className="mx-auto h-14 w-14 sm:h-16 sm:w-16 rounded-lg border border-slate-200 bg-white object-contain shadow-xs transition group-hover:scale-105 group-hover:border-indigo-400"
+                                                            />
+                                                        </button>
+                                                    ) : photoStatus?.status === 'needs_review' ? (
+                                                        canManagePhotos && item.id ? (
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => openPhotoManager(item, 'candidates')}
+                                                                title="Múltiples publicaciones o variaciones encontradas. Haz clic para elegir la correcta."
+                                                                className="inline-block rounded border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-800 hover:bg-amber-100 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-300"
+                                                            >
+                                                                Requiere revisión{photoStatus?.candidates_count ? ` (${photoStatus.candidates_count})` : ''}
+                                                            </button>
+                                                        ) : (
+                                                            <span
+                                                                title="Múltiples publicaciones o variaciones de Mercado Libre con fotografías distintas para este SKU."
+                                                                className="inline-block rounded border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-300"
+                                                            >
+                                                                Requiere revisión
+                                                            </span>
+                                                        )
+                                                    ) : (
+                                                        <span className="inline-block rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-400 dark:bg-neutral-800 dark:text-slate-500">
+                                                            {photoStatus?.status === 'manual_rejected' ? 'Sin foto (rechazada)' : 'Sin foto'}
+                                                        </span>
+                                                    )}
+
+                                                    {photoUrl && photoStatus?.audit_category === 'manual_override' && (
+                                                        <span className="inline-block rounded bg-indigo-50 px-1.5 py-0.5 text-[9px] font-bold text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300">
+                                                            Manual
+                                                        </span>
+                                                    )}
+                                                    {photoUrl && photoStatus?.variation_label && (
+                                                        <span
+                                                            className="max-w-[96px] truncate rounded bg-emerald-50 px-1.5 py-0.5 text-[9px] font-medium text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300"
+                                                            title={photoStatus.variation_label}
+                                                        >
+                                                            {photoStatus.variation_label}
+                                                        </span>
+                                                    )}
+                                                    {canManagePhotos && item.id && !isEditing && (
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => openPhotoManager(item, photoStatus?.audit_category === 'manual_override' ? 'manual' : 'candidates')}
+                                                            className="print:hidden text-[10px] font-semibold text-indigo-600 hover:text-indigo-800 hover:underline dark:text-indigo-400 dark:hover:text-indigo-300"
+                                                        >
+                                                            {photoUrl ? 'Cambiar' : 'Asignar foto'}
+                                                        </button>
+                                                    )}
+                                                </div>
                                             </td>
                                             <td className="px-3 py-3 font-mono text-xs text-slate-500 dark:text-slate-400">
                                                 {item.product?.sku || item.sku || '-'}
@@ -2841,6 +3090,302 @@ export default function PurchasingShow({ order, locations = [], supplier = null,
                                 alt={previewPhoto.title}
                                 className="max-h-[70vh] w-auto max-w-full rounded-xl border border-slate-200 bg-white object-contain shadow-sm"
                             />
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Modal Administrativo: Selección / Aprobación de Fotografía o Imagen Manual */}
+            {photoModalItem && (
+                <div
+                    className="print:hidden fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-xs"
+                    onClick={closePhotoManager}
+                    role="dialog"
+                    aria-modal="true"
+                    aria-label="Gestionar fotografía de partida"
+                >
+                    <div
+                        className="flex max-h-[90vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl dark:bg-neutral-900"
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div className="flex items-start justify-between gap-4 border-b border-slate-200 px-6 py-4 dark:border-neutral-800">
+                            <div className="min-w-0">
+                                <h3 className="text-base font-bold text-slate-900 dark:text-white">
+                                    Gestionar Fotografía — {photoModalItem.product?.name || photoModalItem.product_name}
+                                </h3>
+                                <div className="mt-1 flex flex-wrap items-center gap-3 text-xs text-slate-500 dark:text-slate-400">
+                                    <span>SKU: <strong className="font-mono text-slate-700 dark:text-slate-200">{photoModalItem.product?.sku || photoModalItem.sku}</strong></span>
+                                    {photoModalItem.supplier_sku && (
+                                        <span>Cód. Proveedor: <strong className="font-mono text-indigo-600 dark:text-indigo-400">{photoModalItem.supplier_sku}</strong></span>
+                                    )}
+                                    {photoStatusByItemId[photoModalItem.id]?.mlm && (
+                                        <span className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[11px] dark:bg-neutral-800">
+                                            Actual: {photoStatusByItemId[photoModalItem.id].mlm}
+                                            {photoStatusByItemId[photoModalItem.id].variation_id ? ` / Var ${photoStatusByItemId[photoModalItem.id].variation_id}` : ''}
+                                        </span>
+                                    )}
+                                </div>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={closePhotoManager}
+                                className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-neutral-800"
+                            >
+                                <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                                </svg>
+                            </button>
+                        </div>
+
+                        <div className="flex items-center justify-between border-b border-slate-200 px-6 pt-3 dark:border-neutral-800">
+                            <div className="flex gap-2">
+                                <button
+                                    type="button"
+                                    onClick={() => setPhotoModalTab('candidates')}
+                                    className={`border-b-2 px-3 py-2 text-xs font-bold transition ${
+                                        photoModalTab === 'candidates'
+                                            ? 'border-indigo-600 text-indigo-600 dark:border-indigo-400 dark:text-indigo-400'
+                                            : 'border-transparent text-slate-500 hover:text-slate-700 dark:text-slate-400'
+                                    }`}
+                                >
+                                    Candidatos y Búsqueda ML ({photoCandidates.length})
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => setPhotoModalTab('manual')}
+                                    className={`border-b-2 px-3 py-2 text-xs font-bold transition ${
+                                        photoModalTab === 'manual'
+                                            ? 'border-indigo-600 text-indigo-600 dark:border-indigo-400 dark:text-indigo-400'
+                                            : 'border-transparent text-slate-500 hover:text-slate-700 dark:text-slate-400'
+                                    }`}
+                                >
+                                    Imagen Manual / Override
+                                </button>
+                            </div>
+                            {photoStatusByItemId[photoModalItem.id]?.photo_source_mode && (
+                                <button
+                                    type="button"
+                                    disabled={photoActionSubmitting}
+                                    onClick={handleResetItemPhoto}
+                                    className="mb-1.5 rounded-lg border border-slate-200 px-2.5 py-1 text-[11px] font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50 dark:border-neutral-700 dark:text-slate-300 dark:hover:bg-neutral-800"
+                                >
+                                    Restablecer automático
+                                </button>
+                            )}
+                        </div>
+
+                        {photoModalFeedback && (
+                            <div className={`mx-6 mt-3 rounded-xl border px-4 py-2 text-xs font-semibold ${
+                                photoModalFeedback.type === 'success'
+                                    ? 'border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-300'
+                                    : 'border-rose-200 bg-rose-50 text-rose-800 dark:border-rose-900 dark:bg-rose-950/40 dark:text-rose-300'
+                            }`}>
+                                {photoModalFeedback.text}
+                            </div>
+                        )}
+
+                        <div className="flex-1 overflow-y-auto p-6">
+                            <div className="mb-4">
+                                <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                                    Nota de auditoría / referencia (opcional)
+                                </label>
+                                <input
+                                    type="text"
+                                    maxLength={500}
+                                    value={photoNotesInput}
+                                    onChange={(e) => setPhotoNotesInput(e.target.value)}
+                                    placeholder="Ej. Aprobada publicación correcta, variación Blanco Azul, o referencia sobre 28x19x4"
+                                    className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-xs text-slate-900 focus:border-indigo-500 focus:ring-indigo-500 dark:border-neutral-700 dark:bg-neutral-800 dark:text-white"
+                                />
+                            </div>
+
+                            {photoModalTab === 'candidates' ? (
+                                <div className="space-y-4">
+                                    <form
+                                        onSubmit={(e) => {
+                                            e.preventDefault()
+                                            fetchPhotoCandidates(photoModalItem.id, photoSearchQuery)
+                                        }}
+                                        className="flex flex-col gap-2 sm:flex-row"
+                                    >
+                                        <input
+                                            type="text"
+                                            value={photoSearchQuery}
+                                            onChange={(e) => setPhotoSearchQuery(e.target.value)}
+                                            placeholder="Buscar por título, MLM (ej. MLM2611925824) o SKU..."
+                                            className="flex-1 rounded-xl border border-slate-300 px-3 py-2 text-xs text-slate-900 focus:border-indigo-500 focus:ring-indigo-500 dark:border-neutral-700 dark:bg-neutral-800 dark:text-white"
+                                        />
+                                        <button
+                                            type="submit"
+                                            disabled={photoCandidatesLoading}
+                                            className="rounded-xl bg-indigo-600 px-4 py-2 text-xs font-bold text-white hover:bg-indigo-700 disabled:opacity-50"
+                                        >
+                                            {photoCandidatesLoading ? 'Buscando...' : 'Buscar candidatos'}
+                                        </button>
+                                    </form>
+
+                                    <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                                        La búsqueda por título solo propone candidatos para revisión; ninguna coincidencia por nombre se asigna automáticamente.
+                                    </p>
+
+                                    {photoCandidatesLoading ? (
+                                        <div className="py-10 text-center text-xs text-slate-500">Cargando candidatos de Mercado Libre...</div>
+                                    ) : photoCandidates.length === 0 ? (
+                                        <div className="rounded-xl border border-dashed border-slate-300 p-8 text-center text-xs text-slate-500 dark:border-neutral-700">
+                                            No se encontraron candidatos en Mercado Libre con ese criterio. Prueba otro término o sube una imagen manual en la pestaña «Imagen Manual / Override».
+                                        </div>
+                                    ) : (
+                                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                                            {photoCandidates.map((candidate) => (
+                                                <div
+                                                    key={`${candidate.mlm}-${candidate.variation_id || 'cover'}`}
+                                                    className={`flex gap-3 rounded-xl border p-3 transition ${
+                                                        candidate.is_selected
+                                                            ? 'border-emerald-400 bg-emerald-50/50 dark:border-emerald-700 dark:bg-emerald-950/20'
+                                                            : candidate.is_rejected
+                                                                ? 'border-rose-200 bg-rose-50/30 opacity-75 dark:border-rose-900 dark:bg-rose-950/20'
+                                                                : 'border-slate-200 bg-white dark:border-neutral-800 dark:bg-neutral-950'
+                                                    }`}
+                                                >
+                                                    <button
+                                                        type="button"
+                                                        onClick={() =>
+                                                            setPreviewPhoto({
+                                                                src: candidate.preview_url || candidate.url,
+                                                                title: candidate.title || candidate.mlm,
+                                                                sku: candidate.sku || photoModalItem.sku,
+                                                            })
+                                                        }
+                                                        className="h-20 w-20 shrink-0 overflow-hidden rounded-lg border border-slate-200 bg-white"
+                                                        title="Ampliar candidato"
+                                                    >
+                                                        <img
+                                                            src={candidate.preview_url || candidate.url}
+                                                            alt={candidate.title || candidate.mlm}
+                                                            className="h-full w-full object-contain"
+                                                        />
+                                                    </button>
+                                                    <div className="min-w-0 flex-1">
+                                                        <p className="line-clamp-2 text-xs font-bold text-slate-900 dark:text-white">
+                                                            {candidate.title || 'Publicación sin título en snapshot'}
+                                                        </p>
+                                                        <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[10px]">
+                                                            <span className="rounded bg-slate-100 px-1.5 py-0.5 font-mono font-bold text-slate-700 dark:bg-neutral-800 dark:text-slate-200">
+                                                                {candidate.mlm}
+                                                            </span>
+                                                            {candidate.variation_id && (
+                                                                <span className="rounded bg-indigo-50 px-1.5 py-0.5 font-mono font-semibold text-indigo-700 dark:bg-indigo-950/50 dark:text-indigo-300">
+                                                                    Var: {candidate.variation_id}
+                                                                </span>
+                                                            )}
+                                                            {candidate.listing_status && (
+                                                                <span className="rounded bg-slate-100 px-1.5 py-0.5 uppercase text-slate-600 dark:bg-neutral-800 dark:text-slate-400">
+                                                                    {candidate.listing_status}
+                                                                </span>
+                                                            )}
+                                                            {candidate.account_label && (
+                                                                <span className="text-slate-400">{candidate.account_label}</span>
+                                                            )}
+                                                        </div>
+                                                        {candidate.variation_label && (
+                                                            <p className="mt-1 text-[11px] font-semibold text-emerald-700 dark:text-emerald-300">
+                                                                {candidate.variation_label}
+                                                            </p>
+                                                        )}
+                                                        {candidate.sku && (
+                                                            <p className="mt-0.5 font-mono text-[10px] text-slate-500">
+                                                                SKU ML: {candidate.sku}
+                                                            </p>
+                                                        )}
+                                                        <div className="mt-2 flex flex-wrap items-center gap-2">
+                                                            <button
+                                                                type="button"
+                                                                disabled={photoActionSubmitting}
+                                                                onClick={() => handleApproveCandidate(candidate)}
+                                                                className="rounded-lg bg-emerald-600 px-2.5 py-1 text-[11px] font-bold text-white hover:bg-emerald-700 disabled:opacity-50"
+                                                            >
+                                                                {candidate.is_selected ? 'Aprobada ✓' : 'Aprobar'}
+                                                            </button>
+                                                            {!candidate.is_rejected && (
+                                                                <button
+                                                                    type="button"
+                                                                    disabled={photoActionSubmitting}
+                                                                    onClick={() => handleRejectCandidateOrMarkNone(candidate.mlm, false)}
+                                                                    className="rounded-lg border border-rose-200 px-2 py-1 text-[11px] font-semibold text-rose-700 hover:bg-rose-50 disabled:opacity-50 dark:border-rose-900 dark:text-rose-300 dark:hover:bg-rose-950/40"
+                                                                >
+                                                                    Rechazar MLM
+                                                                </button>
+                                                            )}
+                                                            {candidate.is_rejected && (
+                                                                <span className="text-[10px] font-bold text-rose-600">Rechazada</span>
+                                                            )}
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+                            ) : (
+                                <div className="space-y-6">
+                                    <form onSubmit={handleUploadManualPhoto} className="rounded-xl border border-slate-200 p-4 dark:border-neutral-800">
+                                        <h4 className="text-xs font-bold uppercase tracking-wider text-slate-700 dark:text-slate-200">
+                                            Subir imagen manual / referencia del proveedor
+                                        </h4>
+                                        <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                                            Útil para productos sin publicación confiable en Mercado Libre (ej. sobres tipo burbuja 28×19×4 o 26×36×4). Se mostrará en la orden y en el PDF.
+                                        </p>
+                                        <div className="mt-3 flex flex-col gap-4 sm:flex-row sm:items-center">
+                                            <input
+                                                type="file"
+                                                accept="image/jpeg,image/png,image/webp,image/gif"
+                                                onChange={(e) => {
+                                                    const file = e.target.files?.[0] || null
+                                                    if (manualPhotoPreviewUrl) {
+                                                        URL.revokeObjectURL(manualPhotoPreviewUrl)
+                                                    }
+                                                    setManualPhotoFile(file)
+                                                    setManualPhotoPreviewUrl(file ? URL.createObjectURL(file) : null)
+                                                }}
+                                                className="text-xs text-slate-700 file:mr-3 file:rounded-lg file:border-0 file:bg-indigo-50 file:px-3 file:py-2 file:text-xs file:font-bold file:text-indigo-700 hover:file:bg-indigo-100 dark:text-slate-200"
+                                            />
+                                            {manualPhotoPreviewUrl && (
+                                                <img
+                                                    src={manualPhotoPreviewUrl}
+                                                    alt="Vista previa manual"
+                                                    className="h-20 w-20 rounded-lg border border-slate-200 bg-white object-contain"
+                                                />
+                                            )}
+                                        </div>
+                                        <div className="mt-4 flex flex-wrap gap-2">
+                                            <button
+                                                type="submit"
+                                                disabled={photoActionSubmitting || !manualPhotoFile}
+                                                className="rounded-xl bg-indigo-600 px-4 py-2 text-xs font-bold text-white hover:bg-indigo-700 disabled:opacity-50"
+                                            >
+                                                {photoActionSubmitting ? 'Guardando...' : 'Guardar imagen manual'}
+                                            </button>
+                                        </div>
+                                    </form>
+
+                                    <div className="rounded-xl border border-rose-200 bg-rose-50/40 p-4 dark:border-rose-900 dark:bg-rose-950/20">
+                                        <h4 className="text-xs font-bold text-rose-800 dark:text-rose-300">
+                                            Ocultar / rechazar foto automática
+                                        </h4>
+                                        <p className="mt-1 text-xs text-rose-700/80 dark:text-rose-300/80">
+                                            Si una coincidencia automática de Mercado Libre es incorrecta y aún no tienes la imagen definitiva, puedes marcar esta partida explícitamente sin foto.
+                                        </p>
+                                        <button
+                                            type="button"
+                                            disabled={photoActionSubmitting}
+                                            onClick={() => handleRejectCandidateOrMarkNone(null, true)}
+                                            className="mt-3 rounded-xl border border-rose-300 bg-white px-3 py-1.5 text-xs font-bold text-rose-700 hover:bg-rose-50 disabled:opacity-50 dark:border-rose-800 dark:bg-neutral-900 dark:text-rose-300"
+                                        >
+                                            Marcar partida sin foto
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
                         </div>
                     </div>
                 </div>

@@ -258,6 +258,7 @@ class PurchaseOrderController extends Controller
 
         $user = $request->user();
         $canViewPdf = $user !== null && $user->can('viewPdf', $purchaseOrder);
+        $canManagePhotos = $user !== null && $user->can('managePhotos', $purchaseOrder);
         $sharedPdfUrl = ($user !== null && $user->can('sharePdf', $purchaseOrder))
             ? $this->buildExternalSignedPdfUrl($request, $purchaseOrder)
             : null;
@@ -271,6 +272,7 @@ class PurchaseOrderController extends Controller
             'locations' => $locations,
             'supplier' => $supplier,
             'canViewPdf' => $canViewPdf,
+            'canManagePhotos' => $canManagePhotos,
             'sharedPdfUrl' => $sharedPdfUrl,
         ]);
     }
@@ -331,7 +333,16 @@ class PurchaseOrderController extends Controller
             abort(404);
         }
 
-        $asset = $this->meliImageCache->fetch($resolution['url']);
+        if (
+            $resolution['source'] === PurchaseOrderMeliImageResolver::SOURCE_MANUAL_UPLOAD
+            && is_string($resolution['manual_path'] ?? null)
+            && $resolution['manual_path'] !== ''
+        ) {
+            $asset = $this->meliImageCache->readManualPhoto($resolution['manual_path']);
+        } else {
+            $asset = $this->meliImageCache->fetch($resolution['url']);
+        }
+
         if ($asset === null) {
             abort(404);
         }
@@ -345,8 +356,308 @@ class PurchaseOrderController extends Controller
             ]);
     }
 
+    public function previewPhoto(Request $request, PurchaseOrder $purchaseOrder): HttpResponse
+    {
+        Gate::authorize('managePhotos', $purchaseOrder);
+
+        $trustedUrl = $this->meliImageResolver->trustedUrl($request->query('url'));
+        if ($trustedUrl === null) {
+            abort(404);
+        }
+
+        $asset = $this->meliImageCache->fetch($trustedUrl);
+        if ($asset === null) {
+            abort(404);
+        }
+
+        return response($asset['bytes'], 200)
+            ->withHeaders([
+                'Content-Type' => $asset['mime'],
+                'X-Content-Type-Options' => 'nosniff',
+                'Cache-Control' => 'private, max-age=86400',
+                'X-Robots-Tag' => 'noindex, nofollow, noarchive',
+            ]);
+    }
+
+    public function itemPhotoCandidates(Request $request, PurchaseOrder $purchaseOrder, PurchaseOrderItem $item): JsonResponse
+    {
+        if ((int) $item->purchase_order_id !== (int) $purchaseOrder->id) {
+            abort(404);
+        }
+
+        Gate::authorize('managePhotos', $purchaseOrder);
+
+        $query = $request->query('q');
+        $queryStr = is_string($query) ? trim($query) : null;
+
+        $resolution = $this->meliImageResolver->resolveForItem($purchaseOrder, $item);
+        $candidates = $this->meliImageResolver->discoverCandidatesForItem($item, $queryStr);
+
+        $candidatesWithPreview = array_map(function (array $candidate) use ($purchaseOrder): array {
+            $candidate['preview_url'] = route('purchasing.orders.preview-photo', [
+                'purchaseOrder' => $purchaseOrder->id,
+                'url' => $candidate['url'],
+            ], false);
+
+            return $candidate;
+        }, $candidates);
+
+        return response()->json([
+            'ok' => true,
+            'item' => [
+                'id' => (int) $item->id,
+                'sku' => trim((string) ($item->product?->sku ?: $item->sku)),
+                'supplier_sku' => $item->supplier_sku,
+                'product_name' => $item->product?->name ?? $item->product_name,
+                'photo_source_mode' => $item->getAttribute('photo_source_mode'),
+                'approved_mlm' => $item->getAttribute('approved_mlm'),
+                'approved_variation_id' => $item->getAttribute('approved_variation_id'),
+                'photo_notes' => $item->getAttribute('photo_notes'),
+                'rejected_mlms' => $item->getAttribute('rejected_mlms') ?? [],
+            ],
+            'current_resolution' => $resolution,
+            'candidates' => $candidatesWithPreview,
+        ]);
+    }
+
+    public function approveItemPhoto(Request $request, PurchaseOrder $purchaseOrder, PurchaseOrderItem $item): JsonResponse
+    {
+        if ((int) $item->purchase_order_id !== (int) $purchaseOrder->id) {
+            abort(404);
+        }
+
+        Gate::authorize('managePhotos', $purchaseOrder);
+
+        $validated = $request->validate([
+            'mlm' => ['required', 'string', 'max:40'],
+            'variation_id' => ['nullable', 'string', 'max:64'],
+            'meli_account_id' => ['nullable', 'integer'],
+            'notes' => ['nullable', 'string', 'max:500'],
+        ]);
+
+        $variationId = isset($validated['variation_id']) && trim((string) $validated['variation_id']) !== ''
+            ? trim((string) $validated['variation_id'])
+            : null;
+        $meliAccountId = isset($validated['meli_account_id']) ? (int) $validated['meli_account_id'] : null;
+
+        $candidate = $this->meliImageResolver->resolveExplicitCandidate(
+            $validated['mlm'],
+            $variationId,
+            $meliAccountId,
+        );
+
+        if ($candidate === null) {
+            return response()->json([
+                'ok' => false,
+                'error' => 'No se encontró una fotografía válida en Mercado Libre para la publicación o variación seleccionada.',
+            ], 422);
+        }
+
+        $oldManualPath = $item->getAttribute('manual_photo_path');
+
+        $rejected = is_array($item->getAttribute('rejected_mlms')) ? $item->getAttribute('rejected_mlms') : [];
+        $rejected = array_values(array_filter(
+            $rejected,
+            static fn (mixed $entry): bool => strtoupper(trim((string) $entry)) !== $candidate['mlm']
+        ));
+
+        $item->update([
+            'photo_source_mode' => PurchaseOrderItem::PHOTO_MODE_APPROVED_ML,
+            'approved_mlm' => $candidate['mlm'],
+            'approved_variation_id' => $candidate['variation_id'],
+            'approved_meli_account_id' => $candidate['meli_account_id'],
+            'approved_photo_url' => $candidate['url'],
+            'manual_photo_path' => null,
+            'manual_photo_mime' => null,
+            'photo_notes' => isset($validated['notes']) && trim((string) $validated['notes']) !== '' ? trim((string) $validated['notes']) : null,
+            'rejected_mlms' => $rejected !== [] ? $rejected : null,
+            'photo_updated_by' => $request->user()?->id,
+            'photo_updated_at' => now(),
+        ]);
+
+        if (is_string($oldManualPath) && $oldManualPath !== '') {
+            $this->meliImageCache->deleteManualPhoto($oldManualPath);
+        }
+
+        $item->refresh();
+        $resolution = $this->meliImageResolver->resolveForItem($purchaseOrder, $item);
+
+        return response()->json([
+            'ok' => true,
+            'message' => 'Fotografía aprobada para la partida.',
+            'resolution' => $resolution,
+            'photo_url' => $this->buildSingleItemPhotoUrl($purchaseOrder, $item, false),
+        ]);
+    }
+
+    public function uploadItemManualPhoto(Request $request, PurchaseOrder $purchaseOrder, PurchaseOrderItem $item): JsonResponse
+    {
+        if ((int) $item->purchase_order_id !== (int) $purchaseOrder->id) {
+            abort(404);
+        }
+
+        Gate::authorize('managePhotos', $purchaseOrder);
+
+        $validated = $request->validate([
+            'image' => ['required', 'file', 'mimes:jpg,jpeg,png,webp,gif', 'max:5120'],
+            'notes' => ['nullable', 'string', 'max:500'],
+        ]);
+
+        $file = $request->file('image');
+        $bytes = $file !== null ? (string) file_get_contents($file->getRealPath()) : '';
+        $stored = $this->meliImageCache->storeManualPhoto((int) $purchaseOrder->id, (int) $item->id, $bytes);
+
+        if ($stored === null) {
+            return response()->json([
+                'ok' => false,
+                'error' => 'El archivo no es una imagen válida (JPG, PNG, WEBP o GIF de máximo 5 MB).',
+            ], 422);
+        }
+
+        $oldManualPath = $item->getAttribute('manual_photo_path');
+
+        $item->update([
+            'photo_source_mode' => PurchaseOrderItem::PHOTO_MODE_MANUAL,
+            'manual_photo_path' => $stored['path'],
+            'manual_photo_mime' => $stored['mime'],
+            'approved_mlm' => null,
+            'approved_variation_id' => null,
+            'approved_meli_account_id' => null,
+            'approved_photo_url' => null,
+            'photo_notes' => isset($validated['notes']) && trim((string) $validated['notes']) !== '' ? trim((string) $validated['notes']) : null,
+            'photo_updated_by' => $request->user()?->id,
+            'photo_updated_at' => now(),
+        ]);
+
+        if (is_string($oldManualPath) && $oldManualPath !== '' && $oldManualPath !== $stored['path']) {
+            $this->meliImageCache->deleteManualPhoto($oldManualPath);
+        }
+
+        $item->refresh();
+        $resolution = $this->meliImageResolver->resolveForItem($purchaseOrder, $item);
+
+        return response()->json([
+            'ok' => true,
+            'message' => 'Imagen manual guardada correctamente.',
+            'resolution' => $resolution,
+            'photo_url' => $this->buildSingleItemPhotoUrl($purchaseOrder, $item, false),
+        ]);
+    }
+
+    public function rejectItemPhoto(Request $request, PurchaseOrder $purchaseOrder, PurchaseOrderItem $item): JsonResponse
+    {
+        if ((int) $item->purchase_order_id !== (int) $purchaseOrder->id) {
+            abort(404);
+        }
+
+        Gate::authorize('managePhotos', $purchaseOrder);
+
+        $validated = $request->validate([
+            'mlm' => ['nullable', 'string', 'max:40'],
+            'mark_no_photo' => ['nullable', 'boolean'],
+            'notes' => ['nullable', 'string', 'max:500'],
+        ]);
+
+        $mlm = isset($validated['mlm']) ? strtoupper(trim((string) $validated['mlm'])) : '';
+        $markNoPhoto = (bool) ($validated['mark_no_photo'] ?? ($mlm === ''));
+
+        $rejected = is_array($item->getAttribute('rejected_mlms')) ? $item->getAttribute('rejected_mlms') : [];
+        if ($mlm !== '') {
+            $rejected[] = $mlm;
+            $rejected = array_values(array_unique(array_map(
+                static fn (mixed $entry): string => strtoupper(trim((string) $entry)),
+                $rejected
+            )));
+        }
+
+        $updates = [
+            'rejected_mlms' => $rejected !== [] ? $rejected : null,
+            'photo_updated_by' => $request->user()?->id,
+            'photo_updated_at' => now(),
+        ];
+
+        if (isset($validated['notes']) && trim((string) $validated['notes']) !== '') {
+            $updates['photo_notes'] = trim((string) $validated['notes']);
+        }
+
+        $oldManualPath = $item->getAttribute('manual_photo_path');
+        $clearApproval = $markNoPhoto || ($mlm !== '' && strtoupper(trim((string) $item->getAttribute('approved_mlm'))) === $mlm);
+
+        if ($clearApproval) {
+            $updates['approved_mlm'] = null;
+            $updates['approved_variation_id'] = null;
+            $updates['approved_meli_account_id'] = null;
+            $updates['approved_photo_url'] = null;
+            if ($markNoPhoto) {
+                $updates['photo_source_mode'] = PurchaseOrderItem::PHOTO_MODE_NONE;
+                $updates['manual_photo_path'] = null;
+                $updates['manual_photo_mime'] = null;
+            } elseif ($item->getAttribute('photo_source_mode') === PurchaseOrderItem::PHOTO_MODE_APPROVED_ML) {
+                $updates['photo_source_mode'] = null;
+            }
+        }
+
+        $item->update($updates);
+
+        if ($markNoPhoto && is_string($oldManualPath) && $oldManualPath !== '') {
+            $this->meliImageCache->deleteManualPhoto($oldManualPath);
+        }
+
+        $item->refresh();
+
+        return response()->json([
+            'ok' => true,
+            'message' => $markNoPhoto ? 'Partida marcada sin fotografía.' : 'Candidato rechazado para esta partida.',
+            'resolution' => $this->meliImageResolver->resolveForItem($purchaseOrder, $item),
+        ]);
+    }
+
+    public function resetItemPhoto(Request $request, PurchaseOrder $purchaseOrder, PurchaseOrderItem $item): JsonResponse
+    {
+        if ((int) $item->purchase_order_id !== (int) $purchaseOrder->id) {
+            abort(404);
+        }
+
+        Gate::authorize('managePhotos', $purchaseOrder);
+
+        $oldManualPath = $item->getAttribute('manual_photo_path');
+        $clearRejected = $request->boolean('clear_rejected', false);
+
+        $updates = [
+            'photo_source_mode' => null,
+            'approved_mlm' => null,
+            'approved_variation_id' => null,
+            'approved_meli_account_id' => null,
+            'approved_photo_url' => null,
+            'manual_photo_path' => null,
+            'manual_photo_mime' => null,
+            'photo_notes' => null,
+            'photo_updated_by' => $request->user()?->id,
+            'photo_updated_at' => null,
+        ];
+
+        if ($clearRejected) {
+            $updates['rejected_mlms'] = null;
+        }
+
+        $item->update($updates);
+
+        if (is_string($oldManualPath) && $oldManualPath !== '') {
+            $this->meliImageCache->deleteManualPhoto($oldManualPath);
+        }
+
+        $item->refresh();
+
+        return response()->json([
+            'ok' => true,
+            'message' => 'Selección manual restablecida a resolución automática.',
+            'resolution' => $this->meliImageResolver->resolveForItem($purchaseOrder, $item),
+            'photo_url' => $this->buildSingleItemPhotoUrl($purchaseOrder, $item, false),
+        ]);
+    }
+
     /**
-     * Build same-origin cached photo URLs for items that resolved to a verified Mercado Libre picture.
+     * Build same-origin cached photo URLs for items that resolved to a verified picture.
      *
      * @param  array<int, array<string, mixed>>  $resolved
      * @return array<int, string>
@@ -356,6 +667,7 @@ class PurchaseOrderController extends Controller
         array $resolved,
         bool $useSignedPublicUrls,
     ): array {
+        $itemsById = $purchaseOrder->items->keyBy('id');
         $urls = [];
 
         foreach ($resolved as $itemId => $entry) {
@@ -363,17 +675,28 @@ class PurchaseOrderController extends Controller
                 continue;
             }
 
+            /** @var ?PurchaseOrderItem $item */
+            $item = $itemsById->get((int) $itemId);
+            $version = $item?->getAttribute('photo_updated_at')?->timestamp;
+            $params = [
+                'purchaseOrder' => $purchaseOrder->id,
+                'item' => (int) $itemId,
+            ];
+            if (is_int($version) && $version > 0) {
+                $params['v'] = $version;
+            }
+
             if ($useSignedPublicUrls) {
                 $urls[(int) $itemId] = URL::temporarySignedRoute(
                     'purchasing.orders.public-item-photo',
                     now()->addDays(7),
-                    ['purchaseOrder' => $purchaseOrder->id, 'item' => (int) $itemId],
+                    $params,
                     absolute: false
                 );
             } else {
                 $urls[(int) $itemId] = route(
                     'purchasing.orders.item-photo',
-                    ['purchaseOrder' => $purchaseOrder->id, 'item' => (int) $itemId],
+                    $params,
                     false
                 );
             }
@@ -382,24 +705,79 @@ class PurchaseOrderController extends Controller
         return $urls;
     }
 
+    private function buildSingleItemPhotoUrl(
+        PurchaseOrder $purchaseOrder,
+        PurchaseOrderItem $item,
+        bool $useSignedPublicUrls,
+    ): ?string {
+        $resolved = $this->meliImageResolver->resolveForItem($purchaseOrder, $item);
+        if (! is_string($resolved['url']) || $resolved['url'] === '') {
+            return null;
+        }
+
+        $version = $item->getAttribute('photo_updated_at')?->timestamp;
+        $params = [
+            'purchaseOrder' => $purchaseOrder->id,
+            'item' => (int) $item->id,
+        ];
+        if (is_int($version) && $version > 0) {
+            $params['v'] = $version;
+        }
+
+        return $useSignedPublicUrls
+            ? URL::temporarySignedRoute('purchasing.orders.public-item-photo', now()->addDays(7), $params, absolute: false)
+            : route('purchasing.orders.item-photo', $params, false);
+    }
+
     /**
-     * Build UI photo diagnostic badges (e.g., ambiguous multi-publication conflicts requiring review).
+     * Build UI photo diagnostic metadata (resolved source/variation, manual override, or needs_review).
      *
      * @param  array<int, array<string, mixed>>  $resolved
-     * @return array<int, array{status: string, reason: string, candidates_count: int}>
+     * @return array<int, array<string, mixed>>
      */
     private function buildItemPhotoStatusesFromResolution(array $resolved): array
     {
         $statuses = [];
 
         foreach ($resolved as $itemId => $entry) {
-            if (! empty($entry['ambiguous']) && empty($entry['url'])) {
+            $hasUrl = is_string($entry['url'] ?? null) && $entry['url'] !== '';
+            $isAmbiguous = ! empty($entry['ambiguous']);
+
+            if ($isAmbiguous && ! $hasUrl) {
                 $statuses[(int) $itemId] = [
                     'status' => 'needs_review',
+                    'audit_category' => $entry['audit_category'] ?? PurchaseOrderMeliImageResolver::AUDIT_PENDING_MANUAL_APPROVAL,
                     'reason' => (string) ($entry['reason'] ?? 'ambiguous'),
                     'candidates_count' => count((array) ($entry['ambiguous_matches'] ?? [])),
+                    'source' => $entry['source'] ?? null,
+                    'mlm' => $entry['mlm'] ?? null,
+                    'variation_id' => $entry['variation_id'] ?? null,
+                    'variation_label' => $entry['variation_label'] ?? null,
+                    'listing_title' => $entry['listing_title'] ?? null,
+                    'photo_source_mode' => $entry['photo_source_mode'] ?? null,
+                    'photo_notes' => $entry['photo_notes'] ?? null,
                 ];
+
+                continue;
             }
+
+            $statuses[(int) $itemId] = [
+                'status' => $hasUrl
+                    ? 'resolved'
+                    : (($entry['photo_source_mode'] ?? null) === PurchaseOrderItem::PHOTO_MODE_NONE ? 'manual_rejected' : 'missing'),
+                'audit_category' => $entry['audit_category'] ?? ($hasUrl
+                    ? PurchaseOrderMeliImageResolver::AUDIT_RESOLVED_SKU_LINK
+                    : PurchaseOrderMeliImageResolver::AUDIT_PENDING_NO_CANDIDATE),
+                'reason' => (string) ($entry['reason'] ?? 'unresolved'),
+                'candidates_count' => count((array) ($entry['ambiguous_matches'] ?? [])),
+                'source' => $entry['source'] ?? null,
+                'mlm' => $entry['mlm'] ?? null,
+                'variation_id' => $entry['variation_id'] ?? null,
+                'variation_label' => $entry['variation_label'] ?? null,
+                'listing_title' => $entry['listing_title'] ?? null,
+                'photo_source_mode' => $entry['photo_source_mode'] ?? null,
+                'photo_notes' => $entry['photo_notes'] ?? null,
+            ];
         }
 
         return $statuses;

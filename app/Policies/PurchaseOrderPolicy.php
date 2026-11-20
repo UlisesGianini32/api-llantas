@@ -22,4 +22,9 @@ class PurchaseOrderPolicy
     {
         return $this->viewPdf($user, $purchaseOrder);
     }
+
+    public function managePhotos(User $user, PurchaseOrder $purchaseOrder): bool
+    {
+        return UserAccess::canAccessRoute($user, 'purchasing.orders.approve-photo');
+    }
 }
