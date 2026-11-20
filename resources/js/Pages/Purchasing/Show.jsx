@@ -69,7 +69,7 @@ const STATUS_BADGES = {
     },
 }
 
-export default function PurchasingShow({ order, locations = [], supplier = null, canViewPdf = false, sharedPdfUrl = null }) {
+export default function PurchasingShow({ order, locations = [], supplier = null, canViewPdf = false, sharedPdfUrl = null, imageUrlByItemId = {} }) {
     const badge = STATUS_BADGES[order.status] || STATUS_BADGES.DRAFT
 
     // Autofill defaults
@@ -1171,6 +1171,7 @@ export default function PurchasingShow({ order, locations = [], supplier = null,
                                 <tr>
                                     <th className="px-3 py-3 w-12 text-center">#</th>
                                     <th className="px-3 py-3 w-36 text-indigo-600 dark:text-indigo-400">Cód. Proveedor</th>
+                                    <th className="px-3 py-3 w-20 text-center">Foto ML</th>
                                     <th className="px-3 py-3 w-32">SKU Interno</th>
                                     <th className="px-3 py-3">Producto / Descripción</th>
                                     <th className="px-3 py-3 text-center w-28">Pedidas</th>
@@ -1194,6 +1195,15 @@ export default function PurchasingShow({ order, locations = [], supplier = null,
                                             <td className="px-3 py-3 font-mono font-extrabold text-indigo-600 dark:text-indigo-400">
                                                 {item.supplier_sku || (
                                                     <span className="text-slate-400 font-normal italic text-xs">—</span>
+                                                )}
+                                            </td>
+                                            <td className="px-3 py-3 text-center">
+                                                {imageUrlByItemId[item.id] ? (
+                                                    <a href={imageUrlByItemId[item.id]} target="_blank" rel="noopener noreferrer" title="Ver fotografía de Mercado Libre">
+                                                        <img src={imageUrlByItemId[item.id]} alt={item.product?.name || item.product_name || 'Producto'} loading="lazy" className="mx-auto h-16 w-16 rounded-lg border border-slate-200 bg-white object-contain" />
+                                                    </a>
+                                                ) : (
+                                                    <span className="text-[10px] text-slate-400">Sin foto</span>
                                                 )}
                                             </td>
                                             <td className="px-3 py-3 font-mono text-xs text-slate-500 dark:text-slate-400">
@@ -1672,6 +1682,7 @@ export default function PurchasingShow({ order, locations = [], supplier = null,
                                             <tr className="border-b-2 border-slate-200 bg-slate-50 text-[11px] font-bold uppercase tracking-wider text-slate-600">
                                                 <th className="py-2.5 px-3 w-10 text-center">#</th>
                                                 <th className="py-2.5 px-3 w-32 text-indigo-700">Cód. Proveedor</th>
+                                                <th className="py-2.5 px-3 w-20 text-center">Foto ML</th>
                                                 <th className="py-2.5 px-3 w-28">SKU Interno</th>
                                                 <th className="py-2.5 px-3">Producto / Descripción</th>
                                                 <th className="py-2.5 px-3 w-28 text-center">Cantidad Pedida</th>
@@ -1683,6 +1694,11 @@ export default function PurchasingShow({ order, locations = [], supplier = null,
                                                     <td className="py-2.5 px-3 text-center text-slate-400 font-mono text-[11px]">{idx + 1}</td>
                                                     <td className="py-2.5 px-3 font-mono font-bold text-indigo-700 text-xs">
                                                         {it.supplier_sku || '—'}
+                                                    </td>
+                                                    <td className="py-2.5 px-3 text-center">
+                                                        {imageUrlByItemId[it.id] ? (
+                                                            <img src={imageUrlByItemId[it.id]} crossOrigin="anonymous" alt={it.product?.name || it.product_name || 'Producto'} className="mx-auto h-14 w-14 rounded border border-slate-200 bg-white object-contain" />
+                                                        ) : <span className="text-[10px] text-slate-400">Sin foto</span>}
                                                     </td>
                                                     <td className="py-2.5 px-3 font-mono text-slate-500 text-[11px]">
                                                         {it.product?.sku || it.sku || '-'}
