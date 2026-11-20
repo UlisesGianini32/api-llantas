@@ -35,6 +35,18 @@ El servicio `App\Services\Purchasing\PurchaseOrderMeliImageResolver` resuelve la
 5. **Capa de descubrimiento por título/nombre (solo propuesta, nunca auto-asignación)**
    - El modal administrativo en `/compras/ordenes/{id}` permite buscar candidatos por título, MLM o SKU en `meli_publications` y `meli_price_manager_items`, mostrando foto, título, MLM, variación/color y estado para aprobación manual.
 
+   - **Búsqueda paginada y acotada de variaciones en JSON (`scanVariationPublicationsByRaw` / `scanVariationPriceManagerItemsByRaw`):**
+     - En lugar de una sola consulta truncada con `LIMIT 500` y `ORDER BY` costoso, el resolver divide los SKUs en lotes (`VARIATION_SCAN_SKU_BATCH_SIZE = 100`) y recorre páginas ordenadas por llave primaria mediante paginación por cursor (`WHERE id > $lastId ORDER BY id ASC LIMIT 251`, `VARIATION_SCAN_PAGE_SIZE = 250`).
+     - Cada página se filtra e indexa en streaming por SKU verificado en PHP, descartando de inmediato las filas ruidosas para mantener bajo el consumo de memoria y evitar filesort sobre columnas JSON/TEXT.
+     - El techo operativo por lote y tabla es `VARIATION_SCAN_MAX_PAGES = 20` (hasta 5,000 filas coincidentes por lote). Si alguna vez se alcanza este techo y aún existen filas adicionales, **el truncamiento nunca es silencioso**: se emite un `Log::warning`, se marca `variation_scan_truncated = true` con `scan_diagnostics` en el resultado del resolver y se advierte en `purchasing:audit-order-photos`.
+   - **Límites de la capa interactiva de búsqueda por título (`discoverCandidatesForItem`):**
+     - Consulta hasta 80 filas por tabla (`meli_publications` y `meli_price_manager_items`) por tokens del título y devuelve los mejores 30 candidatos ordenados por relevancia para selección manual.
+   - **Preservación de fotografía aprobada:**
+     - Al aprobar una publicación o variación desde la interfaz administrativa, se guarda `approved_photo_url` (validado contra `*.mlstatic.com`). Aunque un snapshot posterior de Mercado Libre cambie sus fotos, se trunque o desaparezca, el resolver conserva la fotografía aprobada (`reason = resolved_approved_preserved`).
+   - **Autorización estricta:**
+     - `PurchaseOrderController::itemPhoto()` valida explícitamente `PurchaseOrderPolicy::view` y `PurchaseOrderPolicy::viewPhoto` antes de comprobar pertenencia de partida; la ruta pública firmada `/orden-compra/{purchaseOrder}/partidas/{item}/foto` exige firma relativa vigente (`signed:relative`) y rechaza firmas vencidas o alteradas con `403`.
+     - Las imágenes manuales se guardan fuera de `public/` en el disco privado `local` (`storage/app/private/purchasing/manual-photos/...`).
+
 6. **Categorías de auditoría (`purchasing:audit-order-photos`)**
    - `resolved_by_sku_or_link` (Resuelto por SKU/vínculo)
    - `resolved_by_variation` (Resuelto por variación)

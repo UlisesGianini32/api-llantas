@@ -12,9 +12,11 @@ return new class extends Migration
             return;
         }
 
-        Schema::table('purchase_order_items', function (Blueprint $table): void {
+        $afterBase = Schema::hasColumn('purchase_order_items', 'supplier_sku') ? 'supplier_sku' : 'sku';
+
+        Schema::table('purchase_order_items', function (Blueprint $table) use ($afterBase): void {
             if (! Schema::hasColumn('purchase_order_items', 'photo_source_mode')) {
-                $table->string('photo_source_mode', 32)->nullable()->after('supplier_sku');
+                $table->string('photo_source_mode', 32)->nullable()->after($afterBase);
             }
             if (! Schema::hasColumn('purchase_order_items', 'approved_mlm')) {
                 $table->string('approved_mlm', 40)->nullable()->after('photo_source_mode');
@@ -26,7 +28,7 @@ return new class extends Migration
                 $table->unsignedBigInteger('approved_meli_account_id')->nullable()->after('approved_variation_id');
             }
             if (! Schema::hasColumn('purchase_order_items', 'approved_photo_url')) {
-                $table->string('approved_photo_url', 2048)->nullable()->after('approved_meli_account_id');
+                $table->text('approved_photo_url')->nullable()->after('approved_meli_account_id');
             }
             if (! Schema::hasColumn('purchase_order_items', 'manual_photo_path')) {
                 $table->string('manual_photo_path', 255)->nullable()->after('approved_photo_url');

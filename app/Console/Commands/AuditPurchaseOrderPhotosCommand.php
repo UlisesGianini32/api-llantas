@@ -47,6 +47,8 @@ class AuditPurchaseOrderPhotosCommand extends Command
         $ambiguous = [];
         $pendingApprovalItems = [];
         $foundCount = 0;
+        $variationScanTruncated = false;
+        $scanDiagnostics = null;
 
         $categoryCounts = [
             PurchaseOrderMeliImageResolver::AUDIT_RESOLVED_SKU_LINK => 0,
@@ -141,6 +143,11 @@ class AuditPurchaseOrderPhotosCommand extends Command
                 ];
             }
 
+            if (! empty($entry['variation_scan_truncated'])) {
+                $variationScanTruncated = true;
+                $scanDiagnostics ??= $entry['scan_diagnostics'] ?? null;
+            }
+
             $categoryLabel = $this->categoryLabel($auditCategory);
 
             $rows[] = [
@@ -189,7 +196,9 @@ class AuditPurchaseOrderPhotosCommand extends Command
                 'pending_without_candidate' => $categoryCounts[PurchaseOrderMeliImageResolver::AUDIT_PENDING_NO_CANDIDATE],
                 'manual_override' => $categoryCounts[PurchaseOrderMeliImageResolver::AUDIT_MANUAL_OVERRIDE],
                 'by_category' => $categoryCounts,
+                'variation_scan_truncated' => $variationScanTruncated,
             ],
+            'scan_diagnostics' => $scanDiagnostics,
             'missing_skus' => $missing,
             'ambiguous_matches' => $ambiguous,
             'pending_manual_approval_items' => $pendingApprovalItems,
@@ -224,6 +233,10 @@ class AuditPurchaseOrderPhotosCommand extends Command
             $report['summary']['pending_manual_approval'],
             $report['summary']['pending_without_candidate'],
         ));
+
+        if ($variationScanTruncated) {
+            $this->warn('ADVERTENCIA: El escaneo paginado de variaciones en raw alcanzó el techo operativo y pudo truncar coincidencias. Revisa scan_diagnostics en --json.');
+        }
 
         $this->newLine();
         $this->table(
