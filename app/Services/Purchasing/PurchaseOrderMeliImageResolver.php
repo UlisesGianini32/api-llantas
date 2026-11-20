@@ -4,6 +4,7 @@ namespace App\Services\Purchasing;
 
 use App\Models\InventoryChannelLink;
 use App\Models\MeliPublication;
+use App\Models\MeliPriceManagerItem;
 use App\Models\PurchaseOrder;
 use Illuminate\Support\Facades\Schema;
 
@@ -67,6 +68,18 @@ class PurchaseOrderMeliImageResolver
         $byMlm = $publications->groupBy(fn (MeliPublication $publication): string => strtoupper(trim((string) $publication->mlm)));
         $bySku = $publications->groupBy(fn (MeliPublication $publication): string => strtoupper(trim((string) $publication->sku)));
         $byProductId = $links->groupBy('inventory_product_id');
+
+        // The price manager also stores synced publications, sometimes beyond the legacy table.
+        $priceBySku = Schema::hasTable('meli_price_manager_items') && $skus !== []
+            ? MeliPriceManagerItem::query()
+                ->whereIn('sku', $skus)
+                ->whereNotNull('raw_item')
+                ->orderByRaw("CASE WHEN status = 'active' THEN 0 ELSE 1 END")
+                ->orderByDesc('last_synced_at')
+                ->get(['sku', 'raw_item', 'thumbnail', 'status'])
+                ->groupBy(fn (MeliPriceManagerItem $priceItem): string => strtoupper(trim((string) $priceItem->sku)))
+            : collect();
+
         $results = [];
 
         foreach ($items as $item) {
@@ -99,6 +112,22 @@ class PurchaseOrderMeliImageResolver
             // Legacy listing links may only have an exact seller SKU, with no inventory link.
             foreach ($bySku->get(strtoupper($sku), collect()) as $publication) {
                 $url = $this->imageForPublication($publication, $sku);
+                if ($url !== null) {
+                    $results[(int) $item->id] = $url;
+                    break;
+                }
+            }
+
+            if (isset($results[(int) $item->id])) {
+                continue;
+            }
+
+            // Use the exact SKU from the price manager only when the raw image data
+            // identifies the variant (never use an unverified generic cover).
+            foreach ($priceBySku->get(strtoupper($sku), collect()) as $priceItem) {
+                $snapshot = new MeliPublication;
+                $snapshot->raw = $priceItem->raw_item;
+                $url = $this->imageForPublication($snapshot, $sku);
                 if ($url !== null) {
                     $results[(int) $item->id] = $url;
                     break;
