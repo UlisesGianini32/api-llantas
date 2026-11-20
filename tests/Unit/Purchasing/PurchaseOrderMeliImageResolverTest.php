@@ -396,7 +396,7 @@ class PurchaseOrderMeliImageResolverTest extends TestCase
         ]);
 
         // Only paused/historical publication for SKU-HIST -> still resolves cleanly!
-        MeliPublication::create([
+        MeliPublication::forceCreate([
             'user_id' => $this->user->id,
             'meli_account_id' => $acc->id,
             'sku' => 'SKU-HIST',
@@ -642,6 +642,356 @@ class PurchaseOrderMeliImageResolverTest extends TestCase
         $this->assertSame(PurchaseOrderMeliImageResolver::SOURCE_CHANNEL_LINK_PUBLICATION, $disambiguated[$itemPub->id]['source']);
     }
 
+    public function test_cross_table_conflict_between_meli_publications_and_price_manager_for_different_mlms_requires_review(): void
+    {
+        Log::spy();
+
+        $acc1 = $this->createMeliAccount('310001', 'CUENTA_PUB', true);
+        $acc2 = $this->createMeliAccount('310002', 'CUENTA_PM', false);
+
+        $product = $this->createProduct('SKU-CROSS-TABLE', 'Producto En Dos Tablas Con Distinto MLM');
+        $order = $this->createOrderWithItems([$product]);
+        $item = $order->items->firstOrFail();
+
+        // Account 1 synced into meli_publications under MLM-CROSS-A
+        MeliPublication::create([
+            'user_id' => $this->user->id,
+            'meli_account_id' => $acc1->id,
+            'sku' => 'SKU-CROSS-TABLE',
+            'mlm' => 'MLM-CROSS-A',
+            'status' => 'active',
+            'last_sync_at' => now(),
+            'raw' => [
+                'item' => [
+                    'seller_custom_field' => 'SKU-CROSS-TABLE',
+                    'pictures' => [['secure_url' => 'https://http2.mlstatic.com/cross-a.jpg']],
+                ],
+            ],
+        ]);
+
+        // Account 2 synced into meli_price_manager_items under a DIFFERENT listing MLM-CROSS-B with a different photo
+        MeliPriceManagerItem::create([
+            'meli_account_id' => $acc2->id,
+            'meli_item_id' => 'MLM-CROSS-B',
+            'sku' => 'SKU-CROSS-TABLE',
+            'title' => 'Producto En Price Manager',
+            'current_price' => 210,
+            'status' => 'active',
+            'last_synced_at' => now(),
+            'raw_item' => [
+                'id' => 'MLM-CROSS-B',
+                'seller_custom_field' => 'SKU-CROSS-TABLE',
+                'pictures' => [['secure_url' => 'https://http2.mlstatic.com/cross-b.jpg']],
+            ],
+        ]);
+
+        $resolved = $this->resolver->resolveForOrder($order, true);
+        $entry = $resolved[$item->id];
+
+        $this->assertNull($entry['url']);
+        $this->assertTrue($entry['ambiguous']);
+        $this->assertSame('multiple_publications_conflicting_photos', $entry['reason']);
+        $this->assertCount(2, $entry['ambiguous_matches']);
+        $this->assertEqualsCanonicalizing(
+            ['MLM-CROSS-A', 'MLM-CROSS-B'],
+            array_column($entry['ambiguous_matches'], 'mlm'),
+        );
+        $this->assertSame([], $this->resolver->forOrder($order));
+        Log::shouldHaveReceived('info')->atLeast()->once();
+
+        // Explicit channel link to MLM-CROSS-B resolves cleanly without ambiguity
+        InventoryChannelLink::create([
+            'inventory_product_id' => $product->id,
+            'channel' => InventoryChannelLink::MERCADO_LIBRE,
+            'account_key' => (string) $acc2->id,
+            'external_listing_id' => 'MLM-CROSS-B',
+            'is_active' => true,
+            'identity_key' => "ml:{$acc2->id}:MLM-CROSS-B",
+        ]);
+
+        $disambiguated = $this->resolver->resolveForOrder($order, false);
+        $this->assertSame('https://http2.mlstatic.com/cross-b.jpg', $disambiguated[$item->id]['url']);
+        $this->assertFalse($disambiguated[$item->id]['ambiguous']);
+        $this->assertSame(PurchaseOrderMeliImageResolver::SOURCE_CHANNEL_LINK_PRICE_MANAGER, $disambiguated[$item->id]['source']);
+    }
+
+    public function test_same_mlm_snapshots_across_tables_or_history_are_reconciled_by_vigencia_without_false_conflict(): void
+    {
+        $acc = $this->createMeliAccount('320001', 'CUENTA_SNAP', true);
+
+        $prodPmFresher = $this->createProduct('SKU-SNAP-1', 'Snapshot PM Más Reciente');
+        $prodPubFresher = $this->createProduct('SKU-SNAP-2', 'Snapshot Pub Más Reciente');
+        $prodHistCurrent = $this->createProduct('SKU-SNAP-3', 'Snapshot Vigente vs Histórico');
+        $prodTiedConflict = $this->createProduct('SKU-SNAP-TIE', 'Snapshots Empatados Con Fotos Distintas');
+
+        $order = $this->createOrderWithItems([$prodPmFresher, $prodPubFresher, $prodHistCurrent, $prodTiedConflict]);
+        $itemPmFresher = $order->items->firstWhere('inventory_product_id', $prodPmFresher->id);
+        $itemPubFresher = $order->items->firstWhere('inventory_product_id', $prodPubFresher->id);
+        $itemHistCurrent = $order->items->firstWhere('inventory_product_id', $prodHistCurrent->id);
+        $itemTied = $order->items->firstWhere('inventory_product_id', $prodTiedConflict->id);
+
+        // Case 1: Same MLM-SNAP-1, older in meli_publications, fresher in meli_price_manager_items -> picks fresher PM photo
+        MeliPublication::create([
+            'user_id' => $this->user->id,
+            'meli_account_id' => $acc->id,
+            'sku' => 'SKU-SNAP-1',
+            'mlm' => 'MLM-SNAP-1',
+            'status' => 'active',
+            'is_current' => true,
+            'last_sync_at' => now()->subDays(5),
+            'raw' => [
+                'item' => [
+                    'seller_custom_field' => 'SKU-SNAP-1',
+                    'pictures' => [['secure_url' => 'https://http2.mlstatic.com/snap1-old.jpg']],
+                ],
+            ],
+        ]);
+        MeliPriceManagerItem::create([
+            'meli_account_id' => $acc->id,
+            'meli_item_id' => 'MLM-SNAP-1',
+            'sku' => 'SKU-SNAP-1',
+            'title' => 'Snap 1',
+            'current_price' => 100,
+            'status' => 'active',
+            'last_synced_at' => now(),
+            'raw_item' => [
+                'id' => 'MLM-SNAP-1',
+                'seller_custom_field' => 'SKU-SNAP-1',
+                'pictures' => [['secure_url' => 'https://http2.mlstatic.com/snap1-fresh.jpg']],
+            ],
+        ]);
+
+        // Case 2: Same MLM-SNAP-2, fresher in meli_publications, older in meli_price_manager_items -> picks fresher Pub photo
+        MeliPublication::create([
+            'user_id' => $this->user->id,
+            'meli_account_id' => $acc->id,
+            'sku' => 'SKU-SNAP-2',
+            'mlm' => 'MLM-SNAP-2',
+            'status' => 'active',
+            'is_current' => true,
+            'last_sync_at' => now(),
+            'raw' => [
+                'item' => [
+                    'seller_custom_field' => 'SKU-SNAP-2',
+                    'pictures' => [['secure_url' => 'https://http2.mlstatic.com/snap2-fresh.jpg']],
+                ],
+            ],
+        ]);
+        MeliPriceManagerItem::create([
+            'meli_account_id' => $acc->id,
+            'meli_item_id' => 'MLM-SNAP-2',
+            'sku' => 'SKU-SNAP-2',
+            'title' => 'Snap 2',
+            'current_price' => 100,
+            'status' => 'active',
+            'last_synced_at' => now()->subDays(3),
+            'raw_item' => [
+                'id' => 'MLM-SNAP-2',
+                'seller_custom_field' => 'SKU-SNAP-2',
+                'pictures' => [['secure_url' => 'https://http2.mlstatic.com/snap2-old.jpg']],
+            ],
+        ]);
+
+        // Case 3: Same MLM-SNAP-3 twice in meli_publications (historical is_current=false vs is_current=true) -> picks current
+        MeliPublication::forceCreate([
+            'user_id' => $this->user->id,
+            'meli_account_id' => $acc->id,
+            'sku' => 'SKU-SNAP-3',
+            'mlm' => 'MLM-SNAP-3',
+            'status' => 'active',
+            'is_current' => false,
+            'last_sync_at' => now(),
+            'raw' => [
+                'item' => [
+                    'seller_custom_field' => 'SKU-SNAP-3',
+                    'pictures' => [['secure_url' => 'https://http2.mlstatic.com/snap3-historical.jpg']],
+                ],
+            ],
+        ]);
+        MeliPublication::forceCreate([
+            'user_id' => $this->user->id,
+            'meli_account_id' => $acc->id,
+            'sku' => 'SKU-SNAP-3',
+            'mlm' => 'MLM-SNAP-3',
+            'status' => 'active',
+            'is_current' => true,
+            'last_sync_at' => now()->subHour(),
+            'raw' => [
+                'item' => [
+                    'seller_custom_field' => 'SKU-SNAP-3',
+                    'pictures' => [['secure_url' => 'https://http2.mlstatic.com/snap3-current.jpg']],
+                ],
+            ],
+        ]);
+
+        // Case 4: Same MLM-SNAP-TIE with IDENTICAL vigencia (same timestamp, both current & active) and DIFFERENT photos -> ambiguous
+        $exactSameTimestamp = now()->startOfMinute();
+        MeliPublication::create([
+            'user_id' => $this->user->id,
+            'meli_account_id' => $acc->id,
+            'sku' => 'SKU-SNAP-TIE',
+            'mlm' => 'MLM-SNAP-TIE',
+            'status' => 'active',
+            'is_current' => true,
+            'last_sync_at' => $exactSameTimestamp,
+            'raw' => [
+                'item' => [
+                    'seller_custom_field' => 'SKU-SNAP-TIE',
+                    'pictures' => [['secure_url' => 'https://http2.mlstatic.com/tie-pub.jpg']],
+                ],
+            ],
+        ]);
+        MeliPriceManagerItem::create([
+            'meli_account_id' => $acc->id,
+            'meli_item_id' => 'MLM-SNAP-TIE',
+            'sku' => 'SKU-SNAP-TIE',
+            'title' => 'Snap Tie',
+            'current_price' => 100,
+            'status' => 'active',
+            'last_synced_at' => $exactSameTimestamp,
+            'raw_item' => [
+                'id' => 'MLM-SNAP-TIE',
+                'seller_custom_field' => 'SKU-SNAP-TIE',
+                'pictures' => [['secure_url' => 'https://http2.mlstatic.com/tie-pm.jpg']],
+            ],
+        ]);
+
+        $resolved = $this->resolver->resolveForOrder($order, false);
+
+        $this->assertSame('https://http2.mlstatic.com/snap1-fresh.jpg', $resolved[$itemPmFresher->id]['url']);
+        $this->assertFalse($resolved[$itemPmFresher->id]['ambiguous']);
+        $this->assertSame('MLM-SNAP-1', $resolved[$itemPmFresher->id]['mlm']);
+
+        $this->assertSame('https://http2.mlstatic.com/snap2-fresh.jpg', $resolved[$itemPubFresher->id]['url']);
+        $this->assertFalse($resolved[$itemPubFresher->id]['ambiguous']);
+        $this->assertSame('MLM-SNAP-2', $resolved[$itemPubFresher->id]['mlm']);
+
+        $this->assertSame('https://http2.mlstatic.com/snap3-current.jpg', $resolved[$itemHistCurrent->id]['url']);
+        $this->assertFalse($resolved[$itemHistCurrent->id]['ambiguous']);
+
+        $this->assertNull($resolved[$itemTied->id]['url']);
+        $this->assertTrue($resolved[$itemTied->id]['ambiguous']);
+        $this->assertSame('conflicting_listing_snapshots', $resolved[$itemTied->id]['reason']);
+    }
+
+    public function test_same_sku_as_simple_publication_and_secondary_variation_of_another_publication_prevents_wrong_assignment(): void
+    {
+        $acc = $this->createMeliAccount('330001', 'CUENTA_MIX', true);
+
+        $prodConflict = $this->createProduct('SKU-SIMPLE-VAR-CONF', 'SKU En Simple Y Variación Secundaria Conflicto');
+        $prodAgreed = $this->createProduct('SKU-SIMPLE-VAR-OK', 'SKU En Simple Y Variación Secundaria Misma Foto');
+        $order = $this->createOrderWithItems([$prodConflict, $prodAgreed]);
+        $itemConflict = $order->items->firstWhere('inventory_product_id', $prodConflict->id);
+        $itemAgreed = $order->items->firstWhere('inventory_product_id', $prodAgreed->id);
+
+        // Simple publication with SKU-SIMPLE-VAR-CONF
+        MeliPublication::create([
+            'user_id' => $this->user->id,
+            'meli_account_id' => $acc->id,
+            'sku' => 'SKU-SIMPLE-VAR-CONF',
+            'mlm' => 'MLM-SIMPLE-1',
+            'status' => 'active',
+            'last_sync_at' => now(),
+            'raw' => [
+                'item' => [
+                    'seller_custom_field' => 'SKU-SIMPLE-VAR-CONF',
+                    'pictures' => [['secure_url' => 'https://http2.mlstatic.com/simple-photo.jpg']],
+                ],
+            ],
+        ]);
+
+        // Separate multi-variation listing whose top-level `sku` column holds Variation 1,
+        // while Variation 2 shares SKU-SIMPLE-VAR-CONF with a DIFFERENT photo!
+        MeliPublication::create([
+            'user_id' => $this->user->id,
+            'meli_account_id' => $acc->id,
+            'sku' => 'OTHER-PRIMARY-SKU',
+            'mlm' => 'MLM-MULTI-VAR-1',
+            'status' => 'active',
+            'last_sync_at' => now(),
+            'raw' => [
+                'item' => [
+                    'pictures' => [
+                        ['id' => 'v1', 'secure_url' => 'https://http2.mlstatic.com/other-var.jpg'],
+                        ['id' => 'v2', 'secure_url' => 'https://http2.mlstatic.com/secondary-var-photo.jpg'],
+                    ],
+                    'variations' => [
+                        ['id' => 901, 'seller_custom_field' => 'OTHER-PRIMARY-SKU', 'picture_ids' => ['v1']],
+                        ['id' => 902, 'seller_custom_field' => 'SKU-SIMPLE-VAR-CONF', 'picture_ids' => ['v2']],
+                    ],
+                ],
+            ],
+        ]);
+
+        // Simple + secondary variation with the EXACT SAME agreed photo -> resolves cleanly!
+        MeliPublication::create([
+            'user_id' => $this->user->id,
+            'meli_account_id' => $acc->id,
+            'sku' => 'SKU-SIMPLE-VAR-OK',
+            'mlm' => 'MLM-SIMPLE-2',
+            'status' => 'active',
+            'last_sync_at' => now(),
+            'raw' => [
+                'item' => [
+                    'seller_custom_field' => 'SKU-SIMPLE-VAR-OK',
+                    'pictures' => [['secure_url' => 'https://http2.mlstatic.com/same-simple-var.jpg']],
+                ],
+            ],
+        ]);
+        MeliPublication::create([
+            'user_id' => $this->user->id,
+            'meli_account_id' => $acc->id,
+            'sku' => 'OTHER-PRIMARY-SKU-2',
+            'mlm' => 'MLM-MULTI-VAR-2',
+            'status' => 'active',
+            'last_sync_at' => now(),
+            'raw' => [
+                'item' => [
+                    'pictures' => [
+                        ['id' => 'v1', 'secure_url' => 'https://http2.mlstatic.com/other-var-2.jpg'],
+                        ['id' => 'v2', 'secure_url' => 'https://http2.mlstatic.com/same-simple-var.jpg'],
+                    ],
+                    'variations' => [
+                        ['id' => 911, 'seller_custom_field' => 'OTHER-PRIMARY-SKU-2', 'picture_ids' => ['v1']],
+                        ['id' => 912, 'seller_custom_field' => 'SKU-SIMPLE-VAR-OK', 'picture_ids' => ['v2']],
+                    ],
+                ],
+            ],
+        ]);
+
+        $resolved = $this->resolver->resolveForOrder($order, false);
+
+        // Conflicting simple vs secondary variation must NOT auto-select
+        $this->assertNull($resolved[$itemConflict->id]['url']);
+        $this->assertTrue($resolved[$itemConflict->id]['ambiguous']);
+        $this->assertSame('multiple_publications_conflicting_photos', $resolved[$itemConflict->id]['reason']);
+        $this->assertCount(2, $resolved[$itemConflict->id]['ambiguous_matches']);
+        $this->assertEqualsCanonicalizing(
+            ['MLM-SIMPLE-1', 'MLM-MULTI-VAR-1'],
+            array_column($resolved[$itemConflict->id]['ambiguous_matches'], 'mlm'),
+        );
+
+        // Identical photo across simple and secondary variation resolves without conflict
+        $this->assertSame('https://http2.mlstatic.com/same-simple-var.jpg', $resolved[$itemAgreed->id]['url']);
+        $this->assertFalse($resolved[$itemAgreed->id]['ambiguous']);
+
+        // Adding explicit channel link to the secondary variation disambiguates cleanly
+        InventoryChannelLink::create([
+            'inventory_product_id' => $prodConflict->id,
+            'channel' => InventoryChannelLink::MERCADO_LIBRE,
+            'account_key' => (string) $acc->id,
+            'external_listing_id' => 'MLM-MULTI-VAR-1',
+            'external_variant_id' => '902',
+            'is_active' => true,
+            'identity_key' => "ml:{$acc->id}:MLM-MULTI-VAR-1:902",
+        ]);
+
+        $disambiguated = $this->resolver->resolveForOrder($order, false);
+        $this->assertSame('https://http2.mlstatic.com/secondary-var-photo.jpg', $disambiguated[$itemConflict->id]['url']);
+        $this->assertFalse($disambiguated[$itemConflict->id]['ambiguous']);
+        $this->assertSame('902', $disambiguated[$itemConflict->id]['variation_id']);
+    }
+
     public function test_price_manager_fallback_requires_verified_identity_and_rejects_truncated_snapshots(): void
     {
         $acc = $this->createMeliAccount('666666', 'SBS_MAIN', true);
@@ -769,20 +1119,28 @@ class PurchaseOrderMeliImageResolverTest extends TestCase
             ]);
         }
 
-        // Fetch fresh order WITHOUT preloading items.product to verify resolver prevents N+1 itself!
-        $order = $this->createOrderWithItems($products)->fresh();
+        // Fetch fresh orders (5 items vs 50 items) WITHOUT preloading items.product to verify O(1) query count!
+        $smallOrder = $this->createOrderWithItems(array_slice($products, 0, 5))->fresh();
+        $largeOrder = $this->createOrderWithItems($products)->fresh();
 
         DB::flushQueryLog();
         DB::enableQueryLog();
+        $smallUrls = $this->resolver->forOrder($smallOrder);
+        $smallQueries = DB::getQueryLog();
 
-        $urls = $this->resolver->forOrder($order);
-        $queries = DB::getQueryLog();
-
+        DB::flushQueryLog();
+        $largeUrls = $this->resolver->forOrder($largeOrder);
+        $largeQueries = DB::getQueryLog();
         DB::disableQueryLog();
 
-        $this->assertCount(50, $urls);
-        // Constant number of queries regardless of 50 items (items + products + accounts + links + pubs + price_manager + schema checks)
-        $this->assertLessThan(15, count($queries), 'Expected constant bulk query count without N+1, got '.count($queries));
+        $this->assertCount(5, $smallUrls);
+        $this->assertCount(50, $largeUrls);
+        $this->assertSame(
+            count($smallQueries),
+            count($largeQueries),
+            'Query count must stay strictly O(1) between 5-item and 50-item orders (no N+1).'
+        );
+        $this->assertLessThanOrEqual(16, count($largeQueries), 'Expected constant bulk query count without N+1, got '.count($largeQueries));
     }
 
     private function createMeliAccount(string $meliUserId, string $nickname, bool $isDefault): MeliAccount
