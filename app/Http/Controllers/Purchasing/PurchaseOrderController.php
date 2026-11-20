@@ -233,6 +233,8 @@ class PurchaseOrderController extends Controller
 
     public function show(Request $request, PurchaseOrder $purchaseOrder): Response
     {
+        Gate::authorize('view', $purchaseOrder);
+
         $purchaseOrder->load([
             'location:id,code,name',
             'buyer:id,name,email',
@@ -279,10 +281,13 @@ class PurchaseOrderController extends Controller
 
     public function pdf(Request $request, PurchaseOrder $purchaseOrder): HttpResponse
     {
-        $isSignedPublicAccess = $request->routeIs('purchasing.orders.public-pdf')
-            && $request->hasValidRelativeSignature();
-
-        if (! $isSignedPublicAccess) {
+        $isSignedPublicAccess = false;
+        if ($request->routeIs('purchasing.orders.public-pdf')) {
+            if (! $request->hasValidRelativeSignature()) {
+                abort(403);
+            }
+            $isSignedPublicAccess = true;
+        } else {
             Gate::authorize('viewPdf', $purchaseOrder);
         }
 
@@ -317,15 +322,17 @@ class PurchaseOrderController extends Controller
 
     public function itemPhoto(Request $request, PurchaseOrder $purchaseOrder, PurchaseOrderItem $item): HttpResponse
     {
-        if ((int) $item->purchase_order_id !== (int) $purchaseOrder->id) {
-            abort(404);
+        if ($request->routeIs('purchasing.orders.public-item-photo')) {
+            if (! $request->hasValidRelativeSignature()) {
+                abort(403);
+            }
+        } else {
+            Gate::authorize('view', $purchaseOrder);
+            Gate::authorize('viewPhoto', $purchaseOrder);
         }
 
-        $isSignedPublicAccess = $request->routeIs('purchasing.orders.public-item-photo')
-            && $request->hasValidRelativeSignature();
-
-        if (! $isSignedPublicAccess && $request->user() === null) {
-            abort(403);
+        if ((int) $item->purchase_order_id !== (int) $purchaseOrder->id) {
+            abort(404);
         }
 
         $resolution = $this->meliImageResolver->resolveForItem($purchaseOrder, $item);
@@ -381,11 +388,11 @@ class PurchaseOrderController extends Controller
 
     public function itemPhotoCandidates(Request $request, PurchaseOrder $purchaseOrder, PurchaseOrderItem $item): JsonResponse
     {
+        Gate::authorize('managePhotos', $purchaseOrder);
+
         if ((int) $item->purchase_order_id !== (int) $purchaseOrder->id) {
             abort(404);
         }
-
-        Gate::authorize('managePhotos', $purchaseOrder);
 
         $query = $request->query('q');
         $queryStr = is_string($query) ? trim($query) : null;
@@ -422,11 +429,11 @@ class PurchaseOrderController extends Controller
 
     public function approveItemPhoto(Request $request, PurchaseOrder $purchaseOrder, PurchaseOrderItem $item): JsonResponse
     {
+        Gate::authorize('managePhotos', $purchaseOrder);
+
         if ((int) $item->purchase_order_id !== (int) $purchaseOrder->id) {
             abort(404);
         }
-
-        Gate::authorize('managePhotos', $purchaseOrder);
 
         $validated = $request->validate([
             'mlm' => ['required', 'string', 'max:40'],
@@ -492,11 +499,11 @@ class PurchaseOrderController extends Controller
 
     public function uploadItemManualPhoto(Request $request, PurchaseOrder $purchaseOrder, PurchaseOrderItem $item): JsonResponse
     {
+        Gate::authorize('managePhotos', $purchaseOrder);
+
         if ((int) $item->purchase_order_id !== (int) $purchaseOrder->id) {
             abort(404);
         }
-
-        Gate::authorize('managePhotos', $purchaseOrder);
 
         $validated = $request->validate([
             'image' => ['required', 'file', 'mimes:jpg,jpeg,png,webp,gif', 'max:5120'],
@@ -546,11 +553,11 @@ class PurchaseOrderController extends Controller
 
     public function rejectItemPhoto(Request $request, PurchaseOrder $purchaseOrder, PurchaseOrderItem $item): JsonResponse
     {
+        Gate::authorize('managePhotos', $purchaseOrder);
+
         if ((int) $item->purchase_order_id !== (int) $purchaseOrder->id) {
             abort(404);
         }
-
-        Gate::authorize('managePhotos', $purchaseOrder);
 
         $validated = $request->validate([
             'mlm' => ['nullable', 'string', 'max:40'],
@@ -614,11 +621,11 @@ class PurchaseOrderController extends Controller
 
     public function resetItemPhoto(Request $request, PurchaseOrder $purchaseOrder, PurchaseOrderItem $item): JsonResponse
     {
+        Gate::authorize('managePhotos', $purchaseOrder);
+
         if ((int) $item->purchase_order_id !== (int) $purchaseOrder->id) {
             abort(404);
         }
-
-        Gate::authorize('managePhotos', $purchaseOrder);
 
         $oldManualPath = $item->getAttribute('manual_photo_path');
         $clearRejected = $request->boolean('clear_rejected', false);

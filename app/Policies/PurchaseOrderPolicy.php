@@ -13,6 +13,12 @@ class PurchaseOrderPolicy
         return UserAccess::canAccessRoute($user, 'purchasing.orders.show');
     }
 
+    public function viewPhoto(User $user, PurchaseOrder $purchaseOrder): bool
+    {
+        return $this->view($user, $purchaseOrder)
+            && UserAccess::canAccessRoute($user, 'purchasing.orders.item-photo');
+    }
+
     public function viewPdf(User $user, PurchaseOrder $purchaseOrder): bool
     {
         return UserAccess::canAccessRoute($user, 'purchasing.orders.pdf');
