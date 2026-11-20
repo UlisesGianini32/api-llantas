@@ -5,6 +5,7 @@ namespace App\Services\Purchasing;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 use OverflowException;
 use Psr\Http\Message\StreamInterface;
 use Throwable;
@@ -17,6 +18,8 @@ use Throwable;
 class PurchaseOrderMeliImageCacheService
 {
     private const CACHE_DIR = 'purchasing/meli-photos';
+
+    public const MANUAL_DIR = 'purchasing/manual-photos';
 
     private const CACHE_TTL_SECONDS = 604800; // 7 days
 
@@ -85,6 +88,112 @@ class PurchaseOrderMeliImageCacheService
         }
 
         return null;
+    }
+
+    /**
+     * Validate and persist a manually uploaded product photo on private local storage.
+     *
+     * @return array{path: string, mime: string}|null
+     */
+    public function storeManualPhoto(int $orderId, int $itemId, string $bytes): ?array
+    {
+        if ($bytes === '' || strlen($bytes) > self::MAX_BYTES) {
+            return null;
+        }
+
+        $mime = $this->detectValidatedImageMime($bytes);
+        if ($mime === null) {
+            return null;
+        }
+
+        $ext = self::ALLOWED_MIMES[$mime] ?? null;
+        if ($ext === null) {
+            return null;
+        }
+
+        $path = sprintf(
+            '%s/po-%d/item-%d-%s.%s',
+            self::MANUAL_DIR,
+            $orderId,
+            $itemId,
+            Str::lower(Str::random(16)),
+            $ext
+        );
+
+        try {
+            Storage::disk('local')->put($path, $bytes);
+        } catch (Throwable $e) {
+            Log::warning('[Purchasing][MeliPhotos] Unable to store manual product photo', [
+                'purchase_order_id' => $orderId,
+                'item_id' => $itemId,
+                'error' => $e->getMessage(),
+            ]);
+
+            return null;
+        }
+
+        return [
+            'path' => $path,
+            'mime' => $mime,
+        ];
+    }
+
+    /**
+     * Read and validate a manually uploaded product photo from private local storage.
+     *
+     * @return array{bytes: string, mime: string}|null
+     */
+    public function readManualPhoto(string $path): ?array
+    {
+        if (! $this->isSafeManualPath($path)) {
+            return null;
+        }
+
+        try {
+            $disk = Storage::disk('local');
+            if (! $disk->exists($path)) {
+                return null;
+            }
+
+            $bytes = (string) $disk->get($path);
+            if ($bytes === '' || strlen($bytes) > self::MAX_BYTES) {
+                return null;
+            }
+
+            $mime = $this->detectValidatedImageMime($bytes);
+            if ($mime === null) {
+                return null;
+            }
+
+            return [
+                'bytes' => $bytes,
+                'mime' => $mime,
+            ];
+        } catch (Throwable) {
+            return null;
+        }
+    }
+
+    public function deleteManualPhoto(?string $path): void
+    {
+        if (! is_string($path) || ! $this->isSafeManualPath($path)) {
+            return;
+        }
+
+        try {
+            Storage::disk('local')->delete($path);
+        } catch (Throwable) {
+            // Best-effort cleanup
+        }
+    }
+
+    public function isSafeManualPath(string $path): bool
+    {
+        $normalized = str_replace('\\', '/', trim($path));
+
+        return $normalized !== ''
+            && str_starts_with($normalized, self::MANUAL_DIR.'/')
+            && ! str_contains($normalized, '..');
     }
 
     /** @return array{bytes: string, mime: string}|null */

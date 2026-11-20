@@ -11,25 +11,41 @@ use App\Models\PurchaseOrderItem;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Facades\Storage;
 
 /**
- * Resolves purchase order product pictures from already-synced Mercado Libre data.
+ * Resolves purchase order product pictures from manual overrides, admin-approved
+ * Mercado Libre listings/variations, explicit channel links, and already-synced
+ * Mercado Libre data.
  *
  * Priority order:
- * 1. Explicit inventory_channel_links (respecting account, listing MLM, and variation ID).
- * 2. Unified SKU verification across synced meli_publications and meli_price_manager_items
+ * 1. Manual item override (`photo_source_mode = 'manual'` uploaded file / trusted URL, or `'none'`).
+ * 2. Admin-approved ML publication/variation (`photo_source_mode = 'approved_ml'`).
+ * 3. Explicit inventory_channel_links (respecting account, listing MLM, and variation ID).
+ * 4. Unified SKU verification across synced meli_publications and meli_price_manager_items
  *    (including secondary variation SKUs inside raw JSON snapshots):
+ *    - Each bulk-fetched variation snapshot is strictly indexed by its own verified SKUs so
+ *      an unrelated MLM never contaminates another item's diagnostics.
  *    - Multiple snapshots of the SAME listing identity (mlm + variation_id) are reconciled
  *      by currency/freshness (is_current, synced timestamp, listing status).
- *    - Multiple DIFFERENT listing identities sharing a SKU with conflicting photos (including
- *      cross-table conflicts between meli_publications and meli_price_manager_items, or a simple
- *      listing colliding with a secondary variation of another listing) are NEVER auto-selected:
- *      they return url=null with ambiguous=true so the UI marks them for review.
+ *    - Multiple DIFFERENT listing identities sharing a SKU with conflicting photos are NEVER
+ *      auto-selected: they return url=null with ambiguous=true so the UI marks them for review.
  *
- * No outbound ML API calls, no inventory mutations, and no fuzzy name-based matching.
+ * Title-based discovery is exposed separately ONLY to propose candidates for manual selection,
+ * never for automatic assignment.
  */
 class PurchaseOrderMeliImageResolver
 {
+    public const SOURCE_MANUAL_UPLOAD = 'manual_upload';
+
+    public const SOURCE_MANUAL_URL = 'manual_url';
+
+    public const SOURCE_MANUAL_NONE = 'manual_none';
+
+    public const SOURCE_APPROVED_PUBLICATION = 'approved_publication';
+
+    public const SOURCE_APPROVED_VARIATION = 'approved_variation';
+
     public const SOURCE_CHANNEL_LINK_PUBLICATION = 'channel_link_publication';
 
     public const SOURCE_CHANNEL_LINK_PRICE_MANAGER = 'channel_link_price_manager';
@@ -41,6 +57,23 @@ class PurchaseOrderMeliImageResolver
     public const SOURCE_MELI_PRICE_MANAGER_SKU = 'meli_price_manager_sku';
 
     public const SOURCE_MELI_PRICE_MANAGER_VARIATION_SKU = 'meli_price_manager_variation_sku';
+
+    public const AUDIT_RESOLVED_SKU_LINK = 'resolved_by_sku_or_link';
+
+    public const AUDIT_RESOLVED_VARIATION = 'resolved_by_variation';
+
+    public const AUDIT_PENDING_MANUAL_APPROVAL = 'pending_manual_approval';
+
+    public const AUDIT_PENDING_NO_CANDIDATE = 'pending_without_candidate';
+
+    public const AUDIT_MANUAL_OVERRIDE = 'manual_override';
+
+    /** @var list<string> */
+    private const TITLE_STOPWORDS = [
+        'de', 'del', 'la', 'las', 'el', 'los', 'en', 'con', 'sin', 'para', 'por',
+        'un', 'una', 'unos', 'unas', 'al', 'y', 'o', 'a', 'tipo', 'pza', 'pzas',
+        'pieza', 'piezas', 'cm', 'mm', 'ml', 'kg', 'gr', 'oz',
+    ];
 
     /** @return array<int, string> Purchase-order item ID => trusted picture URL */
     public function forOrder(PurchaseOrder $order): array
@@ -91,20 +124,66 @@ class PurchaseOrderMeliImageResolver
             return [];
         }
 
+        $results = [];
+        $remainingItems = collect();
+
+        // Pass 0: Manual overrides (uploaded photo / manual URL) and explicit rejections ('none').
+        foreach ($items as $item) {
+            $manualResult = $this->resolveFromManualOverride($item);
+            if ($manualResult !== null) {
+                $results[(int) $item->id] = $manualResult;
+                continue;
+            }
+            $remainingItems->push($item);
+        }
+
+        if ($remainingItems->isEmpty()) {
+            if ($logDiagnostics) {
+                $this->logDiagnostics($order, $results);
+            }
+
+            return $results;
+        }
+
         $hasPublications = Schema::hasTable('meli_publications');
         $hasPriceManager = Schema::hasTable('meli_price_manager_items');
         $hasLinks = Schema::hasTable('inventory_channel_links');
         $hasAccounts = Schema::hasTable('meli_accounts');
 
         if (! $hasPublications && ! $hasPriceManager) {
-            $results = [];
-            foreach ($items as $item) {
+            foreach ($remainingItems as $item) {
                 $sku = $this->itemSku($item);
+                $approvedMlm = $this->normalizedMlm($item->getAttribute('approved_mlm'));
+                $approvedUrl = $this->trustedUrl($item->getAttribute('approved_photo_url'));
+                if ($item->getAttribute('photo_source_mode') === PurchaseOrderItem::PHOTO_MODE_APPROVED_ML && $approvedUrl !== null) {
+                    $approvedVarId = $this->nullableTrim($item->getAttribute('approved_variation_id'));
+                    $results[(int) $item->id] = $this->resolvedResult(
+                        $item,
+                        $sku,
+                        $approvedUrl,
+                        $approvedVarId !== null ? self::SOURCE_APPROVED_VARIATION : self::SOURCE_APPROVED_PUBLICATION,
+                        $approvedMlm,
+                        $approvedVarId,
+                        is_numeric($item->getAttribute('approved_meli_account_id')) ? (int) $item->getAttribute('approved_meli_account_id') : null,
+                        null,
+                        false,
+                        [],
+                        null,
+                        null,
+                        'resolved_approved_snapshot',
+                    );
+                    continue;
+                }
+
                 $results[(int) $item->id] = $this->emptyResolution(
                     $item,
                     $sku,
                     $sku === '' ? 'missing_sku' : 'no_ml_tables',
                 );
+            }
+
+            if ($logDiagnostics) {
+                $this->logDiagnostics($order, $results);
             }
 
             return $results;
@@ -114,7 +193,7 @@ class PurchaseOrderMeliImageResolver
             ? MeliAccount::query()->get(['id', 'meli_user_id', 'nickname', 'is_default'])
             : collect();
 
-        $skus = $items
+        $skus = $remainingItems
             ->map(fn (PurchaseOrderItem $item): string => $this->itemSku($item))
             ->filter()
             ->unique(fn (string $sku): string => strtoupper($sku))
@@ -123,7 +202,7 @@ class PurchaseOrderMeliImageResolver
 
         $skuQueryVariants = $this->caseVariants($skus);
 
-        $productIds = $items
+        $productIds = $remainingItems
             ->pluck('inventory_product_id')
             ->filter()
             ->map(fn (mixed $id): int => (int) $id)
@@ -131,7 +210,7 @@ class PurchaseOrderMeliImageResolver
             ->values()
             ->all();
 
-        // Priority 1 links: prefer active links first, then historical inactive links as fallback.
+        // Explicit channel links: prefer active links first, then historical inactive links as fallback.
         $links = ($hasLinks && $productIds !== [])
             ? InventoryChannelLink::query()
                 ->whereIn('inventory_product_id', $productIds)
@@ -150,8 +229,16 @@ class PurchaseOrderMeliImageResolver
                 ])
             : collect();
 
-        $mlms = $links
+        $approvedMlms = $remainingItems
+            ->filter(fn (PurchaseOrderItem $item): bool => $item->getAttribute('photo_source_mode') === PurchaseOrderItem::PHOTO_MODE_APPROVED_ML)
+            ->map(fn (PurchaseOrderItem $item): ?string => $this->normalizedMlm($item->getAttribute('approved_mlm')))
+            ->filter()
+            ->values()
+            ->all();
+
+        $mlms = collect($links)
             ->map(fn (InventoryChannelLink $link): string => $this->linkMlm($link))
+            ->merge($approvedMlms)
             ->filter()
             ->unique()
             ->values()
@@ -170,16 +257,19 @@ class PurchaseOrderMeliImageResolver
             'status',
             'last_sync_at',
             'raw',
+            in_array('permalink', $pubColumns, true) ? 'permalink' : null,
             $pubHasIsCurrent ? 'is_current' : null,
             $pubHasPictures ? 'pictures' : null,
         ]));
+
+        $priceSelect = $hasPriceManager ? $this->priceManagerSelectColumns() : [];
 
         $publications = ($hasPublications && ($skuQueryVariants !== [] || $mlmQueryVariants !== []))
             ? $this->queryPublications($pubSelect, $pubHasIsCurrent, $skuQueryVariants, $mlmQueryVariants)
             : collect();
 
         $priceItems = ($hasPriceManager && ($skuQueryVariants !== [] || $mlmQueryVariants !== []))
-            ? $this->queryPriceManagerItems($skuQueryVariants, $mlmQueryVariants)
+            ? $this->queryPriceManagerItems($skuQueryVariants, $mlmQueryVariants, $priceSelect)
             : collect();
 
         $pubByMlm = $publications->groupBy(fn (MeliPublication $pub): string => strtoupper(trim((string) $pub->mlm)));
@@ -188,13 +278,22 @@ class PurchaseOrderMeliImageResolver
         $priceBySku = $priceItems->groupBy(fn (MeliPriceManagerItem $pm): string => strtoupper(trim((string) $pm->sku)));
         $linksByProductId = $links->groupBy('inventory_product_id');
 
-        $results = [];
         $skuFallbackItems = [];
         $linkDiagnosticsByItemId = [];
 
-        // Pass 1: Priority 1 — Explicit inventory_channel_links.
-        foreach ($items as $item) {
+        // Pass 1: Admin-approved ML selections and explicit inventory_channel_links.
+        foreach ($remainingItems as $item) {
             $sku = $this->itemSku($item);
+            $rejectedMlms = $this->normalizedRejectedMlms($item);
+
+            if ($item->getAttribute('photo_source_mode') === PurchaseOrderItem::PHOTO_MODE_APPROVED_ML) {
+                $approvedResult = $this->resolveFromApprovedSelection($item, $sku, $pubByMlm, $priceByMlm);
+                if ($approvedResult !== null) {
+                    $results[(int) $item->id] = $approvedResult;
+                    continue;
+                }
+            }
+
             if ($sku === '') {
                 $results[(int) $item->id] = $this->emptyResolution($item, '', 'missing_sku');
                 continue;
@@ -207,6 +306,7 @@ class PurchaseOrderMeliImageResolver
                 $accounts,
                 $pubByMlm,
                 $priceByMlm,
+                $rejectedMlms,
             );
 
             if ($linkAttempt['resolved'] !== null) {
@@ -218,11 +318,17 @@ class PurchaseOrderMeliImageResolver
                 $linkDiagnosticsByItemId[(int) $item->id] = $linkAttempt['failure'];
             }
 
-            $skuFallbackItems[] = ['item' => $item, 'sku' => $sku];
+            $skuFallbackItems[] = [
+                'item' => $item,
+                'sku' => $sku,
+                'rejected_mlms' => $rejectedMlms,
+            ];
         }
 
         // Pass 2: Unified SKU resolution across meli_publications and meli_price_manager_items
-        // (including secondary variation SKUs stored inside raw JSON) for items without an explicit link.
+        // (including secondary variation SKUs stored inside raw JSON) for items without an explicit match.
+        // Bulk-queried rows are indexed strictly by their own verified SKUs so unrelated MLMs never
+        // contaminate other items' diagnostics or candidate lists.
         if ($skuFallbackItems !== []) {
             $fallbackSkus = collect($skuFallbackItems)
                 ->pluck('sku')
@@ -230,13 +336,21 @@ class PurchaseOrderMeliImageResolver
                 ->values()
                 ->all();
 
+            $fallbackSkuSet = array_fill_keys(
+                array_map(static fn (string $s): string => strtoupper($s), $fallbackSkus),
+                true,
+            );
+
             $variationPubs = $hasPublications
                 ? $this->queryVariationPublicationsByRaw($pubSelect, $pubHasIsCurrent, $fallbackSkus, $publications->pluck('id')->all())
                 : collect();
 
             $variationPriceItems = $hasPriceManager
-                ? $this->queryVariationPriceManagerItemsByRaw($fallbackSkus, $priceItems->pluck('id')->all())
+                ? $this->queryVariationPriceManagerItemsByRaw($fallbackSkus, $priceItems->pluck('id')->all(), $priceSelect)
                 : collect();
+
+            $variationPubsBySku = $this->indexPublicationsByVerifiedSku($publications->merge($variationPubs), $fallbackSkuSet);
+            $variationPriceBySku = $this->indexPriceManagerItemsByVerifiedSku($priceItems->merge($variationPriceItems), $fallbackSkuSet);
 
             foreach ($skuFallbackItems as $entry) {
                 /** @var PurchaseOrderItem $item */
@@ -248,10 +362,11 @@ class PurchaseOrderMeliImageResolver
                     $item,
                     $sku,
                     $pubBySku->get($skuUpper, collect()),
-                    $variationPubs,
+                    $variationPubsBySku[$skuUpper] ?? collect(),
                     $priceBySku->get($skuUpper, collect()),
-                    $variationPriceItems,
+                    $variationPriceBySku[$skuUpper] ?? collect(),
                     $linkDiagnosticsByItemId[(int) $item->id] ?? null,
+                    $entry['rejected_mlms'],
                 );
             }
         }
@@ -327,12 +442,242 @@ class PurchaseOrderMeliImageResolver
     }
 
     /**
-     * Priority 1: Resolve using explicit inventory_channel_links (account + MLM + variant ID).
+     * Pass 0: Resolve manual uploaded photo / manual URL override or explicit 'none' rejection.
+     *
+     * @return ?array<string, mixed>
+     */
+    private function resolveFromManualOverride(PurchaseOrderItem $item): ?array
+    {
+        $mode = $item->getAttribute('photo_source_mode');
+        if ($mode === null || $mode === '') {
+            return null;
+        }
+
+        $sku = $this->itemSku($item);
+        $notes = $this->nullableTrim($item->getAttribute('photo_notes'));
+
+        if ($mode === PurchaseOrderItem::PHOTO_MODE_NONE) {
+            return $this->emptyResolution(
+                $item,
+                $sku,
+                'manual_rejected_no_photo',
+                self::AUDIT_PENDING_NO_CANDIDATE,
+                self::SOURCE_MANUAL_NONE,
+                PurchaseOrderItem::PHOTO_MODE_NONE,
+                $notes,
+            );
+        }
+
+        if ($mode !== PurchaseOrderItem::PHOTO_MODE_MANUAL) {
+            return null;
+        }
+
+        $manualPath = $this->nullableTrim($item->getAttribute('manual_photo_path'));
+        if ($manualPath !== null) {
+            if (! $this->isValidStoredManualPhoto($manualPath)) {
+                return $this->emptyResolution(
+                    $item,
+                    $sku,
+                    'manual_photo_missing_file',
+                    self::AUDIT_PENDING_NO_CANDIDATE,
+                    self::SOURCE_MANUAL_UPLOAD,
+                    PurchaseOrderItem::PHOTO_MODE_MANUAL,
+                    $notes,
+                );
+            }
+
+            $res = $this->resolvedResult(
+                $item,
+                $sku,
+                'local://'.$manualPath,
+                self::SOURCE_MANUAL_UPLOAD,
+                null,
+                null,
+                null,
+                null,
+                false,
+                [],
+                null,
+                null,
+                'manual_override',
+                self::AUDIT_MANUAL_OVERRIDE,
+            );
+            $res['manual_path'] = $manualPath;
+            $res['photo_source_mode'] = PurchaseOrderItem::PHOTO_MODE_MANUAL;
+            $res['photo_notes'] = $notes;
+
+            return $res;
+        }
+
+        $manualUrl = $this->trustedUrl($item->getAttribute('approved_photo_url'));
+        if ($manualUrl !== null) {
+            $res = $this->resolvedResult(
+                $item,
+                $sku,
+                $manualUrl,
+                self::SOURCE_MANUAL_URL,
+                $this->normalizedMlm($item->getAttribute('approved_mlm')),
+                $this->nullableTrim($item->getAttribute('approved_variation_id')),
+                is_numeric($item->getAttribute('approved_meli_account_id')) ? (int) $item->getAttribute('approved_meli_account_id') : null,
+                null,
+                false,
+                [],
+                null,
+                null,
+                'manual_override',
+                self::AUDIT_MANUAL_OVERRIDE,
+            );
+            $res['photo_source_mode'] = PurchaseOrderItem::PHOTO_MODE_MANUAL;
+            $res['photo_notes'] = $notes;
+
+            return $res;
+        }
+
+        return $this->emptyResolution(
+            $item,
+            $sku,
+            'manual_photo_missing_file',
+            self::AUDIT_PENDING_NO_CANDIDATE,
+            self::SOURCE_MANUAL_UPLOAD,
+            PurchaseOrderItem::PHOTO_MODE_MANUAL,
+            $notes,
+        );
+    }
+
+    /**
+     * Pass 1a: Resolve an admin-approved Mercado Libre publication or variation.
+     *
+     * @param  Collection<string, Collection<int, MeliPublication>>  $pubByMlm
+     * @param  Collection<string, Collection<int, MeliPriceManagerItem>>  $priceByMlm
+     * @return ?array<string, mixed>
+     */
+    private function resolveFromApprovedSelection(
+        PurchaseOrderItem $item,
+        string $sku,
+        Collection $pubByMlm,
+        Collection $priceByMlm,
+    ): ?array {
+        $approvedMlm = $this->normalizedMlm($item->getAttribute('approved_mlm'));
+        if ($approvedMlm === null) {
+            return null;
+        }
+
+        $approvedVarId = $this->nullableTrim($item->getAttribute('approved_variation_id'));
+        $approvedAccId = is_numeric($item->getAttribute('approved_meli_account_id'))
+            ? (int) $item->getAttribute('approved_meli_account_id')
+            : null;
+        $fallbackSnapshotUrl = $this->trustedUrl($item->getAttribute('approved_photo_url'));
+        $notes = $this->nullableTrim($item->getAttribute('photo_notes'));
+
+        $snapshots = [];
+
+        foreach ($pubByMlm->get($approvedMlm, collect()) as $publication) {
+            if ($approvedAccId !== null && (int) ($publication->meli_account_id ?? 0) !== $approvedAccId) {
+                continue;
+            }
+
+            $detail = $this->extractImageFromPublication($publication, $sku, $approvedVarId, true, true);
+            if ($detail['url'] !== null) {
+                $snapshots[] = $this->buildPublicationSnapshotCandidate(
+                    $publication,
+                    $approvedMlm,
+                    $detail,
+                    ($detail['variation_id'] ?? $approvedVarId) !== null
+                        ? self::SOURCE_APPROVED_VARIATION
+                        : self::SOURCE_APPROVED_PUBLICATION,
+                );
+            }
+        }
+
+        foreach ($priceByMlm->get($approvedMlm, collect()) as $priceItem) {
+            if ($approvedAccId !== null && (int) ($priceItem->meli_account_id ?? 0) !== $approvedAccId) {
+                continue;
+            }
+
+            $detail = $this->extractImageFromPriceManagerItem($priceItem, $sku, $approvedVarId, true, true);
+            if ($detail['url'] !== null) {
+                $snapshots[] = $this->buildPriceManagerSnapshotCandidate(
+                    $priceItem,
+                    $approvedMlm,
+                    $detail,
+                    ($detail['variation_id'] ?? $approvedVarId) !== null
+                        ? self::SOURCE_APPROVED_VARIATION
+                        : self::SOURCE_APPROVED_PUBLICATION,
+                );
+            }
+        }
+
+        if ($snapshots !== []) {
+            $reconciled = $this->reconcileSnapshotsForSameListing($snapshots);
+            $winner = $reconciled['winner'] ?? $snapshots[0];
+            $resolvedVarId = $winner['variation_id'] ?? $approvedVarId;
+            $auditCategory = $resolvedVarId !== null ? self::AUDIT_RESOLVED_VARIATION : self::AUDIT_RESOLVED_SKU_LINK;
+
+            $res = $this->resolvedResult(
+                $item,
+                $sku,
+                $winner['url'],
+                $winner['source'],
+                $approvedMlm,
+                $resolvedVarId,
+                $winner['meli_account_id'],
+                $winner['listing_status'],
+                false,
+                [],
+                $winner['listing_title'] ?? null,
+                $winner['variation_label'] ?? null,
+                'resolved_approved',
+                $auditCategory,
+            );
+            $res['photo_source_mode'] = PurchaseOrderItem::PHOTO_MODE_APPROVED_ML;
+            $res['photo_notes'] = $notes;
+
+            return $res;
+        }
+
+        if ($fallbackSnapshotUrl !== null) {
+            $auditCategory = $approvedVarId !== null ? self::AUDIT_RESOLVED_VARIATION : self::AUDIT_RESOLVED_SKU_LINK;
+            $res = $this->resolvedResult(
+                $item,
+                $sku,
+                $fallbackSnapshotUrl,
+                $approvedVarId !== null ? self::SOURCE_APPROVED_VARIATION : self::SOURCE_APPROVED_PUBLICATION,
+                $approvedMlm,
+                $approvedVarId,
+                $approvedAccId,
+                null,
+                false,
+                [],
+                null,
+                null,
+                'resolved_approved_snapshot',
+                $auditCategory,
+            );
+            $res['photo_source_mode'] = PurchaseOrderItem::PHOTO_MODE_APPROVED_ML;
+            $res['photo_notes'] = $notes;
+
+            return $res;
+        }
+
+        return $this->emptyResolution(
+            $item,
+            $sku,
+            'approved_listing_not_found',
+            self::AUDIT_PENDING_MANUAL_APPROVAL,
+            null,
+            PurchaseOrderItem::PHOTO_MODE_APPROVED_ML,
+            $notes,
+        );
+    }
+
+    /**
+     * Priority 3: Resolve using explicit inventory_channel_links (account + MLM + variant ID).
      *
      * @param  Collection<int, InventoryChannelLink>  $productLinks
      * @param  Collection<int, MeliAccount>  $accounts
      * @param  Collection<string, Collection<int, MeliPublication>>  $pubByMlm
      * @param  Collection<string, Collection<int, MeliPriceManagerItem>>  $priceByMlm
+     * @param  array<string, true>  $rejectedMlms
      * @return array{resolved: ?array<string, mixed>, failure: ?array<string, mixed>}
      */
     private function resolveFromExplicitLinks(
@@ -342,18 +687,19 @@ class PurchaseOrderMeliImageResolver
         Collection $accounts,
         Collection $pubByMlm,
         Collection $priceByMlm,
+        array $rejectedMlms = [],
     ): array {
         $lastFailure = null;
 
         foreach ($productLinks as $link) {
             $mlm = $this->linkMlm($link);
-            if ($mlm === '') {
+            if ($mlm === '' || isset($rejectedMlms[$mlm])) {
                 continue;
             }
 
             $variationId = $this->nullableTrim($link->external_variant_id);
 
-            // 1a. Check synced meli_publications for this linked MLM.
+            // Check synced meli_publications for this linked MLM.
             foreach ($pubByMlm->get($mlm, collect()) as $publication) {
                 if (! $this->accountKeyMatchesAccount($link->account_key, $publication->meli_account_id, $accounts)) {
                     $lastFailure ??= [
@@ -370,6 +716,8 @@ class PurchaseOrderMeliImageResolver
 
                 $detail = $this->extractImageFromPublication($publication, $sku, $variationId, true);
                 if ($detail['url'] !== null) {
+                    $resolvedVarId = $detail['variation_id'] ?? $variationId;
+
                     return [
                         'resolved' => $this->resolvedResult(
                             $item,
@@ -377,9 +725,15 @@ class PurchaseOrderMeliImageResolver
                             $detail['url'],
                             self::SOURCE_CHANNEL_LINK_PUBLICATION,
                             $mlm,
-                            $detail['variation_id'] ?? $variationId,
+                            $resolvedVarId,
                             $publication->meli_account_id ? (int) $publication->meli_account_id : null,
                             $publication->status,
+                            false,
+                            [],
+                            $detail['listing_title'] ?? null,
+                            $detail['variation_label'] ?? null,
+                            'resolved',
+                            $resolvedVarId !== null ? self::AUDIT_RESOLVED_VARIATION : self::AUDIT_RESOLVED_SKU_LINK,
                         ),
                         'failure' => null,
                     ];
@@ -396,12 +750,13 @@ class PurchaseOrderMeliImageResolver
                         'source' => self::SOURCE_CHANNEL_LINK_PUBLICATION,
                         'mlm' => $mlm,
                         'meli_account_id' => $publication->meli_account_id ? (int) $publication->meli_account_id : null,
+                        'listing_title' => $detail['listing_title'] ?? null,
                         'reason' => $detail['reason'],
                     ]] : [],
                 ];
             }
 
-            // 1b. Check synced meli_price_manager_items for this linked MLM.
+            // Check synced meli_price_manager_items for this linked MLM.
             foreach ($priceByMlm->get($mlm, collect()) as $priceItem) {
                 if (! $this->accountKeyMatchesAccount($link->account_key, $priceItem->meli_account_id, $accounts)) {
                     $lastFailure ??= [
@@ -418,6 +773,8 @@ class PurchaseOrderMeliImageResolver
 
                 $detail = $this->extractImageFromPriceManagerItem($priceItem, $sku, $variationId, true);
                 if ($detail['url'] !== null) {
+                    $resolvedVarId = $detail['variation_id'] ?? $variationId;
+
                     return [
                         'resolved' => $this->resolvedResult(
                             $item,
@@ -425,9 +782,15 @@ class PurchaseOrderMeliImageResolver
                             $detail['url'],
                             self::SOURCE_CHANNEL_LINK_PRICE_MANAGER,
                             $mlm,
-                            $detail['variation_id'] ?? $variationId,
+                            $resolvedVarId,
                             $priceItem->meli_account_id ? (int) $priceItem->meli_account_id : null,
                             $priceItem->status,
+                            false,
+                            [],
+                            $detail['listing_title'] ?? null,
+                            $detail['variation_label'] ?? null,
+                            'resolved',
+                            $resolvedVarId !== null ? self::AUDIT_RESOLVED_VARIATION : self::AUDIT_RESOLVED_SKU_LINK,
                         ),
                         'failure' => null,
                     ];
@@ -444,6 +807,7 @@ class PurchaseOrderMeliImageResolver
                         'source' => self::SOURCE_CHANNEL_LINK_PRICE_MANAGER,
                         'mlm' => $mlm,
                         'meli_account_id' => $priceItem->meli_account_id ? (int) $priceItem->meli_account_id : null,
+                        'listing_title' => $detail['listing_title'] ?? null,
                         'reason' => $detail['reason'],
                     ]] : [],
                 ];
@@ -455,13 +819,14 @@ class PurchaseOrderMeliImageResolver
 
     /**
      * Unified SKU resolution across meli_publications and meli_price_manager_items (including secondary
-     * variations embedded in raw JSON) when no explicit inventory_channel_links match exists.
+     * variations embedded in raw JSON) when no explicit match exists.
      *
      * @param  Collection<int, MeliPublication>  $directPubs
      * @param  Collection<int, MeliPublication>  $variationPubs
      * @param  Collection<int, MeliPriceManagerItem>  $directPriceItems
      * @param  Collection<int, MeliPriceManagerItem>  $variationPriceItems
      * @param  ?array<string, mixed>  $linkFailure
+     * @param  array<string, true>  $rejectedMlms
      * @return array<string, mixed>
      */
     private function resolveUnifiedBySku(
@@ -472,6 +837,7 @@ class PurchaseOrderMeliImageResolver
         Collection $directPriceItems,
         Collection $variationPriceItems,
         ?array $linkFailure,
+        array $rejectedMlms = [],
     ): array {
         $rawCandidates = [];
         $intraListingAmbiguities = [];
@@ -480,6 +846,10 @@ class PurchaseOrderMeliImageResolver
         $seenPubIds = [];
         foreach ($directPubs as $publication) {
             $seenPubIds[(int) $publication->id] = true;
+            $mlm = $this->normalizedMlm($publication->mlm);
+            if ($mlm !== null && isset($rejectedMlms[$mlm])) {
+                continue;
+            }
             $this->collectPublicationCandidate(
                 $publication,
                 $sku,
@@ -492,6 +862,10 @@ class PurchaseOrderMeliImageResolver
 
         foreach ($variationPubs as $publication) {
             if (isset($seenPubIds[(int) $publication->id])) {
+                continue;
+            }
+            $mlm = $this->normalizedMlm($publication->mlm);
+            if ($mlm !== null && isset($rejectedMlms[$mlm])) {
                 continue;
             }
             $this->collectPublicationCandidate(
@@ -507,6 +881,10 @@ class PurchaseOrderMeliImageResolver
         $seenPriceIds = [];
         foreach ($directPriceItems as $priceItem) {
             $seenPriceIds[(int) $priceItem->id] = true;
+            $mlm = $this->normalizedMlm($priceItem->meli_item_id);
+            if ($mlm !== null && isset($rejectedMlms[$mlm])) {
+                continue;
+            }
             $this->collectPriceManagerCandidate(
                 $priceItem,
                 $sku,
@@ -521,6 +899,10 @@ class PurchaseOrderMeliImageResolver
             if (isset($seenPriceIds[(int) $priceItem->id])) {
                 continue;
             }
+            $mlm = $this->normalizedMlm($priceItem->meli_item_id);
+            if ($mlm !== null && isset($rejectedMlms[$mlm])) {
+                continue;
+            }
             $this->collectPriceManagerCandidate(
                 $priceItem,
                 $sku,
@@ -532,35 +914,40 @@ class PurchaseOrderMeliImageResolver
         }
 
         if ($intraListingAmbiguities !== []) {
-            return [
-                'item_id' => (int) $item->id,
-                'inventory_product_id' => $item->inventory_product_id ? (int) $item->inventory_product_id : null,
-                'sku' => $sku,
-                'url' => null,
-                'source' => null,
-                'mlm' => null,
-                'variation_id' => null,
-                'meli_account_id' => null,
-                'listing_status' => null,
-                'reason' => 'variation_ambiguous',
-                'ambiguous' => true,
-                'ambiguous_matches' => $intraListingAmbiguities,
-            ];
+            return $this->emptyResolution(
+                $item,
+                $sku,
+                'variation_ambiguous',
+                self::AUDIT_PENDING_MANUAL_APPROVAL,
+                null,
+                null,
+                $this->nullableTrim($item->getAttribute('photo_notes')),
+                true,
+                $intraListingAmbiguities,
+            );
         }
 
         if ($rawCandidates === []) {
+            $isAmbiguous = (bool) ($fallbackFailure['ambiguous'] ?? false);
+
             return [
                 'item_id' => (int) $item->id,
                 'inventory_product_id' => $item->inventory_product_id ? (int) $item->inventory_product_id : null,
                 'sku' => $sku,
                 'url' => null,
+                'manual_path' => null,
                 'source' => null,
                 'mlm' => $fallbackFailure['mlm'] ?? null,
                 'variation_id' => $fallbackFailure['variation_id'] ?? null,
+                'variation_label' => null,
+                'listing_title' => null,
                 'meli_account_id' => $fallbackFailure['meli_account_id'] ?? null,
                 'listing_status' => $fallbackFailure['listing_status'] ?? null,
+                'photo_source_mode' => $item->getAttribute('photo_source_mode'),
+                'photo_notes' => $this->nullableTrim($item->getAttribute('photo_notes')),
                 'reason' => $fallbackFailure['reason'] ?? 'no_listing_found',
-                'ambiguous' => (bool) ($fallbackFailure['ambiguous'] ?? false),
+                'audit_category' => $isAmbiguous ? self::AUDIT_PENDING_MANUAL_APPROVAL : self::AUDIT_PENDING_NO_CANDIDATE,
+                'ambiguous' => $isAmbiguous,
                 'ambiguous_matches' => $fallbackFailure['ambiguous_matches'] ?? [],
             ];
         }
@@ -588,48 +975,39 @@ class PurchaseOrderMeliImageResolver
         }
 
         if ($snapshotConflicts !== []) {
-            return [
-                'item_id' => (int) $item->id,
-                'inventory_product_id' => $item->inventory_product_id ? (int) $item->inventory_product_id : null,
-                'sku' => $sku,
-                'url' => null,
-                'source' => null,
-                'mlm' => null,
-                'variation_id' => null,
-                'meli_account_id' => null,
-                'listing_status' => null,
-                'reason' => 'conflicting_listing_snapshots',
-                'ambiguous' => true,
-                'ambiguous_matches' => array_map(
-                    fn (array $m): array => $this->formatAmbiguousCandidate($m),
-                    $snapshotConflicts,
-                ),
-            ];
+            return $this->emptyResolution(
+                $item,
+                $sku,
+                'conflicting_listing_snapshots',
+                self::AUDIT_PENDING_MANUAL_APPROVAL,
+                null,
+                null,
+                $this->nullableTrim($item->getAttribute('photo_notes')),
+                true,
+                array_map(fn (array $m): array => $this->formatAmbiguousCandidate($m), $snapshotConflicts),
+            );
         }
 
         $distinctUrls = array_values(array_unique(array_column($canonicalMatches, 'url')));
         if (count($distinctUrls) > 1) {
-            return [
-                'item_id' => (int) $item->id,
-                'inventory_product_id' => $item->inventory_product_id ? (int) $item->inventory_product_id : null,
-                'sku' => $sku,
-                'url' => null,
-                'source' => null,
-                'mlm' => null,
-                'variation_id' => null,
-                'meli_account_id' => null,
-                'listing_status' => null,
-                'reason' => 'multiple_publications_conflicting_photos',
-                'ambiguous' => true,
-                'ambiguous_matches' => array_map(
-                    fn (array $m): array => $this->formatAmbiguousCandidate($m),
-                    $canonicalMatches,
-                ),
-            ];
+            return $this->emptyResolution(
+                $item,
+                $sku,
+                'multiple_publications_conflicting_photos',
+                self::AUDIT_PENDING_MANUAL_APPROVAL,
+                null,
+                null,
+                $this->nullableTrim($item->getAttribute('photo_notes')),
+                true,
+                array_map(fn (array $m): array => $this->formatAmbiguousCandidate($m), $canonicalMatches),
+            );
         }
 
         usort($canonicalMatches, fn (array $a, array $b): int => $this->compareCanonicalPriority($a, $b));
         $best = $canonicalMatches[0];
+        $auditCategory = $best['variation_id'] !== null
+            ? self::AUDIT_RESOLVED_VARIATION
+            : self::AUDIT_RESOLVED_SKU_LINK;
 
         return $this->resolvedResult(
             $item,
@@ -642,6 +1020,10 @@ class PurchaseOrderMeliImageResolver
             $best['listing_status'],
             false,
             [],
+            $best['listing_title'] ?? null,
+            $best['variation_label'] ?? null,
+            'resolved',
+            $auditCategory,
         );
     }
 
@@ -659,29 +1041,10 @@ class PurchaseOrderMeliImageResolver
         ?array &$fallbackFailure,
     ): void {
         $detail = $this->extractImageFromPublication($publication, $sku, null, false);
-        $mlm = strtoupper(trim((string) $publication->mlm)) ?: null;
+        $mlm = $this->normalizedMlm($publication->mlm);
 
         if ($detail['url'] !== null) {
-            $variationId = $detail['variation_id'];
-            $isCurrent = array_key_exists('is_current', $publication->getAttributes())
-                ? (bool) $publication->is_current
-                : true;
-            $syncedAtTs = $publication->last_sync_at ? $publication->last_sync_at->getTimestamp() : null;
-
-            $rawCandidates[] = [
-                'identity_key' => $this->listingIdentityKey($mlm, $variationId, 'pub#'.$publication->id),
-                'url' => $detail['url'],
-                'source' => $source,
-                'mlm' => $mlm,
-                'variation_id' => $variationId,
-                'meli_account_id' => $publication->meli_account_id ? (int) $publication->meli_account_id : null,
-                'listing_status' => $publication->status,
-                'status_rank' => $this->statusRank($publication->status),
-                'is_current' => $isCurrent,
-                'synced_at_ts' => $syncedAtTs,
-                'source_rank' => 0, // meli_publications preferred over price manager when tied
-                'row_id' => (int) $publication->id,
-            ];
+            $rawCandidates[] = $this->buildPublicationSnapshotCandidate($publication, $mlm, $detail, $source);
 
             return;
         }
@@ -691,6 +1054,7 @@ class PurchaseOrderMeliImageResolver
                 'source' => $source,
                 'mlm' => $mlm,
                 'meli_account_id' => $publication->meli_account_id ? (int) $publication->meli_account_id : null,
+                'listing_title' => $detail['listing_title'] ?? null,
                 'reason' => $detail['reason'],
             ];
 
@@ -724,26 +1088,10 @@ class PurchaseOrderMeliImageResolver
         ?array &$fallbackFailure,
     ): void {
         $detail = $this->extractImageFromPriceManagerItem($priceItem, $sku, null, false);
-        $mlm = strtoupper(trim((string) $priceItem->meli_item_id)) ?: null;
+        $mlm = $this->normalizedMlm($priceItem->meli_item_id);
 
         if ($detail['url'] !== null) {
-            $variationId = $detail['variation_id'];
-            $syncedAtTs = $priceItem->last_synced_at ? $priceItem->last_synced_at->getTimestamp() : null;
-
-            $rawCandidates[] = [
-                'identity_key' => $this->listingIdentityKey($mlm, $variationId, 'pm#'.$priceItem->id),
-                'url' => $detail['url'],
-                'source' => $source,
-                'mlm' => $mlm,
-                'variation_id' => $variationId,
-                'meli_account_id' => $priceItem->meli_account_id ? (int) $priceItem->meli_account_id : null,
-                'listing_status' => $priceItem->status,
-                'status_rank' => $this->statusRank($priceItem->status),
-                'is_current' => true,
-                'synced_at_ts' => $syncedAtTs,
-                'source_rank' => 1,
-                'row_id' => (int) $priceItem->id,
-            ];
+            $rawCandidates[] = $this->buildPriceManagerSnapshotCandidate($priceItem, $mlm, $detail, $source);
 
             return;
         }
@@ -753,6 +1101,7 @@ class PurchaseOrderMeliImageResolver
                 'source' => $source,
                 'mlm' => $mlm,
                 'meli_account_id' => $priceItem->meli_account_id ? (int) $priceItem->meli_account_id : null,
+                'listing_title' => $detail['listing_title'] ?? null,
                 'reason' => $detail['reason'],
             ];
 
@@ -770,6 +1119,71 @@ class PurchaseOrderMeliImageResolver
                 'ambiguous_matches' => [],
             ];
         }
+    }
+
+    /**
+     * @param  array<string, mixed>  $detail
+     * @return array<string, mixed>
+     */
+    private function buildPublicationSnapshotCandidate(
+        MeliPublication $publication,
+        ?string $mlm,
+        array $detail,
+        string $source,
+    ): array {
+        $variationId = $detail['variation_id'];
+        $isCurrent = array_key_exists('is_current', $publication->getAttributes())
+            ? (bool) $publication->is_current
+            : true;
+        $syncedAtTs = $publication->last_sync_at ? $publication->last_sync_at->getTimestamp() : null;
+
+        return [
+            'identity_key' => $this->listingIdentityKey($mlm, $variationId, 'pub#'.$publication->id),
+            'url' => $detail['url'],
+            'source' => $source,
+            'mlm' => $mlm,
+            'variation_id' => $variationId,
+            'variation_label' => $detail['variation_label'] ?? null,
+            'listing_title' => $detail['listing_title'] ?? null,
+            'meli_account_id' => $publication->meli_account_id ? (int) $publication->meli_account_id : null,
+            'listing_status' => $publication->status,
+            'status_rank' => $this->statusRank($publication->status),
+            'is_current' => $isCurrent,
+            'synced_at_ts' => $syncedAtTs,
+            'source_rank' => 0, // meli_publications preferred over price manager when tied
+            'row_id' => (int) $publication->id,
+        ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $detail
+     * @return array<string, mixed>
+     */
+    private function buildPriceManagerSnapshotCandidate(
+        MeliPriceManagerItem $priceItem,
+        ?string $mlm,
+        array $detail,
+        string $source,
+    ): array {
+        $variationId = $detail['variation_id'];
+        $syncedAtTs = $priceItem->last_synced_at ? $priceItem->last_synced_at->getTimestamp() : null;
+
+        return [
+            'identity_key' => $this->listingIdentityKey($mlm, $variationId, 'pm#'.$priceItem->id),
+            'url' => $detail['url'],
+            'source' => $source,
+            'mlm' => $mlm,
+            'variation_id' => $variationId,
+            'variation_label' => $detail['variation_label'] ?? null,
+            'listing_title' => $detail['listing_title'] ?? null,
+            'meli_account_id' => $priceItem->meli_account_id ? (int) $priceItem->meli_account_id : null,
+            'listing_status' => $priceItem->status,
+            'status_rank' => $this->statusRank($priceItem->status),
+            'is_current' => true,
+            'synced_at_ts' => $syncedAtTs,
+            'source_rank' => 1,
+            'row_id' => (int) $priceItem->id,
+        ];
     }
 
     /**
@@ -874,6 +1288,8 @@ class PurchaseOrderMeliImageResolver
             'source' => $candidate['source'],
             'mlm' => $candidate['mlm'],
             'variation_id' => $candidate['variation_id'],
+            'variation_label' => $candidate['variation_label'] ?? null,
+            'listing_title' => $candidate['listing_title'] ?? null,
             'meli_account_id' => $candidate['meli_account_id'],
             'listing_status' => $candidate['listing_status'],
             'url' => $candidate['url'],
@@ -881,19 +1297,24 @@ class PurchaseOrderMeliImageResolver
     }
 
     /**
-     * @return array{url: ?string, variation_id: ?string, reason: string, ambiguous: bool}
+     * @return array{url: ?string, variation_id: ?string, variation_label: ?string, listing_title: ?string, reason: string, ambiguous: bool}
      */
     private function extractImageFromPriceManagerItem(
         MeliPriceManagerItem $priceItem,
         string $sku,
         ?string $variationId,
         bool $trustExplicitLink,
+        bool $allowSkuMismatch = false,
     ): array {
         $rawItem = is_array($priceItem->raw_item) ? $priceItem->raw_item : [];
+        $title = $this->nullableTrim($rawItem['title'] ?? $priceItem->title ?? null);
+
         if ($rawItem === [] || ! empty($rawItem['truncated'])) {
             return [
                 'url' => null,
                 'variation_id' => $variationId,
+                'variation_label' => null,
+                'listing_title' => $title,
                 'reason' => 'price_manager_snapshot_incomplete',
                 'ambiguous' => false,
             ];
@@ -908,37 +1329,58 @@ class PurchaseOrderMeliImageResolver
             $rawItem['thumbnail'] = $priceItem->thumbnail;
         }
 
+        if (empty($rawItem['title']) && $title !== null) {
+            $rawItem['title'] = $title;
+        }
+
         $snapshot = new MeliPublication;
         $snapshot->mlm = $priceItem->meli_item_id;
         $snapshot->meli_account_id = $priceItem->meli_account_id;
         $snapshot->status = $priceItem->status;
+        $snapshot->permalink = $priceItem->permalink;
         $snapshot->raw = $rawItem;
         // For price manager items without an explicit channel link, require SKU verification in the
         // raw ML payload itself rather than trusting the denormalized `sku` column alone.
         $snapshot->sku = $trustExplicitLink ? (string) ($priceItem->sku ?? '') : '';
 
-        return $this->extractImageFromPublication($snapshot, $sku, $variationId, $trustExplicitLink);
+        return $this->extractImageFromPublication($snapshot, $sku, $variationId, $trustExplicitLink, $allowSkuMismatch);
     }
 
     /**
-     * @return array{url: ?string, variation_id: ?string, reason: string, ambiguous: bool}
+     * @return array{url: ?string, variation_id: ?string, variation_label: ?string, listing_title: ?string, reason: string, ambiguous: bool}
      */
     private function extractImageFromPublication(
         MeliPublication $publication,
         string $sku,
         ?string $variationId = null,
         bool $trustExplicitLink = false,
+        bool $allowSkuMismatch = false,
     ): array {
         $sku = trim($sku);
-        if ($sku === '') {
-            return ['url' => null, 'variation_id' => $variationId, 'reason' => 'missing_sku', 'ambiguous' => false];
+        if ($sku === '' && ! $allowSkuMismatch) {
+            return [
+                'url' => null,
+                'variation_id' => $variationId,
+                'variation_label' => null,
+                'listing_title' => null,
+                'reason' => 'missing_sku',
+                'ambiguous' => false,
+            ];
         }
 
         $item = MeliPublication::itemArrayFromRaw($publication->raw);
         $modelPictures = is_array($publication->pictures ?? null) ? $publication->pictures : [];
+        $listingTitle = $this->extractListingTitle($item, $publication);
 
         if ($item === [] && $modelPictures === []) {
-            return ['url' => null, 'variation_id' => $variationId, 'reason' => 'empty_raw_payload', 'ambiguous' => false];
+            return [
+                'url' => null,
+                'variation_id' => $variationId,
+                'variation_label' => null,
+                'listing_title' => $listingTitle,
+                'reason' => 'empty_raw_payload',
+                'ambiguous' => false,
+            ];
         }
 
         $variations = is_array($item['variations'] ?? null) ? $item['variations'] : [];
@@ -952,14 +1394,20 @@ class PurchaseOrderMeliImageResolver
                     continue;
                 }
 
-                $variationSku = $this->sellerSku($variation);
-                if ($variationSku !== '' && strcasecmp($variationSku, $sku) !== 0) {
-                    return [
-                        'url' => null,
-                        'variation_id' => $variationId,
-                        'reason' => 'variation_sku_mismatch',
-                        'ambiguous' => false,
-                    ];
+                $variationLabel = $this->extractVariationLabel($variation);
+
+                if (! $allowSkuMismatch) {
+                    $variationSku = $this->sellerSku($variation);
+                    if ($variationSku !== '' && strcasecmp($variationSku, $sku) !== 0) {
+                        return [
+                            'url' => null,
+                            'variation_id' => $variationId,
+                            'variation_label' => $variationLabel,
+                            'listing_title' => $listingTitle,
+                            'reason' => 'variation_sku_mismatch',
+                            'ambiguous' => false,
+                        ];
+                    }
                 }
 
                 $pic = $this->variationPicture($variation, $pictures);
@@ -967,6 +1415,8 @@ class PurchaseOrderMeliImageResolver
                 return [
                     'url' => $pic['url'],
                     'variation_id' => $variationId,
+                    'variation_label' => $variationLabel,
+                    'listing_title' => $listingTitle,
                     'reason' => $pic['url'] !== null ? 'resolved' : $pic['reason'],
                     'ambiguous' => false,
                 ];
@@ -975,22 +1425,26 @@ class PurchaseOrderMeliImageResolver
             return [
                 'url' => null,
                 'variation_id' => $variationId,
+                'variation_label' => null,
+                'listing_title' => $listingTitle,
                 'reason' => 'variation_not_found',
                 'ambiguous' => false,
             ];
         }
 
-        if ($variations !== []) {
+        if ($variations !== [] && ! $allowSkuMismatch) {
             // A generic listing cover can be the wrong color/model: require a single exact SKU variant.
             $matches = array_values(array_filter(
                 $variations,
-                fn (mixed $variation): bool => is_array($variation) && strcasecmp($this->sellerSku($variation), $sku) === 0,
+                fn (mixed $variation): bool => is_array($variation) && $sku !== '' && strcasecmp($this->sellerSku($variation), $sku) === 0,
             ));
 
             if (count($matches) === 0) {
                 return [
                     'url' => null,
                     'variation_id' => null,
+                    'variation_label' => null,
+                    'listing_title' => $listingTitle,
                     'reason' => 'variation_not_found',
                     'ambiguous' => false,
                 ];
@@ -1000,6 +1454,8 @@ class PurchaseOrderMeliImageResolver
                 return [
                     'url' => null,
                     'variation_id' => null,
+                    'variation_label' => null,
+                    'listing_title' => $listingTitle,
                     'reason' => 'variation_ambiguous',
                     'ambiguous' => true,
                 ];
@@ -1012,31 +1468,75 @@ class PurchaseOrderMeliImageResolver
             return [
                 'url' => $pic['url'],
                 'variation_id' => $matchedVariationId,
+                'variation_label' => $this->extractVariationLabel($matchedVariation),
+                'listing_title' => $listingTitle,
                 'reason' => $pic['url'] !== null ? 'resolved' : $pic['reason'],
                 'ambiguous' => false,
             ];
         }
 
-        $sellerSku = $this->sellerSku($item);
-        $columnSku = trim((string) ($publication->sku ?? ''));
+        if ($variations !== [] && $allowSkuMismatch && $sku !== '') {
+            // Even when a whole multi-variation listing was approved without variation_id, prefer exact SKU variation if unique.
+            $matches = array_values(array_filter(
+                $variations,
+                fn (mixed $variation): bool => is_array($variation) && strcasecmp($this->sellerSku($variation), $sku) === 0,
+            ));
 
-        if ($sellerSku !== '' && strcasecmp($sellerSku, $sku) !== 0) {
-            return ['url' => null, 'variation_id' => null, 'reason' => 'sku_mismatch', 'ambiguous' => false];
-        }
-
-        if ($sellerSku === '' && ! $trustExplicitLink) {
-            if ($columnSku === '' || strcasecmp($columnSku, $sku) !== 0) {
-                return [
-                    'url' => null,
-                    'variation_id' => null,
-                    'reason' => 'publication_sku_unverified',
-                    'ambiguous' => false,
-                ];
+            if (count($matches) === 1) {
+                $matchedVariation = $matches[0];
+                $matchedVariationId = isset($matchedVariation['id']) ? (string) $matchedVariation['id'] : null;
+                $pic = $this->variationPicture($matchedVariation, $pictures);
+                if ($pic['url'] !== null) {
+                    return [
+                        'url' => $pic['url'],
+                        'variation_id' => $matchedVariationId,
+                        'variation_label' => $this->extractVariationLabel($matchedVariation),
+                        'listing_title' => $listingTitle,
+                        'reason' => 'resolved',
+                        'ambiguous' => false,
+                    ];
+                }
             }
         }
 
-        if ($sellerSku === '' && $trustExplicitLink && $columnSku !== '' && strcasecmp($columnSku, $sku) !== 0) {
-            return ['url' => null, 'variation_id' => null, 'reason' => 'sku_mismatch', 'ambiguous' => false];
+        if (! $allowSkuMismatch) {
+            $sellerSku = $this->sellerSku($item);
+            $columnSku = trim((string) ($publication->sku ?? ''));
+
+            if ($sellerSku !== '' && strcasecmp($sellerSku, $sku) !== 0) {
+                return [
+                    'url' => null,
+                    'variation_id' => null,
+                    'variation_label' => null,
+                    'listing_title' => $listingTitle,
+                    'reason' => 'sku_mismatch',
+                    'ambiguous' => false,
+                ];
+            }
+
+            if ($sellerSku === '' && ! $trustExplicitLink) {
+                if ($columnSku === '' || strcasecmp($columnSku, $sku) !== 0) {
+                    return [
+                        'url' => null,
+                        'variation_id' => null,
+                        'variation_label' => null,
+                        'listing_title' => $listingTitle,
+                        'reason' => 'publication_sku_unverified',
+                        'ambiguous' => false,
+                    ];
+                }
+            }
+
+            if ($sellerSku === '' && $trustExplicitLink && $columnSku !== '' && strcasecmp($columnSku, $sku) !== 0) {
+                return [
+                    'url' => null,
+                    'variation_id' => null,
+                    'variation_label' => null,
+                    'listing_title' => $listingTitle,
+                    'reason' => 'sku_mismatch',
+                    'ambiguous' => false,
+                ];
+            }
         }
 
         $pic = $this->firstValidPicture($pictures, $item['thumbnail'] ?? null);
@@ -1044,6 +1544,8 @@ class PurchaseOrderMeliImageResolver
         return [
             'url' => $pic['url'],
             'variation_id' => null,
+            'variation_label' => null,
+            'listing_title' => $listingTitle,
             'reason' => $pic['url'] !== null ? 'resolved' : $pic['reason'],
             'ambiguous' => false,
         ];
@@ -1160,6 +1662,586 @@ class PurchaseOrderMeliImageResolver
     }
 
     /**
+     * Resolve an explicit (MLM, variation_id) candidate from synced ML tables for admin approval.
+     *
+     * @return ?array<string, mixed>
+     */
+    public function resolveExplicitCandidate(
+        string $mlm,
+        ?string $variationId = null,
+        ?int $meliAccountId = null,
+    ): ?array {
+        $normalizedMlm = $this->normalizedMlm($mlm);
+        if ($normalizedMlm === null) {
+            return null;
+        }
+
+        $hasPublications = Schema::hasTable('meli_publications');
+        $hasPriceManager = Schema::hasTable('meli_price_manager_items');
+        if (! $hasPublications && ! $hasPriceManager) {
+            return null;
+        }
+
+        $mlmVariants = $this->caseVariants([$normalizedMlm]);
+        $snapshots = [];
+
+        if ($hasPublications) {
+            $pubColumns = Schema::getColumnListing('meli_publications');
+            $pubHasIsCurrent = in_array('is_current', $pubColumns, true);
+            $pubHasPictures = in_array('pictures', $pubColumns, true);
+            $pubSelect = array_values(array_filter([
+                'id',
+                'meli_account_id',
+                'sku',
+                'mlm',
+                'status',
+                'last_sync_at',
+                'raw',
+                in_array('permalink', $pubColumns, true) ? 'permalink' : null,
+                $pubHasIsCurrent ? 'is_current' : null,
+                $pubHasPictures ? 'pictures' : null,
+            ]));
+
+            $pubs = $this->queryPublications($pubSelect, $pubHasIsCurrent, [], $mlmVariants);
+            foreach ($pubs as $publication) {
+                if ($meliAccountId !== null && (int) ($publication->meli_account_id ?? 0) !== $meliAccountId) {
+                    continue;
+                }
+                $detail = $this->extractImageFromPublication($publication, '', $variationId, true, true);
+                if ($detail['url'] !== null) {
+                    $snapshots[] = $this->buildPublicationSnapshotCandidate(
+                        $publication,
+                        $normalizedMlm,
+                        $detail,
+                        $variationId !== null ? self::SOURCE_APPROVED_VARIATION : self::SOURCE_APPROVED_PUBLICATION,
+                    );
+                }
+            }
+        }
+
+        if ($hasPriceManager) {
+            $priceSelect = $this->priceManagerSelectColumns();
+            $priceItems = $this->queryPriceManagerItems([], $mlmVariants, $priceSelect);
+            foreach ($priceItems as $priceItem) {
+                if ($meliAccountId !== null && (int) ($priceItem->meli_account_id ?? 0) !== $meliAccountId) {
+                    continue;
+                }
+                $detail = $this->extractImageFromPriceManagerItem($priceItem, '', $variationId, true, true);
+                if ($detail['url'] !== null) {
+                    $snapshots[] = $this->buildPriceManagerSnapshotCandidate(
+                        $priceItem,
+                        $normalizedMlm,
+                        $detail,
+                        $variationId !== null ? self::SOURCE_APPROVED_VARIATION : self::SOURCE_APPROVED_PUBLICATION,
+                    );
+                }
+            }
+        }
+
+        if ($snapshots === []) {
+            return null;
+        }
+
+        $reconciled = $this->reconcileSnapshotsForSameListing($snapshots);
+        $winner = $reconciled['winner'] ?? $snapshots[0];
+
+        return [
+            'mlm' => $normalizedMlm,
+            'variation_id' => $winner['variation_id'] ?? $variationId,
+            'variation_label' => $winner['variation_label'] ?? null,
+            'listing_title' => $winner['listing_title'] ?? null,
+            'meli_account_id' => $winner['meli_account_id'],
+            'listing_status' => $winner['listing_status'],
+            'url' => $winner['url'],
+        ];
+    }
+
+    /**
+     * Discover candidate Mercado Libre publications and variations for an item using:
+     * 1. Approved / linked / exact-SKU listings
+     * 2. Title & keyword discovery (ONLY to propose candidates for manual review/approval).
+     *
+     * @return list<array<string, mixed>>
+     */
+    public function discoverCandidatesForItem(
+        PurchaseOrderItem $item,
+        ?string $customQuery = null,
+        int $limit = 30,
+    ): array {
+        $hasPublications = Schema::hasTable('meli_publications');
+        $hasPriceManager = Schema::hasTable('meli_price_manager_items');
+        if (! $hasPublications && ! $hasPriceManager) {
+            return [];
+        }
+
+        $item->loadMissing(['product:id,sku,name,brand']);
+
+        $sku = $this->itemSku($item);
+        $supplierSku = trim((string) ($item->supplier_sku ?? ''));
+        $productName = trim((string) ($item->product?->name ?? $item->product_name ?? ''));
+        $searchText = trim((string) ($customQuery ?? ''));
+        if ($searchText === '') {
+            $searchText = $productName;
+        }
+
+        $approvedMlm = $this->normalizedMlm($item->getAttribute('approved_mlm'));
+        $approvedVarId = $this->nullableTrim($item->getAttribute('approved_variation_id'));
+        $photoMode = $item->getAttribute('photo_source_mode');
+        $rejectedMlms = $this->normalizedRejectedMlms($item);
+
+        $accountsById = Schema::hasTable('meli_accounts')
+            ? MeliAccount::query()->get(['id', 'meli_user_id', 'nickname', 'is_default'])->keyBy('id')
+            : collect();
+
+        $links = (Schema::hasTable('inventory_channel_links') && $item->inventory_product_id)
+            ? InventoryChannelLink::query()
+                ->where('inventory_product_id', (int) $item->inventory_product_id)
+                ->where('channel', InventoryChannelLink::MERCADO_LIBRE)
+                ->get(['external_listing_id', 'external_product_id', 'external_variant_id'])
+            : collect();
+
+        $linkedMlms = [];
+        foreach ($links as $link) {
+            $linkMlm = $this->linkMlm($link);
+            if ($linkMlm !== '') {
+                $linkedMlms[$linkMlm] = $this->nullableTrim($link->external_variant_id);
+            }
+        }
+
+        $explicitMlms = array_values(array_unique(array_filter([
+            $approvedMlm,
+            ...array_keys($linkedMlms),
+            ...$this->extractMlmTokens($searchText),
+        ])));
+
+        $skuTerms = array_values(array_unique(array_filter([$sku, $supplierSku])));
+        $tokens = $this->extractSearchTokens($searchText);
+        $skuVariants = $this->caseVariants($skuTerms);
+        $mlmVariants = $this->caseVariants($explicitMlms);
+
+        $pubColumns = $hasPublications ? Schema::getColumnListing('meli_publications') : [];
+        $pubHasIsCurrent = in_array('is_current', $pubColumns, true);
+        $pubHasPictures = in_array('pictures', $pubColumns, true);
+        $pubSelect = array_values(array_filter([
+            'id',
+            'meli_account_id',
+            'sku',
+            'mlm',
+            'status',
+            'last_sync_at',
+            'raw',
+            in_array('permalink', $pubColumns, true) ? 'permalink' : null,
+            $pubHasIsCurrent ? 'is_current' : null,
+            $pubHasPictures ? 'pictures' : null,
+        ]));
+
+        $publications = collect();
+        if ($hasPublications) {
+            if ($skuVariants !== [] || $mlmVariants !== []) {
+                $publications = $publications->merge(
+                    $this->queryPublications($pubSelect, $pubHasIsCurrent, $skuVariants, $mlmVariants)
+                );
+            }
+            if ($sku !== '') {
+                $publications = $publications->merge(
+                    $this->queryVariationPublicationsByRaw($pubSelect, $pubHasIsCurrent, [$sku], $publications->pluck('id')->all())
+                );
+            }
+            if ($tokens !== []) {
+                $publications = $publications->merge(
+                    $this->searchPublicationsByTokens($pubSelect, $pubHasIsCurrent, $tokens, $publications->pluck('id')->all())
+                );
+            }
+        }
+
+        $priceItems = collect();
+        if ($hasPriceManager) {
+            $priceSelect = $this->priceManagerSelectColumns();
+            if ($skuVariants !== [] || $mlmVariants !== []) {
+                $priceItems = $priceItems->merge($this->queryPriceManagerItems($skuVariants, $mlmVariants, $priceSelect));
+            }
+            if ($sku !== '') {
+                $priceItems = $priceItems->merge(
+                    $this->queryVariationPriceManagerItemsByRaw([$sku], $priceItems->pluck('id')->all(), $priceSelect)
+                );
+            }
+            if ($tokens !== []) {
+                $priceItems = $priceItems->merge(
+                    $this->searchPriceManagerItemsByTokens($tokens, $priceItems->pluck('id')->all(), $priceSelect)
+                );
+            }
+        }
+
+        $candidatesByIdentity = [];
+
+        foreach ($publications as $publication) {
+            $mlm = $this->normalizedMlm($publication->mlm);
+            if ($mlm === null) {
+                continue;
+            }
+            $isCurrent = array_key_exists('is_current', $publication->getAttributes())
+                ? (bool) $publication->is_current
+                : true;
+            $syncedAtTs = $publication->last_sync_at ? $publication->last_sync_at->getTimestamp() : null;
+
+            $this->expandPublicationToDiscoveryCandidates(
+                $publication,
+                $mlm,
+                $isCurrent,
+                $syncedAtTs,
+                0,
+                (int) $publication->id,
+                $candidatesByIdentity,
+            );
+        }
+
+        foreach ($priceItems as $priceItem) {
+            $mlm = $this->normalizedMlm($priceItem->meli_item_id);
+            if ($mlm === null) {
+                continue;
+            }
+            $rawItem = is_array($priceItem->raw_item) ? $priceItem->raw_item : [];
+            if ($rawItem === [] || ! empty($rawItem['truncated'])) {
+                continue;
+            }
+            if (empty($rawItem['attributes']) && is_array($priceItem->raw_attributes) && $priceItem->raw_attributes !== []) {
+                $rawItem['attributes'] = $priceItem->raw_attributes;
+            }
+            if (empty($rawItem['thumbnail']) && is_string($priceItem->thumbnail) && trim($priceItem->thumbnail) !== '') {
+                $rawItem['thumbnail'] = $priceItem->thumbnail;
+            }
+            if (empty($rawItem['title']) && is_string($priceItem->title) && trim($priceItem->title) !== '') {
+                $rawItem['title'] = trim($priceItem->title);
+            }
+
+            $snapshot = new MeliPublication;
+            $snapshot->mlm = $priceItem->meli_item_id;
+            $snapshot->meli_account_id = $priceItem->meli_account_id;
+            $snapshot->status = $priceItem->status;
+            $snapshot->permalink = $priceItem->permalink;
+            $snapshot->raw = $rawItem;
+            $snapshot->sku = (string) ($priceItem->sku ?? '');
+
+            $syncedAtTs = $priceItem->last_synced_at ? $priceItem->last_synced_at->getTimestamp() : null;
+
+            $this->expandPublicationToDiscoveryCandidates(
+                $snapshot,
+                $mlm,
+                true,
+                $syncedAtTs,
+                1,
+                (int) $priceItem->id,
+                $candidatesByIdentity,
+            );
+        }
+
+        $scoreTokens = $this->extractSearchTokens($searchText !== '' ? $searchText : $productName);
+        $mlmLookupSet = array_flip($this->extractMlmTokens($searchText));
+
+        $formatted = [];
+        foreach ($candidatesByIdentity as $snapshots) {
+            $reconciled = $this->reconcileSnapshotsForSameListing($snapshots);
+            $winner = $reconciled['winner'] ?? $snapshots[0];
+            $mlm = $winner['mlm'];
+            $varId = $winner['variation_id'];
+            $candidateSku = (string) ($winner['sku'] ?? '');
+
+            $isSelected = $photoMode === PurchaseOrderItem::PHOTO_MODE_APPROVED_ML
+                && $approvedMlm === $mlm
+                && (string) ($approvedVarId ?? '') === (string) ($varId ?? '');
+
+            $isExactSku = $sku !== '' && $candidateSku !== '' && strcasecmp($candidateSku, $sku) === 0;
+            $isLinked = array_key_exists($mlm, $linkedMlms)
+                && ($linkedMlms[$mlm] === null || (string) $linkedMlms[$mlm] === (string) ($varId ?? ''));
+
+            $matchType = match (true) {
+                $isSelected => 'approved',
+                $isLinked => 'channel_link',
+                $isExactSku => 'exact_sku',
+                isset($mlmLookupSet[$mlm]) => 'mlm_lookup',
+                default => 'title_match',
+            };
+
+            $matchPriority = match ($matchType) {
+                'approved' => 0,
+                'channel_link' => 1,
+                'exact_sku' => 2,
+                'mlm_lookup' => 3,
+                default => 4,
+            };
+
+            $haystack = mb_strtolower(trim(implode(' ', array_filter([
+                $winner['listing_title'] ?? '',
+                $winner['variation_label'] ?? '',
+                $candidateSku,
+                $mlm,
+            ]))));
+
+            $tokenHits = 0;
+            foreach ($scoreTokens as $token) {
+                if (str_contains($haystack, mb_strtolower($token))) {
+                    $tokenHits++;
+                }
+            }
+
+            // If a custom query was provided (without exact SKU/MLM), require at least one match in the candidate.
+            if ($customQuery !== null && trim($customQuery) !== '' && $matchPriority === 4 && $tokenHits === 0) {
+                continue;
+            }
+
+            $account = $winner['meli_account_id'] ? $accountsById->get((int) $winner['meli_account_id']) : null;
+            $accountLabel = $account
+                ? (trim((string) ($account->nickname ?? '')) ?: trim((string) ($account->meli_user_id ?? '')) ?: ('Cuenta #'.$account->id))
+                : ($winner['meli_account_id'] ? ('Cuenta #'.$winner['meli_account_id']) : null);
+
+            $formatted[] = [
+                'mlm' => $mlm,
+                'variation_id' => $varId,
+                'variation_label' => $winner['variation_label'],
+                'meli_account_id' => $winner['meli_account_id'],
+                'account_label' => $accountLabel,
+                'title' => $winner['listing_title'],
+                'sku' => $candidateSku !== '' ? $candidateSku : null,
+                'listing_status' => $winner['listing_status'],
+                'permalink' => $winner['permalink'],
+                'url' => $winner['url'],
+                'match_type' => $matchType,
+                'is_rejected' => isset($rejectedMlms[$mlm]),
+                'is_selected' => $isSelected,
+                '_sort_selected' => $isSelected ? 0 : 1,
+                '_sort_rejected' => isset($rejectedMlms[$mlm]) ? 1 : 0,
+                '_sort_priority' => $matchPriority,
+                '_sort_token_hits' => $tokenHits,
+                '_sort_status' => $winner['status_rank'],
+                '_sort_current' => $winner['is_current'] ? 0 : 1,
+                '_sort_ts' => $winner['synced_at_ts'] ?? PHP_INT_MIN,
+            ];
+        }
+
+        usort($formatted, static function (array $a, array $b): int {
+            return ($a['_sort_selected'] <=> $b['_sort_selected'])
+                ?: ($a['_sort_rejected'] <=> $b['_sort_rejected'])
+                ?: ($a['_sort_priority'] <=> $b['_sort_priority'])
+                ?: ($b['_sort_token_hits'] <=> $a['_sort_token_hits'])
+                ?: ($a['_sort_status'] <=> $b['_sort_status'])
+                ?: ($a['_sort_current'] <=> $b['_sort_current'])
+                ?: ($b['_sort_ts'] <=> $a['_sort_ts']);
+        });
+
+        return array_map(static function (array $row): array {
+            unset(
+                $row['_sort_selected'],
+                $row['_sort_rejected'],
+                $row['_sort_priority'],
+                $row['_sort_token_hits'],
+                $row['_sort_status'],
+                $row['_sort_current'],
+                $row['_sort_ts'],
+            );
+
+            return $row;
+        }, array_slice($formatted, 0, max(1, $limit)));
+    }
+
+    /**
+     * Check whether title/keyword discovery finds at least one candidate for an unresolved item.
+     */
+    public function hasDiscoveryCandidatesForItem(PurchaseOrderItem $item): bool
+    {
+        return $this->discoverCandidatesForItem($item, null, 1) !== [];
+    }
+
+    /**
+     * @param  array<string, list<array<string, mixed>>>  $candidatesByIdentity
+     */
+    private function expandPublicationToDiscoveryCandidates(
+        MeliPublication $publication,
+        string $mlm,
+        bool $isCurrent,
+        ?int $syncedAtTs,
+        int $sourceRank,
+        int $rowId,
+        array &$candidatesByIdentity,
+    ): void {
+        $item = MeliPublication::itemArrayFromRaw($publication->raw);
+        $modelPictures = is_array($publication->pictures ?? null) ? $publication->pictures : [];
+        if ($item === [] && $modelPictures === []) {
+            return;
+        }
+
+        $listingTitle = $this->extractListingTitle($item, $publication);
+        $permalink = $this->nullableTrim($publication->permalink ?? ($item['permalink'] ?? null));
+        $variations = is_array($item['variations'] ?? null) ? $item['variations'] : [];
+        $pictures = is_array($item['pictures'] ?? null) && $item['pictures'] !== []
+            ? $item['pictures']
+            : $modelPictures;
+
+        if ($variations !== []) {
+            $addedVariation = false;
+            foreach ($variations as $variation) {
+                if (! is_array($variation)) {
+                    continue;
+                }
+                $varId = isset($variation['id']) ? trim((string) $variation['id']) : '';
+                if ($varId === '') {
+                    continue;
+                }
+                $pic = $this->variationPicture($variation, $pictures);
+                if ($pic['url'] === null) {
+                    continue;
+                }
+
+                $addedVariation = true;
+                $identityKey = $this->listingIdentityKey($mlm, $varId, 'pub#'.$rowId);
+                $candidatesByIdentity[$identityKey][] = [
+                    'identity_key' => $identityKey,
+                    'url' => $pic['url'],
+                    'source' => 'discovery_variation',
+                    'mlm' => $mlm,
+                    'variation_id' => $varId,
+                    'variation_label' => $this->extractVariationLabel($variation),
+                    'listing_title' => $listingTitle,
+                    'sku' => $this->sellerSku($variation),
+                    'permalink' => $permalink,
+                    'meli_account_id' => $publication->meli_account_id ? (int) $publication->meli_account_id : null,
+                    'listing_status' => $publication->status,
+                    'status_rank' => $this->statusRank($publication->status),
+                    'is_current' => $isCurrent,
+                    'synced_at_ts' => $syncedAtTs,
+                    'source_rank' => $sourceRank,
+                    'row_id' => $rowId,
+                ];
+            }
+
+            if ($addedVariation) {
+                return;
+            }
+        }
+
+        $pic = $this->firstValidPicture($pictures, $item['thumbnail'] ?? null);
+        if ($pic['url'] === null) {
+            return;
+        }
+
+        $identityKey = $this->listingIdentityKey($mlm, null, 'pub#'.$rowId);
+        $candidatesByIdentity[$identityKey][] = [
+            'identity_key' => $identityKey,
+            'url' => $pic['url'],
+            'source' => 'discovery_publication',
+            'mlm' => $mlm,
+            'variation_id' => null,
+            'variation_label' => null,
+            'listing_title' => $listingTitle,
+            'sku' => $this->sellerSku($item) ?: trim((string) ($publication->sku ?? '')),
+            'permalink' => $permalink,
+            'meli_account_id' => $publication->meli_account_id ? (int) $publication->meli_account_id : null,
+            'listing_status' => $publication->status,
+            'status_rank' => $this->statusRank($publication->status),
+            'is_current' => $isCurrent,
+            'synced_at_ts' => $syncedAtTs,
+            'source_rank' => $sourceRank,
+            'row_id' => $rowId,
+        ];
+    }
+
+    /**
+     * Index bulk-queried variation publications strictly by the verified SKUs present in each row.
+     * Prevents an unrelated MLM from leaking into another item's diagnostics or candidates.
+     *
+     * @param  Collection<int, MeliPublication>  $publications
+     * @param  array<string, true>  $targetSkusUpper
+     * @return array<string, Collection<int, MeliPublication>>
+     */
+    private function indexPublicationsByVerifiedSku(Collection $publications, array $targetSkusUpper): array
+    {
+        $indexed = [];
+
+        foreach ($publications as $publication) {
+            $item = MeliPublication::itemArrayFromRaw($publication->raw);
+            $matchedSkus = [];
+
+            $colSku = strtoupper(trim((string) ($publication->sku ?? '')));
+            if ($colSku !== '' && isset($targetSkusUpper[$colSku])) {
+                $matchedSkus[$colSku] = true;
+            }
+
+            if ($item !== []) {
+                $itemSku = strtoupper($this->sellerSku($item));
+                if ($itemSku !== '' && isset($targetSkusUpper[$itemSku])) {
+                    $matchedSkus[$itemSku] = true;
+                }
+
+                foreach ((array) ($item['variations'] ?? []) as $variation) {
+                    if (! is_array($variation)) {
+                        continue;
+                    }
+                    $varSku = strtoupper($this->sellerSku($variation));
+                    if ($varSku !== '' && isset($targetSkusUpper[$varSku])) {
+                        $matchedSkus[$varSku] = true;
+                    }
+                }
+            }
+
+            foreach (array_keys($matchedSkus) as $skuUpper) {
+                if (! isset($indexed[$skuUpper])) {
+                    $indexed[$skuUpper] = collect();
+                }
+                $indexed[$skuUpper]->push($publication);
+            }
+        }
+
+        return $indexed;
+    }
+
+    /**
+     * Index bulk-queried price manager items strictly by verified SKUs inside raw_item.
+     *
+     * @param  Collection<int, MeliPriceManagerItem>  $priceItems
+     * @param  array<string, true>  $targetSkusUpper
+     * @return array<string, Collection<int, MeliPriceManagerItem>>
+     */
+    private function indexPriceManagerItemsByVerifiedSku(Collection $priceItems, array $targetSkusUpper): array
+    {
+        $indexed = [];
+
+        foreach ($priceItems as $priceItem) {
+            $rawItem = is_array($priceItem->raw_item) ? $priceItem->raw_item : [];
+            if ($rawItem === [] || ! empty($rawItem['truncated'])) {
+                continue;
+            }
+
+            if (empty($rawItem['attributes']) && is_array($priceItem->raw_attributes) && $priceItem->raw_attributes !== []) {
+                $rawItem['attributes'] = $priceItem->raw_attributes;
+            }
+
+            $matchedSkus = [];
+            $itemSku = strtoupper($this->sellerSku($rawItem));
+            if ($itemSku !== '' && isset($targetSkusUpper[$itemSku])) {
+                $matchedSkus[$itemSku] = true;
+            }
+
+            foreach ((array) ($rawItem['variations'] ?? []) as $variation) {
+                if (! is_array($variation)) {
+                    continue;
+                }
+                $varSku = strtoupper($this->sellerSku($variation));
+                if ($varSku !== '' && isset($targetSkusUpper[$varSku])) {
+                    $matchedSkus[$varSku] = true;
+                }
+            }
+
+            foreach (array_keys($matchedSkus) as $skuUpper) {
+                if (! isset($indexed[$skuUpper])) {
+                    $indexed[$skuUpper] = collect();
+                }
+                $indexed[$skuUpper]->push($priceItem);
+            }
+        }
+
+        return $indexed;
+    }
+
+    /**
      * @param  list<string>  $select
      * @param  list<string>  $skuVariants
      * @param  list<string>  $mlmVariants
@@ -1192,13 +2274,36 @@ class PurchaseOrderMeliImageResolver
             ->get($select);
     }
 
+    /** @return list<string> */
+    private function priceManagerSelectColumns(): array
+    {
+        $columns = Schema::getColumnListing('meli_price_manager_items');
+
+        return array_values(array_filter([
+            'id',
+            'meli_account_id',
+            'meli_item_id',
+            'sku',
+            in_array('title', $columns, true) ? 'title' : null,
+            in_array('permalink', $columns, true) ? 'permalink' : null,
+            'raw_item',
+            'raw_attributes',
+            'thumbnail',
+            'status',
+            'last_synced_at',
+        ]));
+    }
+
     /**
      * @param  list<string>  $skuVariants
      * @param  list<string>  $mlmVariants
+     * @param  list<string>  $select
      * @return Collection<int, MeliPriceManagerItem>
      */
-    private function queryPriceManagerItems(array $skuVariants, array $mlmVariants): Collection
+    private function queryPriceManagerItems(array $skuVariants, array $mlmVariants, array $select = []): Collection
     {
+        $columns = $select !== [] ? $select : $this->priceManagerSelectColumns();
+
         return MeliPriceManagerItem::query()
             ->whereNotNull('raw_item')
             ->where(function ($nested) use ($skuVariants, $mlmVariants): void {
@@ -1216,7 +2321,7 @@ class PurchaseOrderMeliImageResolver
             ->orderByRaw("CASE WHEN status = 'active' THEN 0 WHEN status = 'paused' THEN 1 ELSE 2 END")
             ->orderByDesc('last_synced_at')
             ->orderByDesc('id')
-            ->get(['id', 'meli_account_id', 'meli_item_id', 'sku', 'raw_item', 'raw_attributes', 'thumbnail', 'status', 'last_synced_at']);
+            ->get($columns);
     }
 
     /**
@@ -1260,7 +2365,7 @@ class PurchaseOrderMeliImageResolver
         return $query
             ->orderByDesc('last_sync_at')
             ->orderByDesc('id')
-            ->limit(250)
+            ->limit(500)
             ->get($select);
     }
 
@@ -1269,13 +2374,16 @@ class PurchaseOrderMeliImageResolver
      *
      * @param  list<string>  $skus
      * @param  list<int>  $excludeIds
+     * @param  list<string>  $select
      * @return Collection<int, MeliPriceManagerItem>
      */
-    private function queryVariationPriceManagerItemsByRaw(array $skus, array $excludeIds): Collection
+    private function queryVariationPriceManagerItemsByRaw(array $skus, array $excludeIds, array $select = []): Collection
     {
         if ($skus === []) {
             return collect();
         }
+
+        $columns = $select !== [] ? $select : $this->priceManagerSelectColumns();
 
         $query = MeliPriceManagerItem::query()
             ->whereNotNull('raw_item')
@@ -1300,8 +2408,96 @@ class PurchaseOrderMeliImageResolver
         return $query
             ->orderByDesc('last_synced_at')
             ->orderByDesc('id')
-            ->limit(250)
-            ->get(['id', 'meli_account_id', 'meli_item_id', 'sku', 'raw_item', 'raw_attributes', 'thumbnail', 'status', 'last_synced_at']);
+            ->limit(500)
+            ->get($columns);
+    }
+
+    /**
+     * @param  list<string>  $select
+     * @param  list<string>  $tokens
+     * @param  list<int>  $excludeIds
+     * @return Collection<int, MeliPublication>
+     */
+    private function searchPublicationsByTokens(array $select, bool $hasIsCurrent, array $tokens, array $excludeIds): Collection
+    {
+        if ($tokens === []) {
+            return collect();
+        }
+
+        $query = MeliPublication::query()
+            ->whereNotNull('raw')
+            ->where(function ($nested) use ($tokens): void {
+                foreach (array_slice($tokens, 0, 6) as $index => $token) {
+                    $pattern = '%'.$this->escapeLike($token).'%';
+                    if ($index === 0) {
+                        $nested->where('raw', 'like', $pattern)
+                            ->orWhere('sku', 'like', $pattern)
+                            ->orWhere('mlm', 'like', $pattern);
+                    } else {
+                        $nested->orWhere('raw', 'like', $pattern)
+                            ->orWhere('sku', 'like', $pattern)
+                            ->orWhere('mlm', 'like', $pattern);
+                    }
+                }
+            })
+            ->orderByRaw("CASE WHEN status = 'active' THEN 0 WHEN status = 'paused' THEN 1 ELSE 2 END");
+
+        if ($excludeIds !== []) {
+            $query->whereNotIn('id', $excludeIds);
+        }
+
+        if ($hasIsCurrent) {
+            $query->orderByDesc('is_current');
+        }
+
+        return $query
+            ->orderByDesc('last_sync_at')
+            ->orderByDesc('id')
+            ->limit(80)
+            ->get($select);
+    }
+
+    /**
+     * @param  list<string>  $tokens
+     * @param  list<int>  $excludeIds
+     * @param  list<string>  $select
+     * @return Collection<int, MeliPriceManagerItem>
+     */
+    private function searchPriceManagerItemsByTokens(array $tokens, array $excludeIds, array $select = []): Collection
+    {
+        if ($tokens === []) {
+            return collect();
+        }
+
+        $columns = $select !== [] ? $select : $this->priceManagerSelectColumns();
+
+        $query = MeliPriceManagerItem::query()
+            ->whereNotNull('raw_item')
+            ->where(function ($nested) use ($tokens): void {
+                foreach (array_slice($tokens, 0, 6) as $index => $token) {
+                    $pattern = '%'.$this->escapeLike($token).'%';
+                    if ($index === 0) {
+                        $nested->where('title', 'like', $pattern)
+                            ->orWhere('sku', 'like', $pattern)
+                            ->orWhere('meli_item_id', 'like', $pattern);
+                    } else {
+                        $nested->orWhere('title', 'like', $pattern)
+                            ->orWhere('sku', 'like', $pattern)
+                            ->orWhere('meli_item_id', 'like', $pattern);
+                    }
+                }
+            })
+            ->orderByRaw("CASE WHEN status = 'active' THEN 0 WHEN status = 'paused' THEN 1 ELSE 2 END");
+
+        if ($excludeIds !== []) {
+            $query->whereNotIn('id', $excludeIds);
+        }
+
+        return $query
+            ->orderByDesc('last_synced_at')
+            ->orderByDesc('id')
+            ->limit(80)
+            ->get($columns);
     }
 
     /**
@@ -1375,6 +2571,143 @@ class PurchaseOrderMeliImageResolver
         return str_starts_with($productId, 'MLM') ? $productId : '';
     }
 
+    private function normalizedMlm(mixed $value): ?string
+    {
+        $trimmed = strtoupper(trim((string) ($value ?? '')));
+
+        return $trimmed === '' ? null : $trimmed;
+    }
+
+    /** @return array<string, true> */
+    private function normalizedRejectedMlms(PurchaseOrderItem $item): array
+    {
+        $raw = $item->getAttribute('rejected_mlms');
+        if (is_string($raw)) {
+            $decoded = json_decode($raw, true);
+            $raw = is_array($decoded) ? $decoded : [];
+        }
+
+        if (! is_array($raw)) {
+            return [];
+        }
+
+        $set = [];
+        foreach ($raw as $entry) {
+            $mlm = $this->normalizedMlm($entry);
+            if ($mlm !== null) {
+                $set[$mlm] = true;
+            }
+        }
+
+        return $set;
+    }
+
+    private function isValidStoredManualPhoto(string $path): bool
+    {
+        $normalized = str_replace('\\', '/', trim($path));
+        if (
+            $normalized === ''
+            || ! str_starts_with($normalized, PurchaseOrderMeliImageCacheService::MANUAL_DIR.'/')
+            || str_contains($normalized, '..')
+        ) {
+            return false;
+        }
+
+        return Storage::disk('local')->exists($normalized);
+    }
+
+    /** @param array<string, mixed> $item */
+    private function extractListingTitle(array $item, MeliPublication $publication): ?string
+    {
+        $title = $item['title'] ?? null;
+        if (! is_string($title) || trim($title) === '') {
+            $raw = is_array($publication->raw) ? $publication->raw : [];
+            $title = $raw['title'] ?? null;
+        }
+
+        return $this->nullableTrim($title);
+    }
+
+    /** @param array<string, mixed> $variation */
+    private function extractVariationLabel(array $variation): ?string
+    {
+        $parts = [];
+        foreach ((array) ($variation['attribute_combinations'] ?? []) as $combo) {
+            if (! is_array($combo)) {
+                continue;
+            }
+            $name = trim((string) ($combo['name'] ?? $combo['id'] ?? ''));
+            $value = trim((string) ($combo['value_name'] ?? $combo['value_id'] ?? ''));
+            if ($value === '') {
+                continue;
+            }
+            $parts[] = $name !== '' ? "{$name}: {$value}" : $value;
+        }
+
+        if ($parts !== []) {
+            return implode(', ', $parts);
+        }
+
+        foreach ((array) ($variation['attributes'] ?? []) as $attr) {
+            if (! is_array($attr)) {
+                continue;
+            }
+            $id = strtoupper(trim((string) ($attr['id'] ?? '')));
+            if (in_array($id, ['SELLER_SKU', 'SKU'], true)) {
+                continue;
+            }
+            $name = trim((string) ($attr['name'] ?? $id));
+            $value = trim((string) ($attr['value_name'] ?? $attr['value_id'] ?? ''));
+            if ($value !== '') {
+                $parts[] = $name !== '' ? "{$name}: {$value}" : $value;
+            }
+        }
+
+        return $parts !== [] ? implode(', ', $parts) : null;
+    }
+
+    /** @return list<string> */
+    private function extractMlmTokens(string $text): array
+    {
+        if ($text === '' || ! preg_match_all('/\bMLM-?\d+\b/i', $text, $matches)) {
+            return [];
+        }
+
+        return array_values(array_unique(array_map(
+            static fn (string $m): string => strtoupper(str_replace('-', '', $m)),
+            $matches[0]
+        )));
+    }
+
+    /** @return list<string> */
+    private function extractSearchTokens(string $text): array
+    {
+        $clean = preg_replace('/[^\p{L}\p{N}]+/u', ' ', trim($text));
+        if (! is_string($clean) || $clean === '') {
+            return [];
+        }
+
+        $parts = preg_split('/\s+/u', $clean) ?: [];
+        $tokens = [];
+
+        foreach ($parts as $part) {
+            $trimmed = trim($part);
+            if (mb_strlen($trimmed) < 2) {
+                continue;
+            }
+            $lower = mb_strtolower($trimmed);
+            if (in_array($lower, self::TITLE_STOPWORDS, true)) {
+                continue;
+            }
+            if (preg_match('/^MLM\d+$/i', $trimmed) === 1) {
+                continue;
+            }
+            $tokens[$lower] = $trimmed;
+        }
+
+        return array_values(array_slice($tokens, 0, 8));
+    }
+
     private function nullableTrim(mixed $value): ?string
     {
         $trimmed = trim((string) ($value ?? ''));
@@ -1409,22 +2742,40 @@ class PurchaseOrderMeliImageResolver
         return str_replace(['\\', '%', '_'], ['\\\\', '\\%', '\\_'], $value);
     }
 
-    /** @return array<string, mixed> */
-    private function emptyResolution(PurchaseOrderItem $item, string $sku, string $reason): array
-    {
+    /**
+     * @param  list<array<string, mixed>>  $ambiguousMatches
+     * @return array<string, mixed>
+     */
+    private function emptyResolution(
+        PurchaseOrderItem $item,
+        string $sku,
+        string $reason,
+        string $auditCategory = self::AUDIT_PENDING_NO_CANDIDATE,
+        ?string $source = null,
+        ?string $photoSourceMode = null,
+        ?string $photoNotes = null,
+        bool $ambiguous = false,
+        array $ambiguousMatches = [],
+    ): array {
         return [
             'item_id' => (int) $item->id,
             'inventory_product_id' => $item->inventory_product_id ? (int) $item->inventory_product_id : null,
             'sku' => $sku,
             'url' => null,
-            'source' => null,
+            'manual_path' => null,
+            'source' => $source,
             'mlm' => null,
             'variation_id' => null,
+            'variation_label' => null,
+            'listing_title' => null,
             'meli_account_id' => null,
             'listing_status' => null,
+            'photo_source_mode' => $photoSourceMode ?? $item->getAttribute('photo_source_mode'),
+            'photo_notes' => $photoNotes ?? $this->nullableTrim($item->getAttribute('photo_notes')),
             'reason' => $reason,
-            'ambiguous' => false,
-            'ambiguous_matches' => [],
+            'audit_category' => $auditCategory,
+            'ambiguous' => $ambiguous,
+            'ambiguous_matches' => $ambiguousMatches,
         ];
     }
 
@@ -1443,18 +2794,31 @@ class PurchaseOrderMeliImageResolver
         ?string $listingStatus,
         bool $ambiguous = false,
         array $ambiguousMatches = [],
+        ?string $listingTitle = null,
+        ?string $variationLabel = null,
+        string $reason = 'resolved',
+        ?string $auditCategory = null,
     ): array {
+        $resolvedAuditCategory = $auditCategory
+            ?? ($variationId !== null ? self::AUDIT_RESOLVED_VARIATION : self::AUDIT_RESOLVED_SKU_LINK);
+
         return [
             'item_id' => (int) $item->id,
             'inventory_product_id' => $item->inventory_product_id ? (int) $item->inventory_product_id : null,
             'sku' => $sku,
             'url' => $url,
+            'manual_path' => null,
             'source' => $source,
             'mlm' => $mlm,
             'variation_id' => $variationId,
+            'variation_label' => $variationLabel,
+            'listing_title' => $listingTitle,
             'meli_account_id' => $meliAccountId,
             'listing_status' => $listingStatus,
-            'reason' => 'resolved',
+            'photo_source_mode' => $item->getAttribute('photo_source_mode'),
+            'photo_notes' => $this->nullableTrim($item->getAttribute('photo_notes')),
+            'reason' => $reason,
+            'audit_category' => $resolvedAuditCategory,
             'ambiguous' => $ambiguous,
             'ambiguous_matches' => $ambiguousMatches,
         ];
