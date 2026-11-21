@@ -742,14 +742,44 @@ class PurchaseOrderMeliPhotosFeatureTest extends TestCase
             'manual_photo_mime' => 'image/png',
         ]);
 
-        $exitCode = Artisan::call('purchasing:audit-order-photos', [
+        // 1. Default fast mode: skips per-item deep title discovery transparently and includes performance telemetry.
+        $fastExitCode = Artisan::call('purchasing:audit-order-photos', [
             'order' => 'OC-20261113-0001',
             '--json' => true,
         ]);
 
-        $this->assertSame(0, $exitCode);
+        $this->assertSame(0, $fastExitCode);
+        $fastReport = json_decode(Artisan::output(), true);
+
+        $this->assertSame('fast', $fastReport['summary']['audit_mode']);
+        $this->assertTrue($fastReport['summary']['deep_discovery_skipped']);
+        $this->assertNotEmpty($fastReport['summary']['deep_discovery_note']);
+        $this->assertSame(5, $fastReport['summary']['total_items']);
+        $this->assertSame(3, $fastReport['summary']['with_photo']);
+        $this->assertSame(2, $fastReport['summary']['without_photo']);
+        $this->assertSame(1, $fastReport['summary']['resolved_by_sku_or_link']);
+        $this->assertSame(1, $fastReport['summary']['resolved_by_variation']);
+        $this->assertSame(1, $fastReport['summary']['manual_override']);
+        $this->assertSame(0, $fastReport['summary']['pending_manual_approval']);
+        $this->assertSame(2, $fastReport['summary']['pending_without_candidate']);
+        $this->assertFalse($fastReport['summary']['variation_scan_truncated']);
+        $this->assertArrayHasKey('performance', $fastReport);
+        $this->assertSame('fast', $fastReport['performance']['audit_mode']);
+        $this->assertGreaterThan(0, $fastReport['performance']['queries_count']);
+
+        // 2. Opt-in --deep mode: discovers title candidates for unresolved items without auto-assigning them.
+        $deepExitCode = Artisan::call('purchasing:audit-order-photos', [
+            'order' => 'OC-20261113-0001',
+            '--json' => true,
+            '--deep' => true,
+        ]);
+
+        $this->assertSame(0, $deepExitCode);
         $report = json_decode(Artisan::output(), true);
 
+        $this->assertSame('deep', $report['summary']['audit_mode']);
+        $this->assertFalse($report['summary']['deep_discovery_skipped']);
+        $this->assertFalse($report['summary']['deep_discovery_truncated']);
         $this->assertSame(5, $report['summary']['total_items']);
         $this->assertSame(3, $report['summary']['with_photo']);
         $this->assertSame(2, $report['summary']['without_photo']);
@@ -759,6 +789,72 @@ class PurchaseOrderMeliPhotosFeatureTest extends TestCase
         $this->assertSame(1, $report['summary']['pending_manual_approval']);
         $this->assertSame(1, $report['summary']['pending_without_candidate']);
         $this->assertFalse($report['summary']['variation_scan_truncated']);
+        $this->assertSame('TMP-VAPOR', $report['pending_manual_approval_items'][0]['sku']);
+    }
+
+    public function test_show_warms_item_photo_resolution_cache_so_item_photo_avoids_ml_rescans_and_invalidates_on_approval(): void
+    {
+        [$order, $itemWithPhoto] = $this->seedChinaOrderScenario();
+
+        // Add an alternate listing to verify cache invalidation upon admin approval.
+        MeliPublication::create([
+            'user_id' => $this->admin->id,
+            'meli_account_id' => $this->account->id,
+            'sku' => 'ALT-SKU-CACHE',
+            'mlm' => 'MLM999888777',
+            'status' => 'active',
+            'last_sync_at' => now(),
+            'raw' => [
+                'item' => [
+                    'title' => 'Atomizador Aprobado Nuevo',
+                    'pictures' => [['secure_url' => 'https://http2.mlstatic.com/approved-new.png']],
+                ],
+            ],
+        ]);
+
+        Http::fake([
+            'https://http2.mlstatic.com/pink-variant.png' => Http::response($this->tinyPngBytes, 200, ['Content-Type' => 'image/png']),
+            'https://http2.mlstatic.com/approved-new.png' => Http::response($this->tinyPngBytes, 200, ['Content-Type' => 'image/png']),
+        ]);
+
+        $this->withoutVite();
+        $this->actingAs($this->admin)
+            ->get("/compras/ordenes/{$order->id}")
+            ->assertOk();
+
+        // Calling itemPhoto right after show() must hit the warmed resolution cache (0 ML table queries!).
+        DB::flushQueryLog();
+        DB::enableQueryLog();
+        $this->actingAs($this->admin)
+            ->get("/compras/ordenes/{$order->id}/partidas/{$itemWithPhoto->id}/foto")
+            ->assertOk()
+            ->assertHeader('Content-Type', 'image/png');
+        $queries = DB::getQueryLog();
+        DB::disableQueryLog();
+
+        $mlQueries = array_filter($queries, static fn (array $q): bool => str_contains($q['query'], 'meli_publications')
+            || str_contains($q['query'], 'meli_price_manager_items')
+            || str_contains($q['query'], 'meli_listing_sku_index'));
+
+        $this->assertCount(0, $mlQueries, 'itemPhoto() after show() must reuse cached photo resolution without querying ML tables.');
+
+        // Approving a different ML photo must invalidate/refresh the cache immediately.
+        $this->actingAs($this->admin)
+            ->postJson("/compras/ordenes/{$order->id}/partidas/{$itemWithPhoto->id}/foto-aprobar", [
+                'mlm' => 'MLM999888777',
+                'notes' => 'Cambio validado',
+            ])
+            ->assertOk()
+            ->assertJsonPath('resolution.url', 'https://http2.mlstatic.com/approved-new.png');
+
+        Http::assertNotSent(static fn ($req): bool => $req->url() === 'https://http2.mlstatic.com/approved-new.png');
+
+        $this->actingAs($this->admin)
+            ->get("/compras/ordenes/{$order->id}/partidas/{$itemWithPhoto->id}/foto")
+            ->assertOk()
+            ->assertHeader('Content-Type', 'image/png');
+
+        Http::assertSent(static fn ($req): bool => $req->url() === 'https://http2.mlstatic.com/approved-new.png');
     }
 
     public function test_item_photo_authorization_enforces_policy_blocks_unauthorized_expired_signatures_and_id_tampering(): void

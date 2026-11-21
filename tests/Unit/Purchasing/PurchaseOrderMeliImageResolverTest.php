@@ -11,6 +11,7 @@ use App\Models\MeliPublication;
 use App\Models\PurchaseOrder;
 use App\Models\PurchaseOrderItem;
 use App\Models\User;
+use App\Services\Purchasing\MeliListingSkuIndexService;
 use App\Services\Purchasing\PurchaseOrderMeliImageResolver;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\DB;
@@ -1754,6 +1755,195 @@ class PurchaseOrderMeliImageResolverTest extends TestCase
             $this->assertSame("Color: {$c['color']}", $entry['variation_label']);
             $this->assertSame(PurchaseOrderMeliImageResolver::AUDIT_RESOLVED_VARIATION, $entry['audit_category']);
         }
+    }
+
+    public function test_normalized_sku_index_resolves_over_500_publications_and_variations_with_zero_raw_like_queries(): void
+    {
+        (require database_path('migrations/2026_11_21_000001_create_meli_listing_sku_index_table.php'))->up();
+
+        $acc = $this->createMeliAccount('700100', 'SBS_INDEX', true);
+        $prodPubVar = $this->createProduct('IDX-VAR-550', 'Atomizador Variación Indexada');
+        $prodPmVar = $this->createProduct('IDX-PM-550', 'Pinza PriceManager Indexada');
+        $prodConflict = $this->createProduct('IDX-CONF-1', 'SKU Conflicto Simple vs Variación');
+        $prodUnrelated = $this->createProduct('IDX-NO-MATCH', 'Sobre Sin Publicación');
+
+        $order = $this->createOrderWithItems([$prodPubVar, $prodPmVar, $prodConflict, $prodUnrelated]);
+        [$itemPubVar, $itemPmVar, $itemConflict, $itemUnrelated] = [
+            $order->items[0],
+            $order->items[1],
+            $order->items[2],
+            $order->items[3],
+        ];
+
+        $now = now()->toDateTimeString();
+        $pubNoise = [];
+        $pmNoise = [];
+        for ($i = 1; $i <= 550; $i++) {
+            $pubNoise[] = [
+                'user_id' => $this->user->id,
+                'meli_account_id' => $acc->id,
+                'sku' => "IDX-NOISE-{$i}",
+                'mlm' => sprintf('MLM910%04d', $i),
+                'status' => 'active',
+                'is_current' => 1,
+                'last_sync_at' => $now,
+                'raw' => json_encode(['item' => ['tags' => ['IDX-VAR-550'], 'seller_custom_field' => "IDX-NOISE-{$i}"]]),
+                'created_at' => $now,
+                'updated_at' => $now,
+            ];
+            $pmNoise[] = [
+                'meli_account_id' => $acc->id,
+                'meli_item_id' => sprintf('MLM920%04d', $i),
+                'sku' => "IDX-PM-NOISE-{$i}",
+                'title' => "Ruido PM {$i}",
+                'current_price' => 50,
+                'status' => 'active',
+                'raw_item' => json_encode(['tags' => ['IDX-PM-550'], 'seller_custom_field' => "IDX-PM-NOISE-{$i}"]),
+                'last_synced_at' => $now,
+                'created_at' => $now,
+                'updated_at' => $now,
+            ];
+        }
+        DB::table('meli_publications')->insert($pubNoise);
+        DB::table('meli_price_manager_items')->insert($pmNoise);
+
+        // Real deep variation rows created after row 550 (plus a conflict case)
+        MeliPublication::create([
+            'user_id' => $this->user->id,
+            'meli_account_id' => $acc->id,
+            'sku' => 'PRIMARY-OTHER-IDX',
+            'mlm' => 'MLM9109999',
+            'status' => 'active',
+            'last_sync_at' => now(),
+            'raw' => [
+                'item' => [
+                    'pictures' => [['id' => 'iv1', 'secure_url' => 'https://http2.mlstatic.com/idx-pub-var-550.jpg']],
+                    'variations' => [
+                        ['id' => 910550, 'seller_custom_field' => 'IDX-VAR-550', 'picture_ids' => ['iv1']],
+                    ],
+                ],
+            ],
+        ]);
+
+        MeliPriceManagerItem::create([
+            'meli_account_id' => $acc->id,
+            'meli_item_id' => 'MLM9209999',
+            'sku' => 'PRIMARY-PM-OTHER',
+            'title' => 'Pinza Multivariación',
+            'current_price' => 120,
+            'status' => 'active',
+            'last_synced_at' => now(),
+            'raw_item' => [
+                'id' => 'MLM9209999',
+                'pictures' => [['id' => 'ipm1', 'secure_url' => 'https://http2.mlstatic.com/idx-pm-var-550.jpg']],
+                'variations' => [
+                    ['id' => 920550, 'seller_custom_field' => 'IDX-PM-550', 'picture_ids' => ['ipm1']],
+                ],
+            ],
+        ]);
+
+        // Conflict: simple pub + secondary variation in another pub with different photos
+        MeliPublication::create([
+            'user_id' => $this->user->id,
+            'meli_account_id' => $acc->id,
+            'sku' => 'IDX-CONF-1',
+            'mlm' => 'MLM9300001',
+            'status' => 'active',
+            'last_sync_at' => now(),
+            'raw' => [
+                'item' => [
+                    'seller_custom_field' => 'IDX-CONF-1',
+                    'pictures' => [['secure_url' => 'https://http2.mlstatic.com/idx-conf-simple.jpg']],
+                ],
+            ],
+        ]);
+        MeliPublication::create([
+            'user_id' => $this->user->id,
+            'meli_account_id' => $acc->id,
+            'sku' => 'IDX-CONF-OTHER',
+            'mlm' => 'MLM9300002',
+            'status' => 'active',
+            'last_sync_at' => now(),
+            'raw' => [
+                'item' => [
+                    'pictures' => [['id' => 'ic1', 'secure_url' => 'https://http2.mlstatic.com/idx-conf-var.jpg']],
+                    'variations' => [
+                        ['id' => 930002, 'seller_custom_field' => 'IDX-CONF-1', 'picture_ids' => ['ic1']],
+                    ],
+                ],
+            ],
+        ]);
+
+        // Rebuild full index across all 1,104 rows
+        $stats = app(MeliListingSkuIndexService::class)->rebuildIndex(200);
+        $this->assertSame(553, $stats['publications_scanned']);
+        $this->assertSame(551, $stats['price_manager_scanned']);
+
+        DB::flushQueryLog();
+        DB::enableQueryLog();
+        $resolved = $this->resolver->resolveForOrder($order, false);
+        $queries = DB::getQueryLog();
+        DB::disableQueryLog();
+
+        $likeQueries = array_filter($queries, static fn (array $q): bool => stripos($q['query'], ' like ') !== false);
+        $this->assertCount(0, $likeQueries, 'When meli_listing_sku_index is populated, resolveForOrder() must run ZERO LIKE queries.');
+
+        $this->assertTrue($resolved[$itemPubVar->id]['variation_index_used']);
+        $this->assertFalse($resolved[$itemPubVar->id]['variation_scan_truncated']);
+        $this->assertSame('https://http2.mlstatic.com/idx-pub-var-550.jpg', $resolved[$itemPubVar->id]['url']);
+        $this->assertSame('910550', $resolved[$itemPubVar->id]['variation_id']);
+
+        $this->assertSame('https://http2.mlstatic.com/idx-pm-var-550.jpg', $resolved[$itemPmVar->id]['url']);
+        $this->assertSame('920550', $resolved[$itemPmVar->id]['variation_id']);
+
+        // Conflict is still strictly detected
+        $this->assertNull($resolved[$itemConflict->id]['url']);
+        $this->assertTrue($resolved[$itemConflict->id]['ambiguous']);
+        $this->assertSame('multiple_publications_conflicting_photos', $resolved[$itemConflict->id]['reason']);
+
+        // Unrelated item stays cleanly uncontaminated
+        $this->assertNull($resolved[$itemUnrelated->id]['url']);
+        $this->assertNull($resolved[$itemUnrelated->id]['mlm']);
+        $this->assertSame('no_listing_found', $resolved[$itemUnrelated->id]['reason']);
+    }
+
+    public function test_variation_raw_scan_enforces_time_budget_and_reports_truncation_reason(): void
+    {
+        Log::spy();
+
+        $acc = $this->createMeliAccount('700200', 'SBS_TIME', true);
+        $prod = $this->createProduct('TIME-CAP-1', 'Producto Con Presupuesto Tiempo');
+        $order = $this->createOrderWithItems([$prod]);
+        $item = $order->items->firstOrFail();
+
+        MeliPublication::create([
+            'user_id' => $this->user->id,
+            'meli_account_id' => $acc->id,
+            'sku' => 'OTHER-TIME',
+            'mlm' => 'MLM7990001',
+            'status' => 'active',
+            'raw' => [
+                'item' => [
+                    'pictures' => [['id' => 't1', 'secure_url' => 'https://http2.mlstatic.com/time-cap.jpg']],
+                    'variations' => [
+                        ['id' => 799001, 'seller_custom_field' => 'TIME-CAP-1', 'picture_ids' => ['t1']],
+                    ],
+                ],
+            ],
+        ]);
+
+        // Deterministic zero-second budget forces immediate time_budget_exceeded without flaky sleeps.
+        $timeBoundedResolver = new PurchaseOrderMeliImageResolver(
+            variationScanMaxSeconds: 0.0,
+        );
+
+        $resolved = $timeBoundedResolver->resolveForOrder($order, false);
+
+        $this->assertNull($resolved[$item->id]['url']);
+        $this->assertTrue($resolved[$item->id]['variation_scan_truncated']);
+        $this->assertSame('time_budget_exceeded', $resolved[$item->id]['scan_diagnostics']['meli_publications_reason']);
+        $this->assertSame('time_budget_exceeded', $resolved[$item->id]['scan_diagnostics']['meli_price_manager_reason']);
+        Log::shouldHaveReceived('warning')->atLeast()->once();
     }
 
     private function createMeliAccount(string $meliUserId, string $nickname, bool $isDefault): MeliAccount

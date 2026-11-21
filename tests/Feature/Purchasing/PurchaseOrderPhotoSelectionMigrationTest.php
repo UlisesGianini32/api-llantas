@@ -6,12 +6,14 @@ use App\Models\InventoryLocation;
 use App\Models\InventoryMovement;
 use App\Models\InventoryProduct;
 use App\Models\MeliAccount;
+use App\Models\MeliPriceManagerItem;
 use App\Models\MeliPublication;
 use App\Models\PurchaseOrder;
 use App\Models\PurchaseOrderItem;
 use App\Models\PurchaseOrderReceipt;
 use App\Models\PurchaseOrderReceiptItem;
 use App\Models\User;
+use App\Services\Purchasing\MeliListingSkuIndexService;
 use App\Services\Purchasing\PurchaseOrderMeliImageResolver;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Artisan;
@@ -244,6 +246,124 @@ class PurchaseOrderPhotoSelectionMigrationTest extends TestCase
 
         $migration->down();
         $this->assertFalse(Schema::hasColumn('purchase_order_items', 'photo_source_mode'));
+    }
+
+    public function test_meli_listing_sku_index_migration_backfill_model_hooks_and_safe_rollback(): void
+    {
+        Schema::create('meli_price_manager_items', function (Blueprint $table): void {
+            $table->id();
+            $table->foreignId('meli_account_id');
+            $table->string('meli_item_id', 64);
+            $table->string('sku', 191)->nullable();
+            $table->string('title');
+            $table->decimal('current_price', 15, 2)->default(0);
+            $table->string('status', 64)->nullable();
+            $table->string('thumbnail', 2048)->nullable();
+            $table->json('raw_attributes')->nullable();
+            $table->json('raw_item')->nullable();
+            $table->timestamp('last_synced_at')->nullable();
+            $table->timestamps();
+        });
+
+        $account = MeliAccount::create([
+            'user_id' => $this->admin->id,
+            'meli_user_id' => '55443322',
+            'nickname' => 'SBS_INDEX_MIG',
+            'is_default' => true,
+        ]);
+
+        // Seed listings BEFORE index table exists to ensure model hooks never fail pre-migration.
+        $existingPub = MeliPublication::create([
+            'user_id' => $this->admin->id,
+            'meli_account_id' => $account->id,
+            'sku' => 'ATOMIZADORBCOAF',
+            'mlm' => 'MLM3373409704',
+            'status' => 'active',
+            'last_sync_at' => now(),
+            'raw' => [
+                'item' => [
+                    'pictures' => [
+                        ['id' => 'p1', 'secure_url' => 'https://http2.mlstatic.com/atom-azul.jpg'],
+                        ['id' => 'p2', 'secure_url' => 'https://http2.mlstatic.com/atom-rosa.jpg'],
+                    ],
+                    'variations' => [
+                        ['id' => 186105657167, 'seller_custom_field' => 'ATOMIZADORBCOAF', 'picture_ids' => ['p1']],
+                        ['id' => 186106913357, 'seller_custom_field' => 'ATOMIZADORBR', 'picture_ids' => ['p2']],
+                    ],
+                ],
+            ],
+        ]);
+
+        $existingPm = MeliPriceManagerItem::create([
+            'meli_account_id' => $account->id,
+            'meli_item_id' => 'MLM2124053049',
+            'sku' => 'CAMILLAPROFB',
+            'title' => 'Camilla Portátil Profesional',
+            'status' => 'active',
+            'last_synced_at' => now(),
+            'raw_item' => [
+                'id' => 'MLM2124053049',
+                'pictures' => [['id' => 'c1', 'secure_url' => 'https://http2.mlstatic.com/camilla-negra.jpg']],
+                'variations' => [
+                    ['id' => 184371561381, 'seller_custom_field' => 'CAMILLAPROFN', 'picture_ids' => ['c1']],
+                ],
+            ],
+        ]);
+
+        $this->assertFalse(Schema::hasTable(MeliListingSkuIndexService::TABLE));
+
+        // 1. Apply migration (and verify idempotency on repeated up()).
+        $indexMigration = require database_path('migrations/2026_11_21_000001_create_meli_listing_sku_index_table.php');
+        $indexMigration->up();
+        $indexMigration->up();
+
+        $this->assertTrue(Schema::hasTable(MeliListingSkuIndexService::TABLE));
+
+        // 2. Run Artisan backfill command and verify indexed SKUs for both tables.
+        $exitCode = Artisan::call('purchasing:sync-meli-photo-sku-index', ['--chunk' => 50]);
+        $this->assertSame(0, $exitCode);
+
+        $this->assertDatabaseHas(MeliListingSkuIndexService::TABLE, [
+            'source_table' => MeliListingSkuIndexService::SOURCE_PUBLICATIONS,
+            'source_row_id' => $existingPub->id,
+            'mlm' => 'MLM3373409704',
+            'variation_id' => '186106913357',
+            'sku_normalized' => 'ATOMIZADORBR',
+        ]);
+        $this->assertDatabaseHas(MeliListingSkuIndexService::TABLE, [
+            'source_table' => MeliListingSkuIndexService::SOURCE_PRICE_MANAGER,
+            'source_row_id' => $existingPm->id,
+            'mlm' => 'MLM2124053049',
+            'variation_id' => '184371561381',
+            'sku_normalized' => 'CAMILLAPROFN',
+        ]);
+
+        // 3. Automatic Eloquent model hooks keep the index synchronized on save and delete.
+        $hookPub = MeliPublication::create([
+            'user_id' => $this->admin->id,
+            'meli_account_id' => $account->id,
+            'sku' => 'HOOK-SKU-1',
+            'mlm' => 'MLM8880001',
+            'status' => 'active',
+            'raw' => ['item' => ['seller_custom_field' => 'HOOK-SKU-1']],
+        ]);
+        $this->assertDatabaseHas(MeliListingSkuIndexService::TABLE, [
+            'source_table' => MeliListingSkuIndexService::SOURCE_PUBLICATIONS,
+            'source_row_id' => $hookPub->id,
+            'sku_normalized' => 'HOOK-SKU-1',
+        ]);
+
+        $hookPub->delete();
+        $this->assertDatabaseMissing(MeliListingSkuIndexService::TABLE, [
+            'source_table' => MeliListingSkuIndexService::SOURCE_PUBLICATIONS,
+            'source_row_id' => $hookPub->id,
+        ]);
+
+        // 4. Safe rollback drops only the auxiliary index table without touching source listings.
+        $indexMigration->down();
+        $this->assertFalse(Schema::hasTable(MeliListingSkuIndexService::TABLE));
+        $this->assertDatabaseHas('meli_publications', ['id' => $existingPub->id, 'mlm' => 'MLM3373409704']);
+        $this->assertDatabaseHas('meli_price_manager_items', ['id' => $existingPm->id, 'meli_item_id' => 'MLM2124053049']);
     }
 
     private function createBaseProductionLikeSchema(bool $withSupplierSku): void
