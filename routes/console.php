@@ -165,6 +165,16 @@ Schedule::command('system:heartbeat')
 
 MeliBeautyScheduledPriceSchedule::register();
 
+// Photo index reconciliation. Opt-in after the initial backfill.
+// Advisory lock also protects against concurrent CLI rebuilds.
+if (config('services.meli.photo_index_reconcile_enabled', false)) {
+    Schedule::command('purchasing:sync-meli-photo-sku-index --incremental --scheduled --chunk=200')
+        ->everyThirtyMinutes()
+        ->withoutOverlapping(60)
+        ->runInBackground()
+        ->appendOutputTo(storage_path('logs/meli-photo-index-reconcile.log'));
+}
+
 // Meli-Price-Manager
 Schedule::command('meli-price-manager:sync-categories')
     ->dailyAt('03:10')
