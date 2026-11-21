@@ -674,51 +674,203 @@ A veces bloquea IPs de hosting/datacenters (PolicyAgent). Probá desde otra red 
     public function upsertPublication(User $user, string $sku, array $item): MeliPublication
     {
         $mlm = $item['id'] ?? null;
+
         if (! $mlm) {
             throw new \RuntimeException('Item sin id (MLM).');
         }
 
-        $mlm = (string) $mlm;
-        $subStatus = $this->normalizeSubStatusForStorage($item['sub_status'] ?? null);
+        $mlm = strtoupper(trim((string) $mlm));
+        $sku = trim($sku);
+
+        $subStatus = $this->normalizeSubStatusForStorage(
+            $item['sub_status'] ?? null
+        );
+
         $now = now();
+
+        /*
+         * MeliPublishService trabaja con el access_token del User.
+         * Asociamos la publicación a la cuenta principal/default
+         * correspondiente a ese usuario.
+         */
+        $meliAccountId = DB::table('meli_accounts')
+            ->where('user_id', $user->id)
+            ->orderByDesc('is_default')
+            ->orderBy('id')
+            ->value('id');
+
+        $existing = DB::table('meli_publications')
+            ->where('user_id', $user->id)
+            ->where('mlm', $mlm)
+            ->first();
+
+        $categoryId = trim(
+            (string) (
+                $item['category_id']
+                ?? ($existing->category_id ?? '')
+            )
+        );
+
+        $pictures = $item['pictures'] ?? null;
+
+        if (is_array($pictures)) {
+            $picturesForStorage = json_encode(
+                $pictures,
+                JSON_UNESCAPED_UNICODE
+                | JSON_UNESCAPED_SLASHES
+            );
+        } else {
+            $picturesForStorage =
+                $existing->pictures ?? null;
+        }
 
         $row = [
             'sku' => $sku,
-            'status' => $item['status'] ?? null,
-            'sub_status' => $subStatus !== null ? json_encode($subStatus, JSON_UNESCAPED_UNICODE) : null,
-            'permalink' => $item['permalink'] ?? null,
-            'raw' => json_encode($item, JSON_UNESCAPED_UNICODE),
-            'last_sync_at' => $now,
-            'updated_at' => $now,
+
+            'meli_account_id' =>
+                $meliAccountId
+                    ? (int) $meliAccountId
+                    : ($existing->meli_account_id ?? null),
+
+            'status' =>
+                $item['status'] ?? null,
+
+            'sub_status' =>
+                $subStatus !== null
+                    ? json_encode(
+                        $subStatus,
+                        JSON_UNESCAPED_UNICODE
+                    )
+                    : null,
+
+            'permalink' =>
+                $item['permalink'] ?? null,
+
+            'category_id' =>
+                $categoryId !== ''
+                    ? $categoryId
+                    : null,
+
+            'pictures' =>
+                $picturesForStorage,
+
+            'raw' =>
+                json_encode(
+                    $item,
+                    JSON_UNESCAPED_UNICODE
+                    | JSON_UNESCAPED_SLASHES
+                ),
+
+            'last_sync_at' =>
+                $now,
+
+            'is_current' =>
+                true,
+
+            'updated_at' =>
+                $now,
         ];
 
-        // Evita Eloquent updateOrCreate: filas con JSON corrupto en BD rompían al hidratar el modelo (500 en sync).
-        $existingId = DB::table('meli_publications')
-            ->where('user_id', $user->id)
-            ->where('mlm', $mlm)
-            ->value('id');
+        $id = DB::transaction(function () use (
+            $user,
+            $sku,
+            $mlm,
+            $meliAccountId,
+            $existing,
+            $row,
+            $now
+        ) {
+            /*
+             * La nueva publicación sustituye a la anterior
+             * únicamente dentro de la misma cuenta y SKU.
+             */
+            if (
+                $sku !== ''
+                && $meliAccountId
+            ) {
+                DB::table('meli_publications')
+                    ->where('user_id', $user->id)
+                    ->where(function ($query) use ($meliAccountId) {
+                        $query
+                            ->where(
+                                'meli_account_id',
+                                (int) $meliAccountId
+                            )
+                            ->orWhereNull('meli_account_id');
+                    })
+                    ->where('sku', $sku)
+                    ->where('mlm', '!=', $mlm)
+                    ->where('is_current', true)
+                    ->update([
+                        'is_current' => false,
+                        'updated_at' => $now,
+                    ]);
+            }
 
-        if ($existingId) {
-            DB::table('meli_publications')->where('id', $existingId)->update($row);
-            $id = (int) $existingId;
-        } else {
-            $id = (int) DB::table('meli_publications')->insertGetId(array_merge($row, [
-                'user_id' => $user->id,
-                'mlm' => $mlm,
-                'created_at' => $now,
-            ]));
-        }
+            if ($existing) {
+                DB::table('meli_publications')
+                    ->where('id', $existing->id)
+                    ->update($row);
+
+                return (int) $existing->id;
+            }
+
+            return (int) DB::table(
+                'meli_publications'
+            )->insertGetId(
+                array_merge(
+                    $row,
+                    [
+                        'user_id' =>
+                            $user->id,
+
+                        'mlm' =>
+                            $mlm,
+
+                        'created_at' =>
+                            $now,
+                    ]
+                )
+            );
+        });
 
         $pub = new MeliPublication([
-            'user_id' => $user->id,
-            'sku' => $sku,
-            'mlm' => $mlm,
-            'status' => $row['status'],
-            'sub_status' => $subStatus,
-            'permalink' => $row['permalink'],
-            'raw' => $item,
-            'last_sync_at' => $now,
+            'user_id' =>
+                $user->id,
+
+            'meli_account_id' =>
+                $meliAccountId
+                    ? (int) $meliAccountId
+                    : null,
+
+            'sku' =>
+                $sku,
+
+            'mlm' =>
+                $mlm,
+
+            'status' =>
+                $row['status'],
+
+            'sub_status' =>
+                $subStatus,
+
+            'permalink' =>
+                $row['permalink'],
+
+            'category_id' =>
+                $row['category_id'],
+
+            'raw' =>
+                $item,
+
+            'last_sync_at' =>
+                $now,
+
+            'is_current' =>
+                true,
         ]);
+
         $pub->id = $id;
         $pub->exists = true;
 
@@ -730,6 +882,29 @@ A veces bloquea IPs de hosting/datacenters (PolicyAgent). Probá desde otra red 
 
             if ($storedPublication !== null) {
                 MeliListingSkuIndexService::syncSafelyFromModel($storedPublication);
+
+                // Query Builder also deactivates older publications.
+                // Refresh their index entries after the transaction commits.
+                if ($sku !== '' && $meliAccountId) {
+                    MeliPublication::query()
+                        ->where('user_id', $user->id)
+                        ->where(function ($query) use ($meliAccountId) {
+                            $query
+                                ->where('meli_account_id', (int) $meliAccountId)
+                                ->orWhereNull('meli_account_id');
+                        })
+                        ->where('sku', $sku)
+                        ->where('mlm', '!=', $mlm)
+                        ->where('is_current', false)
+                        ->where('updated_at', $now)
+                        ->chunkById(100, static function ($publications): void {
+                            foreach ($publications as $previousPublication) {
+                                MeliListingSkuIndexService::syncSafelyFromModel(
+                                    $previousPublication
+                                );
+                            }
+                        });
+                }
             } else {
                 Log::warning('[Purchasing][MeliPhotos] Publication missing before index sync', [
                     'publication_id' => $id,

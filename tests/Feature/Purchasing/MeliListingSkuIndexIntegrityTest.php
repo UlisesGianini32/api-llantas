@@ -1184,6 +1184,68 @@ class MeliListingSkuIndexIntegrityTest extends TestCase
             $resolved[$itemId]['url']
         );
     }
+    public function test_upsert_updates_index_when_previous_publication_becomes_non_current(): void
+    {
+        $sku = 'SBS-REPLACEMENT-1';
+
+        $previous = $this->createVariationPublication(
+            'MLM930101',
+            $sku,
+            [
+                [
+                    'id' => 9302,
+                    'sku' => $sku,
+                    'url' => 'https://http2.mlstatic.com/old-publication.jpg',
+                ],
+            ]
+        );
+
+        $this->indexService->rebuildIndex(25);
+
+        app(\App\Services\MeliPublishService::class)->upsertPublication(
+            $this->admin,
+            $sku,
+            [
+                'id' => 'MLM930102',
+                'status' => 'active',
+                'seller_custom_field' => $sku,
+                'pictures' => [],
+                'variations' => [],
+            ]
+        );
+
+        $this->assertSame(
+            0,
+            (int) DB::table('meli_publications')
+                ->where('id', $previous->id)
+                ->value('is_current')
+        );
+
+        $this->assertSame(
+            0,
+            DB::table(MeliListingSkuIndexService::TABLE)
+                ->where('source_table', 'meli_publications')
+                ->where('source_row_id', $previous->id)
+                ->where('is_current', true)
+                ->count()
+        );
+
+        $current = DB::table('meli_publications')
+            ->where('mlm', 'MLM930102')
+            ->first();
+
+        $this->assertNotNull($current);
+        $this->assertSame(1, (int) $current->is_current);
+
+        $this->assertGreaterThan(
+            0,
+            DB::table(MeliListingSkuIndexService::TABLE)
+                ->where('source_table', 'meli_publications')
+                ->where('source_row_id', $current->id)
+                ->where('is_current', true)
+                ->count()
+        );
+    }
     public function test_incremental_reconciliation_and_readonly_status_command_handle_query_builder_drift_and_stale_builds(): void
     {
         $pKeep = $this->createProduct('INC-KEEP', 'Existente');
@@ -1430,6 +1492,7 @@ class MeliListingSkuIndexIntegrityTest extends TestCase
             $table->string('sku')->nullable();
             $table->string('mlm')->nullable();
             $table->string('source_mlm')->nullable();
+            $table->string('category_id')->nullable();
             $table->string('status')->nullable();
             $table->json('sub_status')->nullable();
             $table->string('permalink')->nullable();
