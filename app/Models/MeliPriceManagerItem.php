@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Services\Purchasing\MeliListingSkuIndexService;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
@@ -14,6 +15,17 @@ use Illuminate\Support\Facades\Schema;
 class MeliPriceManagerItem extends Model
 {
     use HasFactory;
+
+    protected static function booted(): void
+    {
+        static::saved(static function (self $item): void {
+            MeliListingSkuIndexService::syncSafelyFromModel($item);
+        });
+
+        static::deleted(static function (self $item): void {
+            MeliListingSkuIndexService::deleteSafelyForModel($item);
+        });
+    }
 
     public const CLASSIFICATION_STATUSES = ['categorized', 'suggested', 'uncategorized', 'ignored'];
 

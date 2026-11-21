@@ -2,12 +2,24 @@
 
 namespace App\Models;
 
+use App\Services\Purchasing\MeliListingSkuIndexService;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 
 class MeliPublication extends Model
 {
     protected $table = 'meli_publications';
+
+    protected static function booted(): void
+    {
+        static::saved(static function (self $publication): void {
+            MeliListingSkuIndexService::syncSafelyFromModel($publication);
+        });
+
+        static::deleted(static function (self $publication): void {
+            MeliListingSkuIndexService::deleteSafelyForModel($publication);
+        });
+    }
 
     protected $fillable = [
         'user_id',

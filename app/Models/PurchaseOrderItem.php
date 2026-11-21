@@ -15,11 +15,30 @@ class PurchaseOrderItem extends Model
 
     public const STATUS_CANCELLED = 'CANCELLED';
 
+    public const PHOTO_MODE_AUTO = null;
+
+    public const PHOTO_MODE_APPROVED_ML = 'approved_ml';
+
+    public const PHOTO_MODE_MANUAL = 'manual';
+
+    public const PHOTO_MODE_NONE = 'none';
+
     protected $fillable = [
         'purchase_order_id',
         'inventory_product_id',
         'sku',
         'supplier_sku',
+        'photo_source_mode',
+        'approved_mlm',
+        'approved_variation_id',
+        'approved_meli_account_id',
+        'approved_photo_url',
+        'manual_photo_path',
+        'manual_photo_mime',
+        'photo_notes',
+        'rejected_mlms',
+        'photo_updated_by',
+        'photo_updated_at',
         'product_name',
         'quantity_ordered',
         'quantity_received',
@@ -31,11 +50,20 @@ class PurchaseOrderItem extends Model
     protected function casts(): array
     {
         return [
+            'approved_meli_account_id' => 'integer',
+            'rejected_mlms' => 'array',
+            'photo_updated_by' => 'integer',
+            'photo_updated_at' => 'datetime',
             'quantity_ordered' => 'integer',
             'quantity_received' => 'integer',
             'unit_cost' => 'decimal:2',
             'subtotal' => 'decimal:2',
         ];
+    }
+
+    public function photoUpdatedBy(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'photo_updated_by');
     }
 
     public function order(): BelongsTo

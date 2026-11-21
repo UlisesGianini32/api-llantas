@@ -36,6 +36,7 @@ final class UserAccess
         'inventory.kits.*',
         'purchasing.orders.index',
         'purchasing.orders.show',
+        'purchasing.orders.item-photo',
         'purchasing.orders.receive',
     ];
 

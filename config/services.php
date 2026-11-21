@@ -102,6 +102,11 @@ return [
          * Debe coincidir con el usuario que enlazó Mercado Libre en el panel.
          */
         'sync_orders_user_id' => max(0, (int) env('MELI_SYNC_ORDERS_USER_ID', 4)),
+        // Enable only after isolated backfill and operational verification.
+        'photo_index_reconcile_enabled' => filter_var(
+            env('MELI_PHOTO_INDEX_RECONCILE_ENABLED', false),
+            FILTER_VALIDATE_BOOLEAN
+        ),
     ],
 
     'shopify' => [
