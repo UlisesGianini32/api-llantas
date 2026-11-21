@@ -92,6 +92,7 @@ class AuditPurchaseOrderPhotosCommand extends Command
             $pendingApprovalItems = [];
             $foundCount = 0;
             $variationIndexUsed = false;
+            $variationIndexGeneration = null;
             $variationScanTruncated = false;
             $scanDiagnostics = null;
 
@@ -209,6 +210,9 @@ class AuditPurchaseOrderPhotosCommand extends Command
 
                 if (! empty($entry['variation_index_used'])) {
                     $variationIndexUsed = true;
+                    if (is_int($entry['variation_index_generation'] ?? null)) {
+                        $variationIndexGeneration = $entry['variation_index_generation'];
+                    }
                 }
 
                 if (! empty($entry['variation_scan_truncated'])) {
@@ -282,6 +286,7 @@ class AuditPurchaseOrderPhotosCommand extends Command
                 'manual_override' => $categoryCounts[PurchaseOrderMeliImageResolver::AUDIT_MANUAL_OVERRIDE],
                 'by_category' => $categoryCounts,
                 'variation_index_used' => $variationIndexUsed,
+                'variation_index_generation' => $variationIndexGeneration,
                 'variation_scan_truncated' => $variationScanTruncated,
             ],
             'performance' => [
@@ -291,6 +296,7 @@ class AuditPurchaseOrderPhotosCommand extends Command
                 'like_queries_count' => $likeQueriesCount,
                 'peak_memory_mb' => $peakMemoryMb,
                 'variation_index_used' => $variationIndexUsed,
+                'variation_index_generation' => $variationIndexGeneration,
                 'variation_scan_truncated' => $variationScanTruncated,
                 'deep_discovery_items_checked' => $deepDiscoveryItemsChecked,
                 'deep_discovery_items_skipped_by_budget' => $deepDiscoveryItemsSkippedByBudget,

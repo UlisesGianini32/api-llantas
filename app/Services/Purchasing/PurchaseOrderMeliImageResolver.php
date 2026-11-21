@@ -369,13 +369,18 @@ class PurchaseOrderMeliImageResolver
             $variationPriceBySku = $this->indexPriceManagerItemsByVerifiedSku($priceItems, $fallbackSkuSet);
 
             $variationIndexUsed = false;
+            $variationIndexGeneration = null;
             $scanTruncated = false;
             $scanDiagnostics = null;
             $scannedRowsTotal = 0;
 
-            if ($this->isVariationSkuIndexReady()) {
+            $activeVariationGeneration = $this->resolveActiveVariationSkuIndexGeneration();
+
+            if ($activeVariationGeneration !== null) {
                 $variationIndexUsed = true;
+                $variationIndexGeneration = $activeVariationGeneration;
                 $indexedLookup = $this->lookupVariationRowsFromSkuIndex(
+                    $activeVariationGeneration,
                     $fallbackSkusUpper,
                     $fallbackSkuSet,
                     $hasPublications,
@@ -458,6 +463,7 @@ class PurchaseOrderMeliImageResolver
                 );
 
                 $resolvedEntry['variation_index_used'] = $variationIndexUsed;
+                $resolvedEntry['variation_index_generation'] = $variationIndexGeneration;
                 $resolvedEntry['variation_scan_truncated'] = $scanTruncated;
                 if ($scanDiagnostics !== null) {
                     $resolvedEntry['scan_diagnostics'] = $scanDiagnostics;
@@ -1974,11 +1980,13 @@ class PurchaseOrderMeliImageResolver
             );
         }
 
-        // Step 2: Variation SKU lookup (normalized index first; bounded raw scan only if explicitly allowed).
+        // Step 2: Variation SKU lookup (verified active generation first; bounded raw scan only if allowed).
         if ($sku !== '') {
             $skuUpper = strtoupper($sku);
-            if ($this->isVariationSkuIndexReady()) {
+            $activeVariationGeneration = $this->resolveActiveVariationSkuIndexGeneration();
+            if ($activeVariationGeneration !== null) {
                 $indexed = $this->lookupVariationRowsFromSkuIndex(
+                    $activeVariationGeneration,
                     [$skuUpper],
                     [$skuUpper => true],
                     $hasPublications,
@@ -2491,22 +2499,34 @@ class PurchaseOrderMeliImageResolver
     }
 
     /**
-     * Check whether the normalized `meli_listing_sku_index` table exists and contains indexed rows.
-     * When unavailable or not yet backfilled, Pass 2 falls back safely to the resource-guarded raw scan.
+     * Return the active verified generation from `meli_listing_sku_index_state`, or null when
+     * the index is missing, uninitialized, building its initial generation, or failed without a
+     * prior complete generation. Row existence in `meli_listing_sku_index` alone NEVER indicates readiness.
      */
-    private function isVariationSkuIndexReady(): bool
+    private function resolveActiveVariationSkuIndexGeneration(): ?int
     {
-        if (! Schema::hasTable(MeliListingSkuIndexService::TABLE)) {
-            return false;
+        if (! Schema::hasTable(MeliListingSkuIndexService::STATE_TABLE)) {
+            return null;
         }
 
-        return DB::table(MeliListingSkuIndexService::TABLE)->limit(1)->exists();
+        $state = DB::table(MeliListingSkuIndexService::STATE_TABLE)
+            ->where('id', MeliListingSkuIndexService::STATE_ROW_ID)
+            ->first(['active_generation', 'status']);
+
+        if ($state === null) {
+            return null;
+        }
+
+        $activeGeneration = (int) $state->active_generation;
+
+        return $activeGeneration > 0 ? $activeGeneration : null;
     }
 
     /**
-     * Resolve variation listings by querying the B-tree indexed `meli_listing_sku_index` table
-     * and hydrating only the matched primary keys (zero `raw LIKE` scans). Every hydrated row is
-     * still verified against its raw payload so stale index entries can never misassign a photo.
+     * Resolve variation listings by querying the verified active generation of the B-tree indexed
+     * `meli_listing_sku_index` table (`mlsi_gen_sku_idx`) and hydrating only matched primary keys
+     * (zero `raw LIKE` scans). Every hydrated row is still verified against its raw payload so
+     * stale index entries can never misassign a photo.
      *
      * @param  list<string>  $skusUpper
      * @param  array<string, true>  $targetSkusUpper
@@ -2517,6 +2537,7 @@ class PurchaseOrderMeliImageResolver
      * @return array{pub_by_sku: array<string, Collection<int, MeliPublication>>, price_by_sku: array<string, Collection<int, MeliPriceManagerItem>>}
      */
     private function lookupVariationRowsFromSkuIndex(
+        int $activeGeneration,
         array $skusUpper,
         array $targetSkusUpper,
         bool $hasPublications,
@@ -2526,7 +2547,7 @@ class PurchaseOrderMeliImageResolver
         array $priceSelect,
         array $excludePriceIds,
     ): array {
-        if ($skusUpper === []) {
+        if ($skusUpper === [] || $activeGeneration <= 0) {
             return ['pub_by_sku' => [], 'price_by_sku' => []];
         }
 
@@ -2538,6 +2559,7 @@ class PurchaseOrderMeliImageResolver
 
         foreach (array_chunk($skusUpper, 500) as $skuChunk) {
             $rows = DB::table(MeliListingSkuIndexService::TABLE)
+                ->where('generation', $activeGeneration)
                 ->whereIn('sku_normalized', $skuChunk)
                 ->get(['source_table', 'source_row_id']);
 
