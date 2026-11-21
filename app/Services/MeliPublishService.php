@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\MeliPublication;
+use App\Services\Purchasing\MeliListingSkuIndexService;
 use App\Models\User;
 use GuzzleHttp\Client;
 use GuzzleHttp\Exception\ClientException;
@@ -720,6 +721,28 @@ A veces bloquea IPs de hosting/datacenters (PolicyAgent). Probá desde otra red 
         ]);
         $pub->id = $id;
         $pub->exists = true;
+
+        // Query Builder bypasses the Eloquent saved event.
+        // Load the persisted row to preserve account, current-state
+        // and other database values omitted from the return object.
+        try {
+            $storedPublication = MeliPublication::query()->find($id);
+
+            if ($storedPublication !== null) {
+                MeliListingSkuIndexService::syncSafelyFromModel($storedPublication);
+            } else {
+                Log::warning('[Purchasing][MeliPhotos] Publication missing before index sync', [
+                    'publication_id' => $id,
+                ]);
+            }
+        } catch (\Throwable $e) {
+            // Auxiliary photo indexing must not interrupt publishing.
+            Log::warning('[Purchasing][MeliPhotos] Unable to reload publication for index sync', [
+                'publication_id' => $id,
+                'exception' => $e::class,
+                'error' => $e->getMessage(),
+            ]);
+        }
 
         return $pub;
     }

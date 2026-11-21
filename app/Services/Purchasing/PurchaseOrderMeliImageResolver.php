@@ -390,6 +390,32 @@ class PurchaseOrderMeliImageResolver
                     $priceSelect,
                     $priceItems->pluck('id')->all(),
                 );
+                // A rebuild can purge the captured generation between the
+                // state read and the index lookup. Retry against the newest
+                // published generation, with a strict upper bound.
+                for ($retry = 0; $retry < 2; $retry++) {
+                    $latestGeneration = $this->resolveActiveVariationSkuIndexGeneration();
+
+                    if ($latestGeneration === null || $latestGeneration === $variationIndexGeneration) {
+                        break;
+                    }
+
+                    $variationIndexGeneration = $latestGeneration;
+
+                    // Discard rows from the previous generation instead of
+                    // merging potentially stale associations.
+                    $indexedLookup = $this->lookupVariationRowsFromSkuIndex(
+                        $latestGeneration,
+                        $fallbackSkusUpper,
+                        $fallbackSkuSet,
+                        $hasPublications,
+                        $pubSelect,
+                        $publications->pluck('id')->all(),
+                        $hasPriceManager,
+                        $priceSelect,
+                        $priceItems->pluck('id')->all(),
+                    );
+                }
                 $variationPubsBySku = $this->mergeIndexedCollections($variationPubsBySku, $indexedLookup['pub_by_sku']);
                 $variationPriceBySku = $this->mergeIndexedCollections($variationPriceBySku, $indexedLookup['price_by_sku']);
             } else {
@@ -2558,10 +2584,17 @@ class PurchaseOrderMeliImageResolver
         $priceIds = [];
 
         foreach (array_chunk($skusUpper, 500) as $skuChunk) {
-            $rows = DB::table(MeliListingSkuIndexService::TABLE)
-                ->where('generation', $activeGeneration)
-                ->whereIn('sku_normalized', $skuChunk)
-                ->get(['source_table', 'source_row_id']);
+            // Read the active generation and its index rows in a single SQL
+            // statement. A concurrent rebuild cannot invalidate a generation
+            // captured by a previous, separate SELECT.
+            $rows = DB::table(MeliListingSkuIndexService::STATE_TABLE.' as sku_state')
+                ->join(MeliListingSkuIndexService::TABLE.' as sku_index', function ($join): void {
+                    $join->on('sku_index.generation', '=', 'sku_state.active_generation');
+                })
+                ->where('sku_state.id', MeliListingSkuIndexService::STATE_ROW_ID)
+                ->where('sku_state.active_generation', '>', 0)
+                ->whereIn('sku_index.sku_normalized', $skuChunk)
+                ->get(['sku_index.source_table', 'sku_index.source_row_id']);
 
             foreach ($rows as $row) {
                 $rowId = (int) $row->source_row_id;

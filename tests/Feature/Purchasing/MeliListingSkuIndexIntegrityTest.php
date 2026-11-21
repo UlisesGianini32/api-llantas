@@ -423,6 +423,767 @@ class MeliListingSkuIndexIntegrityTest extends TestCase
         $this->assertSame(0, DB::table(MeliListingSkuIndexService::TABLE)->where('generation', 1)->count());
     }
 
+    public function test_reader_recovers_when_captured_generation_is_purged(): void
+    {
+        $product = $this->createProduct('RACE-VAR-SKU', 'Producto de carrera');
+        $order = $this->createOrderWithItems([$product]);
+        $itemId = $order->items->firstOrFail()->id;
+
+        $photoUrl = 'https://http2.mlstatic.com/race-photo.jpg';
+
+        $this->createVariationPublication(
+            'MLM700001',
+            'RACE-PARENT',
+            [
+                [
+                    'id' => 7001,
+                    'sku' => 'RACE-VAR-SKU',
+                    'url' => $photoUrl,
+                ],
+            ]
+        );
+
+        $firstBuild = $this->indexService->rebuildIndex(25);
+
+        $this->assertSame(1, $firstBuild['generation']);
+
+        // Sin cambio de generacion, la fotografia debe resolverse.
+        $before = $this->resolver->resolveForOrder($order, false);
+        $this->assertSame($photoUrl, $before[$itemId]['url']);
+
+        $switched = false;
+
+        // La reconstruccion ocurre justo despues de leer active_generation
+        // y antes de consultar las filas del indice.
+        DB::listen(function ($query) use (&$switched): void {
+            if ($switched) {
+                return;
+            }
+
+            $sql = strtolower($query->sql);
+
+            if (
+                ! str_starts_with(ltrim($sql), 'select')
+                || ! str_contains($sql, 'meli_listing_sku_index_state')
+                || ! str_contains($sql, 'active_generation')
+            ) {
+                return;
+            }
+
+            $switched = true;
+
+            $this->indexService->rebuildIndex(25);
+        });
+
+        $resolved = $this->resolver->resolveForOrder($order, false);
+
+        $this->assertTrue(
+            $switched,
+            'La prueba debe provocar el cambio de generacion.'
+        );
+
+        $this->assertSame(
+            2,
+            $this->indexService->getActiveReadyGeneration()
+        );
+
+        $this->assertSame(
+            $photoUrl,
+            $resolved[$itemId]['url'],
+            'La fotografia no debe perderse al purgar la generacion capturada.'
+        );
+    }
+    public function test_reader_survives_three_consecutive_generation_rotations(): void
+    {
+        $product = $this->createProduct('RACE-MULTI-SKU', 'Carrera multiple');
+        $order = $this->createOrderWithItems([$product]);
+        $itemId = $order->items->firstOrFail()->id;
+
+        $photoUrl = 'https://http2.mlstatic.com/race-multi-photo.jpg';
+
+        $this->createVariationPublication(
+            'MLM700002',
+            'RACE-MULTI-PARENT',
+            [
+                [
+                    'id' => 7002,
+                    'sku' => 'RACE-MULTI-SKU',
+                    'url' => $photoUrl,
+                ],
+            ]
+        );
+
+        $first = $this->indexService->rebuildIndex(25);
+        $this->assertSame(1, $first['generation']);
+
+        $rotations = 0;
+
+        DB::listen(function ($query) use (&$rotations): void {
+            if ($rotations >= 3) {
+                return;
+            }
+
+            $sql = strtolower(ltrim($query->sql));
+
+            if (
+                ! str_starts_with($sql, 'select')
+                || ! str_contains($sql, 'meli_listing_sku_index_state')
+                || ! str_contains($sql, 'active_generation')
+            ) {
+                return;
+            }
+
+            $rotations++;
+
+            // Rebuild after the reader captures each generation.
+            $this->indexService->rebuildIndex(25);
+        });
+
+        $resolved = $this->resolver->resolveForOrder($order, false);
+
+        $this->assertSame(3, $rotations);
+        $this->assertSame(4, $this->indexService->getActiveReadyGeneration());
+
+        $this->assertSame(
+            $photoUrl,
+            $resolved[$itemId]['url'],
+            'No debe perderse la fotografia tras tres cambios de generacion.'
+        );
+    }
+    public function test_future_reconciliation_watermark_does_not_skip_modified_rows(): void
+    {
+        $publication = $this->createVariationPublication(
+            'MLM800001',
+            'TIME-PARENT',
+            [
+                [
+                    'id' => 8001,
+                    'sku' => 'TIME-OLD',
+                    'url' => 'https://http2.mlstatic.com/time-photo.jpg',
+                ],
+            ]
+        );
+
+        $initial = $this->indexService->rebuildIndex(25);
+        $this->assertSame(1, $initial['generation']);
+
+        // Simulate a watermark written seven hours ahead of DB time.
+        DB::table(MeliListingSkuIndexService::STATE_TABLE)
+            ->where('id', 1)
+            ->update([
+                'last_reconciled_at' => now()->addHours(7)->toDateTimeString(),
+            ]);
+
+        // Query Builder bypasses Eloquent synchronization hooks.
+        DB::table('meli_publications')
+            ->where('id', $publication->id)
+            ->update([
+                'raw' => json_encode([
+                    'item' => [
+                        'pictures' => [
+                            [
+                                'id' => 'time-photo',
+                                'secure_url' => 'https://http2.mlstatic.com/time-photo.jpg',
+                            ],
+                        ],
+                        'variations' => [
+                            [
+                                'id' => 8001,
+                                'seller_custom_field' => 'TIME-NEW',
+                                'picture_ids' => ['time-photo'],
+                            ],
+                        ],
+                    ],
+                ]),
+                'updated_at' => DB::raw('CURRENT_TIMESTAMP'),
+            ]);
+
+        $result = $this->indexService->reconcileIncremental(25);
+
+        $this->assertGreaterThanOrEqual(
+            1,
+            $result['publications_synced'],
+            'Una marca futura no debe ocultar actualizaciones reales.'
+        );
+
+        $this->assertSame(
+            1,
+            DB::table(MeliListingSkuIndexService::TABLE)
+                ->where('generation', 1)
+                ->where('sku_normalized', 'TIME-NEW')
+                ->count()
+        );
+
+        $this->assertSame(
+            0,
+            DB::table(MeliListingSkuIndexService::TABLE)
+                ->where('generation', 1)
+                ->where('sku_normalized', 'TIME-OLD')
+                ->count()
+        );
+
+        $savedWatermark = DB::table(MeliListingSkuIndexService::STATE_TABLE)
+            ->where('id', 1)
+            ->value('last_reconciled_at');
+
+        $dbNow = DB::selectOne('SELECT CURRENT_TIMESTAMP AS db_now')->db_now;
+
+        $this->assertLessThanOrEqual(
+            (string) $dbNow,
+            (string) $savedWatermark,
+            'La nueva marca no debe quedar adelantada respecto al reloj de BD.'
+        );
+    }
+    public function test_rebuild_catches_up_database_writes_despite_php_clock_skew(): void
+    {
+        $publication = $this->createVariationPublication(
+            'MLM800002',
+            'TIME-REBUILD-PARENT',
+            [
+                [
+                    'id' => 8002,
+                    'sku' => 'TIME-REBUILD-OLD',
+                    'url' => 'https://http2.mlstatic.com/time-rebuild.jpg',
+                ],
+            ]
+        );
+
+        $mutated = false;
+
+        // PHP is seven hours ahead of the actual database clock.
+        $this->travelTo(now()->addHours(7));
+
+        try {
+            $result = $this->indexService->rebuildIndex(
+                25,
+                function (string $stage, int $generation, int $chunkIndex) use (
+                    $publication,
+                    &$mutated
+                ): void {
+                    if ($stage !== 'publications_chunk' || $chunkIndex !== 1) {
+                        return;
+                    }
+
+                    $mutated = true;
+
+                    // This update happens AFTER the publication was scanned.
+                    // CURRENT_TIMESTAMP uses the database clock, not fake PHP time.
+                    DB::table('meli_publications')
+                        ->where('id', $publication->id)
+                        ->update([
+                            'raw' => json_encode([
+                                'item' => [
+                                    'pictures' => [
+                                        [
+                                            'id' => 'p-time-rebuild',
+                                            'secure_url' => 'https://http2.mlstatic.com/time-rebuild.jpg',
+                                        ],
+                                    ],
+                                    'variations' => [
+                                        [
+                                            'id' => 8002,
+                                            'seller_custom_field' => 'TIME-REBUILD-NEW',
+                                            'picture_ids' => ['p-time-rebuild'],
+                                        ],
+                                    ],
+                                ],
+                            ]),
+                            'updated_at' => DB::raw('CURRENT_TIMESTAMP'),
+                        ]);
+                }
+            );
+        } finally {
+            $this->travelBack();
+        }
+
+        $this->assertTrue($mutated, 'La mutacion debe ejecutarse.');
+        $this->assertSame(1, $result['generation']);
+
+        $this->assertGreaterThanOrEqual(
+            1,
+            $result['catchup_publications'],
+            'El catch-up debe capturar cambios escritos con el reloj de BD.'
+        );
+
+        $this->assertSame(
+            1,
+            DB::table(MeliListingSkuIndexService::TABLE)
+                ->where('generation', 1)
+                ->where('sku_normalized', 'TIME-REBUILD-NEW')
+                ->count()
+        );
+
+        $this->assertSame(
+            0,
+            DB::table(MeliListingSkuIndexService::TABLE)
+                ->where('generation', 1)
+                ->where('sku_normalized', 'TIME-REBUILD-OLD')
+                ->count()
+        );
+
+        // The generation's state timestamps must not be in the future.
+        $dbNow = (string) DB::selectOne(
+            'SELECT CURRENT_TIMESTAMP AS db_now'
+        )->db_now;
+
+        $state = DB::table(MeliListingSkuIndexService::STATE_TABLE)
+            ->where('id', 1)
+            ->first([
+                'build_started_at',
+                'build_heartbeat_at',
+                'last_completed_at',
+                'last_reconciled_at',
+            ]);
+
+        foreach ([
+            'build_started_at',
+            'build_heartbeat_at',
+            'last_completed_at',
+            'last_reconciled_at',
+        ] as $field) {
+            $this->assertNotNull($state->{$field});
+
+            $this->assertLessThanOrEqual(
+                $dbNow,
+                (string) $state->{$field},
+                "{$field} no debe adelantarse al reloj de BD."
+            );
+        }
+    }
+    public function test_index_lookup_survives_rotation_between_500_sku_batches(): void
+    {
+        $sku = 'RACE-CHUNK-TARGET';
+        $photoUrl = 'https://http2.mlstatic.com/chunk-race-photo.jpg';
+
+        $product = $this->createProduct($sku, 'Producto del segundo lote');
+        $order = $this->createOrderWithItems([$product]);
+        $itemId = $order->items->firstOrFail()->id;
+
+        $publication = $this->createVariationPublication(
+            'MLM900001',
+            'RACE-CHUNK-PARENT',
+            [
+                [
+                    'id' => 9001,
+                    'sku' => $sku,
+                    'url' => $photoUrl,
+                ],
+            ]
+        );
+
+        $this->assertSame(
+            1,
+            $this->indexService->rebuildIndex(25)['generation']
+        );
+
+        // 500 SKUs without matches in the first SQL batch.
+        $skusUpper = [];
+
+        for ($i = 0; $i < 500; $i++) {
+            $skusUpper[] = sprintf('RACE-NOISE-%04d', $i);
+        }
+
+        // The real SKU can only be found in the second batch.
+        $skusUpper[] = $sku;
+
+        $rotated = false;
+        $indexLookups = 0;
+
+        DB::listen(function ($query) use (&$rotated, &$indexLookups): void {
+            $sql = strtolower(ltrim($query->sql));
+
+            if (
+                ! str_starts_with($sql, 'select')
+                || ! str_contains($sql, 'meli_listing_sku_index')
+                || ! str_contains($sql, 'sku_normalized')
+                || ! str_contains($sql, 'source_row_id')
+            ) {
+                return;
+            }
+
+            $indexLookups++;
+
+            if ($rotated) {
+                return;
+            }
+
+            $rotated = true;
+
+            // After batch one: publish generation 2 and purge generation 1.
+            $this->indexService->rebuildIndex(25);
+        });
+
+        // Focused test of the internal 500-SKU batching boundary.
+        $method = new \ReflectionMethod(
+            $this->resolver,
+            'lookupVariationRowsFromSkuIndex'
+        );
+
+        $lookup = $method->invoke(
+            $this->resolver,
+            1,
+            $skusUpper,
+            array_fill_keys($skusUpper, true),
+            true,
+            [
+                'id',
+                'meli_account_id',
+                'sku',
+                'mlm',
+                'status',
+                'last_sync_at',
+                'raw',
+                'is_current',
+            ],
+            [],
+            false,
+            [],
+            []
+        );
+
+        $this->assertTrue(
+            $rotated,
+            'Debe ocurrir una reconstruccion entre ambos lotes.'
+        );
+
+        $this->assertSame(2, $indexLookups);
+
+        $this->assertSame(
+            2,
+            $this->indexService->getActiveReadyGeneration()
+        );
+
+        $matched = $lookup['pub_by_sku'][$sku] ?? collect();
+
+        $this->assertCount(
+            1,
+            $matched,
+            'El segundo lote no debe perder la publicacion.'
+        );
+
+        $this->assertSame(
+            (int) $publication->id,
+            (int) $matched->first()->id
+        );
+
+        // Finally exercise the normal public resolver entry point.
+        $resolved = $this->resolver->resolveForOrder($order, false);
+
+        $this->assertSame($photoUrl, $resolved[$itemId]['url']);
+        $this->assertTrue($resolved[$itemId]['variation_index_used']);
+    }
+    public function test_full_purchase_order_with_501_items_survives_generation_rotation(): void
+    {
+        $products = [];
+
+        for ($i = 0; $i < 501; $i++) {
+            $sku = sprintf('E2E-BATCH-%04d', $i);
+            $products[] = $this->createProduct($sku, "Producto {$i}");
+        }
+
+        $order = $this->createOrderWithItems($products);
+
+        $firstSku = 'E2E-BATCH-0000';
+        $lastSku = 'E2E-BATCH-0500';
+
+        $firstUrl = 'https://http2.mlstatic.com/e2e-first.jpg';
+        $lastUrl = 'https://http2.mlstatic.com/e2e-last.jpg';
+
+        $this->createVariationPublication(
+            'MLM910001',
+            'E2E-PARENT-FIRST',
+            [
+                [
+                    'id' => 9101,
+                    'sku' => $firstSku,
+                    'url' => $firstUrl,
+                ],
+            ]
+        );
+
+        $this->createVariationPublication(
+            'MLM910002',
+            'E2E-PARENT-LAST',
+            [
+                [
+                    'id' => 9102,
+                    'sku' => $lastSku,
+                    'url' => $lastUrl,
+                ],
+            ]
+        );
+
+        $initial = $this->indexService->rebuildIndex(50);
+        $this->assertSame(1, $initial['generation']);
+
+        $rotations = 0;
+        $indexQueries = 0;
+
+        DB::listen(function ($query) use (&$rotations, &$indexQueries): void {
+            $sql = strtolower(ltrim($query->sql));
+
+            if (
+                ! str_starts_with($sql, 'select')
+                || ! str_contains($sql, 'meli_listing_sku_index')
+                || ! str_contains($sql, 'sku_normalized')
+                || ! str_contains($sql, 'source_row_id')
+            ) {
+                return;
+            }
+
+            $indexQueries++;
+
+            if ($rotations !== 0) {
+                return;
+            }
+
+            $rotations++;
+
+            $this->indexService->rebuildIndex(50);
+        });
+
+        $resolved = $this->resolver->resolveForOrder($order, false);
+
+        $firstItem = $order->items->firstWhere('sku', $firstSku);
+        $lastItem = $order->items->firstWhere('sku', $lastSku);
+        $middleItem = $order->items->firstWhere('sku', 'E2E-BATCH-0250');
+
+        $this->assertNotNull($firstItem);
+        $this->assertNotNull($lastItem);
+        $this->assertNotNull($middleItem);
+
+        $this->assertCount(501, $resolved);
+
+        $this->assertSame(1, $rotations);
+        $this->assertGreaterThanOrEqual(2, $indexQueries);
+
+        $this->assertSame(
+            2,
+            $this->indexService->getActiveReadyGeneration()
+        );
+
+        $this->assertSame(
+            $firstUrl,
+            $resolved[$firstItem->id]['url']
+        );
+
+        $this->assertSame(
+            $lastUrl,
+            $resolved[$lastItem->id]['url']
+        );
+
+        $this->assertNull(
+            $resolved[$middleItem->id]['url'],
+            'No se debe inventar una fotografia para un SKU sin publicacion.'
+        );
+
+        $this->assertTrue(
+            $resolved[$firstItem->id]['variation_index_used']
+        );
+
+        $this->assertTrue(
+            $resolved[$lastItem->id]['variation_index_used']
+        );
+    }
+    public function test_query_builder_write_after_catchup_is_recovered_by_reconciliation(): void
+    {
+        $sku = 'LAST-GAP-NEW';
+        $photoUrl = 'https://http2.mlstatic.com/last-gap-new.jpg';
+
+        $product = $this->createProduct($sku, 'Producto cambio tardio');
+        $order = $this->createOrderWithItems([$product]);
+
+        $publication = $this->createVariationPublication(
+            'MLM920001',
+            'LAST-GAP-PARENT',
+            [
+                [
+                    'id' => 9201,
+                    'sku' => 'LAST-GAP-OLD',
+                    'url' => $photoUrl,
+                ],
+            ]
+        );
+
+        $initial = $this->indexService->rebuildIndex(25);
+        $this->assertSame(1, $initial['generation']);
+
+        $mutated = false;
+
+        $second = $this->indexService->rebuildIndex(
+            25,
+            function (string $stage) use ($publication, $sku, $photoUrl, &$mutated): void {
+                if ($stage !== 'before_publish') {
+                    return;
+                }
+
+                $mutated = true;
+
+                // This happens AFTER the rebuild catch-up pass.
+                // Query Builder intentionally bypasses Eloquent hooks.
+                DB::table('meli_publications')
+                    ->where('id', $publication->id)
+                    ->update([
+                        'raw' => json_encode([
+                            'item' => [
+                                'pictures' => [
+                                    [
+                                        'id' => 'last-gap-picture',
+                                        'secure_url' => $photoUrl,
+                                    ],
+                                ],
+                                'variations' => [
+                                    [
+                                        'id' => 9201,
+                                        'seller_custom_field' => $sku,
+                                        'picture_ids' => ['last-gap-picture'],
+                                    ],
+                                ],
+                            ],
+                        ]),
+                        'updated_at' => DB::raw('CURRENT_TIMESTAMP'),
+                    ]);
+            }
+        );
+
+        $this->assertTrue($mutated);
+        $this->assertSame(2, $second['generation']);
+
+        // A raw Query Builder write after the last catch-up can be
+        // temporarily absent from the newly published generation.
+        $this->assertSame(
+            0,
+            DB::table(MeliListingSkuIndexService::TABLE)
+                ->where('generation', 2)
+                ->where('sku_normalized', $sku)
+                ->count(),
+            'La ventana posterior al catch-up debe quedar reproducida.'
+        );
+
+        // Rebuild saves its start time as the reconciliation watermark.
+        // The next incremental pass must therefore recover this update.
+        $recovery = $this->indexService->reconcileIncremental(25);
+
+        $this->assertSame(2, $recovery['active_generation']);
+        $this->assertGreaterThanOrEqual(
+            1,
+            $recovery['publications_synced'],
+            'La reconciliacion debe recuperar el cambio tardio.'
+        );
+
+        $this->assertSame(
+            1,
+            DB::table(MeliListingSkuIndexService::TABLE)
+                ->where('generation', 2)
+                ->where('sku_normalized', $sku)
+                ->count(),
+            'El SKU actualizado debe aparecer tras reconciliar.'
+        );
+
+        $this->assertSame(
+            0,
+            DB::table(MeliListingSkuIndexService::TABLE)
+                ->where('generation', 2)
+                ->where('sku_normalized', 'LAST-GAP-OLD')
+                ->count()
+        );
+
+        $resolved = $this->resolver->resolveForOrder($order, false);
+        $itemId = $order->items->firstOrFail()->id;
+
+        $this->assertSame(
+            $photoUrl,
+            $resolved[$itemId]['url'],
+            'La fotografia debe encontrarse despues de publicar.'
+        );
+    }
+    public function test_upsert_publication_synchronizes_variation_index_immediately(): void
+    {
+        $newSku = 'UPSERT-NEW';
+        $oldSku = 'UPSERT-OLD';
+        $photoUrl = 'https://http2.mlstatic.com/upsert-new.jpg';
+
+        $product = $this->createProduct($newSku, 'Producto actualizado');
+        $order = $this->createOrderWithItems([$product]);
+
+        $publication = $this->createVariationPublication(
+            'MLM930001',
+            'UPSERT-PARENT',
+            [
+                [
+                    'id' => 9301,
+                    'sku' => $oldSku,
+                    'url' => $photoUrl,
+                ],
+            ]
+        );
+
+        $initial = $this->indexService->rebuildIndex(25);
+        $this->assertSame(1, $initial['generation']);
+
+        // This application service writes with Query Builder.
+        app(\App\Services\MeliPublishService::class)->upsertPublication(
+            $this->admin,
+            'UPSERT-PARENT',
+            [
+                'id' => 'MLM930001',
+                'status' => 'active',
+                'pictures' => [
+                    [
+                        'id' => 'upsert-new-picture',
+                        'secure_url' => $photoUrl,
+                    ],
+                ],
+                'variations' => [
+                    [
+                        'id' => 9301,
+                        'seller_custom_field' => $newSku,
+                        'picture_ids' => ['upsert-new-picture'],
+                    ],
+                ],
+            ]
+        );
+
+        $source = DB::table('meli_publications')
+            ->where('id', $publication->id)
+            ->first();
+
+        $this->assertNotNull($source);
+
+        $raw = json_decode((string) $source->raw, true);
+
+        $this->assertSame(
+            $newSku,
+            $raw['variations'][0]['seller_custom_field']
+        );
+
+        // The application write should synchronize the active index
+        // without depending on a scheduled reconciliation.
+        $this->assertSame(
+            1,
+            DB::table(MeliListingSkuIndexService::TABLE)
+                ->where('generation', 1)
+                ->where('sku_normalized', $newSku)
+                ->count(),
+            'La escritura directa no actualizo inmediatamente el indice.'
+        );
+
+        $this->assertSame(
+            0,
+            DB::table(MeliListingSkuIndexService::TABLE)
+                ->where('generation', 1)
+                ->where('sku_normalized', $oldSku)
+                ->count()
+        );
+
+        $resolved = $this->resolver->resolveForOrder($order, false);
+        $itemId = $order->items->firstOrFail()->id;
+
+        $this->assertSame(
+            $photoUrl,
+            $resolved[$itemId]['url']
+        );
+    }
     public function test_incremental_reconciliation_and_readonly_status_command_handle_query_builder_drift_and_stale_builds(): void
     {
         $pKeep = $this->createProduct('INC-KEEP', 'Existente');

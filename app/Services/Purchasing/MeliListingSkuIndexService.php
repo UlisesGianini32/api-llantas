@@ -61,6 +61,13 @@ class MeliListingSkuIndexService
     /** @var array<string, true> */
     private array $seenJsonErrors = [];
 
+    private function databaseSessionNow(): Carbon
+    {
+        return Carbon::parse(
+            (string) DB::selectOne('SELECT CURRENT_TIMESTAMP AS db_now')->db_now
+        );
+    }
+
     public function isTableAvailable(): bool
     {
         return Schema::hasTable(self::TABLE) && Schema::hasTable(self::STATE_TABLE);
@@ -225,7 +232,7 @@ class MeliListingSkuIndexService
         }
 
         $chunkSize = max(25, min(1000, $chunkSize));
-        $rebuildStartedAt = now();
+        $rebuildStartedAt = $this->databaseSessionNow();
 
         // Step 1: Atomically claim a new candidate generation without altering active_generation.
         [$newGeneration, $previousGeneration] = $this->claimCandidateGeneration($rebuildStartedAt, $forceTakeover);
@@ -349,7 +356,7 @@ class MeliListingSkuIndexService
                 ->count();
 
             // Step 3: Atomic generation publish!
-            $publishedAt = now();
+            $publishedAt = $this->databaseSessionNow();
             DB::transaction(function () use (
                 $newGeneration,
                 $activeRowsCount,
@@ -439,7 +446,12 @@ class MeliListingSkuIndexService
         }
 
         $chunkSize = max(25, min(1000, $chunkSize));
-        $reconcileStartedAt = now();
+
+        // Use the database session clock for TIMESTAMP watermarks.
+        // This avoids writing PHP UTC wall-clock values into a
+        // MariaDB connection configured with a non-UTC timezone.
+        $reconcileStartedAt = $this->databaseSessionNow();
+
         $cutoff = null;
 
         if ($since !== null && trim($since) !== '') {
@@ -448,6 +460,26 @@ class MeliListingSkuIndexService
             $cutoff = Carbon::parse((string) $state->last_reconciled_at)->subSeconds(5);
         } elseif (! empty($state->last_completed_at)) {
             $cutoff = Carbon::parse((string) $state->last_completed_at)->subSeconds(5);
+        }
+
+        // Legacy watermarks may have been written several hours ahead
+        // because PHP and MariaDB used different session timezones.
+        // Recover by reconciling all source rows in bounded chunks.
+        // Explicit --since values remain under operator control.
+        if (
+            ($since === null || trim($since) === '')
+            && $cutoff !== null
+            && $cutoff->gt($reconcileStartedAt->copy()->addSeconds(5))
+        ) {
+            Log::warning(
+                '[Purchasing][MeliPhotos] Future reconciliation watermark detected; running full reconciliation',
+                [
+                    'stored_cutoff' => $cutoff->toDateTimeString(),
+                    'database_now' => $reconcileStartedAt->toDateTimeString(),
+                ]
+            );
+
+            $cutoff = null;
         }
 
         $generations = $this->targetGenerations();
@@ -469,7 +501,7 @@ class MeliListingSkuIndexService
                 'incremental_sync_errors_count' => 0,
                 'last_incremental_error' => null,
                 'last_incremental_error_at' => null,
-                'updated_at' => now(),
+                'updated_at' => $reconcileStartedAt,
             ]);
 
         return [
@@ -553,7 +585,7 @@ class MeliListingSkuIndexService
         if ($buildingGeneration !== null) {
             $heartbeatRaw = $state->build_heartbeat_at ?? $state->build_started_at;
             if ($heartbeatRaw !== null) {
-                $buildIsStale = Carbon::parse((string) $heartbeatRaw)->lt(now()->subMinutes(self::STALE_BUILD_MINUTES));
+                $buildIsStale = Carbon::parse((string) $heartbeatRaw)->lt($this->databaseSessionNow()->subMinutes(self::STALE_BUILD_MINUTES));
             }
         }
 
@@ -744,7 +776,7 @@ class MeliListingSkuIndexService
             if ($buildingGeneration !== null) {
                 $heartbeatRaw = $state->build_heartbeat_at ?? $state->build_started_at;
                 $isStale = $heartbeatRaw === null
-                    || Carbon::parse((string) $heartbeatRaw)->lt(now()->subMinutes(self::STALE_BUILD_MINUTES));
+                    || Carbon::parse((string) $heartbeatRaw)->lt($this->databaseSessionNow()->subMinutes(self::STALE_BUILD_MINUTES));
 
                 if (! $isStale && ! $forceTakeover) {
                     throw new RuntimeException(
@@ -773,12 +805,14 @@ class MeliListingSkuIndexService
 
     private function touchBuildHeartbeat(int $buildingGeneration): void
     {
+        $heartbeatAt = $this->databaseSessionNow();
+
         DB::table(self::STATE_TABLE)
             ->where('id', self::STATE_ROW_ID)
             ->where('building_generation', $buildingGeneration)
             ->update([
-                'build_heartbeat_at' => now(),
-                'updated_at' => now(),
+                'build_heartbeat_at' => $heartbeatAt,
+                'updated_at' => $heartbeatAt,
             ]);
     }
 
@@ -793,7 +827,7 @@ class MeliListingSkuIndexService
         $preservedGeneration = 0;
 
         try {
-            $now = now();
+            $now = $this->databaseSessionNow();
             DB::transaction(function () use ($failedGeneration, $e, $now, &$preservedGeneration): void {
                 $state = DB::table(self::STATE_TABLE)
                     ->where('id', self::STATE_ROW_ID)
