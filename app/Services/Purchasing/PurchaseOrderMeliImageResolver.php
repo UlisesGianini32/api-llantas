@@ -9,6 +9,7 @@ use App\Models\MeliPublication;
 use App\Models\PurchaseOrder;
 use App\Models\PurchaseOrderItem;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
@@ -69,17 +70,22 @@ class PurchaseOrderMeliImageResolver
     public const AUDIT_MANUAL_OVERRIDE = 'manual_override';
 
     /**
-     * Operational bounds for keyset-paginated raw variation scanning.
+     * Operational bounds for keyset-paginated raw variation scanning (used ONLY as fallback when
+     * the normalized `meli_listing_sku_index` table is not yet available or populated).
      * Each SKU batch scans primary-key pages (id > lastId) of VARIATION_SCAN_PAGE_SIZE rows,
      * streaming verified SKU matches into memory and discarding non-matching rows per page.
-     * Reaching VARIATION_SCAN_MAX_PAGES sets `variation_scan_truncated = true` and emits a warning
-     * so truncation is never silent.
+     * Reaching page, time, or memory ceilings sets `variation_scan_truncated = true` and emits a
+     * warning so truncation is never silent.
      */
     public const VARIATION_SCAN_SKU_BATCH_SIZE = 100;
 
-    public const VARIATION_SCAN_PAGE_SIZE = 250;
+    public const VARIATION_SCAN_PAGE_SIZE = 100;
 
     public const VARIATION_SCAN_MAX_PAGES = 20;
+
+    public const VARIATION_SCAN_MAX_SECONDS = 5.0;
+
+    public const SLOW_RESOLUTION_WARN_SECONDS = 2.5;
 
     /** @var list<string> */
     private const TITLE_STOPWORDS = [
@@ -92,6 +98,7 @@ class PurchaseOrderMeliImageResolver
         private readonly int $variationScanPageSize = self::VARIATION_SCAN_PAGE_SIZE,
         private readonly int $variationScanMaxPages = self::VARIATION_SCAN_MAX_PAGES,
         private readonly int $variationScanSkuBatchSize = self::VARIATION_SCAN_SKU_BATCH_SIZE,
+        private readonly float $variationScanMaxSeconds = self::VARIATION_SCAN_MAX_SECONDS,
     ) {}
 
     /** @return array<int, string> Purchase-order item ID => trusted picture URL */
@@ -167,7 +174,6 @@ class PurchaseOrderMeliImageResolver
         $hasPublications = Schema::hasTable('meli_publications');
         $hasPriceManager = Schema::hasTable('meli_price_manager_items');
         $hasLinks = Schema::hasTable('inventory_channel_links');
-        $hasAccounts = Schema::hasTable('meli_accounts');
 
         if (! $hasPublications && ! $hasPriceManager) {
             foreach ($remainingItems as $item) {
@@ -208,10 +214,6 @@ class PurchaseOrderMeliImageResolver
             return $results;
         }
 
-        $accounts = $hasAccounts
-            ? MeliAccount::query()->get(['id', 'meli_user_id', 'nickname', 'is_default'])
-            : collect();
-
         $skus = $remainingItems
             ->map(fn (PurchaseOrderItem $item): string => $this->itemSku($item))
             ->filter()
@@ -246,6 +248,10 @@ class PurchaseOrderMeliImageResolver
                     'is_active',
                     'remote_status',
                 ])
+            : collect();
+
+        $accounts = ($links->isNotEmpty() && Schema::hasTable('meli_accounts'))
+            ? MeliAccount::query()->get(['id', 'meli_user_id', 'nickname', 'is_default'])
             : collect();
 
         $approvedMlms = $remainingItems
@@ -346,50 +352,91 @@ class PurchaseOrderMeliImageResolver
 
         // Pass 2: Unified SKU resolution across meli_publications and meli_price_manager_items
         // (including secondary variation SKUs stored inside raw JSON) for items without an explicit match.
-        // Rows are streamed via keyset pagination (id > lastId) and indexed strictly by their own
-        // verified SKUs so unrelated MLMs never contaminate other items and >500 matches are not lost.
+        // Priority: normalized B-tree index `meli_listing_sku_index` (zero raw LIKE scans).
+        // Fallback: resource-guarded keyset-paginated scan (page, time, and memory bounds).
         if ($skuFallbackItems !== []) {
+            $pass2StartedAt = microtime(true);
             $fallbackSkus = collect($skuFallbackItems)
                 ->pluck('sku')
                 ->unique(fn (string $sku): string => strtoupper($sku))
                 ->values()
                 ->all();
 
-            $fallbackSkuSet = array_fill_keys(
-                array_map(static fn (string $s): string => strtoupper($s), $fallbackSkus),
-                true,
-            );
+            $fallbackSkusUpper = array_values(array_map(static fn (string $s): string => strtoupper($s), $fallbackSkus));
+            $fallbackSkuSet = array_fill_keys($fallbackSkusUpper, true);
 
             $variationPubsBySku = $this->indexPublicationsByVerifiedSku($publications, $fallbackSkuSet);
             $variationPriceBySku = $this->indexPriceManagerItemsByVerifiedSku($priceItems, $fallbackSkuSet);
 
-            $pubScan = $hasPublications
-                ? $this->scanVariationPublicationsByRaw($pubSelect, $fallbackSkus, $publications->pluck('id')->all(), $fallbackSkuSet)
-                : ['by_sku' => [], 'truncated' => false, 'scanned_rows' => 0, 'pages_scanned' => 0, 'max_rows' => 0];
+            $variationIndexUsed = false;
+            $scanTruncated = false;
+            $scanDiagnostics = null;
+            $scannedRowsTotal = 0;
 
-            $priceScan = $hasPriceManager
-                ? $this->scanVariationPriceManagerItemsByRaw($fallbackSkus, $priceItems->pluck('id')->all(), $fallbackSkuSet, $priceSelect)
-                : ['by_sku' => [], 'truncated' => false, 'scanned_rows' => 0, 'pages_scanned' => 0, 'max_rows' => 0];
+            if ($this->isVariationSkuIndexReady()) {
+                $variationIndexUsed = true;
+                $indexedLookup = $this->lookupVariationRowsFromSkuIndex(
+                    $fallbackSkusUpper,
+                    $fallbackSkuSet,
+                    $hasPublications,
+                    $pubSelect,
+                    $publications->pluck('id')->all(),
+                    $hasPriceManager,
+                    $priceSelect,
+                    $priceItems->pluck('id')->all(),
+                );
+                $variationPubsBySku = $this->mergeIndexedCollections($variationPubsBySku, $indexedLookup['pub_by_sku']);
+                $variationPriceBySku = $this->mergeIndexedCollections($variationPriceBySku, $indexedLookup['price_by_sku']);
+            } else {
+                $deadline = $this->variationScanMaxSeconds > 0
+                    ? microtime(true) + $this->variationScanMaxSeconds
+                    : microtime(true) - 1.0;
 
-            $variationPubsBySku = $this->mergeIndexedCollections($variationPubsBySku, $pubScan['by_sku']);
-            $variationPriceBySku = $this->mergeIndexedCollections($variationPriceBySku, $priceScan['by_sku']);
+                $pubScan = $hasPublications
+                    ? $this->scanVariationPublicationsByRaw($pubSelect, $fallbackSkus, $publications->pluck('id')->all(), $fallbackSkuSet, $deadline)
+                    : ['by_sku' => [], 'truncated' => false, 'truncation_reason' => null, 'scanned_rows' => 0, 'pages_scanned' => 0, 'max_rows' => 0];
 
-            $scanTruncated = $pubScan['truncated'] || $priceScan['truncated'];
-            $scanDiagnostics = $scanTruncated ? [
-                'meli_publications_truncated' => $pubScan['truncated'],
-                'meli_publications_scanned' => $pubScan['scanned_rows'],
-                'meli_price_manager_truncated' => $priceScan['truncated'],
-                'meli_price_manager_scanned' => $priceScan['scanned_rows'],
-                'page_size' => max(1, $this->variationScanPageSize),
-                'max_pages_per_batch' => max(1, $this->variationScanMaxPages),
-            ] : null;
+                $priceScan = $hasPriceManager
+                    ? $this->scanVariationPriceManagerItemsByRaw($fallbackSkus, $priceItems->pluck('id')->all(), $fallbackSkuSet, $priceSelect, $deadline)
+                    : ['by_sku' => [], 'truncated' => false, 'truncation_reason' => null, 'scanned_rows' => 0, 'pages_scanned' => 0, 'max_rows' => 0];
 
-            if ($scanTruncated) {
-                Log::warning('[Purchasing][MeliPhotos] Variation raw scan reached operational ceiling', [
+                $variationPubsBySku = $this->mergeIndexedCollections($variationPubsBySku, $pubScan['by_sku']);
+                $variationPriceBySku = $this->mergeIndexedCollections($variationPriceBySku, $priceScan['by_sku']);
+
+                $scannedRowsTotal = $pubScan['scanned_rows'] + $priceScan['scanned_rows'];
+                $scanTruncated = $pubScan['truncated'] || $priceScan['truncated'];
+                $scanDiagnostics = $scanTruncated ? [
+                    'meli_publications_truncated' => $pubScan['truncated'],
+                    'meli_publications_reason' => $pubScan['truncation_reason'],
+                    'meli_publications_scanned' => $pubScan['scanned_rows'],
+                    'meli_price_manager_truncated' => $priceScan['truncated'],
+                    'meli_price_manager_reason' => $priceScan['truncation_reason'],
+                    'meli_price_manager_scanned' => $priceScan['scanned_rows'],
+                    'page_size' => max(1, $this->variationScanPageSize),
+                    'max_pages_per_batch' => max(1, $this->variationScanMaxPages),
+                    'max_seconds' => $this->variationScanMaxSeconds,
+                ] : null;
+
+                if ($scanTruncated) {
+                    Log::warning('[Purchasing][MeliPhotos] Variation raw scan reached operational ceiling', [
+                        'purchase_order_id' => (int) $order->id,
+                        'order_number' => (string) $order->order_number,
+                        'fallback_skus_count' => count($fallbackSkus),
+                        'scan_diagnostics' => $scanDiagnostics,
+                    ]);
+                }
+            }
+
+            $pass2Elapsed = microtime(true) - $pass2StartedAt;
+            if ($pass2Elapsed >= self::SLOW_RESOLUTION_WARN_SECONDS) {
+                Log::warning('[Purchasing][MeliPhotos] Slow photo resolution detected', [
                     'purchase_order_id' => (int) $order->id,
                     'order_number' => (string) $order->order_number,
+                    'duration_ms' => round($pass2Elapsed * 1000, 1),
                     'fallback_skus_count' => count($fallbackSkus),
-                    'scan_diagnostics' => $scanDiagnostics,
+                    'variation_index_used' => $variationIndexUsed,
+                    'scanned_rows' => $scannedRowsTotal,
+                    'peak_memory_mb' => round(memory_get_peak_usage(true) / 1048576, 2),
                 ]);
             }
 
@@ -410,6 +457,7 @@ class PurchaseOrderMeliImageResolver
                     $entry['rejected_mlms'],
                 );
 
+                $resolvedEntry['variation_index_used'] = $variationIndexUsed;
                 $resolvedEntry['variation_scan_truncated'] = $scanTruncated;
                 if ($scanDiagnostics !== null) {
                     $resolvedEntry['scan_diagnostics'] = $scanDiagnostics;
@@ -1008,6 +1056,8 @@ class PurchaseOrderMeliImageResolver
                 'audit_category' => $isAmbiguous ? self::AUDIT_PENDING_MANUAL_APPROVAL : self::AUDIT_PENDING_NO_CANDIDATE,
                 'ambiguous' => $isAmbiguous,
                 'ambiguous_matches' => $fallbackFailure['ambiguous_matches'] ?? [],
+                'variation_index_used' => false,
+                'variation_scan_truncated' => false,
             ];
         }
 
@@ -1817,21 +1867,29 @@ class PurchaseOrderMeliImageResolver
 
     /**
      * Discover candidate Mercado Libre publications and variations for an item using:
-     * 1. Approved / linked / exact-SKU listings
+     * 1. Approved / linked / exact-SKU listings (preferring normalized SKU index)
      * 2. Title & keyword discovery (ONLY to propose candidates for manual review/approval).
      *
+     * @param  ?Collection<int, MeliAccount>  $preloadedAccountsById
      * @return list<array<string, mixed>>
      */
     public function discoverCandidatesForItem(
         PurchaseOrderItem $item,
         ?string $customQuery = null,
         int $limit = 30,
+        bool $skipVariationRawScan = false,
+        ?Collection $preloadedAccountsById = null,
+        ?float $maxSeconds = null,
     ): array {
         $hasPublications = Schema::hasTable('meli_publications');
         $hasPriceManager = Schema::hasTable('meli_price_manager_items');
         if (! $hasPublications && ! $hasPriceManager) {
             return [];
         }
+
+        $deadline = $maxSeconds !== null
+            ? ($maxSeconds > 0 ? microtime(true) + $maxSeconds : microtime(true) - 1.0)
+            : null;
 
         $item->loadMissing(['product:id,sku,name,brand']);
 
@@ -1848,9 +1906,13 @@ class PurchaseOrderMeliImageResolver
         $photoMode = $item->getAttribute('photo_source_mode');
         $rejectedMlms = $this->normalizedRejectedMlms($item);
 
-        $accountsById = Schema::hasTable('meli_accounts')
-            ? MeliAccount::query()->get(['id', 'meli_user_id', 'nickname', 'is_default'])->keyBy('id')
-            : collect();
+        if ($preloadedAccountsById !== null) {
+            $accountsById = $preloadedAccountsById;
+        } else {
+            $accountsById = Schema::hasTable('meli_accounts')
+                ? MeliAccount::query()->get(['id', 'meli_user_id', 'nickname', 'is_default'])->keyBy('id')
+                : collect();
+        }
 
         $links = (Schema::hasTable('inventory_channel_links') && $item->inventory_product_id)
             ? InventoryChannelLink::query()
@@ -1894,53 +1956,84 @@ class PurchaseOrderMeliImageResolver
             $pubHasPictures ? 'pictures' : null,
         ]));
 
+        $priceSelect = $hasPriceManager ? $this->priceManagerSelectColumns() : [];
+
         $publications = collect();
-        if ($hasPublications) {
-            if ($skuVariants !== [] || $mlmVariants !== []) {
-                $publications = $publications->merge(
-                    $this->queryPublications($pubSelect, $pubHasIsCurrent, $skuVariants, $mlmVariants)
-                );
-            }
-            if ($sku !== '') {
-                $skuUpper = strtoupper($sku);
-                $pubScan = $this->scanVariationPublicationsByRaw(
-                    $pubSelect,
-                    [$sku],
-                    $publications->pluck('id')->all(),
+        $priceItems = collect();
+
+        // Step 1: Indexed exact SKU / MLM queries first (cheap, bounded).
+        if ($hasPublications && ($skuVariants !== [] || $mlmVariants !== [])) {
+            $publications = $publications->merge(
+                $this->queryPublications($pubSelect, $pubHasIsCurrent, $skuVariants, $mlmVariants)
+            );
+        }
+
+        if ($hasPriceManager && ($skuVariants !== [] || $mlmVariants !== [])) {
+            $priceItems = $priceItems->merge(
+                $this->queryPriceManagerItems($skuVariants, $mlmVariants, $priceSelect)
+            );
+        }
+
+        // Step 2: Variation SKU lookup (normalized index first; bounded raw scan only if explicitly allowed).
+        if ($sku !== '') {
+            $skuUpper = strtoupper($sku);
+            if ($this->isVariationSkuIndexReady()) {
+                $indexed = $this->lookupVariationRowsFromSkuIndex(
+                    [$skuUpper],
                     [$skuUpper => true],
+                    $hasPublications,
+                    $pubSelect,
+                    $publications->pluck('id')->all(),
+                    $hasPriceManager,
+                    $priceSelect,
+                    $priceItems->pluck('id')->all(),
                 );
-                if (isset($pubScan['by_sku'][$skuUpper])) {
-                    $publications = $publications->merge($pubScan['by_sku'][$skuUpper]);
+                if (isset($indexed['pub_by_sku'][$skuUpper])) {
+                    $publications = $publications->merge($indexed['pub_by_sku'][$skuUpper]);
                 }
-            }
-            if ($tokens !== []) {
-                $publications = $publications->merge(
-                    $this->searchPublicationsByTokens($pubSelect, $pubHasIsCurrent, $tokens, $publications->pluck('id')->all())
-                );
+                if (isset($indexed['price_by_sku'][$skuUpper])) {
+                    $priceItems = $priceItems->merge($indexed['price_by_sku'][$skuUpper]);
+                }
+            } elseif (! $skipVariationRawScan && ! $this->isDeadlineOrMemoryExceeded($deadline)) {
+                if ($hasPublications) {
+                    $pubScan = $this->scanVariationPublicationsByRaw(
+                        $pubSelect,
+                        [$sku],
+                        $publications->pluck('id')->all(),
+                        [$skuUpper => true],
+                        $deadline,
+                    );
+                    if (isset($pubScan['by_sku'][$skuUpper])) {
+                        $publications = $publications->merge($pubScan['by_sku'][$skuUpper]);
+                    }
+                }
+                if ($hasPriceManager && ! $this->isDeadlineOrMemoryExceeded($deadline)) {
+                    $priceScan = $this->scanVariationPriceManagerItemsByRaw(
+                        [$sku],
+                        $priceItems->pluck('id')->all(),
+                        [$skuUpper => true],
+                        $priceSelect,
+                        $deadline,
+                    );
+                    if (isset($priceScan['by_sku'][$skuUpper])) {
+                        $priceItems = $priceItems->merge($priceScan['by_sku'][$skuUpper]);
+                    }
+                }
             }
         }
 
-        $priceItems = collect();
-        if ($hasPriceManager) {
-            $priceSelect = $this->priceManagerSelectColumns();
-            if ($skuVariants !== [] || $mlmVariants !== []) {
-                $priceItems = $priceItems->merge($this->queryPriceManagerItems($skuVariants, $mlmVariants, $priceSelect));
-            }
-            if ($sku !== '') {
-                $skuUpper = strtoupper($sku);
-                $priceScan = $this->scanVariationPriceManagerItemsByRaw(
-                    [$sku],
-                    $priceItems->pluck('id')->all(),
-                    [$skuUpper => true],
-                    $priceSelect,
-                );
-                if (isset($priceScan['by_sku'][$skuUpper])) {
-                    $priceItems = $priceItems->merge($priceScan['by_sku'][$skuUpper]);
-                }
-            }
-            if ($tokens !== []) {
+        // Step 3: Title/keyword discovery — search compact `meli_price_manager_items.title` FIRST
+        // before scanning larger `meli_publications.raw`, always respecting time/memory budgets.
+        if ($tokens !== []) {
+            if ($hasPriceManager && ! $this->isDeadlineOrMemoryExceeded($deadline)) {
                 $priceItems = $priceItems->merge(
                     $this->searchPriceManagerItemsByTokens($tokens, $priceItems->pluck('id')->all(), $priceSelect)
+                );
+            }
+
+            if ($hasPublications && ! $this->isDeadlineOrMemoryExceeded($deadline)) {
+                $publications = $publications->merge(
+                    $this->searchPublicationsByTokens($pubSelect, $tokens, $publications->pluck('id')->all())
                 );
             }
         }
@@ -2398,22 +2491,159 @@ class PurchaseOrderMeliImageResolver
     }
 
     /**
+     * Check whether the normalized `meli_listing_sku_index` table exists and contains indexed rows.
+     * When unavailable or not yet backfilled, Pass 2 falls back safely to the resource-guarded raw scan.
+     */
+    private function isVariationSkuIndexReady(): bool
+    {
+        if (! Schema::hasTable(MeliListingSkuIndexService::TABLE)) {
+            return false;
+        }
+
+        return DB::table(MeliListingSkuIndexService::TABLE)->limit(1)->exists();
+    }
+
+    /**
+     * Resolve variation listings by querying the B-tree indexed `meli_listing_sku_index` table
+     * and hydrating only the matched primary keys (zero `raw LIKE` scans). Every hydrated row is
+     * still verified against its raw payload so stale index entries can never misassign a photo.
+     *
+     * @param  list<string>  $skusUpper
+     * @param  array<string, true>  $targetSkusUpper
+     * @param  list<string>  $pubSelect
+     * @param  list<int>  $excludePubIds
+     * @param  list<string>  $priceSelect
+     * @param  list<int>  $excludePriceIds
+     * @return array{pub_by_sku: array<string, Collection<int, MeliPublication>>, price_by_sku: array<string, Collection<int, MeliPriceManagerItem>>}
+     */
+    private function lookupVariationRowsFromSkuIndex(
+        array $skusUpper,
+        array $targetSkusUpper,
+        bool $hasPublications,
+        array $pubSelect,
+        array $excludePubIds,
+        bool $hasPriceManager,
+        array $priceSelect,
+        array $excludePriceIds,
+    ): array {
+        if ($skusUpper === []) {
+            return ['pub_by_sku' => [], 'price_by_sku' => []];
+        }
+
+        $excludePubSet = array_fill_keys(array_map('intval', $excludePubIds), true);
+        $excludePriceSet = array_fill_keys(array_map('intval', $excludePriceIds), true);
+
+        $pubIds = [];
+        $priceIds = [];
+
+        foreach (array_chunk($skusUpper, 500) as $skuChunk) {
+            $rows = DB::table(MeliListingSkuIndexService::TABLE)
+                ->whereIn('sku_normalized', $skuChunk)
+                ->get(['source_table', 'source_row_id']);
+
+            foreach ($rows as $row) {
+                $rowId = (int) $row->source_row_id;
+                if ($row->source_table === MeliListingSkuIndexService::SOURCE_PUBLICATIONS) {
+                    if ($hasPublications && ! isset($excludePubSet[$rowId])) {
+                        $pubIds[$rowId] = $rowId;
+                    }
+                } elseif ($row->source_table === MeliListingSkuIndexService::SOURCE_PRICE_MANAGER) {
+                    if ($hasPriceManager && ! isset($excludePriceSet[$rowId])) {
+                        $priceIds[$rowId] = $rowId;
+                    }
+                }
+            }
+        }
+
+        $pubBySku = [];
+        if ($pubIds !== [] && $pubSelect !== []) {
+            $fetchedPubs = collect();
+            foreach (array_chunk(array_values($pubIds), 500) as $idChunk) {
+                $fetchedPubs = $fetchedPubs->merge(
+                    MeliPublication::query()->whereIn('id', $idChunk)->get($pubSelect)
+                );
+            }
+            $pubBySku = $this->indexPublicationsByVerifiedSku($fetchedPubs, $targetSkusUpper);
+        }
+
+        $priceBySku = [];
+        if ($priceIds !== []) {
+            $columns = $priceSelect !== [] ? $priceSelect : $this->priceManagerSelectColumns();
+            $fetchedPrice = collect();
+            foreach (array_chunk(array_values($priceIds), 500) as $idChunk) {
+                $fetchedPrice = $fetchedPrice->merge(
+                    MeliPriceManagerItem::query()->whereNotNull('raw_item')->whereIn('id', $idChunk)->get($columns)
+                );
+            }
+            $priceBySku = $this->indexPriceManagerItemsByVerifiedSku($fetchedPrice, $targetSkusUpper);
+        }
+
+        return [
+            'pub_by_sku' => $pubBySku,
+            'price_by_sku' => $priceBySku,
+        ];
+    }
+
+    private function isDeadlineOrMemoryExceeded(?float $deadline): bool
+    {
+        if ($deadline !== null && microtime(true) >= $deadline) {
+            return true;
+        }
+
+        return $this->isMemoryBudgetExceeded();
+    }
+
+    private function isMemoryBudgetExceeded(): bool
+    {
+        $limitBytes = $this->parseMemoryLimitBytes((string) ini_get('memory_limit'));
+        if ($limitBytes === null || $limitBytes <= 0) {
+            return false;
+        }
+
+        return memory_get_usage(true) >= (int) ($limitBytes * 0.80);
+    }
+
+    private function parseMemoryLimitBytes(string $limit): ?int
+    {
+        $trimmed = trim($limit);
+        if ($trimmed === '' || $trimmed === '-1') {
+            return null;
+        }
+
+        if (! preg_match('/^(\d+)\s*([KMG])?$/i', $trimmed, $matches)) {
+            return null;
+        }
+
+        $value = (int) $matches[1];
+        $unit = strtoupper((string) ($matches[2] ?? ''));
+
+        return match ($unit) {
+            'G' => $value * 1073741824,
+            'M' => $value * 1048576,
+            'K' => $value * 1024,
+            default => $value,
+        };
+    }
+
+    /**
      * Keyset-paginated streaming scan for secondary variation SKUs embedded in meli_publications.raw.
+     * Used ONLY as fallback when `meli_listing_sku_index` is unavailable or empty.
      * Scans primary-key pages (id > lastId) without filesort, retains only verified SKU matches in
-     * memory, handles >500 matching rows exhaustively, and reports truncation if the operational
-     * page ceiling is reached.
+     * memory, handles >500 matching rows exhaustively, and reports truncation with explicit reason
+     * if page, time, or memory ceilings are reached.
      *
      * @param  list<string>  $select
      * @param  list<string>  $skus
      * @param  list<int>  $excludeIds
      * @param  array<string, true>  $targetSkusUpper
-     * @return array{by_sku: array<string, Collection<int, MeliPublication>>, truncated: bool, scanned_rows: int, pages_scanned: int, max_rows: int}
+     * @return array{by_sku: array<string, Collection<int, MeliPublication>>, truncated: bool, truncation_reason: ?string, scanned_rows: int, pages_scanned: int, max_rows: int}
      */
     private function scanVariationPublicationsByRaw(
         array $select,
         array $skus,
         array $excludeIds,
         array $targetSkusUpper,
+        ?float $deadline = null,
     ): array {
         $pageSize = max(1, $this->variationScanPageSize);
         $maxPages = max(1, $this->variationScanMaxPages);
@@ -2421,12 +2651,13 @@ class PurchaseOrderMeliImageResolver
         $maxRows = $pageSize * $maxPages;
 
         if ($skus === []) {
-            return ['by_sku' => [], 'truncated' => false, 'scanned_rows' => 0, 'pages_scanned' => 0, 'max_rows' => $maxRows];
+            return ['by_sku' => [], 'truncated' => false, 'truncation_reason' => null, 'scanned_rows' => 0, 'pages_scanned' => 0, 'max_rows' => $maxRows];
         }
 
         $indexed = [];
         $seenPerSku = [];
         $truncated = false;
+        $truncationReason = null;
         $scannedRows = 0;
         $pagesScanned = 0;
         $applyExcludeSql = $excludeIds !== [] && count($excludeIds) <= 500;
@@ -2437,6 +2668,18 @@ class PurchaseOrderMeliImageResolver
             $batchPages = 0;
 
             while ($batchPages < $maxPages) {
+                if ($deadline !== null && microtime(true) >= $deadline) {
+                    $truncated = true;
+                    $truncationReason = 'time_budget_exceeded';
+                    break 2;
+                }
+
+                if ($this->isMemoryBudgetExceeded()) {
+                    $truncated = true;
+                    $truncationReason = 'memory_budget_exceeded';
+                    break 2;
+                }
+
                 $query = MeliPublication::query()
                     ->whereNotNull('raw')
                     ->where('id', '>', $lastId)
@@ -2488,16 +2731,21 @@ class PurchaseOrderMeliImageResolver
                             $indexed[$skuUpper]->push($pub);
                         }
                     }
+                    unset($filteredPage, $pageIndexed);
                 }
 
-                if (! $hasMore || $page->isEmpty()) {
+                $lastRowId = $page->isNotEmpty() ? (int) $page->last()->id : $lastId;
+                unset($rows, $page);
+
+                if (! $hasMore || $lastRowId === $lastId) {
                     break;
                 }
 
-                $lastId = (int) $page->last()->id;
+                $lastId = $lastRowId;
 
                 if ($batchPages >= $maxPages) {
                     $truncated = true;
+                    $truncationReason = 'page_limit_reached';
                     break;
                 }
             }
@@ -2506,6 +2754,7 @@ class PurchaseOrderMeliImageResolver
         return [
             'by_sku' => $indexed,
             'truncated' => $truncated,
+            'truncation_reason' => $truncationReason,
             'scanned_rows' => $scannedRows,
             'pages_scanned' => $pagesScanned,
             'max_rows' => $maxRows,
@@ -2514,19 +2763,20 @@ class PurchaseOrderMeliImageResolver
 
     /**
      * Keyset-paginated streaming scan for secondary variation SKUs embedded in
-     * meli_price_manager_items.raw_item.
+     * meli_price_manager_items.raw_item (fallback when `meli_listing_sku_index` is unavailable).
      *
      * @param  list<string>  $skus
      * @param  list<int>  $excludeIds
      * @param  array<string, true>  $targetSkusUpper
      * @param  list<string>  $select
-     * @return array{by_sku: array<string, Collection<int, MeliPriceManagerItem>>, truncated: bool, scanned_rows: int, pages_scanned: int, max_rows: int}
+     * @return array{by_sku: array<string, Collection<int, MeliPriceManagerItem>>, truncated: bool, truncation_reason: ?string, scanned_rows: int, pages_scanned: int, max_rows: int}
      */
     private function scanVariationPriceManagerItemsByRaw(
         array $skus,
         array $excludeIds,
         array $targetSkusUpper,
         array $select = [],
+        ?float $deadline = null,
     ): array {
         $pageSize = max(1, $this->variationScanPageSize);
         $maxPages = max(1, $this->variationScanMaxPages);
@@ -2534,13 +2784,14 @@ class PurchaseOrderMeliImageResolver
         $maxRows = $pageSize * $maxPages;
 
         if ($skus === []) {
-            return ['by_sku' => [], 'truncated' => false, 'scanned_rows' => 0, 'pages_scanned' => 0, 'max_rows' => $maxRows];
+            return ['by_sku' => [], 'truncated' => false, 'truncation_reason' => null, 'scanned_rows' => 0, 'pages_scanned' => 0, 'max_rows' => $maxRows];
         }
 
         $columns = $select !== [] ? $select : $this->priceManagerSelectColumns();
         $indexed = [];
         $seenPerSku = [];
         $truncated = false;
+        $truncationReason = null;
         $scannedRows = 0;
         $pagesScanned = 0;
         $applyExcludeSql = $excludeIds !== [] && count($excludeIds) <= 500;
@@ -2551,6 +2802,18 @@ class PurchaseOrderMeliImageResolver
             $batchPages = 0;
 
             while ($batchPages < $maxPages) {
+                if ($deadline !== null && microtime(true) >= $deadline) {
+                    $truncated = true;
+                    $truncationReason = 'time_budget_exceeded';
+                    break 2;
+                }
+
+                if ($this->isMemoryBudgetExceeded()) {
+                    $truncated = true;
+                    $truncationReason = 'memory_budget_exceeded';
+                    break 2;
+                }
+
                 $query = MeliPriceManagerItem::query()
                     ->whereNotNull('raw_item')
                     ->where('id', '>', $lastId)
@@ -2602,16 +2865,21 @@ class PurchaseOrderMeliImageResolver
                             $indexed[$skuUpper]->push($pm);
                         }
                     }
+                    unset($filteredPage, $pageIndexed);
                 }
 
-                if (! $hasMore || $page->isEmpty()) {
+                $lastRowId = $page->isNotEmpty() ? (int) $page->last()->id : $lastId;
+                unset($rows, $page);
+
+                if (! $hasMore || $lastRowId === $lastId) {
                     break;
                 }
 
-                $lastId = (int) $page->last()->id;
+                $lastId = $lastRowId;
 
                 if ($batchPages >= $maxPages) {
                     $truncated = true;
+                    $truncationReason = 'page_limit_reached';
                     break;
                 }
             }
@@ -2620,6 +2888,7 @@ class PurchaseOrderMeliImageResolver
         return [
             'by_sku' => $indexed,
             'truncated' => $truncated,
+            'truncation_reason' => $truncationReason,
             'scanned_rows' => $scannedRows,
             'pages_scanned' => $pagesScanned,
             'max_rows' => $maxRows,
@@ -2661,12 +2930,16 @@ class PurchaseOrderMeliImageResolver
     }
 
     /**
+     * Token-based administrative discovery over meli_publications.
+     * Ordered strictly by primary key (`ORDER BY id DESC`) to avoid MariaDB filesort on
+     * large JSON/TEXT rows; PHP ranks candidates by status/currency/token hits afterward.
+     *
      * @param  list<string>  $select
      * @param  list<string>  $tokens
      * @param  list<int>  $excludeIds
      * @return Collection<int, MeliPublication>
      */
-    private function searchPublicationsByTokens(array $select, bool $hasIsCurrent, array $tokens, array $excludeIds): Collection
+    private function searchPublicationsByTokens(array $select, array $tokens, array $excludeIds): Collection
     {
         if ($tokens === []) {
             return collect();
@@ -2675,7 +2948,7 @@ class PurchaseOrderMeliImageResolver
         $query = MeliPublication::query()
             ->whereNotNull('raw')
             ->where(function ($nested) use ($tokens): void {
-                foreach (array_slice($tokens, 0, 6) as $index => $token) {
+                foreach (array_slice($tokens, 0, 5) as $index => $token) {
                     $pattern = '%'.$this->escapeLike($token).'%';
                     if ($index === 0) {
                         $nested->where('raw', 'like', $pattern)
@@ -2687,25 +2960,22 @@ class PurchaseOrderMeliImageResolver
                             ->orWhere('mlm', 'like', $pattern);
                     }
                 }
-            })
-            ->orderByRaw("CASE WHEN status = 'active' THEN 0 WHEN status = 'paused' THEN 1 ELSE 2 END");
+            });
 
         if ($excludeIds !== []) {
             $query->whereNotIn('id', $excludeIds);
         }
 
-        if ($hasIsCurrent) {
-            $query->orderByDesc('is_current');
-        }
-
         return $query
-            ->orderByDesc('last_sync_at')
             ->orderByDesc('id')
-            ->limit(80)
+            ->limit(60)
             ->get($select);
     }
 
     /**
+     * Token-based administrative discovery over compact `meli_price_manager_items.title`.
+     * Ordered strictly by primary key (`ORDER BY id DESC`) to avoid filesort overhead.
+     *
      * @param  list<string>  $tokens
      * @param  list<int>  $excludeIds
      * @param  list<string>  $select
@@ -2722,7 +2992,7 @@ class PurchaseOrderMeliImageResolver
         $query = MeliPriceManagerItem::query()
             ->whereNotNull('raw_item')
             ->where(function ($nested) use ($tokens): void {
-                foreach (array_slice($tokens, 0, 6) as $index => $token) {
+                foreach (array_slice($tokens, 0, 5) as $index => $token) {
                     $pattern = '%'.$this->escapeLike($token).'%';
                     if ($index === 0) {
                         $nested->where('title', 'like', $pattern)
@@ -2734,17 +3004,15 @@ class PurchaseOrderMeliImageResolver
                             ->orWhere('meli_item_id', 'like', $pattern);
                     }
                 }
-            })
-            ->orderByRaw("CASE WHEN status = 'active' THEN 0 WHEN status = 'paused' THEN 1 ELSE 2 END");
+            });
 
         if ($excludeIds !== []) {
             $query->whereNotIn('id', $excludeIds);
         }
 
         return $query
-            ->orderByDesc('last_synced_at')
             ->orderByDesc('id')
-            ->limit(80)
+            ->limit(60)
             ->get($columns);
     }
 
@@ -3024,6 +3292,7 @@ class PurchaseOrderMeliImageResolver
             'audit_category' => $auditCategory,
             'ambiguous' => $ambiguous,
             'ambiguous_matches' => $ambiguousMatches,
+            'variation_index_used' => false,
             'variation_scan_truncated' => false,
         ];
     }
@@ -3070,6 +3339,7 @@ class PurchaseOrderMeliImageResolver
             'audit_category' => $resolvedAuditCategory,
             'ambiguous' => $ambiguous,
             'ambiguous_matches' => $ambiguousMatches,
+            'variation_index_used' => false,
             'variation_scan_truncated' => false,
         ];
     }

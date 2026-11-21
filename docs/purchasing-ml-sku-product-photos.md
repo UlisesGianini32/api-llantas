@@ -34,25 +34,40 @@ El servicio `App\Services\Purchasing\PurchaseOrderMeliImageResolver` resuelve la
 
 5. **Capa de descubrimiento por título/nombre (solo propuesta, nunca auto-asignación)**
    - El modal administrativo en `/compras/ordenes/{id}` permite buscar candidatos por título, MLM o SKU en `meli_publications` y `meli_price_manager_items`, mostrando foto, título, MLM, variación/color y estado para aprobación manual.
+   - Esta búsqueda profunda está **separada** de la resolución automática (`show()`, `pdf()`, `itemPhoto()` y auditoría rápida por defecto) para nunca bloquear la carga de una orden ni la generación de PDF.
 
-   - **Búsqueda paginada y acotada de variaciones en JSON (`scanVariationPublicationsByRaw` / `scanVariationPriceManagerItemsByRaw`):**
-     - En lugar de una sola consulta truncada con `LIMIT 500` y `ORDER BY` costoso, el resolver divide los SKUs en lotes (`VARIATION_SCAN_SKU_BATCH_SIZE = 100`) y recorre páginas ordenadas por llave primaria mediante paginación por cursor (`WHERE id > $lastId ORDER BY id ASC LIMIT 251`, `VARIATION_SCAN_PAGE_SIZE = 250`).
-     - Cada página se filtra e indexa en streaming por SKU verificado en PHP, descartando de inmediato las filas ruidosas para mantener bajo el consumo de memoria y evitar filesort sobre columnas JSON/TEXT.
-     - El techo operativo por lote y tabla es `VARIATION_SCAN_MAX_PAGES = 20` (hasta 5,000 filas coincidentes por lote). Si alguna vez se alcanza este techo y aún existen filas adicionales, **el truncamiento nunca es silencioso**: se emite un `Log::warning`, se marca `variation_scan_truncated = true` con `scan_diagnostics` en el resultado del resolver y se advierte en `purchasing:audit-order-photos`.
-   - **Límites de la capa interactiva de búsqueda por título (`discoverCandidatesForItem`):**
-     - Consulta hasta 80 filas por tabla (`meli_publications` y `meli_price_manager_items`) por tokens del título y devuelve los mejores 30 candidatos ordenados por relevancia para selección manual.
+6. **Optimización de rendimiento, índice auxiliar y control de recursos**
+   - **Índice normalizado de SKU/variación (`meli_listing_sku_index`):**
+     - Migración reversible `2026_11_21_000001_create_meli_listing_sku_index_table.php` con índice B-tree en `sku_normalized`, índice en `(source_table, source_row_id)`, índice en `mlm` y unicidad en `(source_table, source_row_id, variation_key, sku_normalized)`.
+     - Sincronización automática vía hooks seguros en `MeliPublication` y `MeliPriceManagerItem` (`MeliListingSkuIndexService::syncSafelyFromModel` / `deleteSafelyForModel`) que no interrumpen sincronizaciones si la tabla aún no existe o si se ejecuta bajo usuario solo lectura.
+     - Comando de backfill/reconstrucción en lotes constantes de memoria (`chunkById`): `php artisan purchasing:sync-meli-photo-sku-index --chunk=200`.
+     - Cuando `meli_listing_sku_index` existe y está poblado, `resolveItems()` resuelve variaciones secundarias con **cero consultas `LIKE` sobre columnas JSON/TEXT**, manteniendo verificación estricta contra el payload `raw` / `raw_item` para que un índice desactualizado jamás asigne una foto incorrecta.
+     - **Plan de despliegue/validación:** No aplicar esta migración directamente en producción sin validar primero en una réplica/base aislada de MariaDB la migración (`migrate` + `migrate:rollback`), el backfill (`purchasing:sync-meli-photo-sku-index`) y el `EXPLAIN` de las consultas indexadas.
+   - **Fallback acotado y transparente (`scanVariationPublicationsByRaw` / `scanVariationPriceManagerItemsByRaw`):**
+     - Solo se ejecuta si `meli_listing_sku_index` aún no existe o está vacío.
+     - Recorre páginas por llave primaria (`WHERE id > $lastId ORDER BY id ASC LIMIT 101`, `VARIATION_SCAN_PAGE_SIZE = 100`, `VARIATION_SCAN_MAX_PAGES = 20`) sin filesort y libera cada página en memoria al finalizar.
+     - Aplica techos operativos de páginas, tiempo (`VARIATION_SCAN_MAX_SECONDS = 5.0s`) y memoria (80 % de `memory_limit`). Si alcanza cualquier techo, **nunca trunca silenciosamente**: registra `Log::warning`, marca `variation_scan_truncated = true` con `truncation_reason` (`page_limit_reached`, `time_budget_exceeded` o `memory_budget_exceeded`) y expone `scan_diagnostics`.
+     - Si la resolución en Pass 2 supera `SLOW_RESOLUTION_WARN_SECONDS = 2.5s`, emite un `Log::warning` con duración, memoria pico y si el índice auxiliar estuvo activo.
+   - **Caché corta de resolución en peticiones web (`PurchaseOrderController`):**
+     - `show()` y `pdf()` precargan en caché (TTL 120 s, llave versionada por `updated_at`, `photo_updated_at`, modo, MLM/variación aprobados y ruta manual) la resolución de todas las partidas de la orden para que las peticiones concurrentes a `/foto` (`itemPhoto()`) sirvan la imagen con **cero re-escaneos SQL**.
+     - Las mutaciones administrativas (`approveItemPhoto`, `uploadItemManualPhoto`, `rejectItemPhoto`, `resetItemPhoto`) invalidan y refrescan la llave inmediatamente.
+   - **Búsqueda administrativa sin filesort sobre JSON (`discoverCandidatesForItem`):**
+     - Prioriza consultas indexadas por SKU/MLM e índice `meli_listing_sku_index`, busca primero en la columna compacta `meli_price_manager_items.title` antes que en `meli_publications.raw`, elimina `ORDER BY CASE WHEN status ...` en SQL (ordenando por `id DESC LIMIT 60` y puntuando en PHP), y aplica presupuesto de tiempo (`maxSeconds = 3.0s` en el endpoint web).
    - **Preservación de fotografía aprobada:**
      - Al aprobar una publicación o variación desde la interfaz administrativa, se guarda `approved_photo_url` (validado contra `*.mlstatic.com`). Aunque un snapshot posterior de Mercado Libre cambie sus fotos, se trunque o desaparezca, el resolver conserva la fotografía aprobada (`reason = resolved_approved_preserved`).
    - **Autorización estricta:**
      - `PurchaseOrderController::itemPhoto()` valida explícitamente `PurchaseOrderPolicy::view` y `PurchaseOrderPolicy::viewPhoto` antes de comprobar pertenencia de partida; la ruta pública firmada `/orden-compra/{purchaseOrder}/partidas/{item}/foto` exige firma relativa vigente (`signed:relative`) y rechaza firmas vencidas o alteradas con `403`.
      - Las imágenes manuales se guardan fuera de `public/` en el disco privado `local` (`storage/app/private/purchasing/manual-photos/...`).
 
-6. **Categorías de auditoría (`purchasing:audit-order-photos`)**
-   - `resolved_by_sku_or_link` (Resuelto por SKU/vínculo)
-   - `resolved_by_variation` (Resuelto por variación)
-   - `manual_override` (Imagen manual/override)
-   - `pending_manual_approval` (Pendiente por aprobación manual: conflictos ambiguos o candidatos propuestos por título)
-   - `pending_without_candidate` (Pendiente sin candidato)
+7. **Categorías y modos de auditoría (`purchasing:audit-order-photos`)**
+   - **Modo rápido (por defecto):** Ejecuta únicamente una pasada masiva `resolveForOrder()` y **omite** el descubrimiento profundo por título partida por partida (`audit_mode = "fast"`, `deep_discovery_skipped = true`, con nota explícita `deep_discovery_note`). Incluye el bloque `performance` (`duration_ms`, `queries_count`, `like_queries_count`, `peak_memory_mb`, `variation_index_used`, `variation_scan_truncated`).
+   - **Modo exhaustivo opcional (`--deep --time-budget=20`):** Pensado para base aislada. Precarga `meli_accounts` una sola vez, omite re-escaneos `raw` de variación por partida (`skipVariationRawScan = true`), respeta el presupuesto total `--time-budget` y siempre emite JSON válido (indicando `deep_discovery_truncated = true` si se agotó el presupuesto).
+   - Categorías reportadas:
+     - `resolved_by_sku_or_link` (Resuelto por SKU/vínculo)
+     - `resolved_by_variation` (Resuelto por variación)
+     - `manual_override` (Imagen manual/override)
+     - `pending_manual_approval` (Pendiente por aprobación manual: conflictos ambiguos o candidatos propuestos por título en `--deep`)
+     - `pending_without_candidate` (Pendiente sin candidato)
 
 ---
 

@@ -16,6 +16,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response as HttpResponse;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\URL;
 use Inertia\Inertia;
@@ -266,6 +267,7 @@ class PurchaseOrderController extends Controller
             : null;
 
         $resolvedPhotos = $this->meliImageResolver->resolveForOrder($purchaseOrder);
+        $this->cacheOrderItemPhotoResolutions($purchaseOrder, $resolvedPhotos);
 
         return Inertia::render('Purchasing/Show', [
             'order' => $purchaseOrder,
@@ -306,6 +308,7 @@ class PurchaseOrderController extends Controller
         }
 
         $resolvedPhotos = $this->meliImageResolver->resolveForOrder($purchaseOrder);
+        $this->cacheOrderItemPhotoResolutions($purchaseOrder, $resolvedPhotos);
 
         return response()
             ->view('purchasing.order-pdf', [
@@ -335,7 +338,7 @@ class PurchaseOrderController extends Controller
             abort(404);
         }
 
-        $resolution = $this->meliImageResolver->resolveForItem($purchaseOrder, $item);
+        $resolution = $this->resolveItemPhotoCached($purchaseOrder, $item);
         if (! is_string($resolution['url']) || $resolution['url'] === '') {
             abort(404);
         }
@@ -397,8 +400,15 @@ class PurchaseOrderController extends Controller
         $query = $request->query('q');
         $queryStr = is_string($query) ? trim($query) : null;
 
-        $resolution = $this->meliImageResolver->resolveForItem($purchaseOrder, $item);
-        $candidates = $this->meliImageResolver->discoverCandidatesForItem($item, $queryStr);
+        $resolution = $this->resolveItemPhotoCached($purchaseOrder, $item);
+        $candidates = $this->meliImageResolver->discoverCandidatesForItem(
+            item: $item,
+            customQuery: $queryStr,
+            limit: 30,
+            skipVariationRawScan: false,
+            preloadedAccountsById: null,
+            maxSeconds: 3.0,
+        );
 
         $candidatesWithPreview = array_map(function (array $candidate) use ($purchaseOrder): array {
             $candidate['preview_url'] = route('purchasing.orders.preview-photo', [
@@ -461,6 +471,7 @@ class PurchaseOrderController extends Controller
         }
 
         $oldManualPath = $item->getAttribute('manual_photo_path');
+        $oldCacheKey = $this->itemPhotoResolutionCacheKey($purchaseOrder, $item);
 
         $rejected = is_array($item->getAttribute('rejected_mlms')) ? $item->getAttribute('rejected_mlms') : [];
         $rejected = array_values(array_filter(
@@ -482,18 +493,21 @@ class PurchaseOrderController extends Controller
             'photo_updated_at' => now(),
         ]);
 
+        Cache::forget($oldCacheKey);
+
         if (is_string($oldManualPath) && $oldManualPath !== '') {
             $this->meliImageCache->deleteManualPhoto($oldManualPath);
         }
 
         $item->refresh();
         $resolution = $this->meliImageResolver->resolveForItem($purchaseOrder, $item);
+        $this->cacheSingleItemPhotoResolution($purchaseOrder, $item, $resolution);
 
         return response()->json([
             'ok' => true,
             'message' => 'Fotografía aprobada para la partida.',
             'resolution' => $resolution,
-            'photo_url' => $this->buildSingleItemPhotoUrl($purchaseOrder, $item, false),
+            'photo_url' => $this->buildSingleItemPhotoUrl($purchaseOrder, $item, false, $resolution),
         ]);
     }
 
@@ -522,6 +536,7 @@ class PurchaseOrderController extends Controller
         }
 
         $oldManualPath = $item->getAttribute('manual_photo_path');
+        $oldCacheKey = $this->itemPhotoResolutionCacheKey($purchaseOrder, $item);
 
         $item->update([
             'photo_source_mode' => PurchaseOrderItem::PHOTO_MODE_MANUAL,
@@ -536,18 +551,21 @@ class PurchaseOrderController extends Controller
             'photo_updated_at' => now(),
         ]);
 
+        Cache::forget($oldCacheKey);
+
         if (is_string($oldManualPath) && $oldManualPath !== '' && $oldManualPath !== $stored['path']) {
             $this->meliImageCache->deleteManualPhoto($oldManualPath);
         }
 
         $item->refresh();
         $resolution = $this->meliImageResolver->resolveForItem($purchaseOrder, $item);
+        $this->cacheSingleItemPhotoResolution($purchaseOrder, $item, $resolution);
 
         return response()->json([
             'ok' => true,
             'message' => 'Imagen manual guardada correctamente.',
             'resolution' => $resolution,
-            'photo_url' => $this->buildSingleItemPhotoUrl($purchaseOrder, $item, false),
+            'photo_url' => $this->buildSingleItemPhotoUrl($purchaseOrder, $item, false, $resolution),
         ]);
     }
 
@@ -588,6 +606,7 @@ class PurchaseOrderController extends Controller
         }
 
         $oldManualPath = $item->getAttribute('manual_photo_path');
+        $oldCacheKey = $this->itemPhotoResolutionCacheKey($purchaseOrder, $item);
         $clearApproval = $markNoPhoto || ($mlm !== '' && strtoupper(trim((string) $item->getAttribute('approved_mlm'))) === $mlm);
 
         if ($clearApproval) {
@@ -605,17 +624,20 @@ class PurchaseOrderController extends Controller
         }
 
         $item->update($updates);
+        Cache::forget($oldCacheKey);
 
         if ($markNoPhoto && is_string($oldManualPath) && $oldManualPath !== '') {
             $this->meliImageCache->deleteManualPhoto($oldManualPath);
         }
 
         $item->refresh();
+        $resolution = $this->meliImageResolver->resolveForItem($purchaseOrder, $item);
+        $this->cacheSingleItemPhotoResolution($purchaseOrder, $item, $resolution);
 
         return response()->json([
             'ok' => true,
             'message' => $markNoPhoto ? 'Partida marcada sin fotografía.' : 'Candidato rechazado para esta partida.',
-            'resolution' => $this->meliImageResolver->resolveForItem($purchaseOrder, $item),
+            'resolution' => $resolution,
         ]);
     }
 
@@ -628,6 +650,7 @@ class PurchaseOrderController extends Controller
         }
 
         $oldManualPath = $item->getAttribute('manual_photo_path');
+        $oldCacheKey = $this->itemPhotoResolutionCacheKey($purchaseOrder, $item);
         $clearRejected = $request->boolean('clear_rejected', false);
 
         $updates = [
@@ -648,18 +671,21 @@ class PurchaseOrderController extends Controller
         }
 
         $item->update($updates);
+        Cache::forget($oldCacheKey);
 
         if (is_string($oldManualPath) && $oldManualPath !== '') {
             $this->meliImageCache->deleteManualPhoto($oldManualPath);
         }
 
         $item->refresh();
+        $resolution = $this->meliImageResolver->resolveForItem($purchaseOrder, $item);
+        $this->cacheSingleItemPhotoResolution($purchaseOrder, $item, $resolution);
 
         return response()->json([
             'ok' => true,
             'message' => 'Selección manual restablecida a resolución automática.',
-            'resolution' => $this->meliImageResolver->resolveForItem($purchaseOrder, $item),
-            'photo_url' => $this->buildSingleItemPhotoUrl($purchaseOrder, $item, false),
+            'resolution' => $resolution,
+            'photo_url' => $this->buildSingleItemPhotoUrl($purchaseOrder, $item, false, $resolution),
         ]);
     }
 
@@ -712,12 +738,16 @@ class PurchaseOrderController extends Controller
         return $urls;
     }
 
+    /**
+     * @param  ?array<string, mixed>  $preResolved
+     */
     private function buildSingleItemPhotoUrl(
         PurchaseOrder $purchaseOrder,
         PurchaseOrderItem $item,
         bool $useSignedPublicUrls,
+        ?array $preResolved = null,
     ): ?string {
-        $resolved = $this->meliImageResolver->resolveForItem($purchaseOrder, $item);
+        $resolved = $preResolved ?? $this->resolveItemPhotoCached($purchaseOrder, $item);
         if (! is_string($resolved['url']) || $resolved['url'] === '') {
             return null;
         }
@@ -734,6 +764,86 @@ class PurchaseOrderController extends Controller
         return $useSignedPublicUrls
             ? URL::temporarySignedRoute('purchasing.orders.public-item-photo', now()->addDays(7), $params, absolute: false)
             : route('purchasing.orders.item-photo', $params, false);
+    }
+
+    /**
+     * Warm short-lived per-item resolution cache after `show()` or `pdf()` so concurrent
+     * browser `<img>` fetches to `itemPhoto()` do not re-run Mercado Libre DB queries.
+     *
+     * @param  array<int, array<string, mixed>>  $resolvedByItemId
+     */
+    private function cacheOrderItemPhotoResolutions(PurchaseOrder $purchaseOrder, array $resolvedByItemId): void
+    {
+        foreach ($purchaseOrder->items as $item) {
+            $entry = $resolvedByItemId[(int) $item->id] ?? null;
+            if (is_array($entry)) {
+                $this->cacheSingleItemPhotoResolution($purchaseOrder, $item, $entry);
+            }
+        }
+    }
+
+    /**
+     * @param  array<string, mixed>  $resolution
+     */
+    private function cacheSingleItemPhotoResolution(
+        PurchaseOrder $purchaseOrder,
+        PurchaseOrderItem $item,
+        array $resolution,
+    ): void {
+        try {
+            Cache::put(
+                $this->itemPhotoResolutionCacheKey($purchaseOrder, $item),
+                $resolution,
+                now()->addSeconds(120),
+            );
+        } catch (Throwable) {
+            // Best-effort cache warm; never interrupt rendering
+        }
+    }
+
+    /**
+     * Retrieve a cached photo resolution for an item, falling back to live resolution on miss.
+     *
+     * @return array<string, mixed>
+     */
+    private function resolveItemPhotoCached(PurchaseOrder $purchaseOrder, PurchaseOrderItem $item): array
+    {
+        $cacheKey = $this->itemPhotoResolutionCacheKey($purchaseOrder, $item);
+
+        try {
+            $cached = Cache::get($cacheKey);
+            if (is_array($cached) && array_key_exists('url', $cached)) {
+                return $cached;
+            }
+        } catch (Throwable) {
+            // Fallback to live resolution if cache store is unavailable
+        }
+
+        $resolution = $this->meliImageResolver->resolveForItem($purchaseOrder, $item);
+        $this->cacheSingleItemPhotoResolution($purchaseOrder, $item, $resolution);
+
+        return $resolution;
+    }
+
+    private function itemPhotoResolutionCacheKey(PurchaseOrder $purchaseOrder, PurchaseOrderItem $item): string
+    {
+        $photoTs = $item->getAttribute('photo_updated_at')?->getTimestamp() ?? 0;
+        $itemTs = $item->updated_at?->getTimestamp() ?? 0;
+        $mode = (string) ($item->getAttribute('photo_source_mode') ?? 'auto');
+        $mlm = (string) ($item->getAttribute('approved_mlm') ?? '');
+        $var = (string) ($item->getAttribute('approved_variation_id') ?? '');
+        $manual = (string) ($item->getAttribute('manual_photo_path') ?? '');
+        $sku = trim((string) ($item->sku ?? ''));
+
+        return 'po_item_photo_res:'.(int) $purchaseOrder->id.':'.(int) $item->id.':'.sha1(implode('|', [
+            $itemTs,
+            $photoTs,
+            $mode,
+            $mlm,
+            $var,
+            $manual,
+            $sku,
+        ]));
     }
 
     /**
