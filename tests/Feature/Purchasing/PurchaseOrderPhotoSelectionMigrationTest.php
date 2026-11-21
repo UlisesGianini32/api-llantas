@@ -318,12 +318,20 @@ class PurchaseOrderPhotoSelectionMigrationTest extends TestCase
         $indexMigration->up();
 
         $this->assertTrue(Schema::hasTable(MeliListingSkuIndexService::TABLE));
+        $this->assertTrue(Schema::hasTable(MeliListingSkuIndexService::STATE_TABLE));
 
         // 2. Run Artisan backfill command and verify indexed SKUs for both tables.
         $exitCode = Artisan::call('purchasing:sync-meli-photo-sku-index', ['--chunk' => 50]);
         $this->assertSame(0, $exitCode);
 
+        $this->assertDatabaseHas(MeliListingSkuIndexService::STATE_TABLE, [
+            'id' => 1,
+            'status' => MeliListingSkuIndexService::STATUS_READY,
+            'active_generation' => 1,
+        ]);
+
         $this->assertDatabaseHas(MeliListingSkuIndexService::TABLE, [
+            'generation' => 1,
             'source_table' => MeliListingSkuIndexService::SOURCE_PUBLICATIONS,
             'source_row_id' => $existingPub->id,
             'mlm' => 'MLM3373409704',
@@ -331,6 +339,7 @@ class PurchaseOrderPhotoSelectionMigrationTest extends TestCase
             'sku_normalized' => 'ATOMIZADORBR',
         ]);
         $this->assertDatabaseHas(MeliListingSkuIndexService::TABLE, [
+            'generation' => 1,
             'source_table' => MeliListingSkuIndexService::SOURCE_PRICE_MANAGER,
             'source_row_id' => $existingPm->id,
             'mlm' => 'MLM2124053049',
@@ -338,7 +347,7 @@ class PurchaseOrderPhotoSelectionMigrationTest extends TestCase
             'sku_normalized' => 'CAMILLAPROFN',
         ]);
 
-        // 3. Automatic Eloquent model hooks keep the index synchronized on save and delete.
+        // 3. Automatic Eloquent model hooks keep the active generation synchronized on save and delete.
         $hookPub = MeliPublication::create([
             'user_id' => $this->admin->id,
             'meli_account_id' => $account->id,
@@ -348,6 +357,7 @@ class PurchaseOrderPhotoSelectionMigrationTest extends TestCase
             'raw' => ['item' => ['seller_custom_field' => 'HOOK-SKU-1']],
         ]);
         $this->assertDatabaseHas(MeliListingSkuIndexService::TABLE, [
+            'generation' => 1,
             'source_table' => MeliListingSkuIndexService::SOURCE_PUBLICATIONS,
             'source_row_id' => $hookPub->id,
             'sku_normalized' => 'HOOK-SKU-1',
@@ -359,9 +369,10 @@ class PurchaseOrderPhotoSelectionMigrationTest extends TestCase
             'source_row_id' => $hookPub->id,
         ]);
 
-        // 4. Safe rollback drops only the auxiliary index table without touching source listings.
+        // 4. Safe rollback drops only the auxiliary index tables without touching source listings.
         $indexMigration->down();
         $this->assertFalse(Schema::hasTable(MeliListingSkuIndexService::TABLE));
+        $this->assertFalse(Schema::hasTable(MeliListingSkuIndexService::STATE_TABLE));
         $this->assertDatabaseHas('meli_publications', ['id' => $existingPub->id, 'mlm' => 'MLM3373409704']);
         $this->assertDatabaseHas('meli_price_manager_items', ['id' => $existingPm->id, 'meli_item_id' => 'MLM2124053049']);
     }
