@@ -749,6 +749,69 @@ class InventoryIgoraMasterBootstrapApplyTest extends TestCase
         );
     }
 
+    public function test_detects_missing_null_barcode_on_existing_bootstrap_product_as_partial_or_inconsistent(): void
+    {
+        $this->seedConfirmedLocations();
+
+        /** @var IgoraMasterBootstrapPreviewService $previewService */
+        $previewService = app(IgoraMasterBootstrapPreviewService::class);
+        $items = $previewService->auditedProposalItems();
+
+        // Crear los 6 productos y los 6 movimientos INITIAL válidos, pero con barcode = null en el tono 4-13
+        foreach ($items as $item) {
+            $product = InventoryProduct::create([
+                'sku' => $item['sku'],
+                'barcode' => $item['sku'] === '7702045538977' ? null : $item['barcode'],
+                'name' => $item['proposed_name'],
+                'brand' => 'Schwarzkopf',
+                'product_type' => InventoryProduct::SIMPLE,
+                'primary_location_id' => $item['location_id'],
+                'is_active' => false,
+            ]);
+
+            InventoryMovement::create([
+                'inventory_product_id' => $product->id,
+                'inventory_location_id' => $item['location_id'],
+                'type' => InventoryMovement::INITIAL,
+                'quantity' => $item['physical_count'],
+                'reference_type' => 'igora_master_bootstrap',
+                'reference' => IgoraMasterBootstrapPreviewService::PROPOSAL_ID,
+                'occurred_at' => now(),
+                'external_key' => $previewService->operationKeyForSku($item['sku']),
+            ]);
+        }
+
+        // Dry-run debe marcar PARTIAL_OR_INCONSISTENT (nunca COMPLETE ni DRY_RUN_ALREADY_APPLIED)
+        $exitDry = Artisan::call('inventory:igora-master-bootstrap', ['--json' => true]);
+        $this->assertSame(1, $exitDry);
+        $dryReport = json_decode(Artisan::output(), true, 512, JSON_THROW_ON_ERROR);
+        $this->assertSame(IgoraMasterBootstrapApplyService::OUTCOME_DRY_RUN_BLOCKED, $dryReport['outcome']);
+        $this->assertSame('PARTIAL_OR_INCONSISTENT', $dryReport['idempotency']['state']);
+        $this->assertNotSame('COMPLETE', $dryReport['idempotency']['state']);
+        $this->assertContains('PARTIAL_OR_INCONSISTENT_BOOTSTRAP_STATE', $dryReport['blocking_reasons']);
+        $this->assertContains(
+            'UNEXPECTED_BARCODE_FOR_KEY:key=IGORA-ROYAL-MASTER-BOOTSTRAP-2026-11-19:INITIAL:7702045538977,expected=7702045538977,actual=NULL',
+            $dryReport['idempotency']['inconsistencies']
+        );
+
+        // --apply también debe bloquearse (nunca ALREADY_APPLIED ni escrituras adicionales)
+        $exitApply = Artisan::call('inventory:igora-master-bootstrap', [
+            '--apply' => true,
+            '--proposal' => IgoraMasterBootstrapPreviewService::PROPOSAL_ID,
+            '--confirm' => true,
+            '--reconfirmed-counts-at' => '2026-11-23 14:00:00',
+            '--json' => true,
+        ]);
+        $this->assertSame(1, $exitApply);
+        $applyReport = json_decode(Artisan::output(), true, 512, JSON_THROW_ON_ERROR);
+        $this->assertSame(IgoraMasterBootstrapApplyService::OUTCOME_BLOCKED, $applyReport['outcome']);
+        $this->assertSame('PARTIAL_OR_INCONSISTENT', $applyReport['idempotency']['state']);
+        $this->assertFalse($applyReport['writes_executed']);
+        $this->assertDatabaseCount('inventory_products', 6);
+        $this->assertDatabaseCount('inventory_movements', 6);
+        $this->assertSame(89, (int) InventoryMovement::query()->sum('quantity'));
+    }
+
     public function test_enforces_safe_cache_lock_store_and_120s_ttl_configuration(): void
     {
         $this->seedConfirmedLocations();

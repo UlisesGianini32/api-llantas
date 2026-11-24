@@ -598,12 +598,13 @@ class IgoraMasterBootstrapApplyService
                     );
                 }
 
-                if ($product->barcode !== null && $this->normalizeCode((string) $product->barcode) !== $this->normalizeCode($expectedBarcode)) {
+                $actualBarcode = $product->barcode !== null ? trim((string) $product->barcode) : '';
+                if ($actualBarcode === '' || $this->normalizeCode($actualBarcode) !== $this->normalizeCode($expectedBarcode)) {
                     $inconsistencies[] = sprintf(
                         'UNEXPECTED_BARCODE_FOR_KEY:key=%s,expected=%s,actual=%s',
                         $movementKey,
                         $expectedBarcode,
-                        (string) $product->barcode
+                        $actualBarcode === '' ? 'NULL' : $actualBarcode
                     );
                 }
 
