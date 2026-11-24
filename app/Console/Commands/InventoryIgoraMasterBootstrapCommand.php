@@ -22,7 +22,7 @@ class InventoryIgoraMasterBootstrapCommand extends Command
         {--apply : Ejecuta el alta transaccional (predeterminado: dry-run sin escrituras)}
         {--proposal= : Identificador exacto de la propuesta auditada (obligatorio con --apply)}
         {--confirm : Confirma explícitamente la escritura en modo no interactivo}
-        {--reconfirmed-counts-at= : Fecha/hora (>= 2026-11-19) de reconfirmación de conteos físicos frente a pedidos, ventas, apartados, devoluciones y movimientos posteriores}
+        {--reconfirmed-counts-at= : Fecha/hora real (>= 2026-11-19 y no futura) de reconfirmación de conteos físicos frente a pedidos, ventas, apartados, devoluciones y movimientos posteriores}
         {--user-id= : ID opcional de usuario responsable para trazabilidad en created_by}
         {--json : Imprime el reporte completo en formato JSON}';
 
@@ -79,6 +79,8 @@ class InventoryIgoraMasterBootstrapCommand extends Command
             $report['physical_count_date']
         ));
         $this->line('Política comercial inicial: is_active = false (sin habilitación automática en POS, Compras, Kits, Reservas ni ML Stock Sync).');
+        $this->line('Fecha efectiva INITIAL (occurred_at): timestamp real de ejecución (sin inventar hora histórica; conteo físico 2026-11-19 en metadata).');
+        $this->line('Rollback auditable: exclusivamente mediante operaciones compensatorias ADJUSTMENT_OUT (append-only, sin DELETE de ledger).');
         $this->line('Restricción de canales: 0 vínculos ML, 0 BOM, 0 reservas automáticas, 0 llamadas HTTP.');
 
         if (! empty($report['blocking_reasons'])) {

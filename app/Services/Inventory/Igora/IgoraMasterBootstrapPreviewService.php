@@ -69,6 +69,14 @@ class IgoraMasterBootstrapPreviewService
     }
 
     /**
+     * Clave de operación determinista e idempotente para una eventual reversión compensatoria ADJUSTMENT_OUT.
+     */
+    public function compensationKeyForSku(string $sku): string
+    {
+        return sprintf('%s:COMPENSATE:%s', self::PROPOSAL_ID, $this->normalizeCode($sku));
+    }
+
+    /**
      * @return list<string>
      */
     public function operationKeys(): array
@@ -189,7 +197,11 @@ class IgoraMasterBootstrapPreviewService
                     'type' => InventoryMovement::INITIAL,
                     'quantity' => $item['physical_count'],
                     'inventory_location_id' => $item['location_id'],
-                    'occurred_at' => self::PHYSICAL_COUNT_DATE.' 00:00:00',
+                    // occurred_at se registra al instante efectivo de ejecución (sin inventar una hora histórica);
+                    // la fecha del conteo físico verificado (2026-11-19) se conserva en physical_count_date / metadata.
+                    'occurred_at' => null,
+                    'occurred_at_policy' => 'EXECUTION_TIMESTAMP',
+                    'physical_count_date' => self::PHYSICAL_COUNT_DATE,
                     'reference_type' => 'igora_master_bootstrap',
                     'reference' => self::PROPOSAL_ID,
                     'external_key' => $operationKey,
