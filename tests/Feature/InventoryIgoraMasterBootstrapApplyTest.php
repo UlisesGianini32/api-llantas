@@ -8,6 +8,8 @@ use App\Models\InventoryReservation;
 use App\Models\User;
 use App\Services\Inventory\Igora\IgoraMasterBootstrapApplyService;
 use App\Services\Inventory\Igora\IgoraMasterBootstrapPreviewService;
+use App\Services\InventoryMovementService;
+use Carbon\Carbon;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Cache;
@@ -36,6 +38,7 @@ class InventoryIgoraMasterBootstrapApplyTest extends TestCase
         Cache::flush();
 
         $this->createSchema();
+        Carbon::setTestNow(Carbon::parse('2026-11-23 14:30:15'));
         Http::fake();
         Queue::fake();
 
@@ -45,6 +48,12 @@ class InventoryIgoraMasterBootstrapApplyTest extends TestCase
             'password' => bcrypt('secret'),
         ]);
         $this->operator->forceFill(['role' => User::ROLE_ADMIN])->save();
+    }
+
+    protected function tearDown(): void
+    {
+        Carbon::setTestNow();
+        parent::tearDown();
     }
 
     public function test_default_execution_is_dry_run_without_writes_or_http_calls(): void
@@ -216,13 +225,21 @@ class InventoryIgoraMasterBootstrapApplyTest extends TestCase
             $this->assertSame($spec['loc'], (int) $movement->inventory_location_id);
             $this->assertSame('igora_master_bootstrap', $movement->reference_type);
             $this->assertSame(IgoraMasterBootstrapPreviewService::PROPOSAL_ID, $movement->reference);
-            $this->assertSame('2026-11-19 00:00:00', $movement->occurred_at->format('Y-m-d H:i:s'));
+            // Fecha efectiva real de ejecución (sin inventar una hora histórica como 2026-11-19 00:00:00)
+            $this->assertSame('2026-11-23 14:30:15', $movement->occurred_at->format('Y-m-d H:i:s'));
+            $this->assertNotSame('2026-11-19 00:00:00', $movement->occurred_at->format('Y-m-d H:i:s'));
             $this->assertSame($this->operator->id, (int) $movement->created_by);
             $this->assertSame(
                 IgoraMasterBootstrapPreviewService::PROPOSAL_ID.':INITIAL:'.$sku,
                 $movement->external_key
             );
             $this->assertSame('PASO_33', $movement->metadata['step'] ?? null);
+            $this->assertSame('2026-11-19', $movement->metadata['physical_count_date'] ?? null);
+            $this->assertSame('EXECUTION_TIMESTAMP', $movement->metadata['occurred_at_policy'] ?? null);
+            $this->assertSame(
+                IgoraMasterBootstrapPreviewService::PROPOSAL_ID.':COMPENSATE:'.$sku,
+                $movement->metadata['compensation_external_key'] ?? null
+            );
             $this->assertSame($spec['tone'], $movement->metadata['tone'] ?? null);
             $this->assertFalse($movement->metadata['initial_is_active'] ?? true);
         }
@@ -551,6 +568,308 @@ class InventoryIgoraMasterBootstrapApplyTest extends TestCase
         } finally {
             $externalLock->release();
         }
+
+        Queue::assertNothingPushed();
+        Http::assertNothingSent();
+    }
+
+    public function test_rejects_future_and_invalid_calendar_dates_in_reconfirmed_counts_at(): void
+    {
+        $this->seedConfirmedLocations();
+
+        // 1) Fechas futuras (1 segundo adelante, mañana y año futuro) -> COUNTS_RECONFIRMATION_IN_FUTURE
+        foreach (['2026-11-23 14:30:16', '2026-11-24', '2099-01-01 09:00:00'] as $futureDate) {
+            $exit = Artisan::call('inventory:igora-master-bootstrap', [
+                '--apply' => true,
+                '--proposal' => IgoraMasterBootstrapPreviewService::PROPOSAL_ID,
+                '--confirm' => true,
+                '--reconfirmed-counts-at' => $futureDate,
+                '--json' => true,
+            ]);
+
+            $this->assertSame(1, $exit, "Fecha futura {$futureDate} debe bloquearse");
+            $report = json_decode(Artisan::output(), true, 512, JSON_THROW_ON_ERROR);
+            $this->assertSame(IgoraMasterBootstrapApplyService::OUTCOME_BLOCKED, $report['outcome']);
+            $this->assertContains('COUNTS_RECONFIRMATION_IN_FUTURE', $report['blocking_reasons'], "Fallo en {$futureDate}");
+            $this->assertFalse($report['writes_executed']);
+        }
+
+        // 2) Fechas de calendario inválidas u overflow silencioso -> COUNTS_RECONFIRMATION_INVALID_TIMESTAMP
+        foreach ([
+            '2026-02-30',
+            '2026-11-31',
+            '2026-13-01',
+            '2026-00-19',
+            '2026-11-19 25:00:00',
+            '2026-11-19 12:60:00',
+            '2026-11-19 12:00:60',
+            '2026-11-19T12:00:00+25:00',
+            'not-a-date',
+        ] as $invalidDate) {
+            $exit = Artisan::call('inventory:igora-master-bootstrap', [
+                '--apply' => true,
+                '--proposal' => IgoraMasterBootstrapPreviewService::PROPOSAL_ID,
+                '--confirm' => true,
+                '--reconfirmed-counts-at' => $invalidDate,
+                '--json' => true,
+            ]);
+
+            $this->assertSame(1, $exit, "Fecha inválida {$invalidDate} debe bloquearse");
+            $report = json_decode(Artisan::output(), true, 512, JSON_THROW_ON_ERROR);
+            $this->assertSame(IgoraMasterBootstrapApplyService::OUTCOME_BLOCKED, $report['outcome']);
+            $this->assertContains('COUNTS_RECONFIRMATION_INVALID_TIMESTAMP', $report['blocking_reasons'], "Fallo en {$invalidDate}");
+            $this->assertFalse($report['writes_executed']);
+        }
+
+        $this->assertDatabaseCount('inventory_products', 0);
+        $this->assertDatabaseCount('inventory_movements', 0);
+
+        // 3) Fecha válida exacta en el presente con offset ISO-8601 sí es aceptada
+        $exitOk = Artisan::call('inventory:igora-master-bootstrap', [
+            '--apply' => true,
+            '--proposal' => IgoraMasterBootstrapPreviewService::PROPOSAL_ID,
+            '--confirm' => true,
+            '--reconfirmed-counts-at' => '2026-11-23T14:30:15+00:00',
+            '--json' => true,
+        ]);
+        $this->assertSame(0, $exitOk);
+        $okReport = json_decode(Artisan::output(), true, 512, JSON_THROW_ON_ERROR);
+        $this->assertSame(IgoraMasterBootstrapApplyService::OUTCOME_APPLIED, $okReport['outcome']);
+        $this->assertDatabaseCount('inventory_products', 6);
+        $this->assertDatabaseCount('inventory_movements', 6);
+    }
+
+    public function test_detects_swapped_external_keys_between_skus_and_blocks_both_dry_run_and_apply(): void
+    {
+        $this->seedConfirmedLocations();
+
+        /** @var IgoraMasterBootstrapPreviewService $previewService */
+        $previewService = app(IgoraMasterBootstrapPreviewService::class);
+        $items = $previewService->auditedProposalItems();
+
+        // Crear los 6 productos reales
+        $productsBySku = [];
+        foreach ($items as $item) {
+            $productsBySku[$item['sku']] = InventoryProduct::create([
+                'sku' => $item['sku'],
+                'barcode' => $item['barcode'],
+                'name' => $item['proposed_name'],
+                'brand' => 'Schwarzkopf',
+                'product_type' => InventoryProduct::SIMPLE,
+                'primary_location_id' => $item['location_id'],
+                'is_active' => false,
+            ]);
+        }
+
+        // Caso A: Intercambiar las external_key entre 4-63 (7702045538946, qty=14) y 8-50 (7702045548877, qty=14)
+        // Ambos tienen la misma cantidad (14), probando que NO se engaña la validación por cantidad total = 89.
+        $swappedKeyMap = [
+            '7702045538977' => $previewService->operationKeyForSku('7702045538977'),
+            '7702045552393' => $previewService->operationKeyForSku('7702045552393'),
+            '7702045538946' => $previewService->operationKeyForSku('7702045548877'), // INTERCAMBIADA
+            '7702045119718' => $previewService->operationKeyForSku('7702045119718'),
+            '7702045548860' => $previewService->operationKeyForSku('7702045548860'),
+            '7702045548877' => $previewService->operationKeyForSku('7702045538946'), // INTERCAMBIADA
+        ];
+
+        foreach ($items as $item) {
+            InventoryMovement::create([
+                'inventory_product_id' => $productsBySku[$item['sku']]->id,
+                'inventory_location_id' => $item['location_id'],
+                'type' => InventoryMovement::INITIAL,
+                'quantity' => $item['physical_count'],
+                'reference_type' => 'igora_master_bootstrap',
+                'reference' => IgoraMasterBootstrapPreviewService::PROPOSAL_ID,
+                'occurred_at' => now(),
+                'external_key' => $swappedKeyMap[$item['sku']],
+            ]);
+        }
+
+        // Dry-run debe detectar estado inconsistente (jamás DRY_RUN_ALREADY_APPLIED)
+        $exitDry = Artisan::call('inventory:igora-master-bootstrap', ['--json' => true]);
+        $this->assertSame(1, $exitDry);
+        $dryReport = json_decode(Artisan::output(), true, 512, JSON_THROW_ON_ERROR);
+        $this->assertSame(IgoraMasterBootstrapApplyService::OUTCOME_DRY_RUN_BLOCKED, $dryReport['outcome']);
+        $this->assertSame('PARTIAL_OR_INCONSISTENT', $dryReport['idempotency']['state']);
+        $this->assertContains('PARTIAL_OR_INCONSISTENT_BOOTSTRAP_STATE', $dryReport['blocking_reasons']);
+        $this->assertContains(
+            'EXTERNAL_KEY_SKU_MISMATCH:key=IGORA-ROYAL-MASTER-BOOTSTRAP-2026-11-19:INITIAL:7702045548877,expected_sku=7702045548877,actual_sku=7702045538946',
+            $dryReport['idempotency']['inconsistencies']
+        );
+        $this->assertContains(
+            'EXTERNAL_KEY_SKU_MISMATCH:key=IGORA-ROYAL-MASTER-BOOTSTRAP-2026-11-19:INITIAL:7702045538946,expected_sku=7702045538946,actual_sku=7702045548877',
+            $dryReport['idempotency']['inconsistencies']
+        );
+
+        // --apply también debe bloquearse (jamás ALREADY_APPLIED ni escrituras)
+        $exitApply = Artisan::call('inventory:igora-master-bootstrap', [
+            '--apply' => true,
+            '--proposal' => IgoraMasterBootstrapPreviewService::PROPOSAL_ID,
+            '--confirm' => true,
+            '--reconfirmed-counts-at' => '2026-11-23 14:00:00',
+            '--json' => true,
+        ]);
+        $this->assertSame(1, $exitApply);
+        $applyReport = json_decode(Artisan::output(), true, 512, JSON_THROW_ON_ERROR);
+        $this->assertSame(IgoraMasterBootstrapApplyService::OUTCOME_BLOCKED, $applyReport['outcome']);
+        $this->assertFalse($applyReport['writes_executed']);
+        $this->assertDatabaseCount('inventory_movements', 6);
+
+        // Caso B: Intercambiar claves entre 4-13 y 4-46 (misma ubicación 342) y apuntar dos claves al mismo producto
+        InventoryMovement::query()->delete();
+        InventoryMovement::create([
+            'inventory_product_id' => $productsBySku['7702045538977']->id,
+            'inventory_location_id' => 342,
+            'type' => InventoryMovement::INITIAL,
+            'quantity' => 11,
+            'reference' => IgoraMasterBootstrapPreviewService::PROPOSAL_ID,
+            'occurred_at' => now(),
+            'external_key' => $previewService->operationKeyForSku('7702045538977'),
+        ]);
+        InventoryMovement::create([
+            'inventory_product_id' => $productsBySku['7702045538977']->id, // Mismo producto con clave de 4-46
+            'inventory_location_id' => 342,
+            'type' => InventoryMovement::INITIAL,
+            'quantity' => 12,
+            'reference' => IgoraMasterBootstrapPreviewService::PROPOSAL_ID,
+            'occurred_at' => now(),
+            'external_key' => $previewService->operationKeyForSku('7702045552393'),
+        ]);
+
+        $exitDupProduct = Artisan::call('inventory:igora-master-bootstrap', ['--json' => true]);
+        $this->assertSame(1, $exitDupProduct);
+        $dupReport = json_decode(Artisan::output(), true, 512, JSON_THROW_ON_ERROR);
+        $this->assertContains(
+            'DUPLICATE_PRODUCT_ACROSS_OPERATION_KEYS:#'.$productsBySku['7702045538977']->id,
+            $dupReport['idempotency']['inconsistencies']
+        );
+        $this->assertContains(
+            'EXTERNAL_KEY_SKU_MISMATCH:key=IGORA-ROYAL-MASTER-BOOTSTRAP-2026-11-19:INITIAL:7702045552393,expected_sku=7702045552393,actual_sku=7702045538977',
+            $dupReport['idempotency']['inconsistencies']
+        );
+    }
+
+    public function test_enforces_safe_cache_lock_store_and_120s_ttl_configuration(): void
+    {
+        $this->seedConfirmedLocations();
+
+        $this->assertSame(120, IgoraMasterBootstrapApplyService::LOCK_TTL_SECONDS);
+
+        /** @var IgoraMasterBootstrapApplyService $service */
+        $service = app(IgoraMasterBootstrapApplyService::class);
+
+        // Con cache.default = 'array' y allow_non_shared_cache_lock = false (simulando producción sin advisory lock MySQL)
+        $blocked = $service->execute([
+            'apply' => true,
+            'proposal_id' => IgoraMasterBootstrapPreviewService::PROPOSAL_ID,
+            'confirmed' => true,
+            'reconfirmed_counts_at' => '2026-11-23 14:00:00',
+            'allow_non_shared_cache_lock' => false,
+        ]);
+
+        $this->assertSame(IgoraMasterBootstrapApplyService::OUTCOME_BLOCKED, $blocked['outcome']);
+        $this->assertContains('UNSAFE_LOCK_STORE_FOR_CONCURRENCY', $blocked['blocking_reasons']);
+        $this->assertFalse($blocked['concurrency_lock']['is_safe_for_apply']);
+        $this->assertSame('array', $blocked['concurrency_lock']['cache_driver']);
+        $this->assertSame(120, $blocked['concurrency_lock']['lock_ttl_seconds']);
+        $this->assertDatabaseCount('inventory_products', 0);
+        $this->assertDatabaseCount('inventory_movements', 0);
+
+        // Con cache.default = 'file' (compartido entre procesos CLI en el mismo host) y allow_non_shared_cache_lock = false -> permitido
+        $previousDefault = config('cache.default');
+        config(['cache.default' => 'file']);
+        Cache::forgetDriver('file');
+        try {
+            $applied = $service->execute([
+                'apply' => true,
+                'proposal_id' => IgoraMasterBootstrapPreviewService::PROPOSAL_ID,
+                'confirmed' => true,
+                'reconfirmed_counts_at' => '2026-11-23 14:00:00',
+                'allow_non_shared_cache_lock' => false,
+            ]);
+
+            $this->assertSame(IgoraMasterBootstrapApplyService::OUTCOME_APPLIED, $applied['outcome']);
+            $this->assertTrue($applied['concurrency_lock']['is_safe_for_apply']);
+            $this->assertTrue($applied['concurrency_lock']['cache_store_is_shared']);
+            $this->assertTrue($applied['concurrency_lock']['cache_lock_acquired']);
+            $this->assertDatabaseCount('inventory_products', 6);
+            $this->assertDatabaseCount('inventory_movements', 6);
+
+            // Confirmar que el lock de archivo fue liberado al terminar
+            $verifyFreeLock = Cache::lock(IgoraMasterBootstrapApplyService::LOCK_KEY, 10);
+            $this->assertTrue($verifyFreeLock->get());
+            $verifyFreeLock->release();
+        } finally {
+            config(['cache.default' => $previousDefault]);
+        }
+    }
+
+    public function test_defines_auditable_compensatory_rollback_plan_and_nets_stock_to_zero_without_deleting_ledger(): void
+    {
+        $this->seedConfirmedLocations();
+
+        /** @var IgoraMasterBootstrapApplyService $applyService */
+        $applyService = app(IgoraMasterBootstrapApplyService::class);
+        /** @var InventoryMovementService $movementService */
+        $movementService = app(InventoryMovementService::class);
+
+        $applied = $applyService->execute([
+            'apply' => true,
+            'proposal_id' => IgoraMasterBootstrapPreviewService::PROPOSAL_ID,
+            'confirmed' => true,
+            'reconfirmed_counts_at' => '2026-11-23 14:00:00',
+            'actor_user_id' => $this->operator->id,
+        ]);
+
+        $this->assertSame(IgoraMasterBootstrapApplyService::OUTCOME_APPLIED, $applied['outcome']);
+        $plan = $applied['compensatory_rollback_plan'];
+
+        $this->assertSame('COMPENSATORY_LEDGER_ONLY', $plan['policy']);
+        $this->assertFalse($plan['delete_ledger_rows']);
+        $this->assertFalse($plan['delete_products']);
+        $this->assertTrue($plan['keep_products_inactive']);
+        $this->assertSame(InventoryMovement::ADJUSTMENT_OUT, $plan['movement_type']);
+        $this->assertSame(6, $plan['expected_operations_count']);
+        $this->assertSame(-89, $plan['expected_total_compensation_units']);
+        $this->assertCount(6, $plan['operations']);
+
+        // Ejecutar compensación auditable (sin DELETE en inventory_movements ni inventory_products)
+        $executeCompensation = function () use ($plan, $movementService): void {
+            DB::transaction(function () use ($plan, $movementService): void {
+                foreach ($plan['operations'] as $op) {
+                    $product = InventoryProduct::query()->where('sku', $op['sku'])->firstOrFail();
+                    $movementService->record([
+                        'inventory_product_id' => (int) $product->id,
+                        'inventory_location_id' => (int) $op['location_id'],
+                        'type' => InventoryMovement::ADJUSTMENT_OUT,
+                        'quantity' => (int) $op['quantity'],
+                        'reference_type' => $op['reference_type'],
+                        'reference_id' => (int) $product->id,
+                        'reference' => $op['reference'],
+                        'notes' => 'Reversión compensatoria auditable (test PASO 33)',
+                        'created_by' => $this->operator->id,
+                        'occurred_at' => now(),
+                        'external_key' => $op['compensation_external_key'],
+                    ], $this->operator);
+                }
+            });
+        };
+
+        $executeCompensation();
+
+        // Saldo neto = 0 en todos los productos, ledger append-only intacto (6 INITIAL + 6 ADJUSTMENT_OUT = 12)
+        $this->assertDatabaseCount('inventory_products', 6);
+        $this->assertDatabaseCount('inventory_movements', 12);
+        $this->assertSame(0, (int) InventoryMovement::query()->sum('quantity'));
+        foreach (InventoryProduct::query()->get() as $product) {
+            $this->assertFalse($product->is_active);
+            $this->assertSame(0, $product->physicalStock());
+        }
+
+        // Re-ejecutar la compensación es idempotente gracias a compensation_external_key (nunca queda en -89)
+        $executeCompensation();
+        $this->assertDatabaseCount('inventory_movements', 12);
+        $this->assertSame(0, (int) InventoryMovement::query()->sum('quantity'));
 
         Queue::assertNothingPushed();
         Http::assertNothingSent();
