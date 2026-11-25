@@ -58,7 +58,7 @@ class OpsQueuesPruneRedundantTest extends TestCase
             static fn (string $path): int => 20 * 1024 * 1024 * 1024,
         ));
         $this->app->singleton(QueueWorkerDetector::class, fn () => new QueueWorkerDetector(
-            static fn (): array => [],
+            static fn (): array => ['processes' => [], 'unreadable_count' => 0, 'inspection_available' => true],
         ));
     }
 
@@ -82,7 +82,6 @@ class OpsQueuesPruneRedundantTest extends TestCase
         $manifestPath = $this->tmp('dry_manifest.json');
         $auditPath = $this->tmp('dry_audit.ndjson');
 
-        // Mutually exclusive flags must fail cleanly without touching DB.
         $codeInvalid = Artisan::call('ops:queues-prune-redundant', [
             '--dry-run' => true,
             '--apply' => true,
@@ -90,7 +89,6 @@ class OpsQueuesPruneRedundantTest extends TestCase
         ]);
         $this->assertSame(2, $codeInvalid);
 
-        // Default behavior (neither --dry-run nor --apply) executes read-only dry-run.
         $code = Artisan::call('ops:queues-prune-redundant', [
             '--job' => [QueuePayloadInspector::JOB_RESERVATIONS],
             '--manifest' => $manifestPath,
@@ -108,6 +106,10 @@ class OpsQueuesPruneRedundantTest extends TestCase
         $this->assertSame(1, $manifest['entries'][0]['meli_account_id']);
         $this->assertSame(1001, $manifest['entries'][0]['entity_id']);
         $this->assertSame('200001001', $manifest['entries'][0]['remote_order_id']);
+        $this->assertArrayHasKey('authorized_upper_bound', $manifest);
+        $this->assertArrayHasKey('last_scanned_id', $manifest);
+        $this->assertArrayHasKey('next_start_id', $manifest);
+        $this->assertFalse($manifest['is_partial']);
         $this->assertMatchesRegularExpression('/\A[a-f0-9]{64}\z/', $manifest['manifest_sha256']);
         Http::assertNothingSent();
     }
@@ -167,8 +169,9 @@ class OpsQueuesPruneRedundantTest extends TestCase
         $manifestPath = $this->tmp('m03.json');
         $backupPath = $this->tmp('b03.ndjson');
         $auditPath = $this->tmp('a03.ndjson');
+        $lockPath = $this->writeMaintenanceLock('MW-TEST-03');
 
-        $this->runDryRunAndBackup(
+        $sha = $this->runDryRunAndBackup(
             [QueuePayloadInspector::JOB_RESERVATIONS, QueuePayloadInspector::JOB_BEAUTY_PRICES],
             $manifestPath,
             $backupPath,
@@ -178,9 +181,11 @@ class OpsQueuesPruneRedundantTest extends TestCase
             '--apply' => true,
             '--job' => [QueuePayloadInspector::JOB_RESERVATIONS, QueuePayloadInspector::JOB_BEAUTY_PRICES],
             '--manifest' => $manifestPath,
+            '--expected-manifest-sha256' => $sha,
             '--backup' => $backupPath,
             '--audit-log' => $auditPath,
             '--maintenance-window' => 'MW-TEST-03',
+            '--maintenance-lock-file' => $lockPath,
             '--sleep-ms' => 0,
         ]);
         $this->assertSame(0, $code, Artisan::output());
@@ -204,24 +209,26 @@ class OpsQueuesPruneRedundantTest extends TestCase
         $manifestPath = $this->tmp('m04.json');
         $backupPath = $this->tmp('b04.ndjson');
         $auditPath = $this->tmp('a04.ndjson');
+        $lockPath = $this->writeMaintenanceLock('MW-TEST-04');
 
-        $this->runDryRunAndBackup([QueuePayloadInspector::JOB_RESERVATIONS], $manifestPath, $backupPath);
+        $sha = $this->runDryRunAndBackup([QueuePayloadInspector::JOB_RESERVATIONS], $manifestPath, $backupPath);
 
         $manifest = json_decode((string) file_get_contents($manifestPath), true, 64, JSON_THROW_ON_ERROR);
         $this->assertSame(1, $manifest['totals']['candidates']);
         $this->assertSame(1, $manifest['totals']['preserved_reserved']);
         $this->assertSame([$reservedId], $manifest['anomalies']['reserved_job_ids']);
 
-        // Now mark the candidate reserved before --apply -> MUST abort and leave BOTH intact!
         DB::table('jobs')->where('id', $unreservedId)->update(['reserved_at' => time()]);
 
         $code = Artisan::call('ops:queues-prune-redundant', [
             '--apply' => true,
             '--job' => [QueuePayloadInspector::JOB_RESERVATIONS],
             '--manifest' => $manifestPath,
+            '--expected-manifest-sha256' => $sha,
             '--backup' => $backupPath,
             '--audit-log' => $auditPath,
             '--maintenance-window' => 'MW-TEST-04',
+            '--maintenance-lock-file' => $lockPath,
             '--sleep-ms' => 0,
         ]);
         $this->assertSame(1, $code);
@@ -242,8 +249,9 @@ class OpsQueuesPruneRedundantTest extends TestCase
         $manifestPath = $this->tmp('m05.json');
         $backupPath = $this->tmp('b05.ndjson');
         $auditPath = $this->tmp('a05.ndjson');
+        $lockPath = $this->writeMaintenanceLock('MW-TEST-05');
 
-        $this->runDryRunAndBackup([QueuePayloadInspector::JOB_RESERVATIONS], $manifestPath, $backupPath);
+        $sha = $this->runDryRunAndBackup([QueuePayloadInspector::JOB_RESERVATIONS], $manifestPath, $backupPath);
         $manifest = json_decode((string) file_get_contents($manifestPath), true, 64, JSON_THROW_ON_ERROR);
 
         $this->assertSame(1, $manifest['totals']['candidates']);
@@ -254,9 +262,11 @@ class OpsQueuesPruneRedundantTest extends TestCase
             '--apply' => true,
             '--job' => [QueuePayloadInspector::JOB_RESERVATIONS],
             '--manifest' => $manifestPath,
+            '--expected-manifest-sha256' => $sha,
             '--backup' => $backupPath,
             '--audit-log' => $auditPath,
             '--maintenance-window' => 'MW-TEST-05',
+            '--maintenance-lock-file' => $lockPath,
             '--sleep-ms' => 0,
         ]);
         $this->assertSame(0, $code, Artisan::output());
@@ -272,7 +282,6 @@ class OpsQueuesPruneRedundantTest extends TestCase
     {
         $this->seedAccountAndOrder(1, 5001, '200005001', 'paid', 'ready_to_ship');
 
-        // A: displayName says Reservations, serialized object says ProcessMeliMessageNotification
         $mismatchClassId = $this->insertRawJob(json_encode([
             'displayName' => QueuePayloadInspector::JOB_RESERVATIONS,
             'data' => [
@@ -281,7 +290,6 @@ class OpsQueuesPruneRedundantTest extends TestCase
             ],
         ], JSON_THROW_ON_ERROR));
 
-        // B: displayName != commandName
         $mismatchCmdNameId = $this->insertRawJob(json_encode([
             'displayName' => QueuePayloadInspector::JOB_RESERVATIONS,
             'data' => [
@@ -290,7 +298,6 @@ class OpsQueuesPruneRedundantTest extends TestCase
             ],
         ], JSON_THROW_ON_ERROR));
 
-        // C: valid class but missing/zero meliOrderId
         $zeroOrderId = $this->insertRawJob(json_encode([
             'displayName' => QueuePayloadInspector::JOB_RESERVATIONS,
             'data' => [
@@ -299,7 +306,6 @@ class OpsQueuesPruneRedundantTest extends TestCase
             ],
         ], JSON_THROW_ON_ERROR));
 
-        // D: Beauty job with corrupt meliItemId length
         $corruptBeautyId = $this->insertRawJob(json_encode([
             'displayName' => QueuePayloadInspector::JOB_BEAUTY_PRICES,
             'data' => [
@@ -363,7 +369,6 @@ class OpsQueuesPruneRedundantTest extends TestCase
             $this->insertReservationJob(7001);
         }
 
-        // Chunk > 500 must fail.
         $codeOversize = Artisan::call('ops:queues-prune-redundant', [
             '--dry-run' => true,
             '--job' => [QueuePayloadInspector::JOB_RESERVATIONS],
@@ -372,28 +377,32 @@ class OpsQueuesPruneRedundantTest extends TestCase
         $this->assertSame(1, $codeOversize);
         $this->assertStringContainsString('invalid_chunk_size', Artisan::output());
 
-        // Dry-run with max-delete=10, then apply with max-delete=6 and chunk=2.
         $manifestPath = $this->tmp('m08.json');
         $backupPath = $this->tmp('b08.ndjson');
         $auditPath = $this->tmp('a08.ndjson');
+        $lockPath = $this->writeMaintenanceLock('MW-TEST-08');
 
-        $this->runDryRunAndBackup([QueuePayloadInspector::JOB_RESERVATIONS], $manifestPath, $backupPath, maxDelete: 10, chunk: 3);
+        $sha = $this->runDryRunAndBackup([QueuePayloadInspector::JOB_RESERVATIONS], $manifestPath, $backupPath, maxDelete: 10, chunk: 3);
         $manifest = json_decode((string) file_get_contents($manifestPath), true, 64, JSON_THROW_ON_ERROR);
         $this->assertSame(10, $manifest['totals']['candidates']);
+        $this->assertTrue($manifest['is_partial']);
+        $this->assertSame('max_delete_reached', $manifest['stop_reason']);
 
         $codeApply = Artisan::call('ops:queues-prune-redundant', [
             '--apply' => true,
             '--job' => [QueuePayloadInspector::JOB_RESERVATIONS],
             '--manifest' => $manifestPath,
+            '--expected-manifest-sha256' => $sha,
             '--backup' => $backupPath,
             '--audit-log' => $auditPath,
             '--maintenance-window' => 'MW-TEST-08',
+            '--maintenance-lock-file' => $lockPath,
             '--chunk' => 2,
             '--max-delete' => 6,
             '--sleep-ms' => 0,
         ]);
         $this->assertSame(0, $codeApply, Artisan::output());
-        $this->assertSame(9, DB::table('jobs')->count()); // 15 - 6 = 9
+        $this->assertSame(9, DB::table('jobs')->count());
     }
 
     // =========================================================================
@@ -406,36 +415,39 @@ class OpsQueuesPruneRedundantTest extends TestCase
         for ($i = 0; $i < 10; $i++) {
             $ids[] = $this->insertReservationJob(8001);
         }
-        $cutoffId = $ids[4]; // 5th job
+        $cutoffId = $ids[4];
 
         $manifestPath = $this->tmp('m09.json');
         $backupPath = $this->tmp('b09.ndjson');
         $auditPath = $this->tmp('a09.ndjson');
+        $lockPath = $this->writeMaintenanceLock('MW-TEST-09');
 
-        $this->runDryRunAndBackup([QueuePayloadInspector::JOB_RESERVATIONS], $manifestPath, $backupPath, endId: $cutoffId);
+        $sha = $this->runDryRunAndBackup([QueuePayloadInspector::JOB_RESERVATIONS], $manifestPath, $backupPath, endId: $cutoffId);
 
-        // Passing --end-id higher than manifest end_id MUST abort.
         $codeExceed = Artisan::call('ops:queues-prune-redundant', [
             '--apply' => true,
             '--job' => [QueuePayloadInspector::JOB_RESERVATIONS],
             '--manifest' => $manifestPath,
+            '--expected-manifest-sha256' => $sha,
             '--backup' => $backupPath,
             '--audit-log' => $auditPath,
             '--maintenance-window' => 'MW-TEST-09',
+            '--maintenance-lock-file' => $lockPath,
             '--end-id' => $cutoffId + 1,
             '--sleep-ms' => 0,
         ]);
         $this->assertSame(1, $codeExceed);
         $this->assertStringContainsString('upper_bound_violation', Artisan::output());
 
-        // Normal apply deletes strictly <= cutoffId.
         $codeOk = Artisan::call('ops:queues-prune-redundant', [
             '--apply' => true,
             '--job' => [QueuePayloadInspector::JOB_RESERVATIONS],
             '--manifest' => $manifestPath,
+            '--expected-manifest-sha256' => $sha,
             '--backup' => $backupPath,
             '--audit-log' => $auditPath,
             '--maintenance-window' => 'MW-TEST-09',
+            '--maintenance-lock-file' => $lockPath,
             '--sleep-ms' => 0,
         ]);
         $this->assertSame(0, $codeOk, Artisan::output());
@@ -457,18 +469,20 @@ class OpsQueuesPruneRedundantTest extends TestCase
         $manifestPath = $this->tmp('m10.json');
         $backupPath = $this->tmp('b10.ndjson');
         $auditPath = $this->tmp('a10.ndjson');
-        $this->runDryRunAndBackup([QueuePayloadInspector::JOB_RESERVATIONS], $manifestPath, $backupPath);
+        $lockPath = $this->writeMaintenanceLock('MW-TEST-10');
+        $sha = $this->runDryRunAndBackup([QueuePayloadInspector::JOB_RESERVATIONS], $manifestPath, $backupPath);
 
         /** @var QueuePruneService $service */
         $service = $this->app->make(QueuePruneService::class);
-        // Simulate SIGINT/SIGTERM after 1 batch (2 rows).
         $service->setShouldInterruptChecker(static fn (int $batchesDone): bool => $batchesDone >= 1);
 
         $firstRun = $service->apply([
             'jobs' => [QueuePayloadInspector::JOB_RESERVATIONS],
             'manifest_path' => $manifestPath,
+            'expected_manifest_sha256' => $sha,
             'backup_path' => $backupPath,
             'maintenance_window' => 'MW-TEST-10',
+            'maintenance_lock_file' => $lockPath,
             'chunk' => 2,
             'max_delete' => 10,
             'sleep_ms' => 0,
@@ -478,16 +492,18 @@ class OpsQueuesPruneRedundantTest extends TestCase
         $this->assertSame('interrupted', $firstRun['status']);
         $this->assertTrue($firstRun['interrupted']);
         $this->assertSame(2, $firstRun['deleted_this_run']);
+        $this->assertNull($firstRun['next_start_id']);
         $this->assertSame(4, DB::table('jobs')->count());
 
-        // Attempting to re-run WITHOUT --resume must refuse.
         $service->setShouldInterruptChecker(null);
         try {
             $service->apply([
                 'jobs' => [QueuePayloadInspector::JOB_RESERVATIONS],
                 'manifest_path' => $manifestPath,
+                'expected_manifest_sha256' => $sha,
                 'backup_path' => $backupPath,
                 'maintenance_window' => 'MW-TEST-10',
+                'maintenance_lock_file' => $lockPath,
                 'chunk' => 2,
                 'max_delete' => 10,
                 'sleep_ms' => 0,
@@ -499,12 +515,13 @@ class OpsQueuesPruneRedundantTest extends TestCase
             $this->assertSame('checkpoint_requires_resume', $e->reasonCode);
         }
 
-        // Now resume with --resume and complete remaining 4 rows.
         $secondRun = $service->apply([
             'jobs' => [QueuePayloadInspector::JOB_RESERVATIONS],
             'manifest_path' => $manifestPath,
+            'expected_manifest_sha256' => $sha,
             'backup_path' => $backupPath,
             'maintenance_window' => 'MW-TEST-10',
+            'maintenance_lock_file' => $lockPath,
             'chunk' => 2,
             'max_delete' => 10,
             'sleep_ms' => 0,
@@ -515,6 +532,7 @@ class OpsQueuesPruneRedundantTest extends TestCase
         $this->assertSame('completed', $secondRun['status']);
         $this->assertSame(4, $secondRun['deleted_this_run']);
         $this->assertSame(6, $secondRun['total_deleted']);
+        $this->assertNotNull($secondRun['next_start_id']);
         $this->assertSame(0, DB::table('jobs')->count());
     }
 
@@ -531,22 +549,24 @@ class OpsQueuesPruneRedundantTest extends TestCase
         $manifestPath = $this->tmp('m11.json');
         $backupPath = $this->tmp('b11.ndjson');
         $auditPath = $this->tmp('a11.ndjson');
-        $this->runDryRunAndBackup([QueuePayloadInspector::JOB_RESERVATIONS], $manifestPath, $backupPath);
+        $lockPath = $this->writeMaintenanceLock('MW-TEST-11');
+        $sha = $this->runDryRunAndBackup([QueuePayloadInspector::JOB_RESERVATIONS], $manifestPath, $backupPath);
 
         $params = [
             '--apply' => true,
             '--job' => [QueuePayloadInspector::JOB_RESERVATIONS],
             '--manifest' => $manifestPath,
+            '--expected-manifest-sha256' => $sha,
             '--backup' => $backupPath,
             '--audit-log' => $auditPath,
             '--maintenance-window' => 'MW-TEST-11',
+            '--maintenance-lock-file' => $lockPath,
             '--sleep-ms' => 0,
         ];
 
         $this->assertSame(0, Artisan::call('ops:queues-prune-redundant', $params));
         $this->assertSame(1, DB::table('jobs')->count());
 
-        // Re-running the exact same apply command must succeed idempotently with 0 deletions.
         $this->assertSame(0, Artisan::call('ops:queues-prune-redundant', $params));
         $this->assertStringContainsString('already_completed', Artisan::output());
         $this->assertDatabaseHas('jobs', ['id' => $keptId]);
@@ -563,9 +583,9 @@ class OpsQueuesPruneRedundantTest extends TestCase
         $manifestPath = $this->tmp('m12.json');
         $backupPath = $this->tmp('b12.ndjson');
         $auditPath = $this->tmp('a12.ndjson');
-        $this->runDryRunAndBackup([QueuePayloadInspector::JOB_RESERVATIONS], $manifestPath, $backupPath);
+        $lockPath = $this->writeMaintenanceLock('MW-TEST-12');
+        $sha = $this->runDryRunAndBackup([QueuePayloadInspector::JOB_RESERVATIONS], $manifestPath, $backupPath);
 
-        // Simulate 5 GiB free (< 8 GiB required).
         $this->app->singleton(QueueRecoveryDiskChecker::class, fn () => new QueueRecoveryDiskChecker(
             static fn (string $path): int => 5 * 1024 * 1024 * 1024,
         ));
@@ -574,9 +594,11 @@ class OpsQueuesPruneRedundantTest extends TestCase
             '--apply' => true,
             '--job' => [QueuePayloadInspector::JOB_RESERVATIONS],
             '--manifest' => $manifestPath,
+            '--expected-manifest-sha256' => $sha,
             '--backup' => $backupPath,
             '--audit-log' => $auditPath,
             '--maintenance-window' => 'MW-TEST-12',
+            '--maintenance-lock-file' => $lockPath,
             '--sleep-ms' => 0,
         ]);
 
@@ -596,40 +618,43 @@ class OpsQueuesPruneRedundantTest extends TestCase
         $manifestPath = $this->tmp('m13.json');
         $backupPath = $this->tmp('b13.ndjson');
         $auditPath = $this->tmp('a13.ndjson');
-        $this->runDryRunAndBackup([QueuePayloadInspector::JOB_RESERVATIONS], $manifestPath, $backupPath);
+        $lockPath = $this->writeMaintenanceLock('MW-TEST-13');
+        $sha = $this->runDryRunAndBackup([QueuePayloadInspector::JOB_RESERVATIONS], $manifestPath, $backupPath);
 
         $baseParams = [
             '--apply' => true,
             '--job' => [QueuePayloadInspector::JOB_RESERVATIONS],
             '--manifest' => $manifestPath,
+            '--expected-manifest-sha256' => $sha,
             '--backup' => $backupPath,
             '--audit-log' => $auditPath,
             '--maintenance-window' => 'MW-TEST-13',
+            '--maintenance-lock-file' => $lockPath,
             '--sleep-ms' => 0,
         ];
 
-        // 13a. Reservation automation enabled -> abort
         config()->set('inventory.meli_order_reservations.automatic', true);
         $this->assertSame(1, Artisan::call('ops:queues-prune-redundant', $baseParams));
         $this->assertStringContainsString('automation_enabled', Artisan::output());
         config()->set('inventory.meli_order_reservations.automatic', false);
 
-        // 13b. Beauty scheduler enabled -> abort
         config()->set('meli_price_manager.beauty_scheduled_prices.scheduler_enabled', true);
         $this->assertSame(1, Artisan::call('ops:queues-prune-redundant', $baseParams));
         $this->assertStringContainsString('automation_enabled', Artisan::output());
         config()->set('meli_price_manager.beauty_scheduled_prices.scheduler_enabled', false);
 
-        // 13c. Missing maintenance window -> abort
         $noWindow = $baseParams;
         unset($noWindow['--maintenance-window']);
         $this->assertSame(1, Artisan::call('ops:queues-prune-redundant', $noWindow));
         $this->assertStringContainsString('maintenance_window_missing', Artisan::output());
 
-        // 13d. Active worker consuming 'meli' -> abort
         $this->app->singleton(QueueWorkerDetector::class, fn () => new QueueWorkerDetector(
             static fn (): array => [
-                ['pid' => 424242, 'command' => 'php artisan queue:work database --queue=meli,default'],
+                'processes' => [
+                    ['pid' => 424242, 'command' => 'php artisan queue:work database --queue=meli,default'],
+                ],
+                'unreadable_count' => 0,
+                'inspection_available' => true,
             ],
         ));
         $this->assertSame(1, Artisan::call('ops:queues-prune-redundant', $baseParams));
@@ -649,21 +674,22 @@ class OpsQueuesPruneRedundantTest extends TestCase
         $manifestPath = $this->tmp('m14.json');
         $backupPath = $this->tmp('b14.ndjson');
         $auditPath = $this->tmp('a14.ndjson');
-        $this->runDryRunAndBackup([QueuePayloadInspector::JOB_RESERVATIONS], $manifestPath, $backupPath);
+        $lockPath = $this->writeMaintenanceLock('MW-TEST-14');
+        $sha = $this->runDryRunAndBackup([QueuePayloadInspector::JOB_RESERVATIONS], $manifestPath, $backupPath);
 
-        // Missing backup file
         $codeMissing = Artisan::call('ops:queues-prune-redundant', [
             '--apply' => true,
             '--job' => [QueuePayloadInspector::JOB_RESERVATIONS],
             '--manifest' => $manifestPath,
+            '--expected-manifest-sha256' => $sha,
             '--backup' => $this->tmp('does_not_exist.ndjson'),
             '--audit-log' => $auditPath,
             '--maintenance-window' => 'MW-TEST-14',
+            '--maintenance-lock-file' => $lockPath,
         ]);
         $this->assertSame(1, $codeMissing);
         $this->assertStringContainsString('backup_missing', Artisan::output());
 
-        // Tampered backup row
         $corrupt = str_replace('"attempts":0', '"attempts":99', (string) file_get_contents($backupPath));
         file_put_contents($backupPath, $corrupt);
 
@@ -671,9 +697,11 @@ class OpsQueuesPruneRedundantTest extends TestCase
             '--apply' => true,
             '--job' => [QueuePayloadInspector::JOB_RESERVATIONS],
             '--manifest' => $manifestPath,
+            '--expected-manifest-sha256' => $sha,
             '--backup' => $backupPath,
             '--audit-log' => $auditPath,
             '--maintenance-window' => 'MW-TEST-14',
+            '--maintenance-lock-file' => $lockPath,
         ]);
         $this->assertSame(1, $codeCorrupt);
         $this->assertStringContainsString('backup_integrity_failed', Artisan::output());
@@ -691,7 +719,8 @@ class OpsQueuesPruneRedundantTest extends TestCase
         $manifestPath = $this->tmp('m15.json');
         $backupPath = $this->tmp('b15.ndjson');
         $auditPath = $this->tmp('a15.ndjson');
-        $this->runDryRunAndBackup([QueuePayloadInspector::JOB_RESERVATIONS], $manifestPath, $backupPath);
+        $lockPath = $this->writeMaintenanceLock('MW-TEST-15');
+        $sha = $this->runDryRunAndBackup([QueuePayloadInspector::JOB_RESERVATIONS], $manifestPath, $backupPath);
 
         $manifest = json_decode((string) file_get_contents($manifestPath), true, 64, JSON_THROW_ON_ERROR);
         $manifest['incident_id'] = 'TAMPERED-INCIDENT';
@@ -701,9 +730,11 @@ class OpsQueuesPruneRedundantTest extends TestCase
             '--apply' => true,
             '--job' => [QueuePayloadInspector::JOB_RESERVATIONS],
             '--manifest' => $manifestPath,
+            '--expected-manifest-sha256' => $sha,
             '--backup' => $backupPath,
             '--audit-log' => $auditPath,
             '--maintenance-window' => 'MW-TEST-15',
+            '--maintenance-lock-file' => $lockPath,
         ]);
 
         $this->assertSame(1, $code);
@@ -723,9 +754,9 @@ class OpsQueuesPruneRedundantTest extends TestCase
         $manifestPath = $this->tmp('m16.json');
         $backupPath = $this->tmp('b16.ndjson');
         $auditPath = $this->tmp('a16.ndjson');
-        $this->runDryRunAndBackup([QueuePayloadInspector::JOB_RESERVATIONS], $manifestPath, $backupPath);
+        $lockPath = $this->writeMaintenanceLock('MW-TEST-16');
+        $sha = $this->runDryRunAndBackup([QueuePayloadInspector::JOB_RESERVATIONS], $manifestPath, $backupPath);
 
-        // Concurrently mutate job #2's payload after dry-run & backup.
         DB::table('jobs')->where('id', $id2)->update([
             'payload' => $this->buildJobPayload(new ReconcileInventoryMeliOrderReservationsJob(99999)),
         ]);
@@ -734,16 +765,17 @@ class OpsQueuesPruneRedundantTest extends TestCase
             '--apply' => true,
             '--job' => [QueuePayloadInspector::JOB_RESERVATIONS],
             '--manifest' => $manifestPath,
+            '--expected-manifest-sha256' => $sha,
             '--backup' => $backupPath,
             '--audit-log' => $auditPath,
             '--maintenance-window' => 'MW-TEST-16',
+            '--maintenance-lock-file' => $lockPath,
             '--chunk' => 2,
             '--sleep-ms' => 0,
         ]);
 
         $this->assertSame(1, $code);
         $this->assertStringContainsString('concurrent_modification', Artisan::output());
-        // Entire batch rolled back: BOTH jobs still exist.
         $this->assertDatabaseHas('jobs', ['id' => $id1]);
         $this->assertDatabaseHas('jobs', ['id' => $id2]);
     }
@@ -760,9 +792,9 @@ class OpsQueuesPruneRedundantTest extends TestCase
         $manifestPath = $this->tmp('m17.json');
         $backupPath = $this->tmp('b17.ndjson');
         $auditPath = $this->tmp('a17.ndjson');
-        $this->runDryRunAndBackup([QueuePayloadInspector::JOB_RESERVATIONS], $manifestPath, $backupPath);
+        $lockPath = $this->writeMaintenanceLock('MW-TEST-17');
+        $sha = $this->runDryRunAndBackup([QueuePayloadInspector::JOB_RESERVATIONS], $manifestPath, $backupPath);
 
-        // Concurrent inserts of NEW jobs after dry-run (id > manifest.end_id).
         $newId1 = $this->insertReservationJob(16001);
         $newId2 = $this->insertOtherModuleJob(ProcessMeliMessageNotification::class, ['resource' => 'new-msg']);
 
@@ -770,9 +802,11 @@ class OpsQueuesPruneRedundantTest extends TestCase
             '--apply' => true,
             '--job' => [QueuePayloadInspector::JOB_RESERVATIONS],
             '--manifest' => $manifestPath,
+            '--expected-manifest-sha256' => $sha,
             '--backup' => $backupPath,
             '--audit-log' => $auditPath,
             '--maintenance-window' => 'MW-TEST-17',
+            '--maintenance-lock-file' => $lockPath,
             '--sleep-ms' => 0,
         ]);
 
@@ -784,26 +818,26 @@ class OpsQueuesPruneRedundantTest extends TestCase
     }
 
     // =========================================================================
-    // 18. Fallo entre commit y actualización de checkpoint
+    // 18. Fallo entre batch_committed y actualización de checkpoint
     // =========================================================================
-    public function test_18_recovers_traceability_when_crash_occurs_between_commit_and_checkpoint_update(): void
+    public function test_18_recovers_traceability_when_crash_occurs_between_batch_committed_and_checkpoint_update(): void
     {
         $this->seedAccountAndOrder(1, 17001, '200017001', 'paid', 'ready_to_ship');
-        $ids = [];
         for ($i = 0; $i < 4; $i++) {
-            $ids[] = $this->insertReservationJob(17001);
+            $this->insertReservationJob(17001);
         }
 
         $manifestPath = $this->tmp('m18.json');
         $backupPath = $this->tmp('b18.ndjson');
         $auditPath = $this->tmp('a18.ndjson');
-        $this->runDryRunAndBackup([QueuePayloadInspector::JOB_RESERVATIONS], $manifestPath, $backupPath);
+        $lockPath = $this->writeMaintenanceLock('MW-TEST-18');
+        $sha = $this->runDryRunAndBackup([QueuePayloadInspector::JOB_RESERVATIONS], $manifestPath, $backupPath);
 
         /** @var QueuePruneService $service */
         $service = $this->app->make(QueuePruneService::class);
-        $service->setAfterCommitBeforeCheckpointHook(static function (int $batchSeq): void {
+        $service->setAfterAuditBeforeCheckpointHook(static function (int $batchSeq): void {
             if ($batchSeq === 1) {
-                throw new RuntimeException('Simulated hard crash after DB COMMIT and before checkpoint save');
+                throw new RuntimeException('Simulated crash after batch_committed and before checkpoint save');
             }
         });
 
@@ -811,29 +845,31 @@ class OpsQueuesPruneRedundantTest extends TestCase
             $service->apply([
                 'jobs' => [QueuePayloadInspector::JOB_RESERVATIONS],
                 'manifest_path' => $manifestPath,
+                'expected_manifest_sha256' => $sha,
                 'backup_path' => $backupPath,
                 'maintenance_window' => 'MW-TEST-18',
+                'maintenance_lock_file' => $lockPath,
                 'chunk' => 2,
                 'max_delete' => 10,
                 'sleep_ms' => 0,
                 'audit_log_path' => $auditPath,
             ]);
-            $this->fail('Expected simulated post-commit crash.');
+            $this->fail('Expected simulated crash after batch_committed.');
         } catch (RuntimeException $e) {
-            $this->assertStringContainsString('Simulated hard crash', $e->getMessage());
+            $this->assertStringContainsString('Simulated crash', $e->getMessage());
         }
 
-        // Batch 1 WAS committed to DB (2 rows deleted), checkpoint file does NOT exist yet!
         $this->assertSame(2, DB::table('jobs')->count());
         $this->assertFileDoesNotExist($auditPath.'.checkpoint.json');
 
-        // Resume cleanly: must reconcile batch 1 from batch_intent WAL without losing traceability, then delete batch 2!
-        $service->setAfterCommitBeforeCheckpointHook(null);
+        $service->setAfterAuditBeforeCheckpointHook(null);
         $resumed = $service->apply([
             'jobs' => [QueuePayloadInspector::JOB_RESERVATIONS],
             'manifest_path' => $manifestPath,
+            'expected_manifest_sha256' => $sha,
             'backup_path' => $backupPath,
             'maintenance_window' => 'MW-TEST-18',
+            'maintenance_lock_file' => $lockPath,
             'chunk' => 2,
             'max_delete' => 10,
             'sleep_ms' => 0,
@@ -848,7 +884,7 @@ class OpsQueuesPruneRedundantTest extends TestCase
         $this->assertSame(0, DB::table('jobs')->count());
 
         $auditContents = (string) file_get_contents($auditPath);
-        $this->assertStringContainsString('"event":"batch_reconciled_after_crash"', $auditContents);
+        $this->assertStringContainsString('"reconciled_from_committed_audit":true', $auditContents);
     }
 
     // =========================================================================
@@ -866,34 +902,35 @@ class OpsQueuesPruneRedundantTest extends TestCase
         $manifestPath = $this->tmp('m19.json');
         $backupPath = $this->tmp('b19.ndjson');
         $auditPath = $this->tmp('a19.ndjson');
+        $lockPath = $this->writeMaintenanceLock('MW-TEST-19');
 
-        $this->runDryRunAndBackup(
+        $sha = $this->runDryRunAndBackup(
             [QueuePayloadInspector::JOB_RESERVATIONS, QueuePayloadInspector::JOB_BEAUTY_PRICES],
             $manifestPath,
             $backupPath,
         );
 
-        // Verify backup via dedicated command before apply.
         $verifyCode = Artisan::call('ops:queues-verify-backup', [
             '--manifest' => $manifestPath,
+            '--expected-manifest-sha256' => $sha,
             '--backup' => $backupPath,
         ]);
         $this->assertSame(0, $verifyCode, Artisan::output());
 
-        // Delete from primary DB.
         $applyCode = Artisan::call('ops:queues-prune-redundant', [
             '--apply' => true,
             '--job' => [QueuePayloadInspector::JOB_RESERVATIONS, QueuePayloadInspector::JOB_BEAUTY_PRICES],
             '--manifest' => $manifestPath,
+            '--expected-manifest-sha256' => $sha,
             '--backup' => $backupPath,
             '--audit-log' => $auditPath,
             '--maintenance-window' => 'MW-TEST-19',
+            '--maintenance-lock-file' => $lockPath,
             '--sleep-ms' => 0,
         ]);
         $this->assertSame(0, $applyCode, Artisan::output());
         $this->assertSame(0, DB::table('jobs')->count());
 
-        // Restore into a completely separate isolated SQLite DB connection.
         $isolatedSqliteFile = $this->tmp('isolated_restore.sqlite');
         touch($isolatedSqliteFile);
         config()->set('database.connections.isolated_restore', [
@@ -936,15 +973,18 @@ class OpsQueuesPruneRedundantTest extends TestCase
         $manifestPath = $this->tmp('m20.json');
         $backupPath = $this->tmp('b20.ndjson');
         $auditPath = $this->tmp('a20.ndjson');
-        $this->runDryRunAndBackup([QueuePayloadInspector::JOB_RESERVATIONS], $manifestPath, $backupPath);
+        $lockPath = $this->writeMaintenanceLock('MW-TEST-20');
+        $sha = $this->runDryRunAndBackup([QueuePayloadInspector::JOB_RESERVATIONS], $manifestPath, $backupPath);
 
         $code = Artisan::call('ops:queues-prune-redundant', [
             '--apply' => true,
             '--job' => [QueuePayloadInspector::JOB_RESERVATIONS],
             '--manifest' => $manifestPath,
+            '--expected-manifest-sha256' => $sha,
             '--backup' => $backupPath,
             '--audit-log' => $auditPath,
             '--maintenance-window' => 'MW-TEST-20',
+            '--maintenance-lock-file' => $lockPath,
             '--sleep-ms' => 0,
         ]);
 
@@ -956,17 +996,16 @@ class OpsQueuesPruneRedundantTest extends TestCase
     }
 
     // =========================================================================
-    // 21. Diagnóstico de reconstrucción 100% read-only (11 categorías §8 + anomalías §5)
+    // 21. Diagnóstico de reconstrucción 100% read-only (11 categorías + esquema real)
     // =========================================================================
     public function test_21_reconstruction_diagnostics_classifies_all_11_categories_read_only_and_detects_anomalies(): void
     {
         $this->seedFullBusinessTablesScenario();
 
-        // Also seed a job referencing a missing order and an order with missing account to verify §5 anomaly detection.
-        $this->insertReservationJob(999999); // missing order
+        $this->insertReservationJob(999999);
         DB::table('meli_orders')->insert([
             'id' => 90099,
-            'meli_account_id' => 999, // nonexistent account
+            'meli_account_id' => 999,
             'order_id' => '200090099',
             'status' => 'paid',
             'shipping_status' => 'ready_to_ship',
@@ -996,7 +1035,6 @@ class OpsQueuesPruneRedundantTest extends TestCase
         $this->assertSame('read_only_diagnosis', $report['mode']);
         $this->assertFalse($report['reconstructibility_policy']['automatic_reconstructibility_assumed']);
 
-        // Every one of the 11 required categories is populated and accurately classified.
         $this->assertGreaterThanOrEqual(1, $report['counts']['cancelled_orders_with_active_reservations']);
         $this->assertGreaterThanOrEqual(1, $report['counts']['shipped_orders_with_active_reservations']);
         $this->assertGreaterThanOrEqual(1, $report['counts']['paid_orders_pending_reservation']);
@@ -1009,7 +1047,10 @@ class OpsQueuesPruneRedundantTest extends TestCase
         $this->assertGreaterThanOrEqual(1, $report['counts']['expired_beauty_promotions']);
         $this->assertGreaterThanOrEqual(1, $report['counts']['remote_states_requiring_verification']);
 
-        // Strictly zero mutations, zero HTTP calls.
+        $this->assertArrayHasKey('reconstructibility_summary', $report);
+        $this->assertGreaterThanOrEqual(1, $report['reconstructibility_summary']['counts']['ambiguous_entities']);
+        $this->assertGreaterThanOrEqual(1, $report['reconstructibility_summary']['counts']['pending_human_review']);
+
         $this->assertSame($beforeHashes, $this->hashBusinessTables());
         Http::assertNothingSent();
     }
@@ -1025,9 +1066,9 @@ class OpsQueuesPruneRedundantTest extends TestCase
         $manifestPath = $this->tmp('m22.json');
         $backupPath = $this->tmp('b22.ndjson');
         $auditPath = $this->tmp('a22.ndjson');
-        $this->runDryRunAndBackup([QueuePayloadInspector::JOB_RESERVATIONS], $manifestPath, $backupPath);
+        $lockPath = $this->writeMaintenanceLock('MW-TEST-22');
+        $sha = $this->runDryRunAndBackup([QueuePayloadInspector::JOB_RESERVATIONS], $manifestPath, $backupPath);
 
-        // Hold the exact lock scope in another QueueRecoveryLock instance.
         $holder = new QueueRecoveryLock;
         $scope = implode('|', ['sqlite', ':memory:', 'jobs']);
         $holder->acquire(DB::connection('sqlite'), $scope);
@@ -1037,9 +1078,11 @@ class OpsQueuesPruneRedundantTest extends TestCase
                 '--apply' => true,
                 '--job' => [QueuePayloadInspector::JOB_RESERVATIONS],
                 '--manifest' => $manifestPath,
+                '--expected-manifest-sha256' => $sha,
                 '--backup' => $backupPath,
                 '--audit-log' => $auditPath,
                 '--maintenance-window' => 'MW-TEST-22',
+                '--maintenance-lock-file' => $lockPath,
                 '--sleep-ms' => 0,
             ]);
             $this->assertSame(1, $code);
@@ -1062,7 +1105,8 @@ class OpsQueuesPruneRedundantTest extends TestCase
         int $maxDelete = 10000,
         int $chunk = 500,
         ?int $endId = null,
-    ): void {
+        string $incidentId = 'INC-R2-TEST',
+    ): string {
         $params = [
             '--dry-run' => true,
             '--job' => $jobs,
@@ -1070,7 +1114,7 @@ class OpsQueuesPruneRedundantTest extends TestCase
             '--backup-out' => $backupPath,
             '--max-delete' => $maxDelete,
             '--chunk' => $chunk,
-            '--incident' => 'INC-R2-TEST',
+            '--incident' => $incidentId,
         ];
         if ($endId !== null) {
             $params['--end-id'] = $endId;
@@ -1078,6 +1122,24 @@ class OpsQueuesPruneRedundantTest extends TestCase
 
         $code = Artisan::call('ops:queues-prune-redundant', $params);
         $this->assertSame(0, $code, Artisan::output());
+
+        $manifest = json_decode((string) file_get_contents($manifestPath), true, 64, JSON_THROW_ON_ERROR);
+
+        return (string) $manifest['manifest_sha256'];
+    }
+
+    private function writeMaintenanceLock(string $windowId, string $incidentId = 'INC-R2-TEST'): string
+    {
+        $path = $this->tmp('maintenance_'.$windowId.'.lock.json');
+        file_put_contents($path, json_encode([
+            'window_id' => $windowId,
+            'incident_id' => $incidentId,
+            'workers_halted_confirmed' => true,
+            'approved_by' => 'ops-test',
+            'expires_at' => now()->utc()->addHours(2)->toIso8601String(),
+        ], JSON_THROW_ON_ERROR));
+
+        return $path;
     }
 
     private function insertReservationJob(int $meliOrderId, string $queue = 'meli', ?int $reservedAt = null): int
@@ -1186,7 +1248,6 @@ class OpsQueuesPruneRedundantTest extends TestCase
     {
         DB::table('meli_accounts')->insertOrIgnore(['id' => 1, 'nickname' => 'Cuenta 1']);
 
-        // Products: simple (101), kit (102), component (103)
         DB::table('inventory_products')->insert([
             ['id' => 101, 'sku' => 'SKU-SIMPLE', 'name' => 'Simple', 'product_type' => 'simple', 'is_active' => 1],
             ['id' => 102, 'sku' => 'SKU-KIT', 'name' => 'Kit', 'product_type' => 'kit', 'is_active' => 1],
@@ -1221,11 +1282,12 @@ class OpsQueuesPruneRedundantTest extends TestCase
         ]);
         DB::table('inventory_kit_reservations')->insert(['id' => 2, 'source_type' => 'meli_order', 'source_id' => 90002, 'kit_product_id' => 102, 'quantity' => 1, 'status' => 'ACTIVE']);
 
-        // Order 90003: paid pending reservation + manual movement on product 101
+        // Order 90003: paid pending reservation + manual movement on product 101 (using real `occurred_at`!)
         $this->seedAccountAndOrder(1, 90003, '200090003', 'paid', 'ready_to_ship');
         DB::table('meli_order_items')->insert(['meli_order_id' => 90003, 'item_id' => 'MLM101', 'variation_id' => null, 'remote_line_key' => 'MLM101:', 'sku' => 'SKU-SIMPLE', 'quantity' => 2]);
         DB::table('inventory_movements')->insert([
-            'id' => 1, 'inventory_product_id' => 101, 'type' => 'adjustment', 'quantity' => -2, 'reference_type' => 'manual_audit', 'created_at' => '2026-11-11 10:00:00',
+            'id' => 1, 'inventory_product_id' => 101, 'type' => 'adjustment', 'quantity' => -2, 'reference_type' => 'manual_audit',
+            'occurred_at' => '2026-11-11 10:00:00', 'created_at' => '2026-11-11 10:00:00',
         ]);
 
         // Order 90004: shipped during outage that NEVER had reservation
@@ -1248,6 +1310,10 @@ class OpsQueuesPruneRedundantTest extends TestCase
                 'starts_on' => now()->subDays(10)->toDateString(), 'ends_on' => now()->subDays(2)->toDateString(),
                 'starts_at' => '00:00', 'ends_at' => '23:59', 'all_day' => 1, 'timezone' => 'America/Mexico_City', 'active' => 1,
             ],
+        ]);
+        DB::table('meli_beauty_scheduled_discount_items')->insert([
+            ['meli_beauty_scheduled_discount_id' => 501, 'price_manager_item_id' => 301],
+            ['meli_beauty_scheduled_discount_id' => 502, 'price_manager_item_id' => 302],
         ]);
         DB::table('meli_scheduled_price_states')->insert([
             [
@@ -1376,6 +1442,7 @@ class OpsQueuesPruneRedundantTest extends TestCase
             $table->string('type');
             $table->integer('quantity');
             $table->string('reference_type')->nullable();
+            $table->timestamp('occurred_at')->nullable();
             $table->timestamp('created_at')->nullable();
         });
         $schema->create('meli_price_manager_items', function (Blueprint $table): void {
@@ -1396,6 +1463,11 @@ class OpsQueuesPruneRedundantTest extends TestCase
             $table->boolean('all_day')->default(false);
             $table->string('timezone')->default('America/Mexico_City');
             $table->boolean('active')->default(false);
+        });
+        $schema->create('meli_beauty_scheduled_discount_items', function (Blueprint $table): void {
+            $table->id();
+            $table->unsignedBigInteger('meli_beauty_scheduled_discount_id');
+            $table->unsignedBigInteger('price_manager_item_id');
         });
         $schema->create('meli_scheduled_price_states', function (Blueprint $table): void {
             $table->id();

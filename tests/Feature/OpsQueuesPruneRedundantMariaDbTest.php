@@ -21,8 +21,8 @@ use RuntimeException;
 use Tests\TestCase;
 
 /**
- * Isolated MariaDB/InnoDB locking, concurrency, deadlock/lock-wait retry,
- * GET_LOCK mutual exclusion, and cross-database restore verification tests for R2.
+ * Isolated MariaDB/InnoDB locking, concurrency, all-7-column revalidation, deadlock/lock-wait retry,
+ * GET_LOCK mutual exclusion, crash recovery, and PK-collision-safe cross-database restore tests for R2.1.
  *
  * Requires R2_MARIADB_TEST_HOST (opt-in so default SQLite test runs never touch external DBs).
  */
@@ -105,7 +105,7 @@ class OpsQueuesPruneRedundantMariaDbTest extends TestCase
             static fn (string $path): int => 20 * 1024 * 1024 * 1024,
         ));
         $this->app->singleton(QueueWorkerDetector::class, fn () => new QueueWorkerDetector(
-            static fn (): array => [],
+            static fn (): array => ['processes' => [], 'unreadable_count' => 0, 'inspection_available' => true],
         ));
     }
 
@@ -120,7 +120,7 @@ class OpsQueuesPruneRedundantMariaDbTest extends TestCase
         parent::tearDown();
     }
 
-    public function test_mariadb_innodb_full_prune_and_cross_database_restore(): void
+    public function test_mariadb_innodb_full_prune_and_cross_database_restore_with_pk_collision_protection(): void
     {
         $conn = DB::connection('r2_mariadb');
         $engine = $conn->selectOne("SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'jobs'", [$this->database]);
@@ -138,17 +138,16 @@ class OpsQueuesPruneRedundantMariaDbTest extends TestCase
         $manifestPath = $this->tmp('m_maria.json');
         $backupPath = $this->tmp('b_maria.ndjson');
         $auditPath = $this->tmp('a_maria.ndjson');
+        $lockFile = $this->writeMaintenanceLock('MW-MARIADB-01', 'INC-R2-MARIADB');
 
-        $dryCode = Artisan::call('ops:queues-prune-redundant', [
-            '--dry-run' => true,
-            '--job' => [QueuePayloadInspector::JOB_RESERVATIONS, QueuePayloadInspector::JOB_BEAUTY_PRICES],
-            '--manifest' => $manifestPath,
-            '--backup-out' => $backupPath,
-            '--incident' => 'INC-R2-MARIADB',
-        ]);
-        $this->assertSame(0, $dryCode, Artisan::output());
+        $sha = $this->dryRunAndGetSha(
+            [QueuePayloadInspector::JOB_RESERVATIONS, QueuePayloadInspector::JOB_BEAUTY_PRICES],
+            $manifestPath,
+            $backupPath,
+            'INC-R2-MARIADB',
+        );
 
-        // Concurrently insert a new job ABOVE manifest end_id using a separate PDO connection.
+        // Concurrently insert a new job ABOVE manifest authorized_upper_bound using a separate PDO connection.
         $secondPdo = $this->openRawPdo($this->database);
         $newJobPayload = $this->buildPayload(new ReconcileInventoryMeliOrderReservationsJob(999));
         $stmt = $secondPdo->prepare('INSERT INTO jobs (queue, payload, attempts, reserved_at, available_at, created_at) VALUES (?, ?, 0, NULL, ?, ?)');
@@ -159,15 +158,16 @@ class OpsQueuesPruneRedundantMariaDbTest extends TestCase
             '--apply' => true,
             '--job' => [QueuePayloadInspector::JOB_RESERVATIONS, QueuePayloadInspector::JOB_BEAUTY_PRICES],
             '--manifest' => $manifestPath,
+            '--expected-manifest-sha256' => $sha,
             '--backup' => $backupPath,
             '--audit-log' => $auditPath,
             '--maintenance-window' => 'MW-MARIADB-01',
+            '--maintenance-lock-file' => $lockFile,
             '--chunk' => 2,
             '--sleep-ms' => 0,
         ]);
         $this->assertSame(0, $applyCode, Artisan::output());
 
-        // Target jobs deleted; preserved module job AND concurrent post-bound job intact!
         $remaining = $conn->table('jobs')->orderBy('id')->pluck('id')->all();
         $this->assertSame([$preservedId, $newConcurrentId], $remaining);
 
@@ -185,6 +185,14 @@ class OpsQueuesPruneRedundantMariaDbTest extends TestCase
                 $backupService->normalizeRow($restoredRows->get($tid)),
             );
         }
+
+        // Second restore into the same DB MUST abort cleanly with `restore_pk_collision` without overwriting!
+        try {
+            $backupService->restoreToConnection($backupPath, 'r2_mariadb_restore', 'jobs');
+            $this->fail('Expected restore_pk_collision on second restore into MariaDB.');
+        } catch (QueueRecoveryException $e) {
+            $this->assertSame('restore_pk_collision', $e->reasonCode);
+        }
     }
 
     public function test_mariadb_innodb_detects_concurrent_lock_wait_timeout_and_retries_bounded(): void
@@ -195,19 +203,12 @@ class OpsQueuesPruneRedundantMariaDbTest extends TestCase
         $manifestPath = $this->tmp('m_lockwait.json');
         $backupPath = $this->tmp('b_lockwait.ndjson');
         $auditPath = $this->tmp('a_lockwait.ndjson');
+        $lockFile = $this->writeMaintenanceLock('MW-MARIADB-LOCKWAIT', 'INC-R2-LOCKWAIT');
 
-        $this->assertSame(0, Artisan::call('ops:queues-prune-redundant', [
-            '--dry-run' => true,
-            '--job' => [QueuePayloadInspector::JOB_RESERVATIONS],
-            '--manifest' => $manifestPath,
-            '--backup-out' => $backupPath,
-            '--incident' => 'INC-R2-LOCKWAIT',
-        ]));
+        $sha = $this->dryRunAndGetSha([QueuePayloadInspector::JOB_RESERVATIONS], $manifestPath, $backupPath, 'INC-R2-LOCKWAIT');
 
-        // Set a short InnoDB lock_wait_timeout on the prune connection so test runs fast (~1s).
         DB::connection('r2_mariadb')->statement('SET SESSION innodb_lock_wait_timeout = 1');
 
-        // Hold an exclusive InnoDB row lock on $id1 from an independent second PDO connection!
         $blocker = $this->openRawPdo($this->database);
         $blocker->beginTransaction();
         $blocker->query("SELECT id FROM jobs WHERE id = {$id1} FOR UPDATE")->fetchAll();
@@ -219,8 +220,10 @@ class OpsQueuesPruneRedundantMariaDbTest extends TestCase
                 $service->apply([
                     'jobs' => [QueuePayloadInspector::JOB_RESERVATIONS],
                     'manifest_path' => $manifestPath,
+                    'expected_manifest_sha256' => $sha,
                     'backup_path' => $backupPath,
                     'maintenance_window' => 'MW-MARIADB-LOCKWAIT',
+                    'maintenance_lock_file' => $lockFile,
                     'chunk' => 2,
                     'max_delete' => 10,
                     'sleep_ms' => 0,
@@ -235,14 +238,13 @@ class OpsQueuesPruneRedundantMariaDbTest extends TestCase
             $blocker->rollBack();
         }
 
-        // Verify retries were logged and BOTH rows were preserved intact (rolled back cleanly).
         $audit = (string) file_get_contents($auditPath);
         $this->assertStringContainsString('"event":"batch_deadlock_retry"', $audit);
         $this->assertSame(2, DB::connection('r2_mariadb')->table('jobs')->count());
         $this->assertSame([$id1, $id2], DB::connection('r2_mariadb')->table('jobs')->orderBy('id')->pluck('id')->all());
     }
 
-    public function test_mariadb_innodb_aborts_and_rolls_back_on_concurrent_update_from_second_session(): void
+    public function test_mariadb_innodb_aborts_and_rolls_back_on_concurrent_reserved_or_attempts_update(): void
     {
         $id1 = $this->insertJob(new ReconcileInventoryMeliOrderReservationsJob(701));
         $id2 = $this->insertJob(new ReconcileInventoryMeliOrderReservationsJob(702));
@@ -250,31 +252,46 @@ class OpsQueuesPruneRedundantMariaDbTest extends TestCase
         $manifestPath = $this->tmp('m_conc.json');
         $backupPath = $this->tmp('b_conc.ndjson');
         $auditPath = $this->tmp('a_conc.ndjson');
+        $lockFile = $this->writeMaintenanceLock('MW-MARIADB-CONC', 'INC-R2-CONC');
 
-        $this->assertSame(0, Artisan::call('ops:queues-prune-redundant', [
-            '--dry-run' => true,
-            '--job' => [QueuePayloadInspector::JOB_RESERVATIONS],
-            '--manifest' => $manifestPath,
-            '--backup-out' => $backupPath,
-            '--incident' => 'INC-R2-CONC',
-        ]));
+        $sha = $this->dryRunAndGetSha([QueuePayloadInspector::JOB_RESERVATIONS], $manifestPath, $backupPath, 'INC-R2-CONC');
 
-        // Second session concurrently reserves job #2 right before apply!
+        // Second session concurrently increments `attempts` (without touching reserved_at or payload!).
         $secondPdo = $this->openRawPdo($this->database);
-        $secondPdo->prepare('UPDATE jobs SET reserved_at = ? WHERE id = ?')->execute([time(), $id2]);
+        $secondPdo->prepare('UPDATE jobs SET attempts = 1 WHERE id = ?')->execute([$id2]);
 
-        $code = Artisan::call('ops:queues-prune-redundant', [
+        $codeAttempts = Artisan::call('ops:queues-prune-redundant', [
             '--apply' => true,
             '--job' => [QueuePayloadInspector::JOB_RESERVATIONS],
             '--manifest' => $manifestPath,
+            '--expected-manifest-sha256' => $sha,
             '--backup' => $backupPath,
             '--audit-log' => $auditPath,
             '--maintenance-window' => 'MW-MARIADB-CONC',
+            '--maintenance-lock-file' => $lockFile,
             '--chunk' => 2,
             '--sleep-ms' => 0,
         ]);
+        $this->assertSame(1, $codeAttempts);
+        $this->assertStringContainsString('concurrent_modification', Artisan::output());
+        $this->assertSame(2, DB::connection('r2_mariadb')->table('jobs')->count());
 
-        $this->assertSame(1, $code);
+        // Restore attempts=0 and test concurrent reservation!
+        $secondPdo->prepare('UPDATE jobs SET attempts = 0, reserved_at = ? WHERE id = ?')->execute([time(), $id2]);
+
+        $codeReserved = Artisan::call('ops:queues-prune-redundant', [
+            '--apply' => true,
+            '--job' => [QueuePayloadInspector::JOB_RESERVATIONS],
+            '--manifest' => $manifestPath,
+            '--expected-manifest-sha256' => $sha,
+            '--backup' => $backupPath,
+            '--audit-log' => $auditPath,
+            '--maintenance-window' => 'MW-MARIADB-CONC',
+            '--maintenance-lock-file' => $lockFile,
+            '--chunk' => 2,
+            '--sleep-ms' => 0,
+        ]);
+        $this->assertSame(1, $codeReserved);
         $this->assertStringContainsString('reserved_jobs_detected', Artisan::output());
         $this->assertSame(2, DB::connection('r2_mariadb')->table('jobs')->count());
     }
@@ -286,16 +303,10 @@ class OpsQueuesPruneRedundantMariaDbTest extends TestCase
         $manifestPath = $this->tmp('m_getlock.json');
         $backupPath = $this->tmp('b_getlock.ndjson');
         $auditPath = $this->tmp('a_getlock.ndjson');
+        $lockFile = $this->writeMaintenanceLock('MW-MARIADB-GETLOCK', 'INC-R2-GETLOCK');
 
-        $this->assertSame(0, Artisan::call('ops:queues-prune-redundant', [
-            '--dry-run' => true,
-            '--job' => [QueuePayloadInspector::JOB_RESERVATIONS],
-            '--manifest' => $manifestPath,
-            '--backup-out' => $backupPath,
-            '--incident' => 'INC-R2-GETLOCK',
-        ]));
+        $sha = $this->dryRunAndGetSha([QueuePayloadInspector::JOB_RESERVATIONS], $manifestPath, $backupPath, 'INC-R2-GETLOCK');
 
-        // Acquire MariaDB GET_LOCK directly on a second independent PDO session (simulating another host/container).
         $scope = implode('|', ['r2_mariadb', $this->database, 'jobs']);
         $dbLockName = 'ops_qrec_'.substr(hash('sha256', $scope), 0, 48);
 
@@ -309,9 +320,11 @@ class OpsQueuesPruneRedundantMariaDbTest extends TestCase
                 '--apply' => true,
                 '--job' => [QueuePayloadInspector::JOB_RESERVATIONS],
                 '--manifest' => $manifestPath,
+                '--expected-manifest-sha256' => $sha,
                 '--backup' => $backupPath,
                 '--audit-log' => $auditPath,
                 '--maintenance-window' => 'MW-MARIADB-GETLOCK',
+                '--maintenance-lock-file' => $lockFile,
                 '--sleep-ms' => 0,
             ]);
             $this->assertSame(1, $code);
@@ -323,7 +336,7 @@ class OpsQueuesPruneRedundantMariaDbTest extends TestCase
         }
     }
 
-    public function test_mariadb_crash_between_commit_and_checkpoint_reconciles_on_resume(): void
+    public function test_mariadb_crash_after_commit_before_audit_aborts_ambiguous_until_confirmed(): void
     {
         for ($i = 0; $i < 4; $i++) {
             $this->insertJob(new ReconcileInventoryMeliOrderReservationsJob(900 + $i));
@@ -332,20 +345,15 @@ class OpsQueuesPruneRedundantMariaDbTest extends TestCase
         $manifestPath = $this->tmp('m_crash.json');
         $backupPath = $this->tmp('b_crash.ndjson');
         $auditPath = $this->tmp('a_crash.ndjson');
+        $lockFile = $this->writeMaintenanceLock('MW-MARIADB-CRASH', 'INC-R2-CRASH');
 
-        $this->assertSame(0, Artisan::call('ops:queues-prune-redundant', [
-            '--dry-run' => true,
-            '--job' => [QueuePayloadInspector::JOB_RESERVATIONS],
-            '--manifest' => $manifestPath,
-            '--backup-out' => $backupPath,
-            '--incident' => 'INC-R2-CRASH',
-        ]));
+        $sha = $this->dryRunAndGetSha([QueuePayloadInspector::JOB_RESERVATIONS], $manifestPath, $backupPath, 'INC-R2-CRASH');
 
         /** @var QueuePruneService $service */
         $service = $this->app->make(QueuePruneService::class);
-        $service->setAfterCommitBeforeCheckpointHook(static function (int $batchSeq): void {
+        $service->setAfterCommitBeforeAuditHook(static function (int $batchSeq): void {
             if ($batchSeq === 1) {
-                throw new RuntimeException('MariaDB simulated crash after COMMIT');
+                throw new RuntimeException('MariaDB simulated crash strictly between COMMIT and batch_committed');
             }
         });
 
@@ -353,8 +361,10 @@ class OpsQueuesPruneRedundantMariaDbTest extends TestCase
             $service->apply([
                 'jobs' => [QueuePayloadInspector::JOB_RESERVATIONS],
                 'manifest_path' => $manifestPath,
+                'expected_manifest_sha256' => $sha,
                 'backup_path' => $backupPath,
                 'maintenance_window' => 'MW-MARIADB-CRASH',
+                'maintenance_lock_file' => $lockFile,
                 'chunk' => 2,
                 'max_delete' => 10,
                 'sleep_ms' => 0,
@@ -367,17 +377,41 @@ class OpsQueuesPruneRedundantMariaDbTest extends TestCase
 
         $this->assertSame(2, DB::connection('r2_mariadb')->table('jobs')->count());
 
-        $service->setAfterCommitBeforeCheckpointHook(null);
+        // Plain --resume MUST abort with unresolved_ambiguous_batch_intent!
+        $service->setAfterCommitBeforeAuditHook(null);
+        try {
+            $service->apply([
+                'jobs' => [QueuePayloadInspector::JOB_RESERVATIONS],
+                'manifest_path' => $manifestPath,
+                'expected_manifest_sha256' => $sha,
+                'backup_path' => $backupPath,
+                'maintenance_window' => 'MW-MARIADB-CRASH',
+                'maintenance_lock_file' => $lockFile,
+                'chunk' => 2,
+                'max_delete' => 10,
+                'sleep_ms' => 0,
+                'audit_log_path' => $auditPath,
+                'resume' => true,
+            ]);
+            $this->fail('Expected unresolved_ambiguous_batch_intent');
+        } catch (QueueRecoveryException $e) {
+            $this->assertSame('unresolved_ambiguous_batch_intent', $e->reasonCode);
+        }
+
+        // With explicit operator confirmation (--confirm-reconcile-batch=1), reconciles and finishes!
         $resumed = $service->apply([
             'jobs' => [QueuePayloadInspector::JOB_RESERVATIONS],
             'manifest_path' => $manifestPath,
+            'expected_manifest_sha256' => $sha,
             'backup_path' => $backupPath,
             'maintenance_window' => 'MW-MARIADB-CRASH',
+            'maintenance_lock_file' => $lockFile,
             'chunk' => 2,
             'max_delete' => 10,
             'sleep_ms' => 0,
             'audit_log_path' => $auditPath,
             'resume' => true,
+            'confirm_reconcile_batch' => 1,
         ]);
 
         $this->assertSame('completed', $resumed['status']);
@@ -390,6 +424,37 @@ class OpsQueuesPruneRedundantMariaDbTest extends TestCase
     // =========================================================================
     // Helpers
     // =========================================================================
+
+    /** @param list<string> $jobs */
+    private function dryRunAndGetSha(array $jobs, string $manifestPath, string $backupPath, string $incidentId): string
+    {
+        $code = Artisan::call('ops:queues-prune-redundant', [
+            '--dry-run' => true,
+            '--job' => $jobs,
+            '--manifest' => $manifestPath,
+            '--backup-out' => $backupPath,
+            '--incident' => $incidentId,
+        ]);
+        $this->assertSame(0, $code, Artisan::output());
+
+        $manifest = json_decode((string) file_get_contents($manifestPath), true, 64, JSON_THROW_ON_ERROR);
+
+        return (string) $manifest['manifest_sha256'];
+    }
+
+    private function writeMaintenanceLock(string $windowId, string $incidentId): string
+    {
+        $path = $this->tmp('lock_'.$windowId.'.json');
+        file_put_contents($path, json_encode([
+            'window_id' => $windowId,
+            'incident_id' => $incidentId,
+            'workers_halted_confirmed' => true,
+            'approved_by' => 'ops-mariadb-test',
+            'expires_at' => now()->utc()->addHours(2)->toIso8601String(),
+        ], JSON_THROW_ON_ERROR));
+
+        return $path;
+    }
 
     private function bootstrapIsolatedDatabases(): void
     {
