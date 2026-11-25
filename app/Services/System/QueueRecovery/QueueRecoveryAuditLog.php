@@ -8,11 +8,16 @@ use JsonException;
 
 /**
  * Append-only NDJSON audit log for queue recovery runs.
- * Stores metadata, IDs, counts, and SHA-256 hashes only — never raw payloads, tokens, or PII.
+ * - Verifies full writes + fflush + fsync on every record.
+ * - NEVER silently ignores corrupt or truncated NDJSON lines (aborts fail-closed).
+ * - Stores metadata, IDs, counts, and SHA-256 hashes only — never raw payloads, tokens, or PII.
  */
 class QueueRecoveryAuditLog
 {
-    public function __construct(private readonly ?string $path) {}
+    public function __construct(
+        private readonly ?string $path,
+        private readonly QueueRecoveryPathGuard $pathGuard = new QueueRecoveryPathGuard,
+    ) {}
 
     public function path(): ?string
     {
@@ -26,14 +31,8 @@ class QueueRecoveryAuditLog
             return;
         }
 
-        $dir = dirname($this->path);
-        if (! is_dir($dir) && ! @mkdir($dir, 0775, true) && ! is_dir($dir)) {
-            throw new QueueRecoveryException(
-                "No se pudo crear el directorio para el audit log: '{$dir}'.",
-                'audit_log_write_failed',
-                ['path' => $this->path],
-            );
-        }
+        $safePath = $this->pathGuard->assertSafeOutputPath($this->path, false, false);
+        $this->pathGuard->ensureRestrictiveDirectory(dirname($safePath), 0700);
 
         $entry = [
             'timestamp' => now()->utc()->toIso8601String(),
@@ -42,28 +41,19 @@ class QueueRecoveryAuditLog
         ];
 
         $line = json_encode($entry, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR)."\n";
-        $handle = @fopen($this->path, 'ab');
+        $handle = @fopen($safePath, 'ab');
         if ($handle === false) {
             throw new QueueRecoveryException(
-                "No se pudo abrir el audit log para escritura: '{$this->path}'.",
+                "No se pudo abrir el audit log para escritura: '{$safePath}'.",
                 'audit_log_write_failed',
-                ['path' => $this->path],
+                ['path' => $safePath],
             );
         }
 
         try {
+            @chmod($safePath, 0600);
             flock($handle, LOCK_EX);
-            if (fwrite($handle, $line) === false) {
-                throw new QueueRecoveryException(
-                    "No se pudo escribir en el audit log: '{$this->path}'.",
-                    'audit_log_write_failed',
-                    ['path' => $this->path],
-                );
-            }
-            fflush($handle);
-            if (function_exists('fsync')) {
-                @fsync($handle);
-            }
+            $this->pathGuard->writeAllAndSync($handle, $line, $safePath, true);
         } finally {
             flock($handle, LOCK_UN);
             fclose($handle);
@@ -71,113 +61,131 @@ class QueueRecoveryAuditLog
     }
 
     /**
-     * Finds batch_intent records for a manifest that were never followed by batch_committed
-     * or batch_reconciled_after_crash (e.g., crash between DB commit and checkpoint write).
+     * Parses the entire audit log strictly (aborting on ANY corrupt or truncated NDJSON line)
+     * and classifies batch lifecycle state for a manifest.
      *
-     * @return list<array{batch_seq: int, ids: list<int>, min_id: int, max_id: int}>
+     * @return array{
+     *     last_batch_seq: int,
+     *     committed_batches: array<int, array{batch_seq: int, ids: list<int>, min_id: int, max_id: int, checkpoint_saved: bool}>,
+     *     unresolved_intents: list<array{batch_seq: int, ids: list<int>, min_id: int, max_id: int}>
+     * }
      */
-    public function findUnresolvedIntents(string $manifestSha256): array
+    public function inspectManifestJournal(string $manifestSha256): array
     {
-        if ($this->path === null || ! is_file($this->path) || ! is_readable($this->path)) {
-            return [];
+        if ($this->path === null || ! is_file($this->path)) {
+            return [
+                'last_batch_seq' => 0,
+                'committed_batches' => [],
+                'unresolved_intents' => [],
+            ];
+        }
+
+        $safePath = $this->pathGuard->assertSafeInputPath($this->path);
+        $handle = @fopen($safePath, 'rb');
+        if ($handle === false) {
+            throw new QueueRecoveryException(
+                "No se pudo leer el audit log: '{$safePath}'.",
+                'audit_log_unreadable',
+                ['path' => $safePath],
+            );
         }
 
         $intents = [];
-        $resolved = [];
-
-        $handle = @fopen($this->path, 'rb');
-        if ($handle === false) {
-            return [];
-        }
+        $committed = [];
+        $checkpointed = [];
+        $aborted = [];
+        $lastSeq = 0;
+        $lineNumber = 0;
 
         try {
             while (($line = fgets($handle)) !== false) {
-                $trimmed = trim($line);
-                if ($trimmed === '') {
+                $lineNumber++;
+                if (trim($line) === '') {
                     continue;
                 }
 
+                // Detect truncated final line lacking trailing newline or invalid JSON.
                 try {
-                    $record = json_decode($trimmed, true, 64, JSON_THROW_ON_ERROR);
-                } catch (JsonException) {
+                    $record = json_decode($line, true, 64, JSON_THROW_ON_ERROR);
+                } catch (JsonException $e) {
+                    throw new QueueRecoveryException(
+                        "Audit log corrupto o truncado en línea {$lineNumber}: '{$safePath}'. Revise la integridad antes de continuar.",
+                        'audit_log_corrupt',
+                        ['path' => $safePath, 'line' => $lineNumber],
+                        $e,
+                    );
+                }
+
+                if (! is_array($record) || ! is_string($record['event'] ?? null)) {
+                    throw new QueueRecoveryException(
+                        "Registro inválido en audit log línea {$lineNumber}: '{$safePath}'.",
+                        'audit_log_corrupt',
+                        ['path' => $safePath, 'line' => $lineNumber],
+                    );
+                }
+
+                if ((string) ($record['manifest_sha256'] ?? '') !== $manifestSha256) {
                     continue;
                 }
 
-                if (! is_array($record) || (string) ($record['manifest_sha256'] ?? '') !== $manifestSha256) {
-                    continue;
+                $event = (string) $record['event'];
+                $seq = (int) ($record['batch_seq'] ?? 0);
+                if ($seq > $lastSeq) {
+                    $lastSeq = $seq;
                 }
 
-                $event = (string) ($record['event'] ?? '');
-                $batchSeq = (int) ($record['batch_seq'] ?? 0);
-
-                if ($batchSeq <= 0) {
+                if ($seq <= 0) {
                     continue;
                 }
 
                 if ($event === 'batch_intent' && is_array($record['ids'] ?? null)) {
-                    $intents[$batchSeq] = [
-                        'batch_seq' => $batchSeq,
+                    $intents[$seq] = [
+                        'batch_seq' => $seq,
                         'ids' => array_values(array_map('intval', $record['ids'])),
                         'min_id' => (int) ($record['min_id'] ?? 0),
                         'max_id' => (int) ($record['max_id'] ?? 0),
                     ];
-                } elseif (in_array($event, ['batch_committed', 'batch_reconciled_after_crash', 'batch_aborted'], true)) {
-                    $resolved[$batchSeq] = true;
+                } elseif (in_array($event, ['batch_committed', 'batch_reconciled_operator_confirmed'], true)) {
+                    $ids = is_array($record['ids'] ?? null)
+                        ? array_values(array_map('intval', $record['ids']))
+                        : ($intents[$seq]['ids'] ?? []);
+                    $committed[$seq] = [
+                        'batch_seq' => $seq,
+                        'ids' => $ids,
+                        'min_id' => (int) ($record['min_id'] ?? ($ids !== [] ? min($ids) : 0)),
+                        'max_id' => (int) ($record['max_id'] ?? ($ids !== [] ? max($ids) : 0)),
+                        'checkpoint_saved' => false,
+                    ];
+                } elseif ($event === 'batch_checkpoint_saved') {
+                    $checkpointed[$seq] = true;
+                } elseif ($event === 'batch_aborted') {
+                    $aborted[$seq] = true;
                 }
             }
         } finally {
             fclose($handle);
         }
+
+        foreach ($committed as $seq => &$batch) {
+            if (isset($checkpointed[$seq])) {
+                $batch['checkpoint_saved'] = true;
+            }
+        }
+        unset($batch);
 
         $unresolved = [];
         foreach ($intents as $seq => $intent) {
-            if (! isset($resolved[$seq])) {
+            if (! isset($committed[$seq]) && ! isset($aborted[$seq])) {
                 $unresolved[] = $intent;
             }
         }
-
         usort($unresolved, static fn (array $a, array $b): int => $a['batch_seq'] <=> $b['batch_seq']);
+        ksort($committed);
 
-        return $unresolved;
-    }
-
-    /**
-     * Counts all batch_seq numbers already used for this manifest in the audit log.
-     */
-    public function lastBatchSeq(string $manifestSha256): int
-    {
-        if ($this->path === null || ! is_file($this->path) || ! is_readable($this->path)) {
-            return 0;
-        }
-
-        $maxSeq = 0;
-        $handle = @fopen($this->path, 'rb');
-        if ($handle === false) {
-            return 0;
-        }
-
-        try {
-            while (($line = fgets($handle)) !== false) {
-                $trimmed = trim($line);
-                if ($trimmed === '') {
-                    continue;
-                }
-                try {
-                    $record = json_decode($trimmed, true, 64, JSON_THROW_ON_ERROR);
-                } catch (JsonException) {
-                    continue;
-                }
-                if (is_array($record) && (string) ($record['manifest_sha256'] ?? '') === $manifestSha256) {
-                    $seq = (int) ($record['batch_seq'] ?? 0);
-                    if ($seq > $maxSeq) {
-                        $maxSeq = $seq;
-                    }
-                }
-            }
-        } finally {
-            fclose($handle);
-        }
-
-        return $maxSeq;
+        return [
+            'last_batch_seq' => $lastSeq,
+            'committed_batches' => $committed,
+            'unresolved_intents' => $unresolved,
+        ];
     }
 }

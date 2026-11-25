@@ -17,6 +17,8 @@ class QueuePruneService
 
     public const DEFAULT_MAX_DELETE = 10000;
 
+    public const DEFAULT_MAX_SCAN = 50000;
+
     public const DEFAULT_MIN_FREE_DISK_MB = 8192; // 8 GiB
 
     public const DEFAULT_MAX_DEADLOCK_RETRIES = 3;
@@ -24,7 +26,16 @@ class QueuePruneService
     private bool $interrupted = false;
 
     /** @var (callable(int, list<int>): void)|null */
-    private $afterCommitBeforeCheckpointHook = null;
+    private $beforeIntentHook = null;
+
+    /** @var (callable(int, list<int>): void)|null */
+    private $afterIntentBeforeCommitHook = null;
+
+    /** @var (callable(int, list<int>): void)|null */
+    private $afterCommitBeforeAuditHook = null;
+
+    /** @var (callable(int, list<int>): void)|null */
+    private $afterAuditBeforeCheckpointHook = null;
 
     /** @var (callable(int): bool)|null */
     private $shouldInterruptChecker = null;
@@ -36,16 +47,57 @@ class QueuePruneService
         private readonly QueueRecoveryDiskChecker $diskChecker,
         private readonly QueueWorkerDetector $workerDetector,
         private readonly QueueRecoveryLock $lock,
+        private readonly QueueRecoveryPathGuard $pathGuard = new QueueRecoveryPathGuard,
     ) {}
 
     /**
-     * Test hook to simulate a failure strictly between DB commit and checkpoint persistence.
+     * Test hook to simulate failure strictly before persisting batch_intent.
+     *
+     * @param  (callable(int, list<int>): void)|null  $hook
+     */
+    public function setBeforeIntentHook(?callable $hook): void
+    {
+        $this->beforeIntentHook = $hook;
+    }
+
+    /**
+     * Test hook to simulate failure strictly after batch_intent and before DB DELETE/COMMIT.
+     *
+     * @param  (callable(int, list<int>): void)|null  $hook
+     */
+    public function setAfterIntentBeforeCommitHook(?callable $hook): void
+    {
+        $this->afterIntentBeforeCommitHook = $hook;
+    }
+
+    /**
+     * Test hook to simulate failure strictly after DB COMMIT and before batch_committed audit record.
+     *
+     * @param  (callable(int, list<int>): void)|null  $hook
+     */
+    public function setAfterCommitBeforeAuditHook(?callable $hook): void
+    {
+        $this->afterCommitBeforeAuditHook = $hook;
+    }
+
+    /**
+     * Backwards-compatible alias for setAfterCommitBeforeAuditHook().
      *
      * @param  (callable(int, list<int>): void)|null  $hook
      */
     public function setAfterCommitBeforeCheckpointHook(?callable $hook): void
     {
-        $this->afterCommitBeforeCheckpointHook = $hook;
+        $this->afterCommitBeforeAuditHook = $hook;
+    }
+
+    /**
+     * Test hook to simulate failure strictly after batch_committed and before checkpoint save.
+     *
+     * @param  (callable(int, list<int>): void)|null  $hook
+     */
+    public function setAfterAuditBeforeCheckpointHook(?callable $hook): void
+    {
+        $this->afterAuditBeforeCheckpointHook = $hook;
     }
 
     /**
@@ -119,28 +171,35 @@ class QueuePruneService
     }
 
     /**
-     * Read-only PK-cursor scan producing counts, anomalies, signed manifest, and optional backup.
+     * Read-only PK-cursor scan producing counts, anomalies, manifest (checksum + optional HMAC), and optional backup.
+     * Explicitly separates authorized_upper_bound, last_scanned_id, last_candidate_id, next_start_id, and is_partial.
      *
      * @param  array{
      *     jobs: list<string>,
      *     chunk?: int,
      *     max_delete?: int,
+     *     max_scan?: int,
      *     start_id?: int,
      *     end_id?: ?int,
      *     incident_id?: string,
      *     manifest_path?: ?string,
      *     backup_out_path?: ?string,
      *     audit_log_path?: ?string,
+     *     hmac_key?: ?string,
      *     queue_connection?: ?string
      * }  $options
      * @return array<string, mixed>
      */
     public function dryRun(array $options): array
     {
+        $startedAt = microtime(true);
         $allowedJobs = $this->inspector->validateWhitelist($options['jobs']);
         $chunk = $this->validateChunk((int) ($options['chunk'] ?? self::DEFAULT_CHUNK_SIZE));
         $maxDelete = $this->validateMaxDelete((int) ($options['max_delete'] ?? self::DEFAULT_MAX_DELETE));
+        $maxScan = $this->validateMaxScan((int) ($options['max_scan'] ?? self::DEFAULT_MAX_SCAN));
         $startId = max(0, (int) ($options['start_id'] ?? 0));
+        $hmacKey = isset($options['hmac_key']) ? (string) $options['hmac_key'] : null;
+
         $incidentId = trim((string) ($options['incident_id'] ?? 'INC-QUEUE-R2-'.now()->utc()->format('Ymd-His')));
         if ($incidentId === '') {
             $incidentId = 'INC-QUEUE-R2-'.now()->utc()->format('Ymd-His');
@@ -151,17 +210,17 @@ class QueuePruneService
         $table = $target['table'];
 
         $currentMaxId = (int) ($db->table($table)->max('id') ?? 0);
-        $requestedEndId = isset($options['end_id']) && $options['end_id'] !== null && $options['end_id'] !== ''
+        $authorizedUpperBound = isset($options['end_id']) && $options['end_id'] !== null && $options['end_id'] !== ''
             ? (int) $options['end_id']
             : $currentMaxId;
 
-        if ($requestedEndId < 0) {
+        if ($authorizedUpperBound < 0) {
             throw new QueueRecoveryException('El parámetro --end-id no puede ser negativo.', 'invalid_bounds');
         }
 
-        if ($requestedEndId > 0 && $startId > $requestedEndId) {
+        if ($authorizedUpperBound > 0 && $startId > $authorizedUpperBound) {
             throw new QueueRecoveryException(
-                "Rango inválido: --start-id ({$startId}) es mayor que --end-id ({$requestedEndId}).",
+                "Rango inválido: --start-id ({$startId}) es mayor que --end-id ({$authorizedUpperBound}).",
                 'invalid_bounds',
             );
         }
@@ -198,21 +257,26 @@ class QueuePruneService
         $cursor = $startId;
         $highestScannedId = $startId;
         $limitReached = false;
+        $scanLimitReached = false;
+        $scanExhausted = $cursor >= $authorizedUpperBound;
 
-        while ($cursor < $requestedEndId && ! $limitReached) {
+        while ($cursor < $authorizedUpperBound && ! $limitReached && ! $scanLimitReached) {
             $rows = $db->table($table)
                 ->select(['id', 'queue', 'payload', 'attempts', 'reserved_at', 'available_at', 'created_at'])
                 ->where('id', '>', $cursor)
-                ->where('id', '<=', $requestedEndId)
+                ->where('id', '<=', $authorizedUpperBound)
                 ->orderBy('id')
                 ->limit($chunk)
                 ->get();
 
             if ($rows->isEmpty()) {
+                $scanExhausted = true;
                 break;
             }
 
+            $fetchedCount = $rows->count();
             $batchCandidates = [];
+
             foreach ($rows as $row) {
                 $jobId = (int) $row->id;
                 $cursor = $jobId;
@@ -224,56 +288,55 @@ class QueuePruneService
                     if (count($anomalies['reserved_job_ids']) < 500) {
                         $anomalies['reserved_job_ids'][] = $jobId;
                     }
+                } else {
+                    $inspection = $this->inspector->inspect((string) $row->payload, $allowedJobs);
+                    $classLabel = $inspection['job_class'] ?? 'UNKNOWN_OR_INVALID';
+                    $countsByClass[$classLabel] = ($countsByClass[$classLabel] ?? 0) + 1;
 
-                    continue;
-                }
+                    if ($inspection['classification'] === QueuePayloadInspector::CLASSIFICATION_INVALID_JSON) {
+                        $totals['preserved_invalid_json']++;
+                        if (count($anomalies['invalid_payload_job_ids']) < 500) {
+                            $anomalies['invalid_payload_job_ids'][] = $jobId;
+                        }
+                    } elseif ($inspection['classification'] === QueuePayloadInspector::CLASSIFICATION_INCONSISTENT) {
+                        $totals['preserved_inconsistent']++;
+                        if (count($anomalies['inconsistent_payload_job_ids']) < 500) {
+                            $anomalies['inconsistent_payload_job_ids'][] = [
+                                'job_id' => $jobId,
+                                'reason' => $inspection['reason'],
+                            ];
+                        }
+                    } elseif ($inspection['classification'] === QueuePayloadInspector::CLASSIFICATION_OTHER_MODULE) {
+                        $totals['preserved_other_modules']++;
+                    } else {
+                        $normalizedRow = $this->backupService->normalizeRow($row);
+                        $rowSha256 = $this->backupService->rowHash($normalizedRow);
 
-                $inspection = $this->inspector->inspect((string) $row->payload, $allowedJobs);
-                $classLabel = $inspection['job_class'] ?? 'UNKNOWN_OR_INVALID';
-                $countsByClass[$classLabel] = ($countsByClass[$classLabel] ?? 0) + 1;
-
-                if ($inspection['classification'] === QueuePayloadInspector::CLASSIFICATION_INVALID_JSON) {
-                    $totals['preserved_invalid_json']++;
-                    if (count($anomalies['invalid_payload_job_ids']) < 500) {
-                        $anomalies['invalid_payload_job_ids'][] = $jobId;
-                    }
-
-                    continue;
-                }
-
-                if ($inspection['classification'] === QueuePayloadInspector::CLASSIFICATION_INCONSISTENT) {
-                    $totals['preserved_inconsistent']++;
-                    if (count($anomalies['inconsistent_payload_job_ids']) < 500) {
-                        $anomalies['inconsistent_payload_job_ids'][] = [
-                            'job_id' => $jobId,
-                            'reason' => $inspection['reason'],
+                        $batchCandidates[] = [
+                            'id' => $jobId,
+                            'job_class' => (string) $inspection['job_class'],
+                            'queue' => $normalizedRow['queue'],
+                            'attempts' => $normalizedRow['attempts'],
+                            'available_at' => $normalizedRow['available_at'],
+                            'entity_type' => (string) $inspection['entity_type'],
+                            'entity_id' => (int) $inspection['entity_id'],
+                            'meli_item_id' => $inspection['meli_item_id'],
+                            'created_at' => $normalizedRow['created_at'],
+                            'created_at_iso' => gmdate('Y-m-d\TH:i:s\Z', $normalizedRow['created_at']),
+                            'reserved_at' => null,
+                            'payload_hash' => (string) $inspection['payload_hash'],
+                            'row_sha256' => $rowSha256,
                         ];
+
+                        if ((count($entries) + count($batchCandidates)) >= $maxDelete) {
+                            $limitReached = true;
+                            break;
+                        }
                     }
-
-                    continue;
                 }
 
-                if ($inspection['classification'] === QueuePayloadInspector::CLASSIFICATION_OTHER_MODULE) {
-                    $totals['preserved_other_modules']++;
-
-                    continue;
-                }
-
-                $batchCandidates[] = [
-                    'id' => $jobId,
-                    'job_class' => (string) $inspection['job_class'],
-                    'queue' => (string) $row->queue,
-                    'entity_type' => (string) $inspection['entity_type'],
-                    'entity_id' => (int) $inspection['entity_id'],
-                    'meli_item_id' => $inspection['meli_item_id'],
-                    'created_at' => (int) $row->created_at,
-                    'created_at_iso' => gmdate('Y-m-d\TH:i:s\Z', (int) $row->created_at),
-                    'reserved_at' => null,
-                    'payload_hash' => (string) $inspection['payload_hash'],
-                ];
-
-                if ((count($entries) + count($batchCandidates)) >= $maxDelete) {
-                    $limitReached = true;
+                if ($maxScan > 0 && $totals['scanned'] >= $maxScan) {
+                    $scanLimitReached = true;
                     break;
                 }
             }
@@ -296,6 +359,15 @@ class QueuePruneService
                     $countsByEntity[$entry['job_class']][$entityKey] = ($countsByEntity[$entry['job_class']][$entityKey] ?? 0) + 1;
                 }
             }
+
+            if (! $limitReached && ! $scanLimitReached && ($fetchedCount < $chunk || $cursor >= $authorizedUpperBound)) {
+                $scanExhausted = true;
+                break;
+            }
+        }
+
+        if ($cursor >= $authorizedUpperBound) {
+            $scanExhausted = true;
         }
 
         ksort($countsByClass);
@@ -310,9 +382,17 @@ class QueuePruneService
         $anomalies['missing_beauty_rules'] = array_values(array_unique($anomalies['missing_beauty_rules']));
         sort($anomalies['missing_beauty_rules']);
 
-        $effectiveEndId = $entries !== []
-            ? min($requestedEndId, max($highestScannedId, (int) end($entries)['id']))
-            : $requestedEndId;
+        $isPartial = ! $scanExhausted && ($limitReached || $scanLimitReached);
+        $lastScannedId = $isPartial ? $highestScannedId : $authorizedUpperBound;
+        $lastCandidateId = $entries !== [] ? (int) end($entries)['id'] : null;
+        $nextStartId = $lastScannedId;
+
+        $stopReason = match (true) {
+            ! $isPartial => 'completed_upper_bound',
+            $limitReached => 'max_delete_reached',
+            $scanLimitReached => 'max_scan_reached',
+            default => 'completed_upper_bound',
+        };
 
         $manifestBody = [
             'incident_id' => $incidentId,
@@ -324,11 +404,20 @@ class QueuePruneService
             'table' => $table,
             'allowed_jobs' => $allowedJobs,
             'start_id' => $startId,
-            'requested_end_id' => $requestedEndId,
-            'end_id' => $effectiveEndId,
+            'authorized_upper_bound' => $authorizedUpperBound,
+            'last_scanned_id' => $lastScannedId,
+            'last_candidate_id' => $lastCandidateId,
+            'next_start_id' => $nextStartId,
+            'is_partial' => $isPartial,
+            'stop_reason' => $stopReason,
+            // Backwards-compatible aliases kept explicitly tied to cursor fields:
+            'requested_end_id' => $authorizedUpperBound,
+            'end_id' => $lastScannedId,
             'chunk_size' => $chunk,
             'max_delete' => $maxDelete,
+            'max_scan' => $maxScan,
             'limit_reached' => $limitReached,
+            'scan_limit_reached' => $scanLimitReached,
             'totals' => $totals,
             'counts_by_class' => $countsByClass,
             'counts_by_entity' => $countsByEntity,
@@ -336,14 +425,16 @@ class QueuePruneService
             'entries' => $entries,
         ];
 
-        $signedManifest = $this->manifestManager->sign($manifestBody);
+        $finalManifest = $this->manifestManager->finalize($manifestBody, $hmacKey);
 
         $manifestPath = isset($options['manifest_path']) && trim((string) $options['manifest_path']) !== ''
             ? trim((string) $options['manifest_path'])
             : null;
 
+        $manifestSizeBytes = null;
         if ($manifestPath !== null) {
-            $this->manifestManager->writeAtomic($manifestPath, $signedManifest);
+            $this->manifestManager->writeAtomic($manifestPath, $finalManifest, $hmacKey);
+            $manifestSizeBytes = (int) (@filesize($manifestPath) ?: 0);
         }
 
         $backupResult = null;
@@ -352,35 +443,48 @@ class QueuePruneService
             : null;
 
         if ($backupOutPath !== null) {
-            $backupResult = $this->backupService->exportForManifest($db, $table, $signedManifest, $backupOutPath);
+            $backupResult = $this->backupService->exportForManifest($db, $table, $finalManifest, $backupOutPath);
         }
 
-        $auditLog = new QueueRecoveryAuditLog($options['audit_log_path'] ?? null);
+        $auditLog = new QueueRecoveryAuditLog($options['audit_log_path'] ?? null, $this->pathGuard);
         $auditLog->record('dry_run_completed', [
             'incident_id' => $incidentId,
-            'manifest_sha256' => $signedManifest['manifest_sha256'],
+            'manifest_sha256' => $finalManifest['manifest_sha256'],
+            'manifest_hmac_present' => isset($finalManifest['manifest_hmac_sha256']),
             'manifest_path' => $manifestPath,
             'backup_path' => $backupOutPath,
             'start_id' => $startId,
-            'end_id' => $effectiveEndId,
+            'authorized_upper_bound' => $authorizedUpperBound,
+            'last_scanned_id' => $lastScannedId,
+            'last_candidate_id' => $lastCandidateId,
+            'next_start_id' => $nextStartId,
+            'is_partial' => $isPartial,
+            'stop_reason' => $stopReason,
             'totals' => $totals,
         ]);
 
         return [
-            'manifest' => $signedManifest,
+            'manifest' => $finalManifest,
             'manifest_path' => $manifestPath,
+            'manifest_size_bytes' => $manifestSizeBytes,
             'backup' => $backupResult,
+            'duration_ms' => round((microtime(true) - $startedAt) * 1000, 2),
+            'peak_memory_bytes' => memory_get_peak_usage(true),
         ];
     }
 
     /**
-     * Executes controlled micro-transactional deletion strictly from a verified dry-run manifest and verified backup.
+     * Executes controlled micro-transactional deletion strictly from an operator-approved dry-run manifest
+     * and verified external backup, re-checking every safety gate before EVERY micro-batch.
      *
      * @param  array{
      *     jobs: list<string>,
      *     manifest_path: string,
+     *     expected_manifest_sha256: string,
      *     backup_path: string,
      *     maintenance_window: string,
+     *     maintenance_lock_file: string,
+     *     hmac_key?: ?string,
      *     chunk?: int,
      *     max_delete?: int,
      *     start_id?: ?int,
@@ -390,6 +494,7 @@ class QueuePruneService
      *     audit_log_path: string,
      *     checkpoint_path?: ?string,
      *     resume?: bool,
+     *     confirm_reconcile_batch?: ?int,
      *     disk_check_paths?: list<string>,
      *     queue_connection?: ?string,
      *     max_deadlock_retries?: int
@@ -398,6 +503,7 @@ class QueuePruneService
      */
     public function apply(array $options): array
     {
+        $startedAt = microtime(true);
         $this->interrupted = false;
         $this->registerSignalHandlers();
 
@@ -407,7 +513,12 @@ class QueuePruneService
         $sleepMs = max(0, (int) ($options['sleep_ms'] ?? 100));
         $minFreeDiskMb = (int) ($options['min_free_disk_mb'] ?? self::DEFAULT_MIN_FREE_DISK_MB);
         $resume = (bool) ($options['resume'] ?? false);
+        $confirmReconcileBatch = isset($options['confirm_reconcile_batch']) && $options['confirm_reconcile_batch'] !== null && $options['confirm_reconcile_batch'] !== ''
+            ? (int) $options['confirm_reconcile_batch']
+            : null;
         $maxDeadlockRetries = max(1, (int) ($options['max_deadlock_retries'] ?? self::DEFAULT_MAX_DEADLOCK_RETRIES));
+        $expectedManifestSha = isset($options['expected_manifest_sha256']) ? trim((string) $options['expected_manifest_sha256']) : '';
+        $hmacKey = isset($options['hmac_key']) ? (string) $options['hmac_key'] : null;
 
         $auditLogPath = trim((string) ($options['audit_log_path'] ?? ''));
         if ($auditLogPath === '') {
@@ -416,12 +527,12 @@ class QueuePruneService
                 'audit_log_required',
             );
         }
-        $auditLog = new QueueRecoveryAuditLog($auditLogPath);
+        $auditLog = new QueueRecoveryAuditLog($auditLogPath, $this->pathGuard);
 
         $checkpointPath = isset($options['checkpoint_path']) && trim((string) $options['checkpoint_path']) !== ''
             ? trim((string) $options['checkpoint_path'])
             : $auditLogPath.'.checkpoint.json';
-        $checkpoint = new QueueRecoveryCheckpoint($checkpointPath);
+        $checkpoint = new QueueRecoveryCheckpoint($checkpointPath, $this->pathGuard);
 
         $target = $this->resolveQueueTarget($options['queue_connection'] ?? null);
         $db = DB::connection($target['db_connection']);
@@ -441,7 +552,7 @@ class QueuePruneService
             // SAFETY CHECK 1: Both automations MUST be suspended.
             $this->assertAutomationsSuspended();
 
-            // SAFETY CHECK 2: Authorized maintenance window + NO active target workers.
+            // SAFETY CHECK 2a: Authorized maintenance window ID.
             $maintenanceWindow = trim((string) ($options['maintenance_window'] ?? ''));
             if ($maintenanceWindow === '') {
                 throw new QueueRecoveryException(
@@ -450,7 +561,16 @@ class QueuePruneService
                 );
             }
 
-            // SAFETY CHECK 6: Load & cryptographically verify dry-run manifest.
+            // SAFETY CHECK 2b: Fail-closed maintenance sentinel file path.
+            $maintenanceLockFile = trim((string) ($options['maintenance_lock_file'] ?? ''));
+            if ($maintenanceLockFile === '') {
+                throw new QueueRecoveryException(
+                    'Se requiere el archivo sentinel de ventana de mantenimiento (--maintenance-lock-file) en modo fail-closed.',
+                    'maintenance_gate_missing',
+                );
+            }
+
+            // SAFETY CHECK 6: Load & verify dry-run manifest with independent operator approval (--expected-manifest-sha256) + optional HMAC.
             $manifestPath = trim((string) ($options['manifest_path'] ?? ''));
             if ($manifestPath === '') {
                 throw new QueueRecoveryException(
@@ -458,8 +578,24 @@ class QueuePruneService
                     'manifest_missing',
                 );
             }
-            $manifest = $this->manifestManager->loadAndVerify($manifestPath, $this->inspector);
+
+            $manifest = $this->manifestManager->loadAndVerify(
+                $manifestPath,
+                $this->inspector,
+                $expectedManifestSha,
+                $hmacKey,
+                requireOperatorApproval: true,
+            );
             $manifestSha = (string) $manifest['manifest_sha256'];
+            $incidentId = (string) $manifest['incident_id'];
+            $authorizedUpperBound = (int) $manifest['authorized_upper_bound'];
+            $manifestLastScannedId = (int) $manifest['last_scanned_id'];
+            $manifestNextStartId = (int) $manifest['next_start_id'];
+            $manifestEntries = (array) $manifest['entries'];
+            $manifestTotal = count($manifestEntries);
+
+            // Verify maintenance sentinel file matches incident_id, window_id, workers_halted_confirmed=true, and is not expired.
+            $this->workerDetector->assertMaintenanceGateActive($maintenanceLockFile, $maintenanceWindow, $incidentId);
 
             // Verify requested --job classes match manifest exactly.
             $manifestAllowedJobs = (array) $manifest['allowed_jobs'];
@@ -494,10 +630,10 @@ class QueuePruneService
                 );
             }
 
-            // Determine queues present in manifest (plus default 'meli' if empty).
+            // Determine queues present in manifest (plus default 'meli' if empty) and run fail-closed worker check.
             $targetQueues = array_values(array_unique(array_filter(array_map(
                 static fn (array $e): string => (string) ($e['queue'] ?? ''),
-                (array) $manifest['entries'],
+                $manifestEntries,
             ))));
             if ($targetQueues === []) {
                 $targetQueues = ['meli'];
@@ -524,16 +660,16 @@ class QueuePruneService
             ]));
             $checkedDisk = $this->diskChecker->assertMinimumFreeSpace($diskPaths, $minFreeDiskMb);
 
-            // SAFETY CHECK 7 & 8: Verify backup hashes against manifest AND run isolated restore test.
+            // SAFETY CHECK 7 & 8: Verify backup hashes against ALL 7 columns in manifest AND run isolated restore test.
             $backupVerification = $this->backupService->verifyAndTestRestore($backupPath, $manifest);
 
-            // Enforce upper PK bound (never exceed manifest end_id).
-            $upperBoundId = (int) $manifest['end_id'];
+            // Enforce upper PK bound (never exceed manifest last_scanned_id or authorized_upper_bound).
+            $upperBoundId = min($authorizedUpperBound, $manifestLastScannedId);
             if (isset($options['end_id']) && $options['end_id'] !== null && $options['end_id'] !== '') {
                 $requestedEnd = (int) $options['end_id'];
-                if ($requestedEnd > $upperBoundId) {
+                if ($requestedEnd > $authorizedUpperBound) {
                     throw new QueueRecoveryException(
-                        "El --end-id ({$requestedEnd}) excede el límite superior autorizado del manifiesto ({$upperBoundId}).",
+                        "El --end-id ({$requestedEnd}) excede el límite superior autorizado del manifiesto (authorized_upper_bound={$authorizedUpperBound}).",
                         'upper_bound_violation',
                     );
                 }
@@ -544,19 +680,26 @@ class QueuePruneService
                 ? max((int) $options['start_id'], (int) $manifest['start_id'])
                 : (int) $manifest['start_id'];
 
-            // Load existing checkpoint and reconcile any crash between DB commit and checkpoint write.
+            // Strictly parse the audit log journal FIRST (aborts immediately on ANY corrupt or truncated NDJSON line!).
+            $journal = $auditLog->inspectManifestJournal($manifestSha);
+            $batchSeq = $journal['last_batch_seq'];
+
+            // Load existing checkpoint.
             $existingCheckpoint = $checkpoint->load($manifestSha);
             $alreadyCommittedIds = [];
             $cumulativeDeleted = 0;
+            $lastDeletedId = null;
             $lastCommittedId = $effectiveStartId;
-            $batchSeq = $auditLog->lastBatchSeq($manifestSha);
 
             if ($existingCheckpoint !== null) {
                 $checkpointCompleted = (bool) ($existingCheckpoint['completed'] ?? false);
                 $lastCommittedId = max($lastCommittedId, (int) ($existingCheckpoint['last_committed_id'] ?? 0));
+                $lastDeletedId = isset($existingCheckpoint['last_deleted_id']) && $existingCheckpoint['last_deleted_id'] !== null
+                    ? (int) $existingCheckpoint['last_deleted_id']
+                    : ($lastCommittedId > 0 ? $lastCommittedId : null);
                 $cumulativeDeleted = (int) ($existingCheckpoint['total_deleted'] ?? 0);
 
-                foreach ((array) $manifest['entries'] as $entry) {
+                foreach ($manifestEntries as $entry) {
                     $eid = (int) $entry['id'];
                     if ($eid <= $lastCommittedId) {
                         $alreadyCommittedIds[$eid] = true;
@@ -564,27 +707,35 @@ class QueuePruneService
                 }
 
                 if ($checkpointCompleted) {
-                    // Idempotency check: verify none of the manifest entries remain in jobs.
-                    $remainingPresent = $this->countPresentManifestIds($db, $table, (array) $manifest['entries']);
+                    $remainingPresent = $this->countPresentManifestIds($db, $table, $manifestEntries);
                     if ($remainingPresent === 0) {
                         $auditLog->record('apply_idempotent_noop', [
-                            'incident_id' => $manifest['incident_id'],
+                            'incident_id' => $incidentId,
                             'manifest_sha256' => $manifestSha,
                             'total_deleted_previously' => $cumulativeDeleted,
                         ]);
 
                         return [
                             'status' => 'already_completed',
-                            'incident_id' => $manifest['incident_id'],
+                            'incident_id' => $incidentId,
                             'manifest_sha256' => $manifestSha,
+                            'authorized_upper_bound' => $authorizedUpperBound,
+                            'manifest_last_scanned_id' => $manifestLastScannedId,
+                            'last_deleted_id' => $lastDeletedId,
+                            'next_start_id' => $manifestNextStartId,
+                            'manifest_is_partial' => (bool) ($manifest['is_partial'] ?? false),
                             'deleted_this_run' => 0,
                             'total_deleted' => $cumulativeDeleted,
                             'remaining_in_manifest' => 0,
                             'reconciled_after_crash' => 0,
+                            'deadlock_retries' => 0,
                             'interrupted' => false,
                             'backup_verification' => $backupVerification,
                             'disk_checked_mb' => $checkedDisk,
                             'checkpoint_path' => $checkpointPath,
+                            'batch_durations_ms' => [],
+                            'total_duration_ms' => round((microtime(true) - $startedAt) * 1000, 2),
+                            'peak_memory_bytes' => memory_get_peak_usage(true),
                         ];
                     }
 
@@ -603,18 +754,85 @@ class QueuePruneService
                 }
             }
 
-            // Reconcile any unresolved batch_intent left by a crash strictly between DB commit and checkpoint save.
+            // Reconcile batches that were ALREADY committed (`batch_committed` recorded) but crashed before checkpoint save.
             $reconciledAfterCrash = 0;
-            $unresolvedIntents = $auditLog->findUnresolvedIntents($manifestSha);
+            $uncheckpointedCommitted = array_values(array_filter(
+                $journal['committed_batches'],
+                static fn (array $b): bool => ! $b['checkpoint_saved'],
+            ));
 
-            if ($unresolvedIntents !== [] && ! $resume && $existingCheckpoint === null) {
+            if (($uncheckpointedCommitted !== [] || $journal['unresolved_intents'] !== []) && ! $resume) {
                 throw new QueueRecoveryException(
                     'Se detectó un lote pendiente de reconciliación tras interrupción en el audit log. Utilice --resume para reconciliar y continuar.',
                     'checkpoint_requires_resume',
                 );
             }
 
-            foreach ($unresolvedIntents as $intent) {
+            foreach ($uncheckpointedCommitted as $committedBatch) {
+                $batchIds = $committedBatch['ids'];
+                if ($batchIds === []) {
+                    continue;
+                }
+
+                $stillPresent = $db->table($table)->whereIn('id', $batchIds)->pluck('id')->all();
+                if ($stillPresent !== []) {
+                    throw new QueueRecoveryException(
+                        sprintf(
+                            'Inconsistencia crítica: lote #%d tiene batch_committed en audit log pero %d ID(s) siguen en %s.',
+                            $committedBatch['batch_seq'],
+                            count($stillPresent),
+                            $table,
+                        ),
+                        'checkpoint_inconsistent',
+                        ['batch_seq' => $committedBatch['batch_seq']],
+                    );
+                }
+
+                $newlyAccounted = 0;
+                foreach ($batchIds as $cid) {
+                    if (! isset($alreadyCommittedIds[$cid])) {
+                        $alreadyCommittedIds[$cid] = true;
+                        $newlyAccounted++;
+                    }
+                }
+
+                if ($newlyAccounted > 0) {
+                    $reconciledAfterCrash += $newlyAccounted;
+                    $cumulativeDeleted += $newlyAccounted;
+                }
+                $maxBatchId = max($batchIds);
+                $lastCommittedId = max($lastCommittedId, $maxBatchId);
+                $lastDeletedId = $lastDeletedId !== null ? max($lastDeletedId, $maxBatchId) : $maxBatchId;
+                $isNowCompleted = count($alreadyCommittedIds) >= $manifestTotal;
+
+                $checkpoint->saveAtomic([
+                    'incident_id' => $incidentId,
+                    'manifest_sha256' => $manifestSha,
+                    'backup_file_sha256' => $backupVerification['file_sha256'],
+                    'authorized_upper_bound' => $authorizedUpperBound,
+                    'manifest_last_scanned_id' => $manifestLastScannedId,
+                    'last_deleted_id' => $lastDeletedId,
+                    'last_committed_id' => $lastCommittedId,
+                    'next_start_id' => $isNowCompleted ? $manifestNextStartId : null,
+                    'last_batch_seq' => $committedBatch['batch_seq'],
+                    'total_deleted' => $cumulativeDeleted,
+                    'manifest_total' => $manifestTotal,
+                    'completed' => $isNowCompleted,
+                ]);
+
+                $auditLog->record('batch_checkpoint_saved', [
+                    'incident_id' => $incidentId,
+                    'manifest_sha256' => $manifestSha,
+                    'batch_seq' => $committedBatch['batch_seq'],
+                    'reconciled_from_committed_audit' => true,
+                    'last_deleted_id' => $lastDeletedId,
+                    'completed' => $isNowCompleted,
+                ]);
+            }
+
+            // Reconcile unresolved `batch_intent` entries (NO `batch_committed` recorded).
+            // NEVER assume missing rows were deleted by R2 without explicit operator confirmation!
+            foreach ($journal['unresolved_intents'] as $intent) {
                 $intentIds = $intent['ids'];
                 if ($intentIds === []) {
                     continue;
@@ -626,87 +844,152 @@ class QueuePruneService
                     ->map(static fn ($id): int => (int) $id)
                     ->all();
 
-                if ($stillPresent === []) {
-                    // DB commit definitely succeeded before the crash; advance checkpoint without losing traceability!
-                    foreach ($intentIds as $cid) {
-                        $alreadyCommittedIds[$cid] = true;
-                    }
-                    $reconciledAfterCrash += count($intentIds);
-                    $cumulativeDeleted += count($intentIds);
-                    $lastCommittedId = max($lastCommittedId, max($intentIds));
-
-                    $auditLog->record('batch_reconciled_after_crash', [
-                        'incident_id' => $manifest['incident_id'],
-                        'manifest_sha256' => $manifestSha,
-                        'batch_seq' => $intent['batch_seq'],
-                        'reconciled_count' => count($intentIds),
-                        'min_id' => min($intentIds),
-                        'max_id' => max($intentIds),
-                        'cumulative_deleted' => $cumulativeDeleted,
-                    ]);
-
-                    $checkpoint->saveAtomic([
-                        'incident_id' => $manifest['incident_id'],
-                        'manifest_sha256' => $manifestSha,
-                        'backup_file_sha256' => $backupVerification['file_sha256'],
-                        'last_committed_id' => $lastCommittedId,
-                        'last_batch_seq' => $intent['batch_seq'],
-                        'total_deleted' => $cumulativeDeleted,
-                        'manifest_total' => count((array) $manifest['entries']),
-                        'completed' => count($alreadyCommittedIds) >= count((array) $manifest['entries']),
-                    ]);
-                } elseif (count($stillPresent) === count($intentIds)) {
-                    // DB transaction rolled back or never executed before crash; record abort and proceed normally.
+                if (count($stillPresent) === count($intentIds)) {
+                    // 100% of rows still present => DB transaction did NOT commit before crash. Safe to mark aborted and re-execute.
                     $auditLog->record('batch_aborted', [
-                        'incident_id' => $manifest['incident_id'],
+                        'incident_id' => $incidentId,
                         'manifest_sha256' => $manifestSha,
                         'batch_seq' => $intent['batch_seq'],
                         'reason' => 'intent_not_committed_before_crash',
                     ]);
-                } else {
+
+                    continue;
+                }
+
+                if ($stillPresent !== []) {
+                    // Partial disappearance under an uncommitted intent => ALWAYS abort and demand investigation!
                     throw new QueueRecoveryException(
                         sprintf(
-                            'Discrepancia crítica durante reconciliación de lote #%d: %d de %d IDs siguen presentes.',
+                            'Discrepancia crítica en lote #%d sin batch_committed: %d de %d IDs siguen presentes y %d desaparecieron. Abortando para investigación manual.',
                             $intent['batch_seq'],
                             count($stillPresent),
                             count($intentIds),
+                            count($intentIds) - count($stillPresent),
                         ),
-                        'concurrent_modification',
-                        ['batch_seq' => $intent['batch_seq']],
+                        'unresolved_partial_batch_intent',
+                        [
+                            'batch_seq' => $intent['batch_seq'],
+                            'present_count' => count($stillPresent),
+                            'expected_count' => count($intentIds),
+                        ],
                     );
                 }
+
+                // 0 rows present, but NO `batch_committed` was recorded in audit log!
+                // Do NOT assume automatically that R2 deleted them (e.g. an external worker could have consumed them).
+                if ($confirmReconcileBatch !== $intent['batch_seq']) {
+                    throw new QueueRecoveryException(
+                        sprintf(
+                            'Lote ambiguo #%d: existe batch_intent sin batch_committed y los %d IDs (PK %d..%d) ya no existen en %s. No se asume eliminación por R2; investigue logs/BD y solo si confirma que el COMMIT fue de R2 reanude con --resume --confirm-reconcile-batch=%d.',
+                            $intent['batch_seq'],
+                            count($intentIds),
+                            min($intentIds),
+                            max($intentIds),
+                            $table,
+                            $intent['batch_seq'],
+                        ),
+                        'unresolved_ambiguous_batch_intent',
+                        [
+                            'batch_seq' => $intent['batch_seq'],
+                            'count' => count($intentIds),
+                            'min_id' => min($intentIds),
+                            'max_id' => max($intentIds),
+                        ],
+                    );
+                }
+
+                // Operator explicitly investigated and confirmed this exact batch_seq via --confirm-reconcile-batch.
+                $newlyAccounted = 0;
+                foreach ($intentIds as $cid) {
+                    if (! isset($alreadyCommittedIds[$cid])) {
+                        $alreadyCommittedIds[$cid] = true;
+                        $newlyAccounted++;
+                    }
+                }
+                $reconciledAfterCrash += $newlyAccounted;
+                $cumulativeDeleted += $newlyAccounted;
+                $maxIntentId = max($intentIds);
+                $lastCommittedId = max($lastCommittedId, $maxIntentId);
+                $lastDeletedId = $lastDeletedId !== null ? max($lastDeletedId, $maxIntentId) : $maxIntentId;
+                $isNowCompleted = count($alreadyCommittedIds) >= $manifestTotal;
+
+                $auditLog->record('batch_reconciled_operator_confirmed', [
+                    'incident_id' => $incidentId,
+                    'manifest_sha256' => $manifestSha,
+                    'batch_seq' => $intent['batch_seq'],
+                    'operator_confirmed' => true,
+                    'reconciled_count' => $newlyAccounted,
+                    'ids' => $intentIds,
+                    'min_id' => min($intentIds),
+                    'max_id' => $maxIntentId,
+                    'cumulative_deleted' => $cumulativeDeleted,
+                ]);
+
+                $checkpoint->saveAtomic([
+                    'incident_id' => $incidentId,
+                    'manifest_sha256' => $manifestSha,
+                    'backup_file_sha256' => $backupVerification['file_sha256'],
+                    'authorized_upper_bound' => $authorizedUpperBound,
+                    'manifest_last_scanned_id' => $manifestLastScannedId,
+                    'last_deleted_id' => $lastDeletedId,
+                    'last_committed_id' => $lastCommittedId,
+                    'next_start_id' => $isNowCompleted ? $manifestNextStartId : null,
+                    'last_batch_seq' => $intent['batch_seq'],
+                    'total_deleted' => $cumulativeDeleted,
+                    'manifest_total' => $manifestTotal,
+                    'completed' => $isNowCompleted,
+                ]);
+
+                $auditLog->record('batch_checkpoint_saved', [
+                    'incident_id' => $incidentId,
+                    'manifest_sha256' => $manifestSha,
+                    'batch_seq' => $intent['batch_seq'],
+                    'operator_confirmed_reconcile' => true,
+                    'last_deleted_id' => $lastDeletedId,
+                    'completed' => $isNowCompleted,
+                ]);
             }
 
             // Filter remaining entries strictly within bounds and not yet committed.
             $remainingEntries = array_values(array_filter(
-                (array) $manifest['entries'],
+                $manifestEntries,
                 static fn (array $entry): bool => ! isset($alreadyCommittedIds[(int) $entry['id']])
                     && (int) $entry['id'] <= $upperBoundId
                     && (int) $entry['id'] > $lastCommittedId,
             ));
 
             // If crash reconciliation already completed 100% of manifest entries, finalize cleanly.
-            if ($remainingEntries === [] && count($alreadyCommittedIds) >= count((array) $manifest['entries'])) {
+            if ($remainingEntries === [] && count($alreadyCommittedIds) >= $manifestTotal) {
                 $auditLog->record('apply_completed', [
-                    'incident_id' => $manifest['incident_id'],
+                    'incident_id' => $incidentId,
                     'manifest_sha256' => $manifestSha,
                     'deleted_this_run' => 0,
                     'reconciled_after_crash' => $reconciledAfterCrash,
                     'total_deleted' => $cumulativeDeleted,
+                    'next_start_id' => $manifestNextStartId,
                 ]);
 
                 return [
                     'status' => 'completed',
-                    'incident_id' => $manifest['incident_id'],
+                    'incident_id' => $incidentId,
                     'manifest_sha256' => $manifestSha,
+                    'authorized_upper_bound' => $authorizedUpperBound,
+                    'manifest_last_scanned_id' => $manifestLastScannedId,
+                    'last_deleted_id' => $lastDeletedId,
+                    'next_start_id' => $manifestNextStartId,
+                    'manifest_is_partial' => (bool) ($manifest['is_partial'] ?? false),
                     'deleted_this_run' => 0,
                     'total_deleted' => $cumulativeDeleted,
                     'remaining_in_manifest' => 0,
                     'reconciled_after_crash' => $reconciledAfterCrash,
+                    'deadlock_retries' => 0,
                     'interrupted' => false,
                     'backup_verification' => $backupVerification,
                     'disk_checked_mb' => $checkedDisk,
                     'checkpoint_path' => $checkpointPath,
+                    'batch_durations_ms' => [],
+                    'total_duration_ms' => round((microtime(true) - $startedAt) * 1000, 2),
+                    'peak_memory_bytes' => memory_get_peak_usage(true),
                 ];
             }
 
@@ -714,18 +997,21 @@ class QueuePruneService
             $this->assertNoReservedCandidates($db, $table, $remainingEntries);
 
             $auditLog->record('preflight_passed', [
-                'incident_id' => $manifest['incident_id'],
+                'incident_id' => $incidentId,
                 'manifest_sha256' => $manifestSha,
                 'backup_file_sha256' => $backupVerification['file_sha256'],
                 'maintenance_window' => $maintenanceWindow,
+                'maintenance_lock_file' => $maintenanceLockFile,
                 'remaining_candidates' => count($remainingEntries),
-                'upper_bound_id' => $upperBoundId,
+                'authorized_upper_bound' => $authorizedUpperBound,
+                'manifest_last_scanned_id' => $manifestLastScannedId,
                 'disk_checked_mb' => $checkedDisk,
             ]);
 
             $deletedThisRun = 0;
             $deadlockRetriesTotal = 0;
             $batchesExecuted = 0;
+            $batchDurationsMs = [];
             $toProcess = array_slice($remainingEntries, 0, $maxDelete);
 
             foreach (array_chunk($toProcess, $chunk) as $batchEntries) {
@@ -734,7 +1020,10 @@ class QueuePruneService
                     break;
                 }
 
-                // Re-verify minimum free disk space before EVERY batch.
+                // Re-verify ALL operational safety gates before EVERY micro-batch!
+                $this->assertAutomationsSuspended();
+                $this->workerDetector->assertMaintenanceGateActive($maintenanceLockFile, $maintenanceWindow, $incidentId);
+                $this->workerDetector->assertNoActiveTargetWorkers($targetQueues);
                 $this->diskChecker->assertMinimumFreeSpace($diskPaths, $minFreeDiskMb);
 
                 $batchSeq++;
@@ -742,9 +1031,13 @@ class QueuePruneService
                 $minId = min($batchIds);
                 $maxId = max($batchIds);
 
-                // Write-Ahead Intent BEFORE DB commit for crash traceability.
+                if ($this->beforeIntentHook !== null) {
+                    ($this->beforeIntentHook)($batchSeq, $batchIds);
+                }
+
+                // Step 1: Write-Ahead Intent BEFORE DB commit with fsync.
                 $auditLog->record('batch_intent', [
-                    'incident_id' => $manifest['incident_id'],
+                    'incident_id' => $incidentId,
                     'manifest_sha256' => $manifestSha,
                     'batch_seq' => $batchSeq,
                     'count' => count($batchIds),
@@ -753,6 +1046,12 @@ class QueuePruneService
                     'ids' => $batchIds,
                 ]);
 
+                if ($this->afterIntentBeforeCommitHook !== null) {
+                    ($this->afterIntentBeforeCommitHook)($batchSeq, $batchIds);
+                }
+
+                // Step 2 & 3: Revalidate ALL 7 columns under lock, DELETE, COMMIT.
+                $batchStart = microtime(true);
                 $retriesUsed = $this->deleteBatchWithDeadlockRetry(
                     $db,
                     $table,
@@ -764,49 +1063,71 @@ class QueuePruneService
                     $manifestSha,
                     $batchSeq,
                 );
+                $batchDurationMs = round((microtime(true) - $batchStart) * 1000, 2);
+                $batchDurationsMs[] = $batchDurationMs;
                 $deadlockRetriesTotal += $retriesUsed;
 
-                // Optional hook for testing crash strictly between DB commit and checkpoint persistence.
-                if ($this->afterCommitBeforeCheckpointHook !== null) {
-                    ($this->afterCommitBeforeCheckpointHook)($batchSeq, $batchIds);
+                if ($this->afterCommitBeforeAuditHook !== null) {
+                    ($this->afterCommitBeforeAuditHook)($batchSeq, $batchIds);
                 }
 
                 $deletedThisRun += count($batchIds);
                 $cumulativeDeleted += count($batchIds);
                 $lastCommittedId = $maxId;
+                $lastDeletedId = $lastDeletedId !== null ? max($lastDeletedId, $maxId) : $maxId;
                 $batchesExecuted++;
 
                 foreach ($batchIds as $cid) {
                     $alreadyCommittedIds[$cid] = true;
                 }
 
-                $remainingAfterBatch = count((array) $manifest['entries']) - count($alreadyCommittedIds);
+                $remainingAfterBatch = max(0, $manifestTotal - count($alreadyCommittedIds));
+                $isCompletedNow = $remainingAfterBatch === 0;
 
-                // Reconcile manifest, backup, deleted, and remaining counts after every batch.
+                // Step 4: Persist `batch_committed` with IDs and fsync.
                 $auditLog->record('batch_committed', [
-                    'incident_id' => $manifest['incident_id'],
+                    'incident_id' => $incidentId,
                     'manifest_sha256' => $manifestSha,
                     'batch_seq' => $batchSeq,
                     'deleted_count' => count($batchIds),
+                    'ids' => $batchIds,
                     'min_id' => $minId,
                     'max_id' => $maxId,
+                    'duration_ms' => $batchDurationMs,
                     'reconciliation' => [
-                        'manifest_total' => count((array) $manifest['entries']),
+                        'manifest_total' => $manifestTotal,
                         'backup_verified_total' => $backupVerification['row_count'],
                         'cumulative_deleted' => $cumulativeDeleted,
-                        'remaining_in_manifest' => max(0, $remainingAfterBatch),
+                        'remaining_in_manifest' => $remainingAfterBatch,
                     ],
                 ]);
 
+                if ($this->afterAuditBeforeCheckpointHook !== null) {
+                    ($this->afterAuditBeforeCheckpointHook)($batchSeq, $batchIds);
+                }
+
+                // Step 5: Persist atomic checkpoint with fsync and record `batch_checkpoint_saved`.
                 $checkpoint->saveAtomic([
-                    'incident_id' => $manifest['incident_id'],
+                    'incident_id' => $incidentId,
                     'manifest_sha256' => $manifestSha,
                     'backup_file_sha256' => $backupVerification['file_sha256'],
+                    'authorized_upper_bound' => $authorizedUpperBound,
+                    'manifest_last_scanned_id' => $manifestLastScannedId,
+                    'last_deleted_id' => $lastDeletedId,
                     'last_committed_id' => $lastCommittedId,
+                    'next_start_id' => $isCompletedNow ? $manifestNextStartId : null,
                     'last_batch_seq' => $batchSeq,
                     'total_deleted' => $cumulativeDeleted,
-                    'manifest_total' => count((array) $manifest['entries']),
-                    'completed' => $remainingAfterBatch <= 0,
+                    'manifest_total' => $manifestTotal,
+                    'completed' => $isCompletedNow,
+                ]);
+
+                $auditLog->record('batch_checkpoint_saved', [
+                    'incident_id' => $incidentId,
+                    'manifest_sha256' => $manifestSha,
+                    'batch_seq' => $batchSeq,
+                    'last_deleted_id' => $lastDeletedId,
+                    'completed' => $isCompletedNow,
                 ]);
 
                 if ($sleepMs > 0 && $remainingAfterBatch > 0 && $deletedThisRun < count($toProcess) && ! $this->shouldStop($batchesExecuted)) {
@@ -814,26 +1135,35 @@ class QueuePruneService
                 }
             }
 
-            $remainingFinal = max(0, count((array) $manifest['entries']) - count($alreadyCommittedIds));
+            $remainingFinal = max(0, $manifestTotal - count($alreadyCommittedIds));
             $status = $this->interrupted
                 ? 'interrupted'
                 : ($remainingFinal === 0 ? 'completed' : 'partial_limit_reached');
 
+            $applyNextStartId = $remainingFinal === 0 ? $manifestNextStartId : null;
+
             $auditLog->record($this->interrupted ? 'apply_interrupted' : 'apply_completed', [
-                'incident_id' => $manifest['incident_id'],
+                'incident_id' => $incidentId,
                 'manifest_sha256' => $manifestSha,
                 'status' => $status,
                 'deleted_this_run' => $deletedThisRun,
                 'reconciled_after_crash' => $reconciledAfterCrash,
                 'total_deleted' => $cumulativeDeleted,
                 'remaining_in_manifest' => $remainingFinal,
+                'last_deleted_id' => $lastDeletedId,
+                'next_start_id' => $applyNextStartId,
                 'deadlock_retries' => $deadlockRetriesTotal,
             ]);
 
             return [
                 'status' => $status,
-                'incident_id' => $manifest['incident_id'],
+                'incident_id' => $incidentId,
                 'manifest_sha256' => $manifestSha,
+                'authorized_upper_bound' => $authorizedUpperBound,
+                'manifest_last_scanned_id' => $manifestLastScannedId,
+                'last_deleted_id' => $lastDeletedId,
+                'next_start_id' => $applyNextStartId,
+                'manifest_is_partial' => (bool) ($manifest['is_partial'] ?? false),
                 'deleted_this_run' => $deletedThisRun,
                 'total_deleted' => $cumulativeDeleted,
                 'remaining_in_manifest' => $remainingFinal,
@@ -843,13 +1173,20 @@ class QueuePruneService
                 'backup_verification' => $backupVerification,
                 'disk_checked_mb' => $checkedDisk,
                 'checkpoint_path' => $checkpointPath,
+                'batch_durations_ms' => $batchDurationsMs,
+                'total_duration_ms' => round((microtime(true) - $startedAt) * 1000, 2),
+                'peak_memory_bytes' => memory_get_peak_usage(true),
             ];
         } catch (QueueRecoveryException $e) {
-            $auditLog->record('apply_aborted', [
-                'reason_code' => $e->reasonCode,
-                'message' => $e->getMessage(),
-                'context' => $e->context,
-            ]);
+            try {
+                $auditLog->record('apply_aborted', [
+                    'reason_code' => $e->reasonCode,
+                    'message' => $e->getMessage(),
+                    'context' => $e->context,
+                ]);
+            } catch (\Throwable) {
+                // Avoid masking the original exception if the audit log itself failed due to I/O/fsync.
+            }
             throw $e;
         } finally {
             $this->lock->release();
@@ -976,6 +1313,9 @@ class QueuePruneService
     }
 
     /**
+     * Revalidates ALL 7 columns + row_sha256 + payload_hash + class inside a single locked micro-transaction
+     * before executing DELETE.
+     *
      * @param  list<array<string, mixed>>  $batchEntries
      * @param  list<string>  $allowedJobs
      */
@@ -991,9 +1331,9 @@ class QueuePruneService
             $id = (int) $entry['id'];
             if ($id > $upperBoundId) {
                 throw new QueueRecoveryException(
-                    "Job #{$id} excede el límite superior autorizado end_id={$upperBoundId}.",
+                    "Job #{$id} excede el límite superior autorizado ({$upperBoundId}).",
                     'upper_bound_violation',
-                    ['job_id' => $id, 'end_id' => $upperBoundId],
+                    ['job_id' => $id, 'upper_bound' => $upperBoundId],
                 );
             }
             $expectedById[$id] = $entry;
@@ -1005,7 +1345,7 @@ class QueuePruneService
 
         $db->transaction(function () use ($db, $table, $batchIds, $expectedById, $allowedJobs, $upperBoundId, $driver): void {
             $query = $db->table($table)
-                ->select(['id', 'queue', 'payload', 'reserved_at'])
+                ->select(['id', 'queue', 'payload', 'attempts', 'reserved_at', 'available_at', 'created_at'])
                 ->whereIn('id', $batchIds)
                 ->orderBy('id');
 
@@ -1031,8 +1371,9 @@ class QueuePruneService
             foreach ($batchIds as $id) {
                 $row = $rows->get($id);
                 $expected = $expectedById[$id];
+                $normalized = $this->backupService->normalizeRow($row);
 
-                if ($row->reserved_at !== null) {
+                if ($normalized['reserved_at'] !== null) {
                     throw new QueueRecoveryException(
                         "Trabajo reservado detectado dentro de la transacción para job #{$id}. Abortando y revirtiendo lote.",
                         'reserved_jobs_detected',
@@ -1040,25 +1381,30 @@ class QueuePruneService
                     );
                 }
 
-                if ((string) $row->queue !== (string) $expected['queue']) {
+                if ($normalized['queue'] !== (string) $expected['queue']
+                    || $normalized['attempts'] !== (int) $expected['attempts']
+                    || $normalized['available_at'] !== (int) $expected['available_at']
+                    || $normalized['created_at'] !== (int) $expected['created_at']) {
                     throw new QueueRecoveryException(
-                        "Modificación concurrente de cola en job #{$id}: esperada '{$expected['queue']}', actual '{$row->queue}'.",
+                        "Modificación concurrente de metadatos (queue/attempts/available_at/created_at) en job #{$id}. Abortando y revirtiendo lote.",
                         'concurrent_modification',
                         ['job_id' => $id],
                     );
                 }
 
-                $actualPayload = (string) $row->payload;
-                $actualHash = hash('sha256', $actualPayload);
-                if (! hash_equals((string) $expected['payload_hash'], $actualHash)) {
+                $actualPayloadHash = hash('sha256', $normalized['payload']);
+                $actualRowSha256 = $this->backupService->rowHash($normalized);
+
+                if (! hash_equals((string) $expected['payload_hash'], $actualPayloadHash)
+                    || ! hash_equals((string) $expected['row_sha256'], $actualRowSha256)) {
                     throw new QueueRecoveryException(
-                        "Modificación concurrente de payload en job #{$id}: el SHA-256 cambió.",
+                        "Modificación concurrente de payload o fila completa (row_sha256) en job #{$id}.",
                         'concurrent_modification',
                         ['job_id' => $id],
                     );
                 }
 
-                $reinspected = $this->inspector->inspect($actualPayload, $allowedJobs);
+                $reinspected = $this->inspector->inspect($normalized['payload'], $allowedJobs);
                 if ($reinspected['classification'] !== QueuePayloadInspector::CLASSIFICATION_CANDIDATE
                     || $reinspected['job_class'] !== (string) $expected['job_class']) {
                     throw new QueueRecoveryException(
@@ -1214,6 +1560,8 @@ class QueuePruneService
                 'id' => $c['id'],
                 'job_class' => $c['job_class'],
                 'queue' => $c['queue'],
+                'attempts' => $c['attempts'],
+                'available_at' => $c['available_at'],
                 'meli_account_id' => $accountId,
                 'entity_type' => $c['entity_type'],
                 'entity_id' => $c['entity_id'],
@@ -1223,6 +1571,7 @@ class QueuePruneService
                 'created_at_iso' => $c['created_at_iso'],
                 'reserved_at' => null,
                 'payload_hash' => $c['payload_hash'],
+                'row_sha256' => $c['row_sha256'],
             ];
         }
 
@@ -1253,6 +1602,19 @@ class QueuePruneService
         }
 
         return $maxDelete;
+    }
+
+    private function validateMaxScan(int $maxScan): int
+    {
+        if ($maxScan < 0) {
+            throw new QueueRecoveryException(
+                "El parámetro --max-scan ({$maxScan}) debe ser mayor o igual a 0 (0 = sin límite de escaneo hasta --end-id).",
+                'invalid_max_scan',
+                ['max_scan' => $maxScan],
+            );
+        }
+
+        return $maxScan;
     }
 
     private function isDeadlockOrLockWait(QueryException $e): bool

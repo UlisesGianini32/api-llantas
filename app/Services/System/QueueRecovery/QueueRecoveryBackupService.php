@@ -10,23 +10,29 @@ use JsonException;
 use PDO;
 
 /**
- * Exports full jobs rows for a verified manifest to a tamper-evident NDJSON backup,
- * verifies cryptographic hashes, runs an isolated restore verification test, and
- * supports deterministic restoration into an isolated database connection.
+ * Exports full jobs rows (all 7 columns) for a verified manifest to a restrictive-permission (0600)
+ * NDJSON backup outside the Git repository, verifies cryptographic hashes, runs an isolated
+ * SQLite restore verification test, and supports PK-collision-safe restoration into an isolated DB.
  */
 class QueueRecoveryBackupService
 {
-    public const SCHEMA_VERSION = 1;
+    public const SCHEMA_VERSION = 2;
 
     private const EXPORT_CHUNK_SIZE = 500;
 
+    public function __construct(
+        private readonly QueueRecoveryPathGuard $pathGuard = new QueueRecoveryPathGuard,
+    ) {}
+
     /**
      * Exports complete rows for every job entry in the manifest using PK chunks.
+     * Refuses symlinks, unsafe repo paths, and accidental overwrite of existing backups.
      *
      * @param  array<string, mixed>  $manifest
      * @return array{
      *     path: string,
      *     row_count: int,
+     *     size_bytes: int,
      *     entries_sha256: string,
      *     file_sha256: string
      * }
@@ -42,24 +48,24 @@ class QueueRecoveryBackupService
             throw new QueueRecoveryException('El manifiesto no contiene entradas válidas para respaldo.', 'manifest_invalid');
         }
 
-        $dir = dirname($outputPath);
-        if (! is_dir($dir) && ! @mkdir($dir, 0775, true) && ! is_dir($dir)) {
-            throw new QueueRecoveryException(
-                "No se pudo crear el directorio para el respaldo: '{$dir}'.",
-                'backup_write_failed',
-                ['path' => $outputPath],
-            );
-        }
+        // Reject symlinks, traversal, paths inside Git repo, and existing backup files (no accidental overwrite!).
+        $safeOutputPath = $this->pathGuard->assertSafeOutputPath(
+            $outputPath,
+            disallowOverwrite: true,
+            disallowInsideRepo: true,
+        );
+        $this->pathGuard->ensureRestrictiveDirectory(dirname($safeOutputPath), 0700);
 
-        $tmpPath = $outputPath.'.tmp.'.getmypid().'.'.bin2hex(random_bytes(4));
+        $tmpPath = $safeOutputPath.'.tmp.'.getmypid().'.'.bin2hex(random_bytes(4));
         $handle = @fopen($tmpPath, 'wb');
         if ($handle === false) {
             throw new QueueRecoveryException(
                 "No se pudo abrir archivo temporal de respaldo: '{$tmpPath}'.",
                 'backup_write_failed',
-                ['path' => $outputPath],
+                ['path' => $safeOutputPath],
             );
         }
+        @chmod($tmpPath, 0600);
 
         $entriesById = [];
         foreach ($entries as $entry) {
@@ -75,11 +81,12 @@ class QueueRecoveryBackupService
                 'connection' => (string) $manifest['connection'],
                 'database' => (string) $manifest['database'],
                 'table' => $table,
-                'end_id' => (int) $manifest['end_id'],
+                'authorized_upper_bound' => (int) ($manifest['authorized_upper_bound'] ?? $manifest['end_id'] ?? 0),
+                'last_scanned_id' => (int) ($manifest['last_scanned_id'] ?? $manifest['end_id'] ?? 0),
                 'expected_count' => count($entriesById),
                 'created_at' => now()->utc()->toIso8601String(),
             ];
-            $this->writeLine($handle, $header);
+            $this->writeLine($handle, $header, $tmpPath, false);
 
             $digestContext = hash_init('sha256');
             $exportedCount = 0;
@@ -105,6 +112,7 @@ class QueueRecoveryBackupService
                     $expected = $entriesById[$jobId];
                     $normalized = $this->normalizeRow($row);
                     $payloadHash = hash('sha256', $normalized['payload']);
+                    $rowSha = $this->rowHash($normalized);
 
                     if ($normalized['reserved_at'] !== null) {
                         throw new QueueRecoveryException(
@@ -114,15 +122,19 @@ class QueueRecoveryBackupService
                         );
                     }
 
-                    if ($normalized['queue'] !== (string) $expected['queue'] || ! hash_equals((string) $expected['payload_hash'], $payloadHash)) {
+                    if ($normalized['queue'] !== (string) $expected['queue']
+                        || $normalized['attempts'] !== (int) $expected['attempts']
+                        || $normalized['available_at'] !== (int) $expected['available_at']
+                        || $normalized['created_at'] !== (int) $expected['created_at']
+                        || ! hash_equals((string) $expected['payload_hash'], $payloadHash)
+                        || ! hash_equals((string) $expected['row_sha256'], $rowSha)) {
                         throw new QueueRecoveryException(
-                            "No se pudo respaldar job #{$jobId}: discrepancia entre la base de datos y el manifiesto.",
+                            "No se pudo respaldar job #{$jobId}: discrepancia de columnas o hash entre BD y manifiesto.",
                             'backup_source_mismatch',
                             ['job_id' => $jobId],
                         );
                     }
 
-                    $rowSha = $this->rowHash($normalized);
                     hash_update($digestContext, $jobId.':'.$rowSha."\n");
 
                     $this->writeLine($handle, [
@@ -130,7 +142,7 @@ class QueueRecoveryBackupService
                         'row' => $normalized,
                         'payload_hash' => $payloadHash,
                         'row_sha256' => $rowSha,
-                    ]);
+                    ], $tmpPath, false);
                     $exportedCount++;
                 }
             }
@@ -140,29 +152,44 @@ class QueueRecoveryBackupService
                 'type' => 'footer',
                 'row_count' => $exportedCount,
                 'entries_sha256' => $entriesSha,
-            ]);
+            ], $tmpPath, true);
 
-            fflush($handle);
-            fclose($handle);
+            if (! @fclose($handle)) {
+                $handle = null;
+                throw new QueueRecoveryException("Falló fclose() al cerrar respaldo temporal '{$tmpPath}'.", 'backup_write_failed');
+            }
             $handle = null;
 
-            if (! @rename($tmpPath, $outputPath)) {
+            // Final check right before atomic rename to prevent race overwrite.
+            if (file_exists($safeOutputPath)) {
                 @unlink($tmpPath);
                 throw new QueueRecoveryException(
-                    "No se pudo mover atómicamente el respaldo a '{$outputPath}'.",
-                    'backup_write_failed',
-                    ['path' => $outputPath],
+                    "El archivo de respaldo ya existe: '{$safeOutputPath}'.",
+                    'backup_already_exists',
+                    ['path' => $safeOutputPath],
                 );
             }
 
-            $fileSha = hash_file('sha256', $outputPath);
+            if (! @rename($tmpPath, $safeOutputPath)) {
+                @unlink($tmpPath);
+                throw new QueueRecoveryException(
+                    "No se pudo mover atómicamente el respaldo a '{$safeOutputPath}'.",
+                    'backup_write_failed',
+                    ['path' => $safeOutputPath],
+                );
+            }
+
+            $this->pathGuard->enforceRestrictivePermissions($safeOutputPath, 0600);
+
+            $fileSha = hash_file('sha256', $safeOutputPath);
             if (! is_string($fileSha)) {
-                throw new QueueRecoveryException("No se pudo calcular el hash SHA-256 del respaldo '{$outputPath}'.", 'backup_integrity_failed');
+                throw new QueueRecoveryException("No se pudo calcular el hash SHA-256 del respaldo '{$safeOutputPath}'.", 'backup_integrity_failed');
             }
 
             return [
-                'path' => $outputPath,
+                'path' => $safeOutputPath,
                 'row_count' => $exportedCount,
+                'size_bytes' => (int) (@filesize($safeOutputPath) ?: 0),
                 'entries_sha256' => $entriesSha,
                 'file_sha256' => $fileSha,
             ];
@@ -176,31 +203,37 @@ class QueueRecoveryBackupService
     }
 
     /**
-     * Verifies backup hashes against the manifest AND executes an isolated SQLite
+     * Verifies backup hashes against ALL 7 columns in the manifest AND executes an isolated SQLite
      * restore verification test before allowing any deletion.
      *
      * @param  array<string, mixed>  $manifest
      * @return array{
      *     path: string,
      *     row_count: int,
+     *     size_bytes: int,
      *     entries_sha256: string,
      *     file_sha256: string,
-     *     isolated_restore_verified: bool
+     *     isolated_restore_verified: bool,
+     *     restore_duration_ms: float,
+     *     restore_peak_memory_bytes: int
      * }
      */
     public function verifyAndTestRestore(string $backupPath, array $manifest): array
     {
-        if (! is_file($backupPath) || ! is_readable($backupPath)) {
+        $safeBackupPath = $this->pathGuard->assertSafeInputPath($backupPath);
+
+        if (! is_file($safeBackupPath) || ! is_readable($safeBackupPath)) {
             throw new QueueRecoveryException(
-                "El archivo de respaldo no existe o no es legible: '{$backupPath}'.",
+                "El archivo de respaldo no existe o no es legible: '{$safeBackupPath}'.",
                 'backup_missing',
-                ['path' => $backupPath],
+                ['path' => $safeBackupPath],
             );
         }
 
-        $fileSha = hash_file('sha256', $backupPath);
+        $startedAt = microtime(true);
+        $fileSha = hash_file('sha256', $safeBackupPath);
         if (! is_string($fileSha)) {
-            throw new QueueRecoveryException("No se pudo calcular SHA-256 del respaldo '{$backupPath}'.", 'backup_integrity_failed');
+            throw new QueueRecoveryException("No se pudo calcular SHA-256 del respaldo '{$safeBackupPath}'.", 'backup_integrity_failed');
         }
 
         $expectedById = [];
@@ -208,9 +241,9 @@ class QueueRecoveryBackupService
             $expectedById[(int) $entry['id']] = $entry;
         }
 
-        $handle = @fopen($backupPath, 'rb');
+        $handle = @fopen($safeBackupPath, 'rb');
         if ($handle === false) {
-            throw new QueueRecoveryException("No se pudo abrir el respaldo '{$backupPath}'.", 'backup_missing');
+            throw new QueueRecoveryException("No se pudo abrir el respaldo '{$safeBackupPath}'.", 'backup_missing');
         }
 
         $pdo = new PDO('sqlite::memory:');
@@ -335,10 +368,14 @@ class QueueRecoveryBackupService
 
                 $manifestEntry = $expectedById[$jobId];
                 if ($normalized['queue'] !== (string) $manifestEntry['queue']
+                    || $normalized['attempts'] !== (int) $manifestEntry['attempts']
+                    || $normalized['available_at'] !== (int) $manifestEntry['available_at']
+                    || $normalized['created_at'] !== (int) $manifestEntry['created_at']
                     || ! hash_equals((string) $manifestEntry['payload_hash'], $computedPayloadHash)
+                    || ! hash_equals((string) $manifestEntry['row_sha256'], $computedRowHash)
                     || $normalized['reserved_at'] !== null) {
                     throw new QueueRecoveryException(
-                        "Respaldo inconsistente con manifiesto para job #{$jobId}.",
+                        "Respaldo inconsistente con el manifiesto para job #{$jobId}.",
                         'backup_integrity_failed',
                         ['job_id' => $jobId],
                     );
@@ -423,59 +460,65 @@ class QueueRecoveryBackupService
         }
 
         return [
-            'path' => $backupPath,
+            'path' => $safeBackupPath,
             'row_count' => $restoredCount,
+            'size_bytes' => (int) (@filesize($safeBackupPath) ?: 0),
             'entries_sha256' => $computedEntriesSha,
             'file_sha256' => $fileSha,
             'isolated_restore_verified' => true,
+            'restore_duration_ms' => round((microtime(true) - $startedAt) * 1000, 2),
+            'restore_peak_memory_bytes' => memory_get_peak_usage(true),
         ];
     }
 
     /**
      * Restores a verified backup file into a target isolated Laravel DB connection.
+     * - Preserves original PK IDs.
+     * - Checks PK collisions BEFORE inserting and aborts cleanly with `restore_pk_collision` (never overwrites).
+     * - Never modifies any commercial/business table.
      *
      * @return array{restored: int, verified: int, entries_sha256: string}
      */
     public function restoreToConnection(string $backupPath, string $connectionName, string $table = 'jobs'): array
     {
-        if (! is_file($backupPath) || ! is_readable($backupPath)) {
-            throw new QueueRecoveryException("Archivo de respaldo no legible: '{$backupPath}'.", 'backup_missing');
+        $safeBackupPath = $this->pathGuard->assertSafeInputPath($backupPath);
+
+        if (! is_file($safeBackupPath) || ! is_readable($safeBackupPath)) {
+            throw new QueueRecoveryException("Archivo de respaldo no legible: '{$safeBackupPath}'.", 'backup_missing');
         }
 
         $connection = DB::connection($connectionName);
-        $handle = @fopen($backupPath, 'rb');
-        if ($handle === false) {
-            throw new QueueRecoveryException("No se pudo abrir el respaldo '{$backupPath}'.", 'backup_missing');
+
+        // Pass 1: Validate full backup integrity AND check ALL PK collisions BEFORE inserting a single row!
+        $allIds = [];
+        $handleCheck = @fopen($safeBackupPath, 'rb');
+        if ($handleCheck === false) {
+            throw new QueueRecoveryException("No se pudo abrir el respaldo '{$safeBackupPath}'.", 'backup_missing');
         }
 
-        $batch = [];
-        $expectedHashes = [];
         $footer = null;
         $digestContext = hash_init('sha256');
+        $expectedHashes = [];
 
         try {
-            while (($line = fgets($handle)) !== false) {
+            while (($line = fgets($handleCheck)) !== false) {
                 $trimmed = trim($line);
                 if ($trimmed === '') {
                     continue;
                 }
-
                 $record = json_decode($trimmed, true, 64, JSON_THROW_ON_ERROR);
                 if (! is_array($record)) {
                     throw new QueueRecoveryException('Registro inválido en archivo de respaldo.', 'backup_integrity_failed');
                 }
-
                 $type = (string) ($record['type'] ?? '');
                 if ($type === 'footer') {
                     $footer = $record;
 
                     continue;
                 }
-
                 if ($type !== 'row') {
                     continue;
                 }
-
                 $normalized = $this->normalizeRow((array) $record['row']);
                 $rowHash = $this->rowHash($normalized);
                 if (! hash_equals($rowHash, (string) ($record['row_sha256'] ?? ''))) {
@@ -484,11 +527,59 @@ class QueueRecoveryBackupService
                         'backup_integrity_failed',
                     );
                 }
-
+                $allIds[] = $normalized['id'];
                 $expectedHashes[$normalized['id']] = $rowHash;
                 hash_update($digestContext, $normalized['id'].':'.$rowHash."\n");
-                $batch[] = $normalized;
+            }
+        } finally {
+            fclose($handleCheck);
+        }
 
+        $computedSha = hash_final($digestContext);
+        if ($footer === null || ! hash_equals($computedSha, (string) ($footer['entries_sha256'] ?? ''))) {
+            throw new QueueRecoveryException('Digest final del respaldo inválido durante restauración.', 'backup_integrity_failed');
+        }
+
+        // Check PK collisions in chunks BEFORE writing anything!
+        foreach (array_chunk($allIds, self::EXPORT_CHUNK_SIZE) as $chunkIds) {
+            $existingIds = $connection->table($table)
+                ->whereIn('id', $chunkIds)
+                ->pluck('id')
+                ->map(static fn ($id): int => (int) $id)
+                ->all();
+
+            if ($existingIds !== []) {
+                throw new QueueRecoveryException(
+                    sprintf(
+                        'Colisión de PK detectada antes de restaurar: %d ID(s) ya existen en %s (p. ej. #%d). Abortando sin sobrescribir.',
+                        count($existingIds),
+                        $table,
+                        $existingIds[0],
+                    ),
+                    'restore_pk_collision',
+                    ['colliding_sample_ids' => array_slice($existingIds, 0, 10)],
+                );
+            }
+        }
+
+        // Pass 2: Stream and insert in micro-transactions of 500 preserving original IDs.
+        $handle = @fopen($safeBackupPath, 'rb');
+        if ($handle === false) {
+            throw new QueueRecoveryException("No se pudo abrir el respaldo '{$safeBackupPath}'.", 'backup_missing');
+        }
+
+        $batch = [];
+        try {
+            while (($line = fgets($handle)) !== false) {
+                $trimmed = trim($line);
+                if ($trimmed === '') {
+                    continue;
+                }
+                $record = json_decode($trimmed, true, 64, JSON_THROW_ON_ERROR);
+                if (! is_array($record) || (string) ($record['type'] ?? '') !== 'row') {
+                    continue;
+                }
+                $batch[] = $this->normalizeRow((array) $record['row']);
                 if (count($batch) >= self::EXPORT_CHUNK_SIZE) {
                     $this->insertRestoreBatch($connection, $table, $batch);
                     $batch = [];
@@ -502,12 +593,7 @@ class QueueRecoveryBackupService
             fclose($handle);
         }
 
-        $computedSha = hash_final($digestContext);
-        if ($footer === null || ! hash_equals($computedSha, (string) ($footer['entries_sha256'] ?? ''))) {
-            throw new QueueRecoveryException('Digest final del respaldo inválido durante restauración.', 'backup_integrity_failed');
-        }
-
-        // Verify all restored rows exist with exact content in the target isolated DB.
+        // Pass 3: Verify all restored rows exist with exact bit-for-bit content in the target isolated DB.
         $verified = 0;
         foreach (array_chunk(array_keys($expectedHashes), self::EXPORT_CHUNK_SIZE) as $ids) {
             $rows = $connection->table($table)
@@ -555,16 +641,17 @@ class QueueRecoveryBackupService
 
         if (! hash_equals((string) $manifest['manifest_sha256'], (string) ($header['manifest_sha256'] ?? ''))) {
             throw new QueueRecoveryException(
-                'El archivo de respaldo no corresponde a la firma SHA-256 del manifiesto proporcionado.',
+                'El archivo de respaldo no corresponde al checksum manifest_sha256 del manifiesto proporcionado.',
                 'backup_integrity_failed',
             );
         }
 
+        $manifestUpper = (int) ($manifest['authorized_upper_bound'] ?? $manifest['end_id'] ?? 0);
         if ((string) ($header['incident_id'] ?? '') !== (string) $manifest['incident_id']
-            || (int) ($header['end_id'] ?? -1) !== (int) $manifest['end_id']
+            || (int) ($header['authorized_upper_bound'] ?? -1) !== $manifestUpper
             || (string) ($header['table'] ?? '') !== (string) $manifest['table']) {
             throw new QueueRecoveryException(
-                'Los metadatos del respaldo (incident_id, end_id o table) no coinciden con el manifiesto.',
+                'Los metadatos del respaldo (incident_id, authorized_upper_bound o table) no coinciden con el manifiesto.',
                 'backup_integrity_failed',
             );
         }
@@ -575,7 +662,16 @@ class QueueRecoveryBackupService
      */
     private function insertRestoreBatch(ConnectionInterface $connection, string $table, array $batch): void
     {
-        $connection->transaction(function () use ($connection, $table, $batch): void {
+        $ids = array_column($batch, 'id');
+        $connection->transaction(function () use ($connection, $table, $batch, $ids): void {
+            $existing = $connection->table($table)->whereIn('id', $ids)->pluck('id')->all();
+            if ($existing !== []) {
+                throw new QueueRecoveryException(
+                    'Colisión de PK concurrente durante restauración en lote.',
+                    'restore_pk_collision',
+                    ['colliding_sample_ids' => array_slice(array_map('intval', $existing), 0, 10)],
+                );
+            }
             $connection->table($table)->insert($batch);
         });
     }
@@ -612,11 +708,9 @@ class QueueRecoveryBackupService
      * @param  resource  $handle
      * @param  array<string, mixed>  $data
      */
-    private function writeLine($handle, array $data): void
+    private function writeLine($handle, array $data, string $contextPath, bool $sync): void
     {
-        $json = json_encode($data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
-        if (fwrite($handle, $json."\n") === false) {
-            throw new QueueRecoveryException('Error escribiendo línea en archivo de respaldo.', 'backup_write_failed');
-        }
+        $json = json_encode($data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR)."\n";
+        $this->pathGuard->writeAllAndSync($handle, $json, $contextPath, $sync);
     }
 }
