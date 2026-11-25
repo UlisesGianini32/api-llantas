@@ -14,7 +14,11 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 
 /**
- * Strictly READ-ONLY reconstruction diagnostics inventory for R2.
+ * Strictly READ-ONLY reconstruction diagnostics inventory for R2.1.
+ * Aligned to the real production schema (`inventory_movements.occurred_at`,
+ * `meli_beauty_scheduled_discount_items`, `meli_order_items.remote_line_key`,
+ * `inventory_channel_links`, `meli_accounts`).
+ *
  * Never mutates any database table, never executes jobs, and never makes HTTP calls to Mercado Libre.
  */
 class QueueReconstructionDiagnosticsService
@@ -30,10 +34,17 @@ class QueueReconstructionDiagnosticsService
     ) {}
 
     /**
-     * Generates a complete read-only inventory distinguishing all 11 R2 categories.
+     * Generates a complete read-only inventory distinguishing all 11 R2 categories,
+     * real-schema anomalies (deleted/modified Beauty rules, ambiguous links, missing remote_line_key,
+     * account mismatches), and explicit 3-tier classification:
+     * - reconstructible_candidates
+     * - ambiguous_entities
+     * - pending_human_review
      *
      * @param  array{
      *     manifest_path?: ?string,
+     *     expected_manifest_sha256?: ?string,
+     *     hmac_key?: ?string,
      *     account_id?: ?int,
      *     cutover?: ?string,
      *     chunk?: int,
@@ -58,7 +69,13 @@ class QueueReconstructionDiagnosticsService
         $manifestMeta = null;
 
         if (isset($options['manifest_path']) && trim((string) $options['manifest_path']) !== '') {
-            $manifest = $this->manifestManager->loadAndVerify(trim((string) $options['manifest_path']), $this->inspector);
+            $manifest = $this->manifestManager->loadAndVerify(
+                trim((string) $options['manifest_path']),
+                $this->inspector,
+                isset($options['expected_manifest_sha256']) ? (string) $options['expected_manifest_sha256'] : null,
+                isset($options['hmac_key']) ? (string) $options['hmac_key'] : null,
+                requireOperatorApproval: false,
+            );
             $scopedOrderIds = [];
             $scopedDiscountIds = [];
             foreach ((array) $manifest['entries'] as $entry) {
@@ -84,6 +101,7 @@ class QueueReconstructionDiagnosticsService
         $cutoverAt = $this->resolveCutover($options['cutover'] ?? null);
 
         $tables = [
+            'meli_accounts' => $schema->hasTable('meli_accounts'),
             'meli_orders' => $schema->hasTable('meli_orders'),
             'meli_order_items' => $schema->hasTable('meli_order_items'),
             'inventory_channel_links' => $schema->hasTable('inventory_channel_links'),
@@ -94,10 +112,18 @@ class QueueReconstructionDiagnosticsService
             'inventory_products' => $schema->hasTable('inventory_products'),
             'inventory_movements' => $schema->hasTable('inventory_movements'),
             'meli_beauty_scheduled_discounts' => $schema->hasTable('meli_beauty_scheduled_discounts'),
+            'meli_beauty_scheduled_discount_items' => $schema->hasTable('meli_beauty_scheduled_discount_items'),
             'meli_scheduled_price_states' => $schema->hasTable('meli_scheduled_price_states'),
             'meli_price_changes' => $schema->hasTable('meli_price_changes'),
             'meli_price_manager_items' => $schema->hasTable('meli_price_manager_items'),
         ];
+
+        $validAccountIds = [];
+        if ($tables['meli_accounts']) {
+            foreach ($db->table('meli_accounts')->pluck('id') as $aid) {
+                $validAccountIds[(int) $aid] = true;
+            }
+        }
 
         $categories = [
             'cancelled_orders_with_active_reservations' => [],
@@ -113,15 +139,33 @@ class QueueReconstructionDiagnosticsService
             'remote_states_requiring_verification' => [],
         ];
 
+        $schemaAnomalies = [
+            'missing_orders_in_manifest' => [],
+            'ambiguous_channel_links' => [],
+            'missing_remote_line_key_orders' => [],
+            'account_mismatches' => [],
+            'deleted_beauty_rules' => [],
+            'modified_beauty_rules_orphaned_states' => [],
+        ];
+
+        $classification = [
+            'reconstructible_candidates' => [],
+            'ambiguous_entities' => [],
+            'pending_human_review' => [],
+        ];
+
         if ($tables['meli_orders']) {
             $this->diagnoseOrders(
                 $db,
                 $tables,
+                $validAccountIds,
                 $scopedOrderIds,
                 $accountFilter,
                 $cutoverAt,
                 $chunk,
                 $categories,
+                $schemaAnomalies,
+                $classification,
             );
         }
 
@@ -129,15 +173,23 @@ class QueueReconstructionDiagnosticsService
             $this->diagnoseBeautyPromotions(
                 $db,
                 $tables,
+                $validAccountIds,
                 $scopedDiscountIds,
                 $accountFilter,
                 $categories,
+                $schemaAnomalies,
+                $classification,
             );
         }
 
         $counts = [];
         foreach ($categories as $key => $items) {
             $counts[$key] = count($items);
+        }
+
+        $anomalyCounts = [];
+        foreach ($schemaAnomalies as $key => $items) {
+            $anomalyCounts[$key] = count($items);
         }
 
         return [
@@ -157,28 +209,55 @@ class QueueReconstructionDiagnosticsService
                     'multiline_orders',
                     'kits_and_components',
                     'remote_states_requiring_verification',
+                    'deleted_beauty_rules',
+                    'modified_beauty_rules_orphaned_states',
+                    'ambiguous_channel_links',
+                    'missing_remote_line_key_orders',
+                    'account_mismatches',
                 ],
             ],
             'counts' => $counts,
+            'anomaly_counts' => $anomalyCounts,
+            'reconstructibility_summary' => [
+                'counts' => [
+                    'reconstructible_candidates' => count($classification['reconstructible_candidates']),
+                    'ambiguous_entities' => count($classification['ambiguous_entities']),
+                    'pending_human_review' => count($classification['pending_human_review']),
+                ],
+                'reconstructible_candidates' => $classification['reconstructible_candidates'],
+                'ambiguous_entities' => $classification['ambiguous_entities'],
+                'pending_human_review' => $classification['pending_human_review'],
+            ],
+            'schema_anomalies' => $schemaAnomalies,
             'categories' => $categories,
         ];
     }
 
     /**
      * @param  array<string, bool>  $tables
+     * @param  array<int, bool>  $validAccountIds
      * @param  list<int>|null  $scopedOrderIds
      * @param  array<string, list<array<string, mixed>>>  $categories
+     * @param  array<string, list<array<string, mixed>>>  $schemaAnomalies
+     * @param  array<string, list<array<string, mixed>>>  $classification
      */
     private function diagnoseOrders(
         ConnectionInterface $db,
         array $tables,
+        array $validAccountIds,
         ?array $scopedOrderIds,
         ?int $accountFilter,
         ?CarbonImmutable $cutoverAt,
         int $chunk,
         array &$categories,
+        array &$schemaAnomalies,
+        array &$classification,
     ): void {
-        // Pre-index kit product IDs and component product IDs if available (read-only).
+        $schema = Schema::connection($db->getName());
+        $hasMovOccurredAt = $tables['inventory_movements'] && $schema->hasColumn('inventory_movements', 'occurred_at');
+        $hasItemVarCol = $tables['meli_order_items'] && $schema->hasColumn('meli_order_items', 'variation_id');
+        $hasItemLineKeyCol = $tables['meli_order_items'] && $schema->hasColumn('meli_order_items', 'remote_line_key');
+
         $kitProductIds = [];
         $componentProductIds = [];
         if ($tables['inventory_products']) {
@@ -196,7 +275,7 @@ class QueueReconstructionDiagnosticsService
         // Pre-index active ML channel links with order_reservation_enabled = true.
         $reservationLinksByKey = [];
         if ($tables['inventory_channel_links']) {
-            $hasOrderResCol = Schema::connection($db->getName())->hasColumn('inventory_channel_links', 'order_reservation_enabled');
+            $hasOrderResCol = $schema->hasColumn('inventory_channel_links', 'order_reservation_enabled');
             $linkQuery = $db->table('inventory_channel_links')
                 ->where('channel', InventoryChannelLink::MERCADO_LIBRE)
                 ->where('is_active', true);
@@ -217,6 +296,7 @@ class QueueReconstructionDiagnosticsService
         $cursor = 0;
         $scopedChunks = $scopedOrderIds !== null ? array_chunk($scopedOrderIds, $chunk) : null;
         $scopedIndex = 0;
+        $foundScopedOrderIds = [];
 
         while (true) {
             if ($scopedChunks !== null) {
@@ -250,18 +330,20 @@ class QueueReconstructionDiagnosticsService
             }
 
             $batchOrderIds = $orders->pluck('id')->map(static fn ($id): int => (int) $id)->all();
+            foreach ($batchOrderIds as $foundId) {
+                $foundScopedOrderIds[$foundId] = true;
+            }
+
             $batchRemoteIds = $orders->pluck('order_id')->filter()->map(static fn ($id): string => (string) $id)->unique()->values()->all();
 
             // Load items for this batch.
             $itemsByOrderId = [];
             if ($tables['meli_order_items']) {
-                $hasVarCol = Schema::connection($db->getName())->hasColumn('meli_order_items', 'variation_id');
-                $hasLineKeyCol = Schema::connection($db->getName())->hasColumn('meli_order_items', 'remote_line_key');
                 $cols = ['id', 'meli_order_id', 'item_id', 'sku', 'quantity'];
-                if ($hasVarCol) {
+                if ($hasItemVarCol) {
                     $cols[] = 'variation_id';
                 }
-                if ($hasLineKeyCol) {
+                if ($hasItemLineKeyCol) {
                     $cols[] = 'remote_line_key';
                 }
 
@@ -324,7 +406,7 @@ class QueueReconstructionDiagnosticsService
                     }
                 }
                 foreach ($orderItems as $oi) {
-                    $var = property_exists($oi, 'variation_id') && $oi->variation_id !== null ? (string) $oi->variation_id : '';
+                    $var = $hasItemVarCol && $oi->variation_id !== null ? (string) $oi->variation_id : '';
                     $lk = ((string) $order->meli_account_id).'|'.((string) $oi->item_id).'|'.$var;
                     foreach ($reservationLinksByKey[$lk] ?? [] as $matchedLink) {
                         $pids[$matchedLink['inventory_product_id']] = true;
@@ -336,9 +418,14 @@ class QueueReconstructionDiagnosticsService
                 }
             }
 
-            // Detect manual movements for affected products.
+            // Detect manual movements using real production column `occurred_at` (with fallback to `created_at`).
             $manualMovementsByProduct = [];
             if ($tables['inventory_movements'] && $allBatchProductIds !== []) {
+                $movCols = ['id', 'inventory_product_id', 'type', 'quantity', 'reference_type', 'created_at'];
+                if ($hasMovOccurredAt) {
+                    $movCols[] = 'occurred_at';
+                }
+
                 $movs = $db->table('inventory_movements')
                     ->whereIn('inventory_product_id', array_keys($allBatchProductIds))
                     ->where(function ($q): void {
@@ -346,7 +433,7 @@ class QueueReconstructionDiagnosticsService
                             ->orWhereNotIn('reference_type', ['inventory_reservation', 'inventory_kit_reservation']);
                     })
                     ->orderByDesc('id')
-                    ->get(['id', 'inventory_product_id', 'type', 'quantity', 'reference_type', 'created_at']);
+                    ->get($movCols);
 
                 foreach ($movs as $m) {
                     $manualMovementsByProduct[(int) $m->inventory_product_id][] = $m;
@@ -355,6 +442,7 @@ class QueueReconstructionDiagnosticsService
 
             foreach ($orders as $order) {
                 $oid = (int) $order->id;
+                $accountId = $order->meli_account_id !== null ? (int) $order->meli_account_id : null;
                 $status = strtolower(trim((string) ($order->status ?? '')));
                 $shippingStatus = strtolower(trim((string) ($order->shipping_status ?? '')));
                 $orderItems = $itemsByOrderId[$oid] ?? [];
@@ -368,18 +456,34 @@ class QueueReconstructionDiagnosticsService
                 $afterCutover = $this->orderIsAfterCutover($order, $cutoverAt);
 
                 $hasReservationEnabledLink = false;
+                $ambiguousLinkKeys = [];
+                $missingLineKeyCount = 0;
+
                 foreach ($orderItems as $oi) {
-                    $var = property_exists($oi, 'variation_id') && $oi->variation_id !== null ? (string) $oi->variation_id : '';
+                    $var = $hasItemVarCol && $oi->variation_id !== null ? (string) $oi->variation_id : '';
                     $lk = ((string) $order->meli_account_id).'|'.((string) $oi->item_id).'|'.$var;
                     if (isset($reservationLinksByKey[$lk])) {
                         $hasReservationEnabledLink = true;
-                        break;
+                        if (count($reservationLinksByKey[$lk]) > 1) {
+                            $ambiguousLinkKeys[] = [
+                                'item_id' => (string) $oi->item_id,
+                                'variation_id' => $var !== '' ? $var : null,
+                                'link_count' => count($reservationLinksByKey[$lk]),
+                                'link_ids' => array_column($reservationLinksByKey[$lk], 'link_id'),
+                            ];
+                        }
+                    }
+
+                    if ($hasItemLineKeyCol && ($oi->remote_line_key === null || trim((string) $oi->remote_line_key) === '')) {
+                        $missingLineKeyCount++;
                     }
                 }
 
+                $accountMismatch = $accountId === null || ($tables['meli_accounts'] && ! isset($validAccountIds[$accountId]));
+
                 $summary = [
                     'meli_order_id' => $oid,
-                    'meli_account_id' => $order->meli_account_id !== null ? (int) $order->meli_account_id : null,
+                    'meli_account_id' => $accountId,
                     'remote_order_id' => (string) $order->order_id,
                     'status' => $status,
                     'shipping_status' => $shippingStatus !== '' ? $shippingStatus : null,
@@ -387,50 +491,85 @@ class QueueReconstructionDiagnosticsService
                     'active_allocations' => count($activeAllocs),
                 ];
 
-                // 1. Cancelled with active reservations
-                if ($status === 'cancelled' && $hasActiveReservation) {
+                $ambiguityReasons = [];
+                $humanReviewReasons = [];
+
+                if ($accountMismatch) {
+                    $schemaAnomalies['account_mismatches'][] = [
+                        'entity_type' => 'meli_order',
+                        'entity_id' => $oid,
+                        'meli_account_id' => $accountId,
+                    ];
+                    $humanReviewReasons[] = 'account_mismatch';
+                }
+
+                if ($ambiguousLinkKeys !== []) {
+                    $schemaAnomalies['ambiguous_channel_links'][] = [
+                        ...$summary,
+                        'ambiguous_links' => $ambiguousLinkKeys,
+                    ];
+                    $ambiguityReasons[] = 'ambiguous_channel_link';
+                }
+
+                if ($missingLineKeyCount > 0 && ($hasActiveReservation || $hasReservationEnabledLink)) {
+                    $schemaAnomalies['missing_remote_line_key_orders'][] = [
+                        ...$summary,
+                        'items_missing_remote_line_key' => $missingLineKeyCount,
+                    ];
+                    $ambiguityReasons[] = 'missing_remote_line_key';
+                }
+
+                $isCancelledWithActive = $status === 'cancelled' && $hasActiveReservation;
+                if ($isCancelledWithActive) {
                     $categories['cancelled_orders_with_active_reservations'][] = $summary;
                 }
 
-                // 2. Shipped/delivered/in_transit with active reservations
-                if ($status !== 'cancelled' && in_array($shippingStatus, self::FULFILLED_SHIPPING_STATUSES, true) && $hasActiveReservation) {
+                $isShippedWithActive = $status !== 'cancelled'
+                    && in_array($shippingStatus, self::FULFILLED_SHIPPING_STATUSES, true)
+                    && $hasActiveReservation;
+                if ($isShippedWithActive) {
                     $categories['shipped_orders_with_active_reservations'][] = $summary;
                 }
 
-                // 3. Paid pending reservation (open, after cutover, enabled link, no active alloc)
-                if ($status === 'paid'
+                $isPaidPending = $status === 'paid'
                     && ! in_array($shippingStatus, self::FULFILLED_SHIPPING_STATUSES, true)
                     && $afterCutover
                     && $hasReservationEnabledLink
-                    && ! $hasActiveReservation) {
+                    && ! $hasActiveReservation;
+                if ($isPaidPending) {
                     $categories['paid_orders_pending_reservation'][] = $summary;
                 }
 
-                // 4. Shipped during outage that NEVER had reservations
-                if ($status !== 'cancelled'
+                $isShippedNeverReserved = $status !== 'cancelled'
                     && in_array($shippingStatus, self::FULFILLED_SHIPPING_STATUSES, true)
                     && $afterCutover
                     && $hasReservationEnabledLink
                     && ! $hasActiveReservation
-                    && $fulfilledAllocs === []) {
+                    && $fulfilledAllocs === [];
+                if ($isShippedNeverReserved) {
                     $categories['shipped_during_outage_never_reserved'][] = [
                         ...$summary,
                         'requires_manual_verification' => true,
                     ];
+                    $humanReviewReasons[] = 'shipped_during_outage_never_reserved';
                 }
 
-                // 5. Orders with manual movements on affected products (after order creation)
+                // 5. Orders with manual movements on affected products (using real `occurred_at` when present).
                 $orderCreatedAt = $this->parseOrderTimestamp($order);
                 $matchedManualMovements = [];
                 foreach ($productIdsByOrderId[$oid] ?? [] as $pid) {
                     foreach ($manualMovementsByProduct[$pid] ?? [] as $mov) {
-                        $movAt = $mov->created_at ? CarbonImmutable::parse((string) $mov->created_at) : null;
+                        $rawTimestamp = ($hasMovOccurredAt && ! empty($mov->occurred_at))
+                            ? (string) $mov->occurred_at
+                            : (! empty($mov->created_at) ? (string) $mov->created_at : null);
+                        $movAt = $rawTimestamp !== null ? CarbonImmutable::parse($rawTimestamp) : null;
                         if ($orderCreatedAt === null || $movAt === null || $movAt->greaterThanOrEqualTo($orderCreatedAt)) {
                             $matchedManualMovements[] = [
                                 'movement_id' => (int) $mov->id,
                                 'inventory_product_id' => $pid,
                                 'type' => (string) $mov->type,
                                 'quantity' => (int) $mov->quantity,
+                                'occurred_at' => $rawTimestamp,
                             ];
                         }
                     }
@@ -442,14 +581,16 @@ class QueueReconstructionDiagnosticsService
                         'manual_movements_sample' => array_slice($matchedManualMovements, 0, 5),
                         'requires_manual_verification' => true,
                     ];
+                    $ambiguityReasons[] = 'manual_movements_detected';
                 }
 
-                // 6. Multiline orders (relevant if has active reservation or enabled link)
+                // 6. Multiline orders
                 if (count($orderItems) > 1 && ($hasActiveReservation || $hasReservationEnabledLink)) {
                     $categories['multiline_orders'][] = [
                         ...$summary,
                         'requires_manual_verification' => true,
                     ];
+                    $ambiguityReasons[] = 'multiline_order';
                 }
 
                 // 7. Kits and components
@@ -472,6 +613,55 @@ class QueueReconstructionDiagnosticsService
                         'has_active_kit_reservation' => isset($activeKitResByOrderId[$oid]),
                         'requires_manual_verification' => true,
                     ];
+                    $ambiguityReasons[] = 'kit_or_component_involved';
+                }
+
+                // 3-tier classification for this order:
+                if ($humanReviewReasons !== []) {
+                    $classification['pending_human_review'][] = [
+                        'entity_type' => 'meli_order',
+                        'entity_id' => $oid,
+                        'meli_account_id' => $accountId,
+                        'reasons' => array_values(array_unique(array_merge($humanReviewReasons, $ambiguityReasons))),
+                    ];
+                } elseif ($ambiguityReasons !== []) {
+                    $classification['ambiguous_entities'][] = [
+                        'entity_type' => 'meli_order',
+                        'entity_id' => $oid,
+                        'meli_account_id' => $accountId,
+                        'reasons' => array_values(array_unique($ambiguityReasons)),
+                    ];
+                } elseif ($isCancelledWithActive || $isShippedWithActive || $isPaidPending) {
+                    $actionHint = match (true) {
+                        $isCancelledWithActive => 'release_active_reservation_for_cancelled_order',
+                        $isShippedWithActive => 'fulfill_active_reservation_for_shipped_order',
+                        default => 'evaluate_reservation_for_paid_order',
+                    };
+                    $classification['reconstructible_candidates'][] = [
+                        'entity_type' => 'meli_order',
+                        'entity_id' => $oid,
+                        'meli_account_id' => $accountId,
+                        'candidate_action' => $actionHint,
+                        'automatic_execution_allowed' => false,
+                    ];
+                }
+            }
+        }
+
+        // Flag any manifest-scoped orders that no longer exist in `meli_orders`.
+        if ($scopedOrderIds !== null && $accountFilter === null) {
+            foreach ($scopedOrderIds as $scopedId) {
+                if (! isset($foundScopedOrderIds[$scopedId])) {
+                    $schemaAnomalies['missing_orders_in_manifest'][] = [
+                        'meli_order_id' => $scopedId,
+                        'reason' => 'order_not_found_in_meli_orders',
+                    ];
+                    $classification['pending_human_review'][] = [
+                        'entity_type' => 'meli_order',
+                        'entity_id' => $scopedId,
+                        'meli_account_id' => null,
+                        'reasons' => ['order_missing_from_db'],
+                    ];
                 }
             }
         }
@@ -479,15 +669,21 @@ class QueueReconstructionDiagnosticsService
 
     /**
      * @param  array<string, bool>  $tables
+     * @param  array<int, bool>  $validAccountIds
      * @param  list<int>|null  $scopedDiscountIds
      * @param  array<string, list<array<string, mixed>>>  $categories
+     * @param  array<string, list<array<string, mixed>>>  $schemaAnomalies
+     * @param  array<string, list<array<string, mixed>>>  $classification
      */
     private function diagnoseBeautyPromotions(
         ConnectionInterface $db,
         array $tables,
+        array $validAccountIds,
         ?array $scopedDiscountIds,
         ?int $accountFilter,
         array &$categories,
+        array &$schemaAnomalies,
+        array &$classification,
     ): void {
         $rulesQuery = $db->table('meli_beauty_scheduled_discounts')->orderBy('id');
         if ($scopedDiscountIds !== null) {
@@ -501,11 +697,78 @@ class QueueReconstructionDiagnosticsService
         }
 
         $rules = $rulesQuery->get();
+        $foundRuleIds = [];
+        foreach ($rules as $r) {
+            $foundRuleIds[(int) $r->id] = true;
+        }
+
+        // Detect deleted Beauty rules referenced by manifest OR by orphaned `meli_scheduled_price_states`.
+        $deletedRuleIds = [];
+        if ($scopedDiscountIds !== null && $accountFilter === null) {
+            foreach ($scopedDiscountIds as $did) {
+                if (! isset($foundRuleIds[$did])) {
+                    $deletedRuleIds[$did] = 'referenced_in_manifest_but_deleted';
+                }
+            }
+        }
+
+        if ($tables['meli_scheduled_price_states']) {
+            $orphanStatesQuery = $db->table('meli_scheduled_price_states')
+                ->whereIn('status', ['active', 'restore_pending', 'failed']);
+            if ($scopedDiscountIds !== null) {
+                $orphanStatesQuery->whereIn('meli_beauty_scheduled_discount_id', $scopedDiscountIds);
+            }
+            foreach ($orphanStatesQuery->get() as $st) {
+                $did = (int) $st->meli_beauty_scheduled_discount_id;
+                if (! isset($foundRuleIds[$did]) && ! $db->table('meli_beauty_scheduled_discounts')->where('id', $did)->exists()) {
+                    $deletedRuleIds[$did] = 'orphaned_scheduled_price_state_without_rule';
+                    $categories['remote_states_requiring_verification'][] = [
+                        'discount_id' => $did,
+                        'meli_account_id' => null,
+                        'price_manager_item_id' => (int) $st->price_manager_item_id,
+                        'meli_item_id' => null,
+                        'sku' => null,
+                        'local_state_status' => (string) $st->status,
+                        'window_status' => 'rule_deleted',
+                        'base_price' => $st->base_price !== null ? (float) $st->base_price : null,
+                        'promotional_price' => $st->promotional_price !== null ? (float) $st->promotional_price : null,
+                        'failure_message' => $st->failure_message !== null ? mb_substr((string) $st->failure_message, 0, 200) : null,
+                        'recent_failed_changes' => 0,
+                        'requires_remote_verification' => true,
+                    ];
+                }
+            }
+        }
+
+        foreach ($deletedRuleIds as $did => $reason) {
+            $schemaAnomalies['deleted_beauty_rules'][] = [
+                'discount_id' => $did,
+                'reason' => $reason,
+            ];
+            $classification['pending_human_review'][] = [
+                'entity_type' => 'beauty_discount',
+                'entity_id' => $did,
+                'meli_account_id' => null,
+                'reasons' => [$reason],
+            ];
+        }
+
         if ($rules->isEmpty()) {
             return;
         }
 
-        $ruleIds = $rules->pluck('id')->map(static fn ($id): int => (int) $id)->all();
+        $ruleIds = array_keys($foundRuleIds);
+
+        // Load explicit item links from `meli_beauty_scheduled_discount_items` (real production schema) to detect modified rules.
+        $explicitItemsByRule = [];
+        if ($tables['meli_beauty_scheduled_discount_items']) {
+            $pivotRows = $db->table('meli_beauty_scheduled_discount_items')
+                ->whereIn('meli_beauty_scheduled_discount_id', $ruleIds)
+                ->get(['meli_beauty_scheduled_discount_id', 'price_manager_item_id']);
+            foreach ($pivotRows as $pr) {
+                $explicitItemsByRule[(int) $pr->meli_beauty_scheduled_discount_id][(int) $pr->price_manager_item_id] = true;
+            }
+        }
 
         $statesByRule = [];
         if ($tables['meli_scheduled_price_states']) {
@@ -549,6 +812,7 @@ class QueueReconstructionDiagnosticsService
         }
 
         foreach ($rules as $row) {
+            $accountId = $row->meli_account_id !== null ? (int) $row->meli_account_id : null;
             $model = new MeliBeautyScheduledDiscount([
                 'meli_account_id' => $row->meli_account_id,
                 'brand_group_id' => $row->brand_group_id ?? null,
@@ -565,31 +829,60 @@ class QueueReconstructionDiagnosticsService
 
             $windowStatus = $this->beautyWindow->status($model);
             $ruleStates = $statesByRule[$model->id] ?? [];
+            $explicitItems = $explicitItemsByRule[$model->id] ?? [];
 
             $activeStates = array_values(array_filter($ruleStates, static fn ($s): bool => (string) $s->status === 'active'));
             $restorePendingStates = array_values(array_filter($ruleStates, static fn ($s): bool => (string) $s->status === 'restore_pending'));
             $failedStates = array_values(array_filter($ruleStates, static fn ($s): bool => (string) $s->status === 'failed'));
 
+            $accountMismatch = $accountId === null || ($tables['meli_accounts'] && ! isset($validAccountIds[$accountId]));
+            if ($accountMismatch) {
+                $schemaAnomalies['account_mismatches'][] = [
+                    'entity_type' => 'beauty_discount',
+                    'entity_id' => $model->id,
+                    'meli_account_id' => $accountId,
+                ];
+            }
+
+            // Detect modified Beauty rule: rule has explicit items in `meli_beauty_scheduled_discount_items`,
+            // yet an active/restore_pending/failed state references an item no longer attached to the rule!
+            $orphanedItemIds = [];
+            if ($explicitItems !== []) {
+                foreach (array_merge($activeStates, $restorePendingStates, $failedStates) as $st) {
+                    $pmItemId = (int) $st->price_manager_item_id;
+                    if (! isset($explicitItems[$pmItemId])) {
+                        $orphanedItemIds[] = $pmItemId;
+                    }
+                }
+            }
+            if ($orphanedItemIds !== []) {
+                $schemaAnomalies['modified_beauty_rules_orphaned_states'][] = [
+                    'discount_id' => $model->id,
+                    'meli_account_id' => $accountId,
+                    'orphaned_price_manager_item_ids' => array_values(array_unique($orphanedItemIds)),
+                    'reason' => 'state_item_removed_from_meli_beauty_scheduled_discount_items',
+                ];
+            }
+
             $ruleSummary = [
                 'discount_id' => $model->id,
-                'meli_account_id' => (int) $row->meli_account_id,
+                'meli_account_id' => $accountId,
                 'active_flag' => (bool) ($row->active ?? false),
                 'all_day' => (bool) ($row->all_day ?? false),
                 'starts_on' => $row->starts_on ?? null,
                 'ends_on' => $row->ends_on ?? null,
                 'window_status' => $windowStatus,
+                'explicit_items_count' => count($explicitItems),
                 'states_active' => count($activeStates),
                 'states_restore_pending' => count($restorePendingStates),
                 'states_failed' => count($failedStates),
             ];
 
-            // 8. Active promotions (enabled and in_window or scheduled, OR having active remote state)
             if (((bool) ($row->active ?? false) && in_array($windowStatus, ['in_window', 'outside_hours', 'scheduled'], true))
                 || $activeStates !== []) {
                 $categories['active_beauty_promotions'][] = $ruleSummary;
             }
 
-            // 9. Promotions pending restore (explicit restore_pending OR active states on disabled/finished/outside_hours rule)
             $needsRestore = $restorePendingStates !== []
                 || ($activeStates !== [] && in_array($windowStatus, ['disabled', 'finished', 'outside_hours'], true));
             if ($needsRestore) {
@@ -599,27 +892,62 @@ class QueueReconstructionDiagnosticsService
                 ];
             }
 
-            // 10. Expired promotions
             if ($windowStatus === 'finished') {
                 $categories['expired_beauty_promotions'][] = $ruleSummary;
             }
 
-            // 11. Remote states requiring verification (active, restore_pending, failed states, or recent failed price changes)
+            $remoteStatesCount = count($activeStates) + count($restorePendingStates) + count($failedStates);
             foreach (array_merge($activeStates, $restorePendingStates, $failedStates) as $st) {
                 $itemInfo = $itemsById[(int) $st->price_manager_item_id] ?? ['meli_item_id' => null, 'sku' => null];
                 $categories['remote_states_requiring_verification'][] = [
                     'discount_id' => $model->id,
-                    'meli_account_id' => (int) $row->meli_account_id,
+                    'meli_account_id' => $accountId,
                     'price_manager_item_id' => (int) $st->price_manager_item_id,
                     'meli_item_id' => $itemInfo['meli_item_id'],
                     'sku' => $itemInfo['sku'],
                     'local_state_status' => (string) $st->status,
                     'window_status' => $windowStatus,
+                    'orphaned_from_rule_items' => in_array((int) $st->price_manager_item_id, $orphanedItemIds, true),
                     'base_price' => $st->base_price !== null ? (float) $st->base_price : null,
                     'promotional_price' => $st->promotional_price !== null ? (float) $st->promotional_price : null,
                     'failure_message' => $st->failure_message !== null ? mb_substr((string) $st->failure_message, 0, 200) : null,
                     'recent_failed_changes' => count($recentFailedChangesByItem[(int) $st->price_manager_item_id] ?? []),
                     'requires_remote_verification' => true,
+                ];
+            }
+
+            // 3-tier classification for this Beauty rule:
+            if ($accountMismatch || $needsRestore || $failedStates !== [] || $orphanedItemIds !== [] || $remoteStatesCount > 0) {
+                $reasons = [];
+                if ($accountMismatch) {
+                    $reasons[] = 'account_mismatch';
+                }
+                if ($needsRestore) {
+                    $reasons[] = 'beauty_promotion_pending_restore';
+                }
+                if ($failedStates !== []) {
+                    $reasons[] = 'beauty_promotion_failed_states';
+                }
+                if ($orphanedItemIds !== []) {
+                    $reasons[] = 'modified_beauty_rule_orphaned_states';
+                }
+                if ($remoteStatesCount > 0) {
+                    $reasons[] = 'remote_meli_state_verification_required';
+                }
+
+                $classification['pending_human_review'][] = [
+                    'entity_type' => 'beauty_discount',
+                    'entity_id' => $model->id,
+                    'meli_account_id' => $accountId,
+                    'reasons' => array_values(array_unique($reasons)),
+                ];
+            } else {
+                $classification['reconstructible_candidates'][] = [
+                    'entity_type' => 'beauty_discount',
+                    'entity_id' => $model->id,
+                    'meli_account_id' => $accountId,
+                    'candidate_action' => $windowStatus === 'finished' ? 'no_action_expired_without_active_states' : 'evaluate_rule_window_when_scheduler_resumes',
+                    'automatic_execution_allowed' => false,
                 ];
             }
         }
