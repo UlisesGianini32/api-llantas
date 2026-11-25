@@ -1,0 +1,424 @@
+<?php
+
+namespace App\Services\Purchasing;
+
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
+use OverflowException;
+use Psr\Http\Message\StreamInterface;
+use Throwable;
+
+/**
+ * Fetches and locally caches verified Mercado Libre product pictures so purchase orders,
+ * html2canvas/html2pdf exports, and shared supplier PDFs render same-origin without CORS
+ * failures and remain resilient if remote ML URLs temporarily fail or expire.
+ */
+class PurchaseOrderMeliImageCacheService
+{
+    private const CACHE_DIR = 'purchasing/meli-photos';
+
+    public const MANUAL_DIR = 'purchasing/manual-photos';
+
+    private const CACHE_TTL_SECONDS = 604800; // 7 days
+
+    public const MAX_BYTES = 5_242_880; // 5 MB
+
+    private const READ_CHUNK_BYTES = 65_536; // 64 KB
+
+    private const MAX_REDIRECTS = 2;
+
+    /** @var array<string, string> */
+    private const ALLOWED_MIMES = [
+        'image/jpeg' => 'jpg',
+        'image/png' => 'png',
+        'image/webp' => 'webp',
+        'image/gif' => 'gif',
+    ];
+
+    public function __construct(
+        private readonly PurchaseOrderMeliImageResolver $resolver,
+    ) {}
+
+    /**
+     * Retrieve cached or freshly fetched image bytes for a trusted Mercado Libre URL.
+     *
+     * @return array{bytes: string, mime: string, cached: bool, stale: bool}|null
+     */
+    public function fetch(string $rawUrl): ?array
+    {
+        $url = $this->resolver->trustedUrl($rawUrl);
+        if ($url === null) {
+            return null;
+        }
+
+        $hash = hash('sha256', $url);
+        $staleCandidate = $this->readCached($hash);
+
+        if ($staleCandidate !== null && ! $staleCandidate['expired']) {
+            return [
+                'bytes' => $staleCandidate['bytes'],
+                'mime' => $staleCandidate['mime'],
+                'cached' => true,
+                'stale' => false,
+            ];
+        }
+
+        $downloaded = $this->downloadTrustedImage($url);
+        if ($downloaded !== null) {
+            $this->writeCached($hash, $url, $downloaded['bytes'], $downloaded['mime']);
+
+            return [
+                'bytes' => $downloaded['bytes'],
+                'mime' => $downloaded['mime'],
+                'cached' => false,
+                'stale' => false,
+            ];
+        }
+
+        // Stale-while-error fallback: if remote URL expired or ML CDN failed, keep serving the cached copy.
+        if ($staleCandidate !== null) {
+            return [
+                'bytes' => $staleCandidate['bytes'],
+                'mime' => $staleCandidate['mime'],
+                'cached' => true,
+                'stale' => true,
+            ];
+        }
+
+        return null;
+    }
+
+    /**
+     * Validate and persist a manually uploaded product photo on private local storage.
+     *
+     * @return array{path: string, mime: string}|null
+     */
+    public function storeManualPhoto(int $orderId, int $itemId, string $bytes): ?array
+    {
+        if ($bytes === '' || strlen($bytes) > self::MAX_BYTES) {
+            return null;
+        }
+
+        $mime = $this->detectValidatedImageMime($bytes);
+        if ($mime === null) {
+            return null;
+        }
+
+        $ext = self::ALLOWED_MIMES[$mime] ?? null;
+        if ($ext === null) {
+            return null;
+        }
+
+        $path = sprintf(
+            '%s/po-%d/item-%d-%s.%s',
+            self::MANUAL_DIR,
+            $orderId,
+            $itemId,
+            Str::lower(Str::random(16)),
+            $ext
+        );
+
+        try {
+            Storage::disk('local')->put($path, $bytes);
+        } catch (Throwable $e) {
+            Log::warning('[Purchasing][MeliPhotos] Unable to store manual product photo', [
+                'purchase_order_id' => $orderId,
+                'item_id' => $itemId,
+                'error' => $e->getMessage(),
+            ]);
+
+            return null;
+        }
+
+        return [
+            'path' => $path,
+            'mime' => $mime,
+        ];
+    }
+
+    /**
+     * Read and validate a manually uploaded product photo from private local storage.
+     *
+     * @return array{bytes: string, mime: string}|null
+     */
+    public function readManualPhoto(string $path): ?array
+    {
+        if (! $this->isSafeManualPath($path)) {
+            return null;
+        }
+
+        try {
+            $disk = Storage::disk('local');
+            if (! $disk->exists($path)) {
+                return null;
+            }
+
+            $bytes = (string) $disk->get($path);
+            if ($bytes === '' || strlen($bytes) > self::MAX_BYTES) {
+                return null;
+            }
+
+            $mime = $this->detectValidatedImageMime($bytes);
+            if ($mime === null) {
+                return null;
+            }
+
+            return [
+                'bytes' => $bytes,
+                'mime' => $mime,
+            ];
+        } catch (Throwable) {
+            return null;
+        }
+    }
+
+    public function deleteManualPhoto(?string $path): void
+    {
+        if (! is_string($path) || ! $this->isSafeManualPath($path)) {
+            return;
+        }
+
+        try {
+            Storage::disk('local')->delete($path);
+        } catch (Throwable) {
+            // Best-effort cleanup
+        }
+    }
+
+    public function isSafeManualPath(string $path): bool
+    {
+        $normalized = str_replace('\\', '/', trim($path));
+
+        return $normalized !== ''
+            && str_starts_with($normalized, self::MANUAL_DIR.'/')
+            && ! str_contains($normalized, '..');
+    }
+
+    /** @return array{bytes: string, mime: string}|null */
+    private function downloadTrustedImage(string $url): ?array
+    {
+        $currentUrl = $url;
+
+        for ($hop = 0; $hop <= self::MAX_REDIRECTS; $hop++) {
+            try {
+                $response = Http::timeout(6)
+                    ->connectTimeout(3)
+                    ->withHeaders([
+                        'Accept' => 'image/jpeg,image/png,image/webp,image/gif,*/*;q=0.5',
+                        'User-Agent' => 'SBS-Purchasing/1.0',
+                    ])
+                    ->withOptions([
+                        'allow_redirects' => false,
+                        'stream' => true,
+                        'progress' => static function (int $downloadTotal, int $downloadedBytes): void {
+                            if ($downloadTotal > self::MAX_BYTES || $downloadedBytes > self::MAX_BYTES) {
+                                throw new OverflowException('Remote photo exceeded maximum allowed download size.');
+                            }
+                        },
+                    ])
+                    ->get($currentUrl);
+            } catch (OverflowException) {
+                Log::warning('[Purchasing][MeliPhotos] Aborted oversized remote photo during transfer', [
+                    'host' => parse_url($currentUrl, PHP_URL_HOST),
+                    'max_bytes' => self::MAX_BYTES,
+                ]);
+
+                return null;
+            } catch (Throwable $e) {
+                Log::warning('[Purchasing][MeliPhotos] Failed fetching remote photo', [
+                    'host' => parse_url($currentUrl, PHP_URL_HOST),
+                    'error' => $e->getMessage(),
+                ]);
+
+                return null;
+            }
+
+            $psrResponse = $response->toPsrResponse();
+            $stream = $psrResponse->getBody();
+            $status = $response->status();
+
+            if (in_array($status, [301, 302, 303, 307, 308], true)) {
+                $stream->close();
+                $location = $this->resolver->trustedUrl($response->header('Location'));
+                if ($location === null) {
+                    return null;
+                }
+                $currentUrl = $location;
+                continue;
+            }
+
+            if ($status !== 200) {
+                $stream->close();
+
+                return null;
+            }
+
+            $contentLengthHeader = trim((string) $response->header('Content-Length'));
+            if ($contentLengthHeader !== '' && ctype_digit($contentLengthHeader) && (int) $contentLengthHeader > self::MAX_BYTES) {
+                $stream->close();
+                Log::warning('[Purchasing][MeliPhotos] Rejected remote photo with oversized Content-Length', [
+                    'host' => parse_url($currentUrl, PHP_URL_HOST),
+                    'content_length' => (int) $contentLengthHeader,
+                    'max_bytes' => self::MAX_BYTES,
+                ]);
+
+                return null;
+            }
+
+            $body = $this->readBoundedStream($stream, $currentUrl);
+            if ($body === null || $body === '') {
+                return null;
+            }
+
+            $mime = $this->detectValidatedImageMime($body);
+            if ($mime === null) {
+                return null;
+            }
+
+            return [
+                'bytes' => $body,
+                'mime' => $mime,
+            ];
+        }
+
+        return null;
+    }
+
+    /**
+     * Incrementally read up to MAX_BYTES from a PSR-7 stream and abort/close immediately if exceeded,
+     * protecting memory even for chunked transfers without a Content-Length header.
+     */
+    private function readBoundedStream(StreamInterface $stream, string $currentUrl): ?string
+    {
+        $chunks = [];
+        $totalBytes = 0;
+
+        try {
+            while (! $stream->eof()) {
+                $remainingAllowed = self::MAX_BYTES - $totalBytes;
+                $bytesToRead = min(self::READ_CHUNK_BYTES, $remainingAllowed + 1);
+                $chunk = $stream->read($bytesToRead);
+
+                if ($chunk === '') {
+                    break;
+                }
+
+                $totalBytes += strlen($chunk);
+                if ($totalBytes > self::MAX_BYTES) {
+                    Log::warning('[Purchasing][MeliPhotos] Aborted oversized streamed remote photo', [
+                        'host' => parse_url($currentUrl, PHP_URL_HOST),
+                        'bytes_read' => $totalBytes,
+                        'max_bytes' => self::MAX_BYTES,
+                    ]);
+
+                    return null;
+                }
+
+                $chunks[] = $chunk;
+            }
+        } catch (Throwable $e) {
+            Log::warning('[Purchasing][MeliPhotos] Error reading remote photo stream', [
+                'host' => parse_url($currentUrl, PHP_URL_HOST),
+                'error' => $e->getMessage(),
+            ]);
+
+            return null;
+        } finally {
+            $stream->close();
+        }
+
+        return implode('', $chunks);
+    }
+
+    private function detectValidatedImageMime(string $bytes): ?string
+    {
+        $info = @getimagesizefromstring($bytes);
+        if (! is_array($info)) {
+            return null;
+        }
+
+        $mime = strtolower(trim((string) ($info['mime'] ?? '')));
+
+        return array_key_exists($mime, self::ALLOWED_MIMES) ? $mime : null;
+    }
+
+    /** @return array{bytes: string, mime: string, expired: bool}|null */
+    private function readCached(string $hash): ?array
+    {
+        try {
+            $disk = Storage::disk('local');
+            $metaPath = $this->metaPath($hash);
+            if (! $disk->exists($metaPath)) {
+                return null;
+            }
+
+            $meta = json_decode((string) $disk->get($metaPath), true);
+            if (! is_array($meta)) {
+                return null;
+            }
+
+            $mime = strtolower(trim((string) ($meta['mime'] ?? '')));
+            $ext = self::ALLOWED_MIMES[$mime] ?? null;
+            if ($ext === null) {
+                return null;
+            }
+
+            $imagePath = $this->imagePath($hash, $ext);
+            if (! $disk->exists($imagePath)) {
+                return null;
+            }
+
+            $bytes = (string) $disk->get($imagePath);
+            if ($bytes === '') {
+                return null;
+            }
+
+            $cachedAt = (int) ($meta['cached_at'] ?? 0);
+            $expired = (time() - $cachedAt) > self::CACHE_TTL_SECONDS;
+
+            return [
+                'bytes' => $bytes,
+                'mime' => $mime,
+                'expired' => $expired,
+            ];
+        } catch (Throwable) {
+            return null;
+        }
+    }
+
+    private function writeCached(string $hash, string $url, string $bytes, string $mime): void
+    {
+        $ext = self::ALLOWED_MIMES[$mime] ?? null;
+        if ($ext === null) {
+            return;
+        }
+
+        try {
+            $disk = Storage::disk('local');
+            $disk->put($this->imagePath($hash, $ext), $bytes);
+            $disk->put($this->metaPath($hash), (string) json_encode([
+                'mime' => $mime,
+                'source_url' => $url,
+                'cached_at' => time(),
+                'bytes' => strlen($bytes),
+            ], JSON_UNESCAPED_SLASHES));
+        } catch (Throwable $e) {
+            Log::warning('[Purchasing][MeliPhotos] Unable to persist local image cache', [
+                'hash' => $hash,
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
+
+    private function imagePath(string $hash, string $ext): string
+    {
+        return self::CACHE_DIR.'/'.$hash.'.'.$ext;
+    }
+
+    private function metaPath(string $hash): string
+    {
+        return self::CACHE_DIR.'/'.$hash.'.json';
+    }
+}
