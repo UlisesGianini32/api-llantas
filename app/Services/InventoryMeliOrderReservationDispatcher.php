@@ -12,10 +12,14 @@ class InventoryMeliOrderReservationDispatcher
 {
     public function __construct(
         private readonly InventoryMeliOrderReservationCutover $cutover,
+        private readonly InventoryMeliOrderReconciliationCoordinator $coordinator,
     ) {}
 
-    public function dispatchAfterCommit(MeliOrder $order): void
-    {
+    public function dispatchAfterCommit(
+        MeliOrder $order,
+        ?string $previousFingerprint = null,
+        bool $forceReconcile = false,
+    ): void {
         if (! (bool) config('inventory.meli_order_reservations.automatic', false)) {
             return;
         }
@@ -30,12 +34,28 @@ class InventoryMeliOrderReservationDispatcher
         $queue = (string) config('inventory.meli_order_reservations.queue', 'meli');
 
         try {
+            $decision = $this->coordinator->registerOrderState(
+                $order,
+                $previousFingerprint,
+                $forceReconcile,
+            );
+
+            if (! $decision['should_dispatch']) {
+                return;
+            }
+
             DB::afterCommit(function () use ($localId, $remoteId, $accountId, $queue): void {
                 try {
                     // The sync driver executes the job here. Keep the dispatch boundary
                     // best effort so legacy order persistence remains successful.
                     ReconcileInventoryMeliOrderReservationsJob::dispatch($localId)->onQueue($queue);
                 } catch (Throwable $exception) {
+                    $sanitized = $this->sanitizeMessage($exception->getMessage());
+                    try {
+                        $this->coordinator->markFailed($localId, null, $sanitized);
+                    } catch (Throwable) {
+                        // Never mask enqueue failure logging or fail order persistence.
+                    }
                     $this->logEnqueueFailure($localId, $remoteId, $accountId, $exception);
                 }
             });

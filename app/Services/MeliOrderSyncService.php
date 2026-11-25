@@ -24,7 +24,10 @@ class MeliOrderSyncService
         protected SyscomOrderFromMeliService $syscomOrderFromMeli,
         protected MeliOrderDeliveryClassifier $deliveryClassifier,
         protected InventoryMeliOrderReservationDispatcher $reservationDispatcher,
-    ) {}
+        protected ?InventoryMeliOrderReconciliationFingerprint $reconciliationFingerprint = null,
+    ) {
+        $this->reconciliationFingerprint ??= app(InventoryMeliOrderReconciliationFingerprint::class);
+    }
 
     /**
      * Sincroniza todas las órdenes de un día para la cuenta de Mercado Libre
@@ -439,8 +442,23 @@ class MeliOrderSyncService
                 );
 
                 $existingOrder = MeliOrder::query()
+                    ->with('items')
                     ->where('order_id', $orderId)
                     ->first();
+
+                $previousFingerprint = $existingOrder
+                    ? $this->reconciliationFingerprint->forOrder($existingOrder)
+                    : null;
+
+                // Prevent transient /shipments/{id} failures from clobbering a known
+                // fulfilled shipping_status back to null (which could otherwise trigger re-reservation).
+                if ($shipping['shipping_status'] === null
+                    && $existingOrder
+                    && in_array(strtolower(trim((string) ($existingOrder->shipping_status ?? ''))), ['shipped', 'delivered', 'in_transit'], true)) {
+                    $shipping['shipping_status'] = $existingOrder->shipping_status;
+                    $shipping['shipping_substatus'] ??= $existingOrder->shipping_substatus;
+                    $shipping['shipping_raw'] ??= $existingOrder->shipping_raw;
+                }
 
                 $itemShippingModes = $this->resolveItemShippingModes(
                     $user,
@@ -615,7 +633,7 @@ class MeliOrderSyncService
                 $this->syscomOrderFromMeli
                     ->handleAfterMeliSync($user, $order);
 
-                $this->reservationDispatcher->dispatchAfterCommit($order);
+                $this->reservationDispatcher->dispatchAfterCommit($order, $previousFingerprint);
 
                 return $savedItems;
             }
@@ -997,6 +1015,7 @@ class MeliOrderSyncService
              * No se deben actualizar órdenes de otra cuenta usando este token.
              */
             $orders = MeliOrder::query()
+                ->with('items')
                 ->where(
                     'shipping_id',
                     $shippingId
@@ -1029,6 +1048,15 @@ class MeliOrderSyncService
                 $first->shipping_type
             );
 
+            $previousSnapshots = [];
+            $newShippingStatus = strtolower(trim((string) ($attrs['shipping_status'] ?? '')));
+            foreach ($orders as $existing) {
+                $oldShippingStatus = strtolower(trim((string) ($existing->shipping_status ?? '')));
+                if ($oldShippingStatus !== $newShippingStatus) {
+                    $previousSnapshots[(int) $existing->id] = $this->reconciliationFingerprint->forOrder($existing);
+                }
+            }
+
             $row = $this->meliOrderShippingUpdateRow(
                 $attrs
             );
@@ -1045,6 +1073,20 @@ class MeliOrderSyncService
                 ->update($row);
 
             $touched += $n;
+
+            if ($previousSnapshots !== []) {
+                $updatedOrders = MeliOrder::query()
+                    ->with('items')
+                    ->whereIn('id', array_keys($previousSnapshots))
+                    ->get();
+
+                foreach ($updatedOrders as $updatedOrder) {
+                    $this->reservationDispatcher->dispatchAfterCommit(
+                        $updatedOrder,
+                        $previousSnapshots[(int) $updatedOrder->id] ?? null,
+                    );
+                }
+            }
 
             if ($delayUs > 0) {
                 usleep($delayUs);

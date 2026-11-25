@@ -12,6 +12,7 @@ class MeliOrderStoreService
 {
     public function __construct(
         private readonly InventoryMeliOrderReservationDispatcher $reservationDispatcher,
+        private readonly InventoryMeliOrderReconciliationFingerprint $fingerprint,
     ) {}
 
     public function storeFromOrderApiResponse(array $orderData): MeliOrder
@@ -22,6 +23,12 @@ class MeliOrderStoreService
             if ($orderId <= 0) {
                 throw new \RuntimeException('El payload de la orden no trae id válido.');
             }
+
+            $existing = MeliOrder::query()
+                ->with('items')
+                ->where('order_id', $orderId)
+                ->first();
+            $previousFingerprint = $existing ? $this->fingerprint->forOrder($existing) : null;
 
             $order = MeliOrder::updateOrCreate(
                 ['order_id' => $orderId],
@@ -58,12 +65,14 @@ class MeliOrderStoreService
                 ]);
             }
 
+            $order->load('items');
+
             Log::info('Orden ML guardada correctamente', [
                 'order_id' => $order->order_id,
                 'items' => count($items),
             ]);
 
-            $this->reservationDispatcher->dispatchAfterCommit($order);
+            $this->reservationDispatcher->dispatchAfterCommit($order, $previousFingerprint);
 
             return $order;
         });
