@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
+use App\Exceptions\StaleReconciliationLeaseException;
 use App\Jobs\ReconcileInventoryMeliOrderReservationsJob;
 use App\Models\InventoryChannelLink;
 use App\Models\InventoryLocation;
@@ -24,11 +25,12 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Schema;
 use PDO;
+use RuntimeException;
 use Tests\TestCase;
 
 /**
  * Real MariaDB 10.5.29 / InnoDB (REPEATABLE-READ) concurrency, migration, locking,
- * lease exclusion, and double-deduction prevention tests for R3.
+ * atomic same-DB enqueue, fencing token, stale callback, and double-deduction tests for R3/R3.1.
  *
  * Opt-in via R3_MARIADB_TEST_HOST so standard SQLite runs stay isolated.
  */
@@ -94,6 +96,7 @@ class InventoryMeliOrderReservationR3MariaDbTest extends TestCase
 
     protected function tearDown(): void
     {
+        InventoryMeliOrderReconciliationCoordinator::resetTestingHooks();
         Carbon::setTestNow();
         if ($this->bootstrapped) {
             DB::purge('r3_mariadb');
@@ -102,7 +105,7 @@ class InventoryMeliOrderReservationR3MariaDbTest extends TestCase
         parent::tearDown();
     }
 
-    public function test_mariadb_migration_is_additive_idempotent_and_uses_innodb_indexes(): void
+    public function test_mariadb_migration_is_additive_idempotent_and_uses_innodb_r31_indexes(): void
     {
         $conn = DB::connection('r3_mariadb');
         $tableInfo = $conn->selectOne(
@@ -110,6 +113,10 @@ class InventoryMeliOrderReservationR3MariaDbTest extends TestCase
             [$this->database],
         );
         $this->assertSame('InnoDB', $tableInfo->ENGINE);
+
+        // Verify MariaDB isolation level is REPEATABLE-READ (matches production).
+        $iso = $conn->selectOne('SELECT @@tx_isolation AS iso');
+        $this->assertSame('REPEATABLE-READ', $iso->iso);
 
         // Re-running migration up() must be a safe idempotent no-op.
         $migration = require database_path('migrations/2026_11_25_000001_create_inventory_meli_order_reconciliations_table.php');
@@ -123,9 +130,62 @@ class InventoryMeliOrderReservationR3MariaDbTest extends TestCase
 
         $this->assertContains('inv_meli_order_rec_order_uq', $indexes);
         $this->assertContains('inv_meli_order_rec_state_lease_idx', $indexes);
+        $this->assertContains('inv_meli_order_rec_outbox_idx', $indexes);
+        $this->assertContains('inv_meli_order_rec_pending_job_idx', $indexes);
+
+        foreach (['fencing_token', 'pending_job_id', 'dispatch_confirmed_at', 'stock_sync_required', 'stock_sync_completed_revision'] as $col) {
+            $this->assertTrue(Schema::connection('r3_mariadb')->hasColumn('inventory_meli_order_reconciliations', $col));
+        }
     }
 
-    public function test_mariadb_concurrent_session_lease_exclusion_and_dirty_revision_followup(): void
+    public function test_mariadb_h1_atomic_same_db_enqueue_commits_and_rolls_back_with_outer_tx_without_orphans(): void
+    {
+        [$product] = $this->seedProduct('SKU-M-ATOMIC', 10);
+        $this->seedLink($product, 1, 'MLM-M-ATOMIC', null, true);
+        $order = $this->seedOrder(1, 880010, 'paid', [['item_id' => 'MLM-M-ATOMIC', 'key' => 'MLM-M-ATOMIC:', 'qty' => 2]]);
+
+        $dispatcher = app(InventoryMeliOrderReservationDispatcher::class);
+        $observerPdo = $this->openRawPdo();
+
+        // 1. Outer transaction rollback must roll back BOTH PENDING row AND `jobs` row atomically,
+        //    AND an independent connection must NEVER see uncommitted rows mid-transaction!
+        try {
+            DB::transaction(function () use ($dispatcher, $order, $observerPdo): void {
+                $dispatcher->dispatchAfterCommit($order);
+
+                // Inside same TX: both rows exist.
+                $this->assertSame(1, DB::table('jobs')->count());
+                $this->assertSame(1, InventoryMeliOrderReconciliation::where('meli_order_id', $order->id)->count());
+
+                // Independent InnoDB session sees 0 uncommitted jobs and 0 uncommitted reconciliation rows!
+                $this->assertSame(0, (int) $observerPdo->query('SELECT COUNT(*) FROM jobs')->fetchColumn());
+                $this->assertSame(0, (int) $observerPdo->query('SELECT COUNT(*) FROM inventory_meli_order_reconciliations')->fetchColumn());
+
+                throw new RuntimeException('Outer TX rollback');
+            });
+            $this->fail('Expected RuntimeException');
+        } catch (RuntimeException) {
+            // Expected
+        }
+
+        $this->assertSame(0, (int) $observerPdo->query('SELECT COUNT(*) FROM jobs')->fetchColumn());
+        $this->assertSame(0, (int) $observerPdo->query('SELECT COUNT(*) FROM inventory_meli_order_reconciliations')->fetchColumn());
+
+        // 2. Clean commit -> independent session immediately sees BOTH PENDING (with pending_job_id & dispatch_confirmed_at) AND jobs row!
+        DB::transaction(function () use ($dispatcher, $order): void {
+            $dispatcher->dispatchAfterCommit($order);
+        });
+
+        $jobId = (int) $observerPdo->query('SELECT id FROM jobs LIMIT 1')->fetchColumn();
+        $this->assertGreaterThan(0, $jobId);
+
+        $state = InventoryMeliOrderReconciliation::where('meli_order_id', $order->id)->firstOrFail();
+        $this->assertSame(InventoryMeliOrderReconciliation::STATE_PENDING, $state->state);
+        $this->assertSame($jobId, (int) $state->pending_job_id);
+        $this->assertNotNull($state->dispatch_confirmed_at);
+    }
+
+    public function test_mariadb_concurrent_session_lease_exclusion_and_atomic_dirty_revision_followup(): void
     {
         [$product] = $this->seedProduct('SKU-M-LEASE', 10);
         $this->seedLink($product, 1, 'MLM-M-LEASE', null, true);
@@ -134,12 +194,13 @@ class InventoryMeliOrderReservationR3MariaDbTest extends TestCase
         $coordinator = app(InventoryMeliOrderReconciliationCoordinator::class);
         $dispatcher = app(InventoryMeliOrderReservationDispatcher::class);
 
-        // Worker 1 claims active lease on MariaDB InnoDB.
-        $claim1 = $coordinator->claimForExecution($order->id, 'worker-alpha', 300);
+        // Worker 1 claims active lease (token=1) on MariaDB InnoDB.
+        $claim1 = $coordinator->claimForExecution($order->id, 'worker-alpha', leaseSeconds: 300);
         $this->assertTrue($claim1['claimed']);
+        $this->assertSame(1, $claim1['fencing_token']);
 
         // Worker 2 cannot overlap while Worker 1's lease is active.
-        $claim2 = $coordinator->claimForExecution($order->id, 'worker-beta', 300);
+        $claim2 = $coordinator->claimForExecution($order->id, 'worker-beta', leaseSeconds: 300);
         $this->assertFalse($claim2['claimed']);
         $this->assertSame('active_lease_held_by_another_worker', $claim2['reason']);
 
@@ -151,17 +212,67 @@ class InventoryMeliOrderReservationR3MariaDbTest extends TestCase
         $dispatcher->dispatchAfterCommit($order->fresh('items'));
         $this->assertSame(0, DB::table('jobs')->count());
 
-        // Worker 1 finishes its initial paid fingerprint -> coordinator detects revision drift and demands 1 follow-up!
+        // Worker 1 finishes its initial paid fingerprint -> completeExecution() ATOMICALLY inserts 1 follow-up job!
         $completion = $coordinator->completeExecution(
             $order->id,
             'worker-alpha',
+            $claim1['fencing_token'],
             $claim1['starting_revision'],
-            'old-paid-fingerprint',
+            $claim1['fingerprint'],
         );
         $this->assertTrue($completion['needs_followup']);
+        $this->assertTrue($completion['enqueued_atomically']);
+        $this->assertFalse($completion['needs_after_commit_followup']);
+        $this->assertSame(1, DB::table('jobs')->count());
 
         $row = InventoryMeliOrderReconciliation::where('meli_order_id', $order->id)->firstOrFail();
         $this->assertSame(InventoryMeliOrderReconciliation::STATE_PENDING, $row->state);
+        $this->assertSame((int) DB::table('jobs')->value('id'), (int) $row->pending_job_id);
+        $this->assertNotNull($row->dispatch_confirmed_at);
+    }
+
+    public function test_mariadb_h2_fencing_token_blocks_stale_owner_inside_innodb_transaction(): void
+    {
+        [$product] = $this->seedProduct('SKU-M-FENCE', 10);
+        $this->seedLink($product, 1, 'MLM-M-FENCE', null, true);
+        $order = $this->seedOrder(1, 880020, 'paid', [['item_id' => 'MLM-M-FENCE', 'key' => 'MLM-M-FENCE:', 'qty' => 4]]);
+
+        $coordinator = app(InventoryMeliOrderReconciliationCoordinator::class);
+        $service = app(InventoryMeliOrderReservationService::class);
+
+        // Worker A claims token=1, then hangs past lease expiry (300s).
+        $claimA = $coordinator->claimForExecution($order->id, 'worker-A', leaseSeconds: 300);
+        $this->assertSame(1, $claimA['fencing_token']);
+
+        Carbon::setTestNow(Carbon::now()->addSeconds(305));
+
+        // Worker B reclaims lease with token=2.
+        $claimB = $coordinator->claimForExecution($order->id, 'worker-B', leaseSeconds: 300);
+        $this->assertTrue($claimB['claimed']);
+        $this->assertSame(2, $claimB['fencing_token']);
+
+        // Stale Worker A wakes up and attempts to mutate inventory with token=1 -> InnoDB TX aborts with StaleReconciliationLeaseException!
+        try {
+            $service->apply($order->fresh('items'), ['lease_owner' => 'worker-A', 'fencing_token' => 1]);
+            $this->fail('Expected StaleReconciliationLeaseException for stale owner.');
+        } catch (StaleReconciliationLeaseException) {
+            // Expected
+        }
+
+        // Verify 0 mutations by Worker A!
+        $this->assertSame(0, InventoryReservation::count());
+
+        // Stale Worker A invoking failed() callback does NOT touch Worker B's active PROCESSING lease!
+        (new ReconcileInventoryMeliOrderReservationsJob($order->id, 1))->failed(new RuntimeException('stale A timeout'));
+        $state = InventoryMeliOrderReconciliation::where('meli_order_id', $order->id)->firstOrFail();
+        $this->assertSame(InventoryMeliOrderReconciliation::STATE_PROCESSING, $state->state);
+        $this->assertSame('worker-B', $state->lease_owner);
+        $this->assertSame(2, (int) $state->fencing_token);
+
+        // Worker B legitimately reserves and completes!
+        $service->apply($order->fresh('items'), ['lease_owner' => 'worker-B', 'fencing_token' => 2]);
+        $coordinator->completeExecution($order->id, 'worker-B', 2, $claimB['starting_revision'], $claimB['fingerprint']);
+        $this->assertSame(4, (int) InventoryReservation::active()->sum('quantity'));
     }
 
     public function test_mariadb_innodb_row_lock_prevents_concurrent_double_fulfillment_and_re_reservation(): void
@@ -210,17 +321,28 @@ class InventoryMeliOrderReservationR3MariaDbTest extends TestCase
         $this->assertSame(0, InventoryReservation::active()->count());
     }
 
-    public function test_mariadb_repeated_syncs_with_stopped_workers_create_strictly_one_job_and_converge(): void
+    public function test_mariadb_h4_out_of_order_snapshot_and_pruned_job_self_healing_with_stopped_workers(): void
     {
         [$product] = $this->seedProduct('SKU-M-DEDUP', 15);
         $this->seedLink($product, 1, 'MLM-M-DEDUP', null, true);
         $order = $this->seedOrder(1, 880003, 'paid', [['item_id' => 'MLM-M-DEDUP', 'key' => 'MLM-M-DEDUP:', 'qty' => 2]]);
+        $stalePaidSnapshot = clone $order;
+        $stalePaidSnapshot->setRelation('items', $order->items);
 
         $dispatcher = app(InventoryMeliOrderReservationDispatcher::class);
+        $coordinator = app(InventoryMeliOrderReconciliationCoordinator::class);
+
         for ($i = 0; $i < 25; $i++) {
             $dispatcher->dispatchAfterCommit($order->fresh('items'));
         }
         $this->assertSame(1, DB::table('jobs')->count());
+
+        // Simulate R2.1 pruning that job row -> next sync heals in O(1) via PK check!
+        $prunedId = (int) DB::table('jobs')->value('id');
+        DB::table('jobs')->where('id', $prunedId)->delete();
+        $dispatcher->dispatchAfterCommit($order->fresh('items'));
+        $this->assertSame(1, DB::table('jobs')->count());
+        $this->assertNotSame($prunedId, (int) DB::table('jobs')->value('id'));
 
         // Process the single job -> IDLE, reserved=2.
         DB::table('jobs')->truncate();
@@ -233,6 +355,15 @@ class InventoryMeliOrderReservationR3MariaDbTest extends TestCase
             $dispatcher->dispatchAfterCommit($order->fresh('items'));
         }
         $this->assertSame(0, DB::table('jobs')->count());
+
+        // Second raw PDO session updates order to 'cancelled'; stale caller passes OLD in-memory 'paid' snapshot!
+        $second = $this->openRawPdo();
+        $second->prepare('UPDATE meli_orders SET status = ? WHERE id = ?')->execute(['cancelled', $order->id]);
+        $cancelledFp = $coordinator->fingerprint($order->fresh('items'));
+
+        $dec = $coordinator->registerOrderState($stalePaidSnapshot);
+        $this->assertSame($cancelledFp, $dec['fingerprint']);
+        $this->assertSame(1, DB::table('jobs')->count());
     }
 
     // =========================================================================

@@ -73,11 +73,12 @@ class InventoryMeliOrderReservationFlowTest extends TestCase
             $table->unique(['meli_order_id', 'item_id']);
         });
         (require database_path('migrations/2026_09_27_000001_add_order_reservation_identity.php'))->up();
+        (require database_path('migrations/2026_11_25_000001_create_inventory_meli_order_reconciliations_table.php'))->up();
     }
 
     protected function tearDown(): void
     {
-        foreach (['inventory_channel_order_allocations', 'meli_order_items', 'meli_orders', 'inventory_channel_stock_syncs',
+        foreach (['inventory_meli_order_reconciliations', 'inventory_channel_order_allocations', 'meli_order_items', 'meli_orders', 'inventory_channel_stock_syncs',
             'inventory_channel_links', 'inventory_kit_reservations', 'inventory_kit_components', 'inventory_reservations',
             'inventory_movements'] as $table) Schema::dropIfExists($table);
         Schema::table('inventory_products', function (Blueprint $table): void {

@@ -51,10 +51,12 @@ class InventoryMeliOrderReservationAutomationTest extends TestCase
             $table->unsignedInteger('quantity')->default(1);
             $table->timestamps();
         });
+        (require database_path('migrations/2026_11_25_000001_create_inventory_meli_order_reconciliations_table.php'))->up();
     }
 
     protected function tearDown(): void
     {
+        Schema::dropIfExists('inventory_meli_order_reconciliations');
         Schema::dropIfExists('meli_order_items');
         Schema::dropIfExists('meli_orders');
         DB::purge('sqlite');
