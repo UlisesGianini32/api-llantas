@@ -13,6 +13,7 @@ class MeliOrderStoreService
     public function __construct(
         private readonly InventoryMeliOrderReservationDispatcher $reservationDispatcher,
         private readonly InventoryMeliOrderReconciliationFingerprint $fingerprint,
+        private readonly MeliOrderRemoteFreshnessGuard $freshnessGuard,
     ) {}
 
     public function storeFromOrderApiResponse(array $orderData): MeliOrder
@@ -30,6 +31,19 @@ class MeliOrderStoreService
                 ->first();
             if ($existing) {
                 $existing->load('items');
+
+                $freshness = $this->freshnessGuard->evaluateOrderUpdate($existing, $orderData);
+                if (! $freshness['accept']) {
+                    Log::warning('Orden ML descartada por control temporal de frescura', [
+                        'meli_order_id' => $existing->id,
+                        'order_id' => $orderId,
+                        'reason' => $freshness['reason'],
+                        'stored_timestamp_utc' => $freshness['stored_timestamp_utc'],
+                        'incoming_timestamp_utc' => $freshness['incoming_timestamp_utc'],
+                    ]);
+
+                    return $existing;
+                }
             }
             $previousFingerprint = $existing ? $this->fingerprint->forOrder($existing) : null;
 

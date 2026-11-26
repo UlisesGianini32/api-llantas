@@ -25,8 +25,10 @@ class MeliOrderSyncService
         protected MeliOrderDeliveryClassifier $deliveryClassifier,
         protected InventoryMeliOrderReservationDispatcher $reservationDispatcher,
         protected ?InventoryMeliOrderReconciliationFingerprint $reconciliationFingerprint = null,
+        protected ?MeliOrderRemoteFreshnessGuard $freshnessGuard = null,
     ) {
         $this->reconciliationFingerprint ??= app(InventoryMeliOrderReconciliationFingerprint::class);
+        $this->freshnessGuard ??= app(MeliOrderRemoteFreshnessGuard::class);
     }
 
     /**
@@ -491,6 +493,85 @@ class MeliOrderSyncService
                     ->where('order_id', $orderId)
                     ->lockForUpdate()
                     ->first();
+
+                $acceptOrderUpdate = true;
+                $acceptShipmentUpdate = true;
+
+                if ($lockedExistingOrder) {
+                    $lockedExistingOrder->load('items');
+                    $previousFingerprint = $this->reconciliationFingerprint->forOrder($lockedExistingOrder);
+
+                    $orderFreshness = $this->freshnessGuard->evaluateOrderUpdate($lockedExistingOrder, $orderData);
+                    $acceptOrderUpdate = $orderFreshness['accept'];
+
+                    $incomingShipmentRaw = is_array($shipping['shipping_raw'] ?? null)
+                        ? $shipping['shipping_raw']
+                        : (is_array($orderData['shipping'] ?? null) ? $orderData['shipping'] : null);
+                    $shipmentFreshness = $this->freshnessGuard->evaluateShipmentUpdate(
+                        $lockedExistingOrder,
+                        $incomingShipmentRaw,
+                        $shipping['shipping_status'] ?? null,
+                    );
+                    $acceptShipmentUpdate = $shipmentFreshness['accept'];
+
+                    if (! $acceptOrderUpdate && ! $acceptShipmentUpdate) {
+                        Log::warning('ML sync storeOrder descartado por control temporal de frescura', [
+                            'meli_order_id' => $lockedExistingOrder->id,
+                            'order_id' => $orderId,
+                            'order_reason' => $orderFreshness['reason'],
+                            'order_stored_ts_utc' => $orderFreshness['stored_timestamp_utc'],
+                            'order_incoming_ts_utc' => $orderFreshness['incoming_timestamp_utc'],
+                            'shipment_reason' => $shipmentFreshness['reason'],
+                            'shipment_stored_ts_utc' => $shipmentFreshness['stored_timestamp_utc'],
+                            'shipment_incoming_ts_utc' => $shipmentFreshness['incoming_timestamp_utc'],
+                        ]);
+
+                        return 0;
+                    }
+
+                    if (! $acceptShipmentUpdate) {
+                        Log::warning('ML sync storeOrder preservó envío local más reciente', [
+                            'meli_order_id' => $lockedExistingOrder->id,
+                            'order_id' => $orderId,
+                            'shipment_reason' => $shipmentFreshness['reason'],
+                            'shipment_stored_ts_utc' => $shipmentFreshness['stored_timestamp_utc'],
+                            'shipment_incoming_ts_utc' => $shipmentFreshness['incoming_timestamp_utc'],
+                        ]);
+
+                        $shipping['shipping_id'] = $lockedExistingOrder->shipping_id ?? $shipping['shipping_id'];
+                        $shipping['shipping_mode'] = $lockedExistingOrder->shipping_mode ?? $shipping['shipping_mode'];
+                        $shipping['shipping_type'] = $lockedExistingOrder->shipping_type ?? $shipping['shipping_type'];
+                        $shipping['shipping_status'] = $lockedExistingOrder->shipping_status;
+                        $shipping['shipping_substatus'] = $lockedExistingOrder->shipping_substatus;
+                        $shipping['shipping_logistic_type'] = $lockedExistingOrder->shipping_logistic_type ?? $shipping['shipping_logistic_type'];
+                        $shipping['shipping_process_date'] = $lockedExistingOrder->shipping_process_date ?? $shipping['shipping_process_date'];
+                        $shipping['shipping_raw'] = $lockedExistingOrder->shipping_raw;
+                    }
+                }
+
+                if ($lockedExistingOrder && ! $acceptOrderUpdate && $acceptShipmentUpdate) {
+                    Log::warning('ML sync storeOrder preservó pedido local más reciente y aplicó únicamente envío más reciente', [
+                        'meli_order_id' => $lockedExistingOrder->id,
+                        'order_id' => $orderId,
+                        'order_reason' => $orderFreshness['reason'] ?? 'stale_remote_order',
+                    ]);
+
+                    $lockedExistingOrder->forceFill([
+                        'shipping_id' => $shipping['shipping_id'] ?? $lockedExistingOrder->shipping_id,
+                        'shipping_mode' => $shipping['shipping_mode'] ?? $lockedExistingOrder->shipping_mode,
+                        'shipping_type' => $shipping['shipping_type'] ?? $lockedExistingOrder->shipping_type,
+                        'shipping_status' => $shipping['shipping_status'],
+                        'shipping_substatus' => $shipping['shipping_substatus'],
+                        'shipping_logistic_type' => $shipping['shipping_logistic_type'] ?? $lockedExistingOrder->shipping_logistic_type,
+                        'shipping_process_date' => $shipping['shipping_process_date'] ?? $lockedExistingOrder->shipping_process_date,
+                        'shipping_raw' => $shipping['shipping_raw'] ?? $lockedExistingOrder->shipping_raw,
+                    ])->save();
+                    $lockedExistingOrder->load('items');
+
+                    $this->reservationDispatcher->dispatchAfterCommit($lockedExistingOrder, $previousFingerprint);
+
+                    return 0;
+                }
 
                 if ($shipping['shipping_status'] === null
                     && $lockedExistingOrder
@@ -1070,7 +1151,7 @@ class MeliOrderSyncService
                 $attrs
             );
 
-            $n = DB::transaction(function () use ($shippingId, $meliAccountId, $attrs, $row): int {
+            $n = DB::transaction(function () use ($shippingId, $meliAccountId, $shipment, $attrs, $row): int {
                 $lockedOrders = MeliOrder::query()
                     ->where('shipping_id', $shippingId)
                     ->where('meli_account_id', $meliAccountId)
@@ -1083,18 +1164,43 @@ class MeliOrderSyncService
                 }
 
                 $lockedOrders->load('items');
+                $acceptedOrderIds = [];
                 $previousSnapshots = [];
                 $newShippingStatus = strtolower(trim((string) ($attrs['shipping_status'] ?? '')));
 
                 foreach ($lockedOrders as $existing) {
+                    $freshness = $this->freshnessGuard->evaluateShipmentUpdate(
+                        $existing,
+                        $shipment,
+                        $attrs['shipping_status'] ?? null,
+                    );
+
+                    if (! $freshness['accept']) {
+                        Log::warning('ML refreshShipments descartó actualización de envío obsoleta o ambigua', [
+                            'meli_order_id' => $existing->id,
+                            'order_id' => $existing->order_id,
+                            'shipping_id' => $shippingId,
+                            'reason' => $freshness['reason'],
+                            'stored_timestamp_utc' => $freshness['stored_timestamp_utc'],
+                            'incoming_timestamp_utc' => $freshness['incoming_timestamp_utc'],
+                        ]);
+
+                        continue;
+                    }
+
+                    $acceptedOrderIds[] = (int) $existing->id;
                     $oldShippingStatus = strtolower(trim((string) ($existing->shipping_status ?? '')));
                     if ($oldShippingStatus !== $newShippingStatus) {
                         $previousSnapshots[(int) $existing->id] = $this->reconciliationFingerprint->forOrder($existing);
                     }
                 }
 
+                if ($acceptedOrderIds === []) {
+                    return 0;
+                }
+
                 $updatedCount = MeliOrder::query()
-                    ->whereIn('id', $lockedOrders->pluck('id')->all())
+                    ->whereIn('id', $acceptedOrderIds)
                     ->update($row);
 
                 if ($previousSnapshots !== []) {

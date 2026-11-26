@@ -84,16 +84,67 @@ class MeliOrderCancellationService
 
     public function persistRemote(MeliOrder $order, array $remoteOrder, ?array $shipment = null): void
     {
-        $shippingId = data_get($remoteOrder, 'shipping.id');
-        $order->forceFill(array_filter([
-            'status' => filled($remoteOrder['status'] ?? null) ? (string) $remoteOrder['status'] : null,
-            'display_id' => filled($remoteOrder['display_id'] ?? null) ? (string) $remoteOrder['display_id'] : null,
-            'shipping_id' => filled($shippingId) ? (string) $shippingId : null,
-            'shipping_status' => filled($shipment['status'] ?? null) ? (string) $shipment['status'] : null,
-            'shipping_substatus' => filled($shipment['substatus'] ?? null) ? (string) $shipment['substatus'] : null,
-            'shipping_raw' => $shipment,
-            'raw' => $remoteOrder,
-        ], fn (mixed $value): bool => $value !== null))->save();
+        $guard = app(\App\Services\MeliOrderRemoteFreshnessGuard::class);
+
+        \Illuminate\Support\Facades\DB::transaction(function () use ($order, $remoteOrder, $shipment, $guard): void {
+            $locked = MeliOrder::query()
+                ->whereKey($order->getKey())
+                ->lockForUpdate()
+                ->first();
+
+            if (! $locked) {
+                return;
+            }
+
+            $orderDecision = $guard->evaluateOrderUpdate($locked, $remoteOrder);
+            $shipmentDecision = $shipment !== null
+                ? $guard->evaluateShipmentUpdate(
+                    $locked,
+                    $shipment,
+                    filled($shipment['status'] ?? null) ? (string) $shipment['status'] : null,
+                )
+                : ['accept' => false, 'reason' => 'no_shipment_payload', 'stored_timestamp_utc' => null, 'incoming_timestamp_utc' => null];
+
+            if (! $orderDecision['accept'] && ! $shipmentDecision['accept']) {
+                \Illuminate\Support\Facades\Log::warning('MELI ORDERS: persistRemote descartado por control temporal de frescura', [
+                    'meli_order_id' => $locked->id,
+                    'order_id' => $locked->order_id,
+                    'order_reason' => $orderDecision['reason'],
+                    'shipment_reason' => $shipmentDecision['reason'],
+                ]);
+
+                return;
+            }
+
+            $updates = [];
+            if ($orderDecision['accept']) {
+                $shippingId = data_get($remoteOrder, 'shipping.id');
+                $updates += array_filter([
+                    'status' => filled($remoteOrder['status'] ?? null) ? (string) $remoteOrder['status'] : null,
+                    'display_id' => filled($remoteOrder['display_id'] ?? null) ? (string) $remoteOrder['display_id'] : null,
+                    'shipping_id' => filled($shippingId) ? (string) $shippingId : null,
+                    'raw' => $remoteOrder,
+                ], static fn (mixed $value): bool => $value !== null);
+            }
+
+            if ($shipment !== null && $shipmentDecision['accept']) {
+                $updates += array_filter([
+                    'shipping_status' => filled($shipment['status'] ?? null) ? (string) $shipment['status'] : null,
+                    'shipping_substatus' => filled($shipment['substatus'] ?? null) ? (string) $shipment['substatus'] : null,
+                    'shipping_raw' => $shipment,
+                ], static fn (mixed $value): bool => $value !== null);
+            }
+
+            if ($updates !== []) {
+                $locked->forceFill($updates)->save();
+                $order->setRawAttributes($locked->getAttributes(), true);
+            }
+
+            if ((bool) config('inventory.meli_order_reservations.automatic', false)) {
+                app(\App\Services\InventoryMeliOrderReservationDispatcher::class)
+                    ->dispatchAfterCommit($locked);
+            }
+        });
     }
 
     public function safeError(string $message): string
