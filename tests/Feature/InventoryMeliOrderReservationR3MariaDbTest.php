@@ -370,12 +370,31 @@ class InventoryMeliOrderReservationR3MariaDbTest extends TestCase
 
     public function test_mariadb_h8_two_independent_connections_reject_out_of_order_http_responses_and_preflight_passes_innodb(): void
     {
-        // 1. Verify production preflight passes on real MariaDB 10.5.29 InnoDB (and fails if after_commit=true)!
+        // 1. Verify production preflight fails when strict_atomic_queue=false, PASSES on MariaDB 10.5.29 InnoDB when true,
+        //    and FAILS CLOSED if ANY transactional table (e.g. jobs) is non-InnoDB (MyISAM)!
         config()->set('queue.connections.database.after_commit', false);
         config()->set('queue.connections.database.retry_after', 7300);
+        config()->set('inventory.meli_order_reservations.strict_atomic_queue', false);
         $preflight = app(InventoryMeliOrderReconciliationPreflight::class);
+        $this->assertFalse($preflight->check()['passed'], 'Preflight must FAIL when strict_atomic_queue=false.');
+
+        config()->set('inventory.meli_order_reservations.strict_atomic_queue', true);
         $report = $preflight->check();
-        $this->assertTrue($report['passed'], 'Preflight must PASS on MariaDB 10.5.29 InnoDB with valid queue config.');
+        $this->assertTrue($report['passed'], 'Preflight must PASS on MariaDB 10.5.29 InnoDB with valid strict config.');
+        $this->assertSame(13, $report['runtime']['tables_verified']);
+
+        // Non-transactional engine (MyISAM) on `jobs` MUST make preflight fail-closed!
+        DB::connection('r3_mariadb')->statement('ALTER TABLE `jobs` ENGINE = MyISAM');
+        try {
+            $badEngine = $preflight->check();
+            $this->assertFalse($badEngine['passed'], 'Preflight must FAIL when jobs uses MyISAM.');
+            $engineCheck = collect($badEngine['checks'])->firstWhere('name', 'transactional_tables_use_innodb');
+            $this->assertFalse($engineCheck['passed']);
+            $this->assertArrayHasKey('jobs', $engineCheck['details']['non_innodb']);
+        } finally {
+            DB::connection('r3_mariadb')->statement('ALTER TABLE `jobs` ENGINE = InnoDB');
+        }
+        $this->assertTrue($preflight->check()['passed']);
 
         // 2. Two independent MariaDB connections with inverted HTTP response arrival order:
         //    Seed initial order, then Session 2 (independent PDO) commits newer cancelled + qty=4 (16:05:00Z).
@@ -416,6 +435,37 @@ class InventoryMeliOrderReservationR3MariaDbTest extends TestCase
         $this->assertSame('shipped', $fresh->shipping_status);
         $this->assertSame(4, (int) $fresh->items->sole()->quantity);
         $this->assertSame(0, DB::table('jobs')->count());
+    }
+
+    public function test_mariadb_h13_starvation_free_recovery_behind_110_healthy_pending_jobs(): void
+    {
+        config()->set('inventory.meli_order_reservations.strict_atomic_queue', true);
+        $dispatcher = app(InventoryMeliOrderReservationDispatcher::class);
+        $coordinator = app(InventoryMeliOrderReconciliationCoordinator::class);
+
+        for ($i = 1; $i <= 110; $i++) {
+            $ord = $this->seedOrder(1, 881000 + $i, 'paid', [['item_id' => 'MLM-M-H13', 'key' => 'MLM-M-H13:', 'qty' => 1]]);
+            $dispatcher->dispatchAfterCommit($ord);
+        }
+        $this->assertSame(110, DB::table('jobs')->count());
+
+        // Higher-ID stuck orders: 1 expired PROCESSING + 1 orphaned PENDING whose job vanished.
+        $stuckProc = $this->seedOrder(1, 881501, 'paid', [['item_id' => 'MLM-M-H13', 'key' => 'MLM-M-H13:', 'qty' => 1]]);
+        $coordinator->claimForExecution($stuckProc->id, 'dead-mariadb-worker', leaseSeconds: 300);
+
+        $stuckPending = $this->seedOrder(1, 881502, 'paid', [['item_id' => 'MLM-M-H13', 'key' => 'MLM-M-H13:', 'qty' => 1]]);
+        $dispatcher->dispatchAfterCommit($stuckPending);
+        $vanishedId = (int) InventoryMeliOrderReconciliation::where('meli_order_id', $stuckPending->id)->value('pending_job_id');
+        DB::table('jobs')->where('id', $vanishedId)->delete();
+
+        Carbon::setTestNow(Carbon::now()->addSeconds(305));
+
+        $res = $coordinator->recoverStuckReconciliations(limit: 10);
+        $this->assertNull($res['blocked_reason']);
+        $this->assertSame(2, $res['scanned']);
+        $this->assertSame(1, $res['recovered_expired_processing']);
+        $this->assertSame(1, $res['recovered_pending']);
+        $this->assertSame(112, DB::table('jobs')->count());
     }
 
     // =========================================================================

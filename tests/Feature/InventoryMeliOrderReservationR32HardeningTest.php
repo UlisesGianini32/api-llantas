@@ -646,7 +646,12 @@ class InventoryMeliOrderReservationR32HardeningTest extends TestCase
     {
         $preflight = app(InventoryMeliOrderReconciliationPreflight::class);
 
-        // 1. Valid database queue config (same DB, after_commit=false, 120 < 300 < 7300) -> PASS!
+        // 0. strict_atomic_queue = false MUST FAIL preflight (H15)!
+        config()->set('inventory.meli_order_reservations.strict_atomic_queue', false);
+        $this->assertFalse($preflight->check()['passed']);
+
+        // 1. Valid database queue config (same DB, after_commit=false, strict_atomic_queue=true, 120 < 300 < 7300) -> PASS!
+        config()->set('inventory.meli_order_reservations.strict_atomic_queue', true);
         $ok = $preflight->check();
         $this->assertTrue($ok['passed']);
         $this->assertSame(0, Artisan::call('ops:inventory-meli-reconciliations-preflight', ['--json' => true]));
