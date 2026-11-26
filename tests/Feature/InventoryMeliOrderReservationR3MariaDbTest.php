@@ -15,9 +15,11 @@ use App\Models\InventoryReservation;
 use App\Models\MeliOrder;
 use App\Models\MeliOrderItem;
 use App\Services\InventoryMeliOrderReconciliationCoordinator;
+use App\Services\InventoryMeliOrderReconciliationPreflight;
 use App\Services\InventoryMeliOrderReservationDispatcher;
 use App\Services\InventoryMeliOrderReservationService;
 use App\Services\InventoryStockService;
+use App\Services\MeliOrderStoreService;
 use Carbon\Carbon;
 use Illuminate\Database\QueryException;
 use Illuminate\Database\Schema\Blueprint;
@@ -364,6 +366,56 @@ class InventoryMeliOrderReservationR3MariaDbTest extends TestCase
         $dec = $coordinator->registerOrderState($stalePaidSnapshot);
         $this->assertSame($cancelledFp, $dec['fingerprint']);
         $this->assertSame(1, DB::table('jobs')->count());
+    }
+
+    public function test_mariadb_h8_two_independent_connections_reject_out_of_order_http_responses_and_preflight_passes_innodb(): void
+    {
+        // 1. Verify production preflight passes on real MariaDB 10.5.29 InnoDB (and fails if after_commit=true)!
+        config()->set('queue.connections.database.after_commit', false);
+        config()->set('queue.connections.database.retry_after', 7300);
+        $preflight = app(InventoryMeliOrderReconciliationPreflight::class);
+        $report = $preflight->check();
+        $this->assertTrue($report['passed'], 'Preflight must PASS on MariaDB 10.5.29 InnoDB with valid queue config.');
+
+        // 2. Two independent MariaDB connections with inverted HTTP response arrival order:
+        //    Seed initial order, then Session 2 (independent PDO) commits newer cancelled + qty=4 (16:05:00Z).
+        $order = $this->seedOrder(1, 880099, 'paid', [['item_id' => 'MLM-M-H8', 'key' => 'MLM-M-H8:', 'qty' => 1]]);
+        $order->update(['raw' => ['date_created' => '2026-11-20T09:00:00Z', 'last_updated' => '2026-11-20T15:55:00Z']]);
+        DB::table('jobs')->truncate();
+
+        $session2 = $this->openRawPdo();
+        $session2->beginTransaction();
+        $newerRaw = json_encode([
+            'id' => 880099,
+            'status' => 'cancelled',
+            'date_created' => '2026-11-20T09:00:00Z',
+            'last_updated' => '2026-11-20T16:05:00Z',
+        ], JSON_THROW_ON_ERROR);
+        $session2->prepare('UPDATE meli_orders SET status = ?, shipping_status = ?, raw = ? WHERE id = ?')
+            ->execute(['cancelled', 'shipped', $newerRaw, $order->id]);
+        $session2->prepare('UPDATE meli_order_items SET quantity = ? WHERE meli_order_id = ?')
+            ->execute([4, $order->id]);
+        $session2->commit();
+
+        // Session 1 now persists an OLDER HTTP response (`paid`, qty=1, last_updated = 12:00:00-04:00 == 16:00:00Z < 16:05:00Z)!
+        app(MeliOrderStoreService::class)->storeFromOrderApiResponse([
+            'id' => 880099,
+            'status' => 'paid',
+            'date_created' => '2026-11-20T09:00:00Z',
+            'last_updated' => '2026-11-20T12:00:00-04:00',
+            'order_items' => [[
+                'item' => ['id' => 'MLM-M-H8'],
+                'quantity' => 1,
+                'unit_price' => 100,
+            ]],
+        ]);
+
+        // Under InnoDB FOR UPDATE, Session 1 observed Session 2's 16:05:00Z commit and REJECTED the stale overwrite!
+        $fresh = $order->fresh('items');
+        $this->assertSame('cancelled', $fresh->status);
+        $this->assertSame('shipped', $fresh->shipping_status);
+        $this->assertSame(4, (int) $fresh->items->sole()->quantity);
+        $this->assertSame(0, DB::table('jobs')->count());
     }
 
     // =========================================================================
