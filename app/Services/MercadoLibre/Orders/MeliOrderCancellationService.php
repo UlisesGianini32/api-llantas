@@ -96,20 +96,29 @@ class MeliOrderCancellationService
                 return;
             }
 
-            $orderDecision = $guard->evaluateOrderUpdate($locked, $remoteOrder);
+            $orderDecision = $guard->evaluateOrderUpdate(
+                $locked,
+                $remoteOrder,
+                $locked->meli_account_id !== null ? (int) $locked->meli_account_id : null,
+            );
+
+            $incomingShippingId = data_get($remoteOrder, 'shipping.id') ?? data_get($shipment, 'id');
             $shipmentDecision = $shipment !== null
                 ? $guard->evaluateShipmentUpdate(
                     $locked,
                     $shipment,
                     filled($shipment['status'] ?? null) ? (string) $shipment['status'] : null,
+                    $incomingShippingId !== null ? (string) $incomingShippingId : null,
+                    orderAuthorizesNewShippingId: $orderDecision['accept'],
                 )
                 : ['accept' => false, 'reason' => 'no_shipment_payload', 'stored_timestamp_utc' => null, 'incoming_timestamp_utc' => null];
 
             if (! $orderDecision['accept'] && ! $shipmentDecision['accept']) {
-                \Illuminate\Support\Facades\Log::warning('MELI ORDERS: persistRemote descartado por control temporal de frescura', [
+                \Illuminate\Support\Facades\Log::warning('MELI ORDERS: persistRemote descartado por control temporal o integridad', [
                     'meli_order_id' => $locked->id,
                     'order_id' => $locked->order_id,
                     'order_reason' => $orderDecision['reason'],
+                    'order_payload_kind' => $orderDecision['payload_kind'],
                     'shipment_reason' => $shipmentDecision['reason'],
                 ]);
 
@@ -119,16 +128,24 @@ class MeliOrderCancellationService
             $updates = [];
             if ($orderDecision['accept']) {
                 $shippingId = data_get($remoteOrder, 'shipping.id');
+                $effectiveRaw = $orderDecision['advance_full_raw_timestamp']
+                    ? $remoteOrder
+                    : $guard->mergePartialOrderRaw(
+                        is_array($locked->raw) ? $locked->raw : [],
+                        $remoteOrder,
+                    );
+
                 $updates += array_filter([
                     'status' => filled($remoteOrder['status'] ?? null) ? (string) $remoteOrder['status'] : null,
                     'display_id' => filled($remoteOrder['display_id'] ?? null) ? (string) $remoteOrder['display_id'] : null,
                     'shipping_id' => filled($shippingId) ? (string) $shippingId : null,
-                    'raw' => $remoteOrder,
+                    'raw' => $effectiveRaw,
                 ], static fn (mixed $value): bool => $value !== null);
             }
 
             if ($shipment !== null && $shipmentDecision['accept']) {
                 $updates += array_filter([
+                    'shipping_id' => filled($shipment['id'] ?? null) ? (string) $shipment['id'] : null,
                     'shipping_status' => filled($shipment['status'] ?? null) ? (string) $shipment['status'] : null,
                     'shipping_substatus' => filled($shipment['substatus'] ?? null) ? (string) $shipment['substatus'] : null,
                     'shipping_raw' => $shipment,
