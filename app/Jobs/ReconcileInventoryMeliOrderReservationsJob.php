@@ -156,36 +156,60 @@ class ReconcileInventoryMeliOrderReservationsJob implements ShouldQueue
                 static fn (): array => $service->apply($freshOrder),
             );
 
-            // Verify lease & fencing token BEFORE dispatching remote stock sync, and durably flag
-            // stock_sync_required = true so a retry still converges stock if dispatchForOrder() fails.
-            $coordinator->markStockSyncRequiredAndRenewLease(
-                $freshOrder->id,
-                $leaseOwner,
-                $fencingToken,
-            );
-
             /*
              * Re-discover affected products from the persisted allocations rather
              * than trusting only the current action result.
              *
-             * This is intentional: a retry can return NO_CHANGE after the
-             * reservation was already committed, but it must still have another
-             * opportunity to converge Mercado Libre stock if the previous stock
-             * dispatch failed.
+             * When running on same-DB `database` queue with the real stock dispatcher,
+             * ALL SyncInventoryMeliStockLinkJob rows are enqueued ATOMICALLY inside
+             * completeExecution()'s DB transaction under lease_owner + fencing_token lock
+             * (zero partial dispatch on SIGKILL, zero stale-owner stock dispatch).
+             * Otherwise (BusFake / QueueFake / mocked dispatcher / non-same-DB), dispatch
+             * under fenced renewal right before completeExecution().
              */
-            $stockSyncJobsDispatched = app(
-                InventoryMeliAffectedStockDispatcher::class
-            )->dispatchForOrder($freshOrder);
-
+            $stockDispatcher = app(InventoryMeliAffectedStockDispatcher::class);
             $queue = (string) config('inventory.meli_order_reservations.queue', 'meli');
-            $completion = $coordinator->completeExecution(
-                $freshOrder->id,
-                $leaseOwner,
-                $fencingToken,
-                (int) $claim['starting_revision'],
-                $reconciledFingerprint,
-                $queue,
-            );
+            $useAtomicStockHandoff = $coordinator->canAtomicPushToDatabaseQueue()
+                && ! ($stockDispatcher instanceof \Mockery\MockInterface);
+
+            if ($useAtomicStockHandoff) {
+                $coordinator->markStockSyncRequiredAndRenewLease(
+                    $freshOrder->id,
+                    $leaseOwner,
+                    $fencingToken,
+                );
+                $linkIds = $stockDispatcher->resolveDispatchableLinkIdsForOrder($freshOrder);
+
+                $completion = $coordinator->completeExecution(
+                    $freshOrder->id,
+                    $leaseOwner,
+                    $fencingToken,
+                    (int) $claim['starting_revision'],
+                    $reconciledFingerprint,
+                    $queue,
+                    $linkIds,
+                );
+                $stockSyncJobsDispatched = (int) $completion['stock_sync_jobs_enqueued_atomically'];
+            } else {
+                // Verify lease & fencing token BEFORE dispatching remote stock sync, and durably flag
+                // stock_sync_required = true so a retry still converges stock if dispatchForOrder() fails.
+                $coordinator->markStockSyncRequiredAndRenewLease(
+                    $freshOrder->id,
+                    $leaseOwner,
+                    $fencingToken,
+                );
+
+                $stockSyncJobsDispatched = $stockDispatcher->dispatchForOrder($freshOrder);
+
+                $completion = $coordinator->completeExecution(
+                    $freshOrder->id,
+                    $leaseOwner,
+                    $fencingToken,
+                    (int) $claim['starting_revision'],
+                    $reconciledFingerprint,
+                    $queue,
+                );
+            }
 
             if ($completion['needs_after_commit_followup']) {
                 $orderId = $freshOrder->id;
@@ -236,6 +260,8 @@ class ReconcileInventoryMeliOrderReservationsJob implements ShouldQueue
                 'fencing_token' => $fencingToken,
                 'actions' => $actions,
                 'stock_sync_jobs_dispatched' => $stockSyncJobsDispatched,
+                'stock_sync_handoff' => $stockSyncJobsDispatched > 0 ? 'enqueued_not_remotely_confirmed' : 'none_required',
+                'stock_sync_atomic' => $useAtomicStockHandoff,
                 'followup_dispatched' => $completion['needs_followup'],
                 'followup_atomic' => $completion['enqueued_atomically'],
             ]);

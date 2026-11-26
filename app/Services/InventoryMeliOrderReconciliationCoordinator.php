@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Exceptions\InventoryMeliOrderReconciliationSchemaException;
 use App\Exceptions\StaleReconciliationLeaseException;
 use App\Jobs\ReconcileInventoryMeliOrderReservationsJob;
+use App\Jobs\SyncInventoryMeliStockLinkJob;
 use App\Models\InventoryMeliOrderReconciliation;
 use App\Models\MeliOrder;
 use Illuminate\Contracts\Bus\Dispatcher as BusDispatcher;
@@ -152,6 +153,13 @@ class InventoryMeliOrderReconciliationCoordinator
         ?string $queueName = null,
     ): array {
         $this->assertStateTableExists();
+
+        if ((bool) config('inventory.meli_order_reservations.strict_atomic_queue', false)
+            && ! $this->canAtomicPushToDatabaseQueue()) {
+            throw new \RuntimeException(
+                'Modo estricto activo (strict_atomic_queue=true): la cola debe usar driver database en la misma conexión transaccional con after_commit=false.',
+            );
+        }
 
         $localId = (int) $order->getKey();
         if ($localId <= 0) {
@@ -721,6 +729,43 @@ class InventoryMeliOrderReconciliationCoordinator
     }
 
     /**
+     * Marks `stock_sync_required = true` inside an ALREADY-OPEN inventory transaction (after
+     * `meli_orders` lock) so a SIGKILL immediately after committing an inventory line never loses
+     * the obligation to synchronize affected Mercado Libre listings (H9).
+     */
+    public function markStockSyncRequiredInTransaction(
+        int $meliOrderId,
+        string $leaseOwner,
+        int $fencingToken,
+    ): void {
+        $this->assertStateTableExists();
+
+        $now = now();
+        $row = InventoryMeliOrderReconciliation::query()
+            ->where('meli_order_id', $meliOrderId)
+            ->lockForUpdate()
+            ->first();
+
+        if (! $row
+            || $row->state !== InventoryMeliOrderReconciliation::STATE_PROCESSING
+            || $row->lease_owner !== $leaseOwner
+            || (int) $row->fencing_token !== $fencingToken
+            || $row->lease_expires_at === null
+            || $row->lease_expires_at->lte($now)) {
+            throw new StaleReconciliationLeaseException(
+                $meliOrderId,
+                $leaseOwner,
+                $fencingToken,
+                'La ejecución perdió su lease o fencing token al registrar obligación de stock sync.',
+            );
+        }
+
+        if (! (bool) $row->stock_sync_required) {
+            $row->forceFill(['stock_sync_required' => true])->save();
+        }
+    }
+
+    /**
      * Marks stock_sync_required = true and renews active lease right after inventory apply() succeeds
      * and immediately before dispatching remote stock-sync jobs. Throws StaleReconciliationLeaseException
      * if this worker no longer owns the active lease + fencing token.
@@ -769,16 +814,21 @@ class InventoryMeliOrderReconciliationCoordinator
 
     /**
      * Completes execution under row locks (`meli_orders` -> `inventory_meli_order_reconciliations` -> `jobs`),
-     * verifying exact lease_owner + fencing_token. If a newer material update arrived during execution,
-     * transitions immediately to PENDING and enqueues exactly 1 follow-up job (atomically inside the same
-     * DB transaction when using same-DB `database` queue, or via outbox otherwise).
+     * verifying exact lease_owner + fencing_token.
      *
+     * When `$atomicStockSyncLinkIds` is provided on a same-DB `database` queue, ALL `SyncInventoryMeliStockLinkJob`
+     * rows are pushed inside this SAME DB transaction (eliminating partial dispatch on SIGKILL and guaranteeing
+     * stale owners cannot dispatch stock syncs). Note that clearing `stock_sync_required` marks local queue
+     * handoff only — remote Mercado Libre confirmation is audited separately in `inventory_channel_stock_syncs`.
+     *
+     * @param  list<int>  $atomicStockSyncLinkIds
      * @return array{
      *     needs_followup: bool,
      *     enqueued_atomically: bool,
      *     needs_after_commit_followup: bool,
      *     pending_job_id: ?int,
-     *     next_revision: int
+     *     next_revision: int,
+     *     stock_sync_jobs_enqueued_atomically: int
      * }
      */
     public function completeExecution(
@@ -788,6 +838,7 @@ class InventoryMeliOrderReconciliationCoordinator
         int $startingRevision,
         string $reconciledFingerprint,
         ?string $queueName = null,
+        array $atomicStockSyncLinkIds = [],
     ): array {
         $this->assertStateTableExists();
 
@@ -800,6 +851,7 @@ class InventoryMeliOrderReconciliationCoordinator
             $startingRevision,
             $reconciledFingerprint,
             $queue,
+            $atomicStockSyncLinkIds,
         ): array {
             $now = now();
 
@@ -826,6 +878,16 @@ class InventoryMeliOrderReconciliationCoordinator
                     $fencingToken,
                     'La ejecución perdió su lease o fencing token antes de completar la reconciliación.',
                 );
+            }
+
+            $atomicStockCount = 0;
+            if ($atomicStockSyncLinkIds !== [] && $this->canAtomicPushToDatabaseQueue()) {
+                $queueConnectionName = (string) config('queue.default', 'database');
+                foreach ($atomicStockSyncLinkIds as $linkId) {
+                    $stockJob = new SyncInventoryMeliStockLinkJob((int) $linkId);
+                    Queue::connection($queueConnectionName)->pushOn($stockJob->queue ?: 'meli', $stockJob);
+                    $atomicStockCount++;
+                }
             }
 
             $currentRequested = (int) $row->requested_revision;
@@ -857,6 +919,7 @@ class InventoryMeliOrderReconciliationCoordinator
                     'needs_after_commit_followup' => $enqueue['should_dispatch_after_commit'],
                     'pending_job_id' => $enqueue['pending_job_id'],
                     'next_revision' => $nextRev,
+                    'stock_sync_jobs_enqueued_atomically' => $atomicStockCount,
                 ];
             }
 
@@ -881,6 +944,7 @@ class InventoryMeliOrderReconciliationCoordinator
                 'needs_after_commit_followup' => false,
                 'pending_job_id' => null,
                 'next_revision' => $currentRequested,
+                'stock_sync_jobs_enqueued_atomically' => $atomicStockCount,
             ];
         });
     }
@@ -1170,7 +1234,196 @@ class InventoryMeliOrderReconciliationCoordinator
         ];
     }
 
-    private function canAtomicPushToDatabaseQueue(): bool
+    /**
+     * Bounded, idempotent recovery sweeper for ALL stuck reconciliation obligations without requiring
+     * any future syncs for the affected orders and without scanning `jobs` payloads (H11):
+     * 1. PENDING with unconfirmed outbox (`dispatch_confirmed_at IS NULL` past grace) OR missing `pending_job_id` in `jobs` (O(1) PK check).
+     * 2. PROCESSING whose lease has expired (`lease_expires_at <= now()`), e.g. SIGKILL/OOM mid-flight.
+     * 3. FAILED whose retry job vanished from `jobs` with `attempts < $maxAutoRecoveryAttempts` and pending obligation.
+     *
+     * @return array{
+     *     scanned: int,
+     *     recovered_pending: int,
+     *     recovered_expired_processing: int,
+     *     recovered_failed: int,
+     *     skipped: int
+     * }
+     */
+    public function recoverStuckReconciliations(
+        int $limit = 100,
+        ?int $graceSeconds = null,
+        int $maxAutoRecoveryAttempts = 8,
+        ?string $queueName = null,
+    ): array {
+        $this->assertStateTableExists();
+
+        $limit = max(1, min(1000, $limit));
+        $grace = max(0, (int) ($graceSeconds ?? config('inventory.meli_order_reservations.outbox_grace_seconds', self::DEFAULT_OUTBOX_GRACE_SECONDS)));
+        $now = now();
+        $cutoff = $now->copy()->subSeconds($grace);
+        $queue = $queueName ?? (string) config('inventory.meli_order_reservations.queue', 'meli');
+
+        $candidates = InventoryMeliOrderReconciliation::query()
+            ->where(function ($q) use ($now, $cutoff, $maxAutoRecoveryAttempts): void {
+                // 1. PENDING unconfirmed outbox or PENDING carrying a database pending_job_id to verify in O(1).
+                $q->where(function ($p) use ($cutoff): void {
+                    $p->where('state', InventoryMeliOrderReconciliation::STATE_PENDING)
+                        ->where(function ($p2) use ($cutoff): void {
+                            $p2->where(function ($unconfirmed) use ($cutoff): void {
+                                $unconfirmed->whereNull('dispatch_confirmed_at')
+                                    ->where(function ($q2) use ($cutoff): void {
+                                        $q2->whereNull('queued_at')->orWhere('queued_at', '<=', $cutoff);
+                                    });
+                            })->orWhereNotNull('pending_job_id');
+                        });
+                })
+                    // 2. PROCESSING with expired lease.
+                    ->orWhere(function ($proc) use ($now): void {
+                        $proc->where('state', InventoryMeliOrderReconciliation::STATE_PROCESSING)
+                            ->whereNotNull('lease_expires_at')
+                            ->where('lease_expires_at', '<=', $now);
+                    })
+                    // 3. FAILED with bounded retry budget.
+                    ->orWhere(function ($fail) use ($maxAutoRecoveryAttempts): void {
+                        $fail->where('state', InventoryMeliOrderReconciliation::STATE_FAILED)
+                            ->where('attempts', '<', max(1, $maxAutoRecoveryAttempts));
+                    });
+            })
+            ->orderBy('id')
+            ->limit($limit)
+            ->pluck('meli_order_id')
+            ->map(static fn ($id): int => (int) $id)
+            ->all();
+
+        $recoveredPending = 0;
+        $recoveredExpiredProcessing = 0;
+        $recoveredFailed = 0;
+        $skipped = 0;
+
+        foreach ($candidates as $orderId) {
+            $decision = DB::transaction(function () use ($orderId, $maxAutoRecoveryAttempts, $queue): array {
+                $txNow = now();
+
+                // Global lock ordering: meli_orders -> inventory_meli_order_reconciliations -> jobs.
+                $order = MeliOrder::query()->whereKey($orderId)->lockForUpdate()->first();
+                $row = InventoryMeliOrderReconciliation::query()
+                    ->where('meli_order_id', $orderId)
+                    ->lockForUpdate()
+                    ->first();
+
+                if (! $row || $row->state === InventoryMeliOrderReconciliation::STATE_IDLE) {
+                    return ['bucket' => null, 'needs_after_commit' => false, 'revision' => 0];
+                }
+
+                if (! $order) {
+                    $row->forceFill([
+                        'state' => InventoryMeliOrderReconciliation::STATE_IDLE,
+                        'pending_job_id' => null,
+                        'dispatch_confirmed_at' => null,
+                        'lease_owner' => null,
+                        'lease_expires_at' => null,
+                    ])->save();
+
+                    return ['bucket' => null, 'needs_after_commit' => false, 'revision' => 0];
+                }
+
+                $order->load('items');
+                $liveFingerprint = $this->fingerprint->forOrder($order);
+
+                if ($row->state === InventoryMeliOrderReconciliation::STATE_PENDING) {
+                    if (! $this->isPendingDispatchMissing($row, $txNow)) {
+                        return ['bucket' => null, 'needs_after_commit' => false, 'revision' => 0];
+                    }
+
+                    $rev = max(1, (int) $row->requested_revision);
+                    $res = $this->transitionToPendingAndEnqueue($row, $orderId, $rev, $liveFingerprint, $queue, $txNow, 'sweeper_recovered_pending');
+
+                    return ['bucket' => 'pending', 'needs_after_commit' => $res['should_dispatch_after_commit'], 'revision' => $rev];
+                }
+
+                if ($row->state === InventoryMeliOrderReconciliation::STATE_PROCESSING) {
+                    if ($row->lease_expires_at === null || $row->lease_expires_at->isFuture()) {
+                        return ['bucket' => null, 'needs_after_commit' => false, 'revision' => 0];
+                    }
+
+                    $rev = max(1, (int) $row->requested_revision);
+                    $res = $this->transitionToPendingAndEnqueue($row, $orderId, $rev, $liveFingerprint, $queue, $txNow, 'sweeper_reclaimed_expired_processing');
+
+                    return ['bucket' => 'processing', 'needs_after_commit' => $res['should_dispatch_after_commit'], 'revision' => $rev];
+                }
+
+                if ($row->state === InventoryMeliOrderReconciliation::STATE_FAILED) {
+                    if ((int) $row->attempts >= max(1, $maxAutoRecoveryAttempts)) {
+                        return ['bucket' => null, 'needs_after_commit' => false, 'revision' => 0];
+                    }
+
+                    // If Laravel's retry job is still queued in `jobs`, do NOT duplicate it!
+                    if ($row->pending_job_id !== null && $this->databaseJobExists((int) $row->pending_job_id)) {
+                        return ['bucket' => null, 'needs_after_commit' => false, 'revision' => 0];
+                    }
+
+                    $hasObligation = (bool) $row->stock_sync_required
+                        || (int) $row->requested_revision > (int) $row->processed_revision
+                        || $row->last_reconciled_fingerprint === null
+                        || ! hash_equals((string) $row->last_reconciled_fingerprint, $liveFingerprint);
+
+                    if (! $hasObligation) {
+                        return ['bucket' => null, 'needs_after_commit' => false, 'revision' => 0];
+                    }
+
+                    $rev = max(1, (int) $row->requested_revision);
+                    $res = $this->transitionToPendingAndEnqueue($row, $orderId, $rev, $liveFingerprint, $queue, $txNow, 'sweeper_recovered_failed');
+
+                    return ['bucket' => 'failed', 'needs_after_commit' => $res['should_dispatch_after_commit'], 'revision' => $rev];
+                }
+
+                return ['bucket' => null, 'needs_after_commit' => false, 'revision' => 0];
+            });
+
+            if ($decision['bucket'] === null) {
+                $skipped++;
+
+                continue;
+            }
+
+            if ($decision['needs_after_commit']) {
+                $rev = (int) $decision['revision'];
+                try {
+                    $this->invokeAfterCommitOutboxHook($orderId, $rev, 'stuck_recovery');
+                    ReconcileInventoryMeliOrderReservationsJob::dispatch($orderId, $rev)->onQueue($queue);
+                    $this->confirmOutboxDispatch($orderId, $rev);
+                } catch (Throwable $exception) {
+                    $this->markEnqueueFailedForRevision($orderId, $rev, $exception->getMessage());
+                    Log::error('Inventory Meli order reservation stuck recovery failed', [
+                        'meli_order_id' => $orderId,
+                        'revision' => $rev,
+                        'exception' => $exception::class,
+                        'message' => $this->sanitizeErrorMessage($exception->getMessage()),
+                    ]);
+                    $skipped++;
+
+                    continue;
+                }
+            }
+
+            match ($decision['bucket']) {
+                'pending' => $recoveredPending++,
+                'processing' => $recoveredExpiredProcessing++,
+                'failed' => $recoveredFailed++,
+                default => null,
+            };
+        }
+
+        return [
+            'scanned' => count($candidates),
+            'recovered_pending' => $recoveredPending,
+            'recovered_expired_processing' => $recoveredExpiredProcessing,
+            'recovered_failed' => $recoveredFailed,
+            'skipped' => $skipped,
+        ];
+    }
+
+    public function canAtomicPushToDatabaseQueue(): bool
     {
         if (! self::$allowSameDbAtomicPush) {
             return false;

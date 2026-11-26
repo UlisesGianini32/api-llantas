@@ -9,5 +9,7 @@ return [
         // DB_QUEUE_RETRY_AFTER (7300s in prod) and above job timeout (120s).
         'lease_seconds' => (int) env('INVENTORY_MELI_ORDER_RESERVATIONS_LEASE_SECONDS', 300),
         'job_timeout_seconds' => (int) env('INVENTORY_MELI_ORDER_RESERVATIONS_TIMEOUT_SECONDS', 120),
+        // When enabled in production, fail-closed if queue.default is not same-DB database with after_commit=false.
+        'strict_atomic_queue' => (bool) env('INVENTORY_MELI_ORDER_RESERVATIONS_STRICT_ATOMIC_QUEUE', false),
     ],
 ];

@@ -173,6 +173,7 @@ class InventoryMeliOrderReservationService
                         'diagnostic_code' => null,
                         'diagnostic_metadata' => null,
                     ])->save();
+                    $this->markStockSyncRequiredInsideTransaction($freshOrder, $leaseContext);
 
                     return $inspection + ['applied' => true];
                 }
@@ -189,6 +190,7 @@ class InventoryMeliOrderReservationService
                         'diagnostic_code' => null,
                         'diagnostic_metadata' => null,
                     ])->save();
+                    $this->markStockSyncRequiredInsideTransaction($freshOrder, $leaseContext);
 
                     return $inspection + ['applied' => true];
                 }
@@ -249,6 +251,7 @@ class InventoryMeliOrderReservationService
                     'diagnostic_code' => null,
                     'diagnostic_metadata' => null,
                 ])->save();
+                $this->markStockSyncRequiredInsideTransaction($freshOrder, $leaseContext);
 
                 return array_merge($inspection, ['applied' => true, 'reservation_id' => $reservation->id]);
             });
@@ -280,6 +283,28 @@ class InventoryMeliOrderReservationService
         }
 
         $coordinator->assertAndRenewLeaseInTransaction(
+            (int) $order->getKey(),
+            (string) $effectiveLease['lease_owner'],
+            (int) $effectiveLease['fencing_token'],
+        );
+    }
+
+    /**
+     * Persists `stock_sync_required = true` inside the EXACT same DB transaction as the inventory
+     * mutation so a SIGKILL right after line commit never loses the obligation to synchronize stock (H9).
+     *
+     * @param  array{lease_owner: string, fencing_token: int}|null  $leaseContext
+     */
+    private function markStockSyncRequiredInsideTransaction(MeliOrder $order, ?array $leaseContext): void
+    {
+        $coordinator = app(InventoryMeliOrderReconciliationCoordinator::class);
+        $effectiveLease = $leaseContext ?? $coordinator->activeLeaseContext((int) $order->getKey());
+
+        if ($effectiveLease === null) {
+            return;
+        }
+
+        $coordinator->markStockSyncRequiredInTransaction(
             (int) $order->getKey(),
             (string) $effectiveLease['lease_owner'],
             (int) $effectiveLease['fencing_token'],
