@@ -64,6 +64,16 @@ class InventoryMeliOrderReconciliationCoordinator
         }
     }
 
+    public function assertStrictAtomicQueueIfEnabled(): void
+    {
+        if ((bool) config('inventory.meli_order_reservations.strict_atomic_queue', false)
+            && ! $this->canAtomicPushToDatabaseQueue()) {
+            throw new \RuntimeException(
+                'Modo estricto activo (strict_atomic_queue=true): la cola debe usar driver database en la misma conexión transaccional con after_commit=false.',
+            );
+        }
+    }
+
     public function fingerprint(MeliOrder $order): string
     {
         return $this->fingerprint->forOrder($order);
@@ -153,13 +163,7 @@ class InventoryMeliOrderReconciliationCoordinator
         ?string $queueName = null,
     ): array {
         $this->assertStateTableExists();
-
-        if ((bool) config('inventory.meli_order_reservations.strict_atomic_queue', false)
-            && ! $this->canAtomicPushToDatabaseQueue()) {
-            throw new \RuntimeException(
-                'Modo estricto activo (strict_atomic_queue=true): la cola debe usar driver database en la misma conexión transaccional con after_commit=false.',
-            );
-        }
+        $this->assertStrictAtomicQueueIfEnabled();
 
         $localId = (int) $order->getKey();
         if ($localId <= 0) {
@@ -366,7 +370,31 @@ class InventoryMeliOrderReconciliationCoordinator
                 ];
             }
 
-            // 5. IDLE (change / never reconciled / pending stock sync), FAILED (no retry in jobs),
+            // 4b. FAILED with NO retry job in `jobs`: enforce automatic retry ceiling so ordinary
+            //     non-material syncs cannot bypass the retry cap indefinitely (H13).
+            if ($row->state === InventoryMeliOrderReconciliation::STATE_FAILED) {
+                $maxAttempts = max(1, (int) config('inventory.meli_order_reservations.max_auto_recovery_attempts', 8));
+                if ((int) $row->attempts >= $maxAttempts && ! $fingerprintChangedFromRequested && ! $forceReconcile) {
+                    $row->save();
+
+                    return [
+                        'should_dispatch' => false,
+                        'enqueued_atomically' => false,
+                        'should_dispatch_after_commit' => false,
+                        'pending_job_id' => null,
+                        'reason' => 'failed_retry_ceiling_reached',
+                        'revision' => (int) $row->requested_revision,
+                        'fingerprint' => $currentFingerprint,
+                    ];
+                }
+
+                // A genuine material change or explicit administrative force-reconcile starts a fresh retry budget.
+                if ($fingerprintChangedFromRequested || $forceReconcile) {
+                    $row->attempts = 0;
+                }
+            }
+
+            // 5. IDLE (change / never reconciled / pending stock sync), FAILED (within budget or new change),
             //    or PROCESSING with EXPIRED lease => transition to PENDING and enqueue exactly 1 job.
             $wasExpiredLease = $row->state === InventoryMeliOrderReconciliation::STATE_PROCESSING;
             $nextRevision = ($fingerprintChangedFromRequested || $forceReconcile || ! $hasUnprocessedRevision)
@@ -841,6 +869,7 @@ class InventoryMeliOrderReconciliationCoordinator
         array $atomicStockSyncLinkIds = [],
     ): array {
         $this->assertStateTableExists();
+        $this->assertStrictAtomicQueueIfEnabled();
 
         $queue = $queueName ?? (string) config('inventory.meli_order_reservations.queue', 'meli');
 
@@ -902,6 +931,7 @@ class InventoryMeliOrderReconciliationCoordinator
                 $row->last_reconciled_at = $now;
                 $row->stock_sync_required = false;
                 $row->stock_sync_completed_revision = max((int) $row->stock_sync_completed_revision, $startingRevision);
+                $row->attempts = 0;
 
                 $enqueue = $this->transitionToPendingAndEnqueue(
                     $row,
@@ -935,6 +965,7 @@ class InventoryMeliOrderReconciliationCoordinator
                 'dispatch_confirmed_at' => null,
                 'lease_owner' => null,
                 'lease_expires_at' => null,
+                'attempts' => 0,
                 'last_error' => null,
             ])->save();
 
@@ -1235,73 +1266,77 @@ class InventoryMeliOrderReconciliationCoordinator
     }
 
     /**
-     * Bounded, idempotent recovery sweeper for ALL stuck reconciliation obligations without requiring
-     * any future syncs for the affected orders and without scanning `jobs` payloads (H11):
-     * 1. PENDING with unconfirmed outbox (`dispatch_confirmed_at IS NULL` past grace) OR missing `pending_job_id` in `jobs` (O(1) PK check).
-     * 2. PROCESSING whose lease has expired (`lease_expires_at <= now()`), e.g. SIGKILL/OOM mid-flight.
-     * 3. FAILED whose retry job vanished from `jobs` with `attempts < $maxAutoRecoveryAttempts` and pending obligation.
+     * Starvation-free, priority-ordered, bounded, idempotent recovery sweeper (H11 + H13):
+     * - Enforces `automatic = true`, durable state table existence, `strict_atomic_queue`, and cutover.
+     * - Filters out healthy PENDING/FAILED rows directly in SQL using O(1) primary-key `NOT EXISTS`
+     *   against `jobs.id` (zero payload scanning, zero starvation even behind thousands of healthy
+     *   lower-ID PENDING rows).
+     * - Prioritizes:
+     *   1. Expired PROCESSING leases (`lease_expires_at <= now()`)
+     *   2. Unconfirmed outbox PENDING (`dispatch_confirmed_at IS NULL` past grace)
+     *   3. Orphaned PENDING whose `pending_job_id` vanished from `jobs`
+     *   4. Recoverable FAILED within `maxAutoRecoveryAttempts` whose retry job vanished from `jobs`
+     * - Supports deterministic cursor pagination (`$afterId` -> `next_after_id`, `has_more`).
      *
      * @return array{
      *     scanned: int,
      *     recovered_pending: int,
      *     recovered_expired_processing: int,
      *     recovered_failed: int,
-     *     skipped: int
+     *     skipped: int,
+     *     next_after_id: ?int,
+     *     has_more: bool,
+     *     blocked_reason: ?string
      * }
      */
     public function recoverStuckReconciliations(
         int $limit = 100,
         ?int $graceSeconds = null,
-        int $maxAutoRecoveryAttempts = 8,
+        ?int $maxAutoRecoveryAttempts = null,
         ?string $queueName = null,
+        ?int $afterId = null,
     ): array {
         $this->assertStateTableExists();
+        $this->assertStrictAtomicQueueIfEnabled();
+
+        if (! (bool) config('inventory.meli_order_reservations.automatic', false)) {
+            return [
+                'scanned' => 0,
+                'recovered_pending' => 0,
+                'recovered_expired_processing' => 0,
+                'recovered_failed' => 0,
+                'skipped' => 0,
+                'next_after_id' => $afterId,
+                'has_more' => false,
+                'blocked_reason' => 'automation_disabled',
+            ];
+        }
 
         $limit = max(1, min(1000, $limit));
         $grace = max(0, (int) ($graceSeconds ?? config('inventory.meli_order_reservations.outbox_grace_seconds', self::DEFAULT_OUTBOX_GRACE_SECONDS)));
+        $maxAttempts = max(1, (int) ($maxAutoRecoveryAttempts ?? config('inventory.meli_order_reservations.max_auto_recovery_attempts', 8)));
         $now = now();
         $cutoff = $now->copy()->subSeconds($grace);
         $queue = $queueName ?? (string) config('inventory.meli_order_reservations.queue', 'meli');
+        $cursorFloor = max(0, (int) ($afterId ?? 0));
 
-        $candidates = InventoryMeliOrderReconciliation::query()
-            ->where(function ($q) use ($now, $cutoff, $maxAutoRecoveryAttempts): void {
-                // 1. PENDING unconfirmed outbox or PENDING carrying a database pending_job_id to verify in O(1).
-                $q->where(function ($p) use ($cutoff): void {
-                    $p->where('state', InventoryMeliOrderReconciliation::STATE_PENDING)
-                        ->where(function ($p2) use ($cutoff): void {
-                            $p2->where(function ($unconfirmed) use ($cutoff): void {
-                                $unconfirmed->whereNull('dispatch_confirmed_at')
-                                    ->where(function ($q2) use ($cutoff): void {
-                                        $q2->whereNull('queued_at')->orWhere('queued_at', '<=', $cutoff);
-                                    });
-                            })->orWhereNotNull('pending_job_id');
-                        });
-                })
-                    // 2. PROCESSING with expired lease.
-                    ->orWhere(function ($proc) use ($now): void {
-                        $proc->where('state', InventoryMeliOrderReconciliation::STATE_PROCESSING)
-                            ->whereNotNull('lease_expires_at')
-                            ->where('lease_expires_at', '<=', $now);
-                    })
-                    // 3. FAILED with bounded retry budget.
-                    ->orWhere(function ($fail) use ($maxAutoRecoveryAttempts): void {
-                        $fail->where('state', InventoryMeliOrderReconciliation::STATE_FAILED)
-                            ->where('attempts', '<', max(1, $maxAutoRecoveryAttempts));
-                    });
-            })
-            ->orderBy('id')
-            ->limit($limit)
-            ->pluck('meli_order_id')
-            ->map(static fn ($id): int => (int) $id)
-            ->all();
+        $selectedRows = $this->selectPrioritizedStuckCandidates($limit + 1, $now, $cutoff, $maxAttempts, $cursorFloor);
+        $hasMore = count($selectedRows) > $limit;
+        $batch = array_slice($selectedRows, 0, $limit);
 
+        $cutover = app(InventoryMeliOrderReservationCutover::class);
         $recoveredPending = 0;
         $recoveredExpiredProcessing = 0;
         $recoveredFailed = 0;
         $skipped = 0;
+        $lastExaminedId = $cursorFloor > 0 ? $cursorFloor : null;
 
-        foreach ($candidates as $orderId) {
-            $decision = DB::transaction(function () use ($orderId, $maxAutoRecoveryAttempts, $queue): array {
+        foreach ($batch as $candidate) {
+            $recId = $candidate['id'];
+            $orderId = $candidate['meli_order_id'];
+            $lastExaminedId = $lastExaminedId === null ? $recId : max($lastExaminedId, $recId);
+
+            $decision = DB::transaction(function () use ($orderId, $maxAttempts, $queue, $cutover): array {
                 $txNow = now();
 
                 // Global lock ordering: meli_orders -> inventory_meli_order_reconciliations -> jobs.
@@ -1315,7 +1350,7 @@ class InventoryMeliOrderReconciliationCoordinator
                     return ['bucket' => null, 'needs_after_commit' => false, 'revision' => 0];
                 }
 
-                if (! $order) {
+                if (! $order || ! $cutover->allows($order)) {
                     $row->forceFill([
                         'state' => InventoryMeliOrderReconciliation::STATE_IDLE,
                         'pending_job_id' => null,
@@ -1330,17 +1365,6 @@ class InventoryMeliOrderReconciliationCoordinator
                 $order->load('items');
                 $liveFingerprint = $this->fingerprint->forOrder($order);
 
-                if ($row->state === InventoryMeliOrderReconciliation::STATE_PENDING) {
-                    if (! $this->isPendingDispatchMissing($row, $txNow)) {
-                        return ['bucket' => null, 'needs_after_commit' => false, 'revision' => 0];
-                    }
-
-                    $rev = max(1, (int) $row->requested_revision);
-                    $res = $this->transitionToPendingAndEnqueue($row, $orderId, $rev, $liveFingerprint, $queue, $txNow, 'sweeper_recovered_pending');
-
-                    return ['bucket' => 'pending', 'needs_after_commit' => $res['should_dispatch_after_commit'], 'revision' => $rev];
-                }
-
                 if ($row->state === InventoryMeliOrderReconciliation::STATE_PROCESSING) {
                     if ($row->lease_expires_at === null || $row->lease_expires_at->isFuture()) {
                         return ['bucket' => null, 'needs_after_commit' => false, 'revision' => 0];
@@ -1352,12 +1376,22 @@ class InventoryMeliOrderReconciliationCoordinator
                     return ['bucket' => 'processing', 'needs_after_commit' => $res['should_dispatch_after_commit'], 'revision' => $rev];
                 }
 
-                if ($row->state === InventoryMeliOrderReconciliation::STATE_FAILED) {
-                    if ((int) $row->attempts >= max(1, $maxAutoRecoveryAttempts)) {
+                if ($row->state === InventoryMeliOrderReconciliation::STATE_PENDING) {
+                    if (! $this->isPendingDispatchMissing($row, $txNow)) {
                         return ['bucket' => null, 'needs_after_commit' => false, 'revision' => 0];
                     }
 
-                    // If Laravel's retry job is still queued in `jobs`, do NOT duplicate it!
+                    $rev = max(1, (int) $row->requested_revision);
+                    $res = $this->transitionToPendingAndEnqueue($row, $orderId, $rev, $liveFingerprint, $queue, $txNow, 'sweeper_recovered_pending');
+
+                    return ['bucket' => 'pending', 'needs_after_commit' => $res['should_dispatch_after_commit'], 'revision' => $rev];
+                }
+
+                if ($row->state === InventoryMeliOrderReconciliation::STATE_FAILED) {
+                    if ((int) $row->attempts >= $maxAttempts) {
+                        return ['bucket' => null, 'needs_after_commit' => false, 'revision' => 0];
+                    }
+
                     if ($row->pending_job_id !== null && $this->databaseJobExists((int) $row->pending_job_id)) {
                         return ['bucket' => null, 'needs_after_commit' => false, 'revision' => 0];
                     }
@@ -1415,12 +1449,156 @@ class InventoryMeliOrderReconciliationCoordinator
         }
 
         return [
-            'scanned' => count($candidates),
+            'scanned' => count($batch),
             'recovered_pending' => $recoveredPending,
             'recovered_expired_processing' => $recoveredExpiredProcessing,
             'recovered_failed' => $recoveredFailed,
             'skipped' => $skipped,
+            'next_after_id' => $lastExaminedId,
+            'has_more' => $hasMore,
+            'blocked_reason' => null,
         ];
+    }
+
+    /**
+     * Selects truly stuck candidates in priority order without scanning `jobs.payload` and without
+     * letting healthy lower-ID PENDING rows starve higher-ID stuck rows (H13).
+     *
+     * @return list<array{id: int, meli_order_id: int}>
+     */
+    private function selectPrioritizedStuckCandidates(
+        int $targetCount,
+        \Illuminate\Support\Carbon $now,
+        \Illuminate\Support\Carbon $cutoff,
+        int $maxAttempts,
+        int $afterId,
+    ): array {
+        $selected = [];
+        $seenIds = [];
+
+        $append = static function ($rows) use (&$selected, &$seenIds, $targetCount): void {
+            foreach ($rows as $row) {
+                if (count($selected) >= $targetCount) {
+                    return;
+                }
+                $id = (int) $row->id;
+                if (isset($seenIds[$id])) {
+                    continue;
+                }
+                $seenIds[$id] = true;
+                $selected[] = [
+                    'id' => $id,
+                    'meli_order_id' => (int) $row->meli_order_id,
+                ];
+            }
+        };
+
+        $sameDbJobsTable = $this->sameDbJobsTableName();
+
+        // Priority 1: Expired PROCESSING leases (oldest expiry first, then id).
+        $remaining = $targetCount - count($selected);
+        if ($remaining > 0) {
+            $append(
+                InventoryMeliOrderReconciliation::query()
+                    ->where('state', InventoryMeliOrderReconciliation::STATE_PROCESSING)
+                    ->whereNotNull('lease_expires_at')
+                    ->where('lease_expires_at', '<=', $now)
+                    ->when($afterId > 0, fn ($q) => $q->where('id', '>', $afterId))
+                    ->orderBy('lease_expires_at')
+                    ->orderBy('id')
+                    ->limit($remaining)
+                    ->get(['id', 'meli_order_id']),
+            );
+        }
+
+        // Priority 2: Unconfirmed outbox PENDING past grace window (uses composite outbox index).
+        $remaining = $targetCount - count($selected);
+        if ($remaining > 0) {
+            $append(
+                InventoryMeliOrderReconciliation::query()
+                    ->where('state', InventoryMeliOrderReconciliation::STATE_PENDING)
+                    ->whereNull('dispatch_confirmed_at')
+                    ->where(function ($q) use ($cutoff): void {
+                        $q->whereNull('queued_at')->orWhere('queued_at', '<=', $cutoff);
+                    })
+                    ->when($afterId > 0, fn ($q) => $q->where('id', '>', $afterId))
+                    ->orderBy('id')
+                    ->limit($remaining)
+                    ->get(['id', 'meli_order_id']),
+            );
+        }
+
+        // Priority 3: Orphaned PENDING whose `pending_job_id` no longer exists in `jobs` (PK NOT EXISTS!).
+        // Healthy PENDING rows whose job IS in `jobs` are excluded in SQL so they can NEVER starve stuck rows!
+        $remaining = $targetCount - count($selected);
+        if ($remaining > 0 && $sameDbJobsTable !== null) {
+            $append(
+                InventoryMeliOrderReconciliation::query()
+                    ->where('state', InventoryMeliOrderReconciliation::STATE_PENDING)
+                    ->whereNotNull('pending_job_id')
+                    ->whereNotExists(function ($sub) use ($sameDbJobsTable): void {
+                        $sub->select(DB::raw(1))
+                            ->from($sameDbJobsTable)
+                            ->whereColumn($sameDbJobsTable.'.id', 'inventory_meli_order_reconciliations.pending_job_id');
+                    })
+                    ->when($afterId > 0, fn ($q) => $q->where('id', '>', $afterId))
+                    ->orderBy('id')
+                    ->limit($remaining)
+                    ->get(['id', 'meli_order_id']),
+            );
+        }
+
+        // Priority 4: Recoverable FAILED within budget whose retry job is NULL or vanished from `jobs`.
+        $remaining = $targetCount - count($selected);
+        if ($remaining > 0) {
+            $failedQuery = InventoryMeliOrderReconciliation::query()
+                ->where('state', InventoryMeliOrderReconciliation::STATE_FAILED)
+                ->where('attempts', '<', $maxAttempts)
+                ->when($afterId > 0, fn ($q) => $q->where('id', '>', $afterId));
+
+            if ($sameDbJobsTable !== null) {
+                $failedQuery->where(function ($q) use ($sameDbJobsTable): void {
+                    $q->whereNull('pending_job_id')
+                        ->orWhereNotExists(function ($sub) use ($sameDbJobsTable): void {
+                            $sub->select(DB::raw(1))
+                                ->from($sameDbJobsTable)
+                                ->whereColumn($sameDbJobsTable.'.id', 'inventory_meli_order_reconciliations.pending_job_id');
+                        });
+                });
+            } else {
+                $failedQuery->whereNull('pending_job_id');
+            }
+
+            $append(
+                $failedQuery
+                    ->orderBy('id')
+                    ->limit($remaining)
+                    ->get(['id', 'meli_order_id']),
+            );
+        }
+
+        return $selected;
+    }
+
+    private function sameDbJobsTableName(): ?string
+    {
+        $queueConnectionName = (string) config('queue.default', 'sync');
+        if (config("queue.connections.{$queueConnectionName}.driver") !== 'database') {
+            return null;
+        }
+
+        $queueDbConnection = config("queue.connections.{$queueConnectionName}.connection")
+            ?? config('database.default');
+        $stateDbConnection = (new InventoryMeliOrderReconciliation)->getConnectionName()
+            ?? config('database.default');
+
+        if ($queueDbConnection !== $stateDbConnection) {
+            return null;
+        }
+
+        $jobsTable = (string) config("queue.connections.{$queueConnectionName}.table", 'jobs');
+
+        return Schema::connection($queueDbConnection)->hasTable($jobsTable) ? $jobsTable : null;
     }
 
     public function canAtomicPushToDatabaseQueue(): bool

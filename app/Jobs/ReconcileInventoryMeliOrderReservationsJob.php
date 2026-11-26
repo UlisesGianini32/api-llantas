@@ -58,9 +58,19 @@ class ReconcileInventoryMeliOrderReservationsJob implements ShouldQueue
 
         try {
             $coordinator->assertStateTableExists();
+            $coordinator->assertStrictAtomicQueueIfEnabled();
         } catch (InventoryMeliOrderReconciliationSchemaException $exception) {
             Log::critical('Inventory Meli order reservation blocked: durable reconciliation table missing', [
                 'diagnostic_code' => 'missing_reconciliation_state_table',
+                'meli_order_id' => $this->meliOrderId,
+                'target_revision' => $this->targetRevision,
+                'message' => $coordinator->sanitizeErrorMessage($exception->getMessage()),
+            ]);
+
+            return;
+        } catch (\RuntimeException $exception) {
+            Log::critical('Inventory Meli order reservation blocked: incompatible atomic queue configuration', [
+                'diagnostic_code' => 'incompatible_atomic_queue_config',
                 'meli_order_id' => $this->meliOrderId,
                 'target_revision' => $this->targetRevision,
                 'message' => $coordinator->sanitizeErrorMessage($exception->getMessage()),
