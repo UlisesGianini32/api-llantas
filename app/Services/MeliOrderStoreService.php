@@ -25,9 +25,12 @@ class MeliOrderStoreService
             }
 
             $existing = MeliOrder::query()
-                ->with('items')
                 ->where('order_id', $orderId)
+                ->lockForUpdate()
                 ->first();
+            if ($existing) {
+                $existing->load('items');
+            }
             $previousFingerprint = $existing ? $this->fingerprint->forOrder($existing) : null;
 
             $order = MeliOrder::updateOrCreate(

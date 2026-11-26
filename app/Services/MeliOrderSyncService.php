@@ -483,6 +483,24 @@ class MeliOrderSyncService
                 );
 
                 /*
+                 * Serializa actualizaciones concurrentes del mismo pedido bajo bloqueo de fila
+                 * (orden global: meli_orders -> inventory_meli_order_reconciliations -> jobs)
+                 * después de concluir las llamadas HTTP a Mercado Libre.
+                 */
+                $lockedExistingOrder = MeliOrder::query()
+                    ->where('order_id', $orderId)
+                    ->lockForUpdate()
+                    ->first();
+
+                if ($shipping['shipping_status'] === null
+                    && $lockedExistingOrder
+                    && in_array(strtolower(trim((string) ($lockedExistingOrder->shipping_status ?? ''))), ['shipped', 'delivered', 'in_transit'], true)) {
+                    $shipping['shipping_status'] = $lockedExistingOrder->shipping_status;
+                    $shipping['shipping_substatus'] ??= $lockedExistingOrder->shipping_substatus;
+                    $shipping['shipping_raw'] ??= $lockedExistingOrder->shipping_raw;
+                }
+
+                /*
                  * order_id es único en Mercado Libre.
                  *
                  * Cuando una orden antigua ya existe sin meli_account_id,
@@ -1048,45 +1066,56 @@ class MeliOrderSyncService
                 $first->shipping_type
             );
 
-            $previousSnapshots = [];
-            $newShippingStatus = strtolower(trim((string) ($attrs['shipping_status'] ?? '')));
-            foreach ($orders as $existing) {
-                $oldShippingStatus = strtolower(trim((string) ($existing->shipping_status ?? '')));
-                if ($oldShippingStatus !== $newShippingStatus) {
-                    $previousSnapshots[(int) $existing->id] = $this->reconciliationFingerprint->forOrder($existing);
-                }
-            }
-
             $row = $this->meliOrderShippingUpdateRow(
                 $attrs
             );
 
-            $n = MeliOrder::query()
-                ->where(
-                    'shipping_id',
-                    $shippingId
-                )
-                ->where(
-                    'meli_account_id',
-                    $meliAccountId
-                )
-                ->update($row);
-
-            $touched += $n;
-
-            if ($previousSnapshots !== []) {
-                $updatedOrders = MeliOrder::query()
-                    ->with('items')
-                    ->whereIn('id', array_keys($previousSnapshots))
+            $n = DB::transaction(function () use ($shippingId, $meliAccountId, $attrs, $row): int {
+                $lockedOrders = MeliOrder::query()
+                    ->where('shipping_id', $shippingId)
+                    ->where('meli_account_id', $meliAccountId)
+                    ->orderBy('id')
+                    ->lockForUpdate()
                     ->get();
 
-                foreach ($updatedOrders as $updatedOrder) {
-                    $this->reservationDispatcher->dispatchAfterCommit(
-                        $updatedOrder,
-                        $previousSnapshots[(int) $updatedOrder->id] ?? null,
-                    );
+                if ($lockedOrders->isEmpty()) {
+                    return 0;
                 }
-            }
+
+                $lockedOrders->load('items');
+                $previousSnapshots = [];
+                $newShippingStatus = strtolower(trim((string) ($attrs['shipping_status'] ?? '')));
+
+                foreach ($lockedOrders as $existing) {
+                    $oldShippingStatus = strtolower(trim((string) ($existing->shipping_status ?? '')));
+                    if ($oldShippingStatus !== $newShippingStatus) {
+                        $previousSnapshots[(int) $existing->id] = $this->reconciliationFingerprint->forOrder($existing);
+                    }
+                }
+
+                $updatedCount = MeliOrder::query()
+                    ->whereIn('id', $lockedOrders->pluck('id')->all())
+                    ->update($row);
+
+                if ($previousSnapshots !== []) {
+                    $updatedOrders = MeliOrder::query()
+                        ->with('items')
+                        ->whereIn('id', array_keys($previousSnapshots))
+                        ->orderBy('id')
+                        ->get();
+
+                    foreach ($updatedOrders as $updatedOrder) {
+                        $this->reservationDispatcher->dispatchAfterCommit(
+                            $updatedOrder,
+                            $previousSnapshots[(int) $updatedOrder->id] ?? null,
+                        );
+                    }
+                }
+
+                return $updatedCount;
+            });
+
+            $touched += $n;
 
             if ($delayUs > 0) {
                 usleep($delayUs);

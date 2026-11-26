@@ -51,8 +51,12 @@ class InventoryMeliOrderReservationService
             ->all();
     }
 
-    /** Apply one known local order deterministically with per-order & per-line row locks. */
-    public function apply(MeliOrder $order): array
+    /**
+     * Apply one known local order deterministically with per-order & per-line row locks.
+     *
+     * @param  array{lease_owner: string, fencing_token: int}|null  $leaseContext
+     */
+    public function apply(MeliOrder $order, ?array $leaseContext = null): array
     {
         $items = $order->items
             ->sortBy(static fn (MeliOrderItem $item): string => (string) ($item->remote_line_key ?? '').'|'.(int) $item->getKey())
@@ -60,13 +64,16 @@ class InventoryMeliOrderReservationService
 
         $results = [];
         foreach ($items as $item) {
-            $results[] = $this->applyLine($order, $item);
+            $results[] = $this->applyLine($order, $item, $leaseContext);
         }
 
         return $results;
     }
 
-    private function applyLine(MeliOrder $order, MeliOrderItem $item): array
+    /**
+     * @param  array{lease_owner: string, fencing_token: int}|null  $leaseContext
+     */
+    private function applyLine(MeliOrder $order, MeliOrderItem $item, ?array $leaseContext = null): array
     {
         if (! Schema::hasTable('inventory_channel_order_allocations')) {
             return $this->inspect($order, $item);
@@ -81,14 +88,19 @@ class InventoryMeliOrderReservationService
             return DB::transaction(function () use (
                 $order,
                 $item,
+                $leaseContext,
                 &$fallbackInspection,
                 &$fallbackIdentity,
                 &$fallbackOrder,
                 &$fallbackItem,
             ): array {
-                // Lock the local MeliOrder row first to serialize concurrent workers for the same order
-                // and guarantee we always inspect the latest committed status / shipping_status.
+                // Global lock ordering:
+                // 1) meli_orders -> 2) inventory_meli_order_reconciliations (fencing)
+                // -> 3) inventory_channel_order_allocations -> 4) inventory_products / reservations.
                 $freshOrder = MeliOrder::query()->lockForUpdate()->find($order->getKey()) ?? $order;
+
+                $this->assertFencingLeaseInsideTransaction($freshOrder, $leaseContext);
+
                 $freshItem = $this->resolveFreshOrderItem($freshOrder, $item);
 
                 if ($freshItem === null) {
@@ -249,10 +261,29 @@ class InventoryMeliOrderReservationService
                 'available' => $available,
                 'diagnostic' => 'INSUFFICIENT_INVENTORY',
             ]);
-            $this->saveDiagnostic($fallbackOrder, $fallbackItem, $identity, $result);
+            $this->saveDiagnostic($fallbackOrder, $fallbackItem, $identity, $result, $leaseContext);
 
             return $result;
         }
+    }
+
+    /**
+     * @param  array{lease_owner: string, fencing_token: int}|null  $leaseContext
+     */
+    private function assertFencingLeaseInsideTransaction(MeliOrder $order, ?array $leaseContext): void
+    {
+        $coordinator = app(InventoryMeliOrderReconciliationCoordinator::class);
+        $effectiveLease = $leaseContext ?? $coordinator->activeLeaseContext((int) $order->getKey());
+
+        if ($effectiveLease === null) {
+            return;
+        }
+
+        $coordinator->assertAndRenewLeaseInTransaction(
+            (int) $order->getKey(),
+            (string) $effectiveLease['lease_owner'],
+            (int) $effectiveLease['fencing_token'],
+        );
     }
 
     private function inspect(MeliOrder $order, MeliOrderItem $item): array
@@ -871,15 +902,23 @@ class InventoryMeliOrderReservationService
     /**
      * @param  array{line: string, hash: string}  $identity
      * @param  array<string, mixed>  $diagnostic
+     * @param  array{lease_owner: string, fencing_token: int}|null  $leaseContext
      */
-    private function saveDiagnostic(MeliOrder $order, MeliOrderItem $item, array $identity, array $diagnostic): void
-    {
+    private function saveDiagnostic(
+        MeliOrder $order,
+        MeliOrderItem $item,
+        array $identity,
+        array $diagnostic,
+        ?array $leaseContext = null,
+    ): void {
         if (! Schema::hasTable('inventory_channel_order_allocations')) {
             return;
         }
 
-        DB::transaction(function () use ($order, $item, $identity, $diagnostic): void {
-            $this->saveDiagnosticInsideTransaction($order, $item, $identity, $diagnostic);
+        DB::transaction(function () use ($order, $item, $identity, $diagnostic, $leaseContext): void {
+            $freshOrder = MeliOrder::query()->lockForUpdate()->find($order->getKey()) ?? $order;
+            $this->assertFencingLeaseInsideTransaction($freshOrder, $leaseContext);
+            $this->saveDiagnosticInsideTransaction($freshOrder, $item, $identity, $diagnostic);
         });
     }
 
