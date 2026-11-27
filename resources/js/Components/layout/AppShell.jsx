@@ -862,9 +862,11 @@ function SidebarBrand() {
    SIDEBAR NAVIGATION
    ========================================================================= */
 function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
-    const { notifications_summary = null, autopartes_access = [] } = usePage().props
+    const { notifications_summary = null, autopartes_access = [], warehouse_dispatches = null } = usePage().props
     const isAdmin = role === 'admin'
     const canOperate = isAdmin || role === 'operations'
+    const isWarehouse = role === 'warehouse'
+    const canAccessDispatches = Boolean(warehouse_dispatches?.can_access)
     const isBranchRestricted = role === 'branch_restricted'
     const totalUnreadNotifs = notifications_summary?.total_unread ?? 0
     const hasCriticalNotifs = notifications_summary?.has_critical ?? false
@@ -949,6 +951,25 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                 </div>
             </div>
 
+            {/* ALMACÉN (WAREHOUSE ROLE - SALIDAS A SALONES) */}
+            {!canOperate && isWarehouse && canAccessDispatches && (
+                <div>
+                    <p className="mb-1.5 px-3 text-[10px] font-bold uppercase tracking-wider text-slate-400 dark:text-neutral-500">
+                        Almacén
+                    </p>
+                    <div className="space-y-0.5">
+                        <NavItem
+                            href="/almacen/salidas"
+                            icon={IconTruck}
+                            active={currentPath.startsWith('/almacen/salidas')}
+                            onNavigate={onNavigate}
+                        >
+                            Salidas a Salones
+                        </NavItem>
+                    </div>
+                </div>
+            )}
+
             {/* INVENTARIO & ALMACÉN */}
             {canOperate && (
                 <div>
@@ -988,6 +1009,16 @@ function SidebarNav({ currentPath, role, onNavigate, pendingQuestions = 0 }) {
                         >
                             Movimientos
                         </NavItem>
+                        {canAccessDispatches && (
+                            <NavItem
+                                href="/almacen/salidas"
+                                icon={IconTruck}
+                                active={currentPath.startsWith('/almacen/salidas')}
+                                onNavigate={onNavigate}
+                            >
+                                Salidas a Salones
+                            </NavItem>
+                        )}
                         <NavItem
                             href="/almacen/reservas"
                             icon={IconLock}

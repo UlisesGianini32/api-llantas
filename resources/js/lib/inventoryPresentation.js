@@ -9,6 +9,8 @@ const MOVEMENT_TYPE_LABELS = {
     SALE: 'Venta',
     ADJUSTMENT_OUT: 'Ajuste de salida',
     DAMAGE: 'Merma / daño',
+    DISPATCH_OUT: 'Salida de almacén (Salón)',
+    DISPATCH_RETURN: 'Reversión / devolución de salida',
 }
 
 const RESERVATION_STATUS_LABELS = {
