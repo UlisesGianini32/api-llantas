@@ -61,6 +61,33 @@ class IgoraMasterBootstrapPreviewService
     ];
 
     /**
+     * Clave de operación determinista e idempotente para el movimiento INITIAL de cada SKU.
+     */
+    public function operationKeyForSku(string $sku): string
+    {
+        return sprintf('%s:INITIAL:%s', self::PROPOSAL_ID, $this->normalizeCode($sku));
+    }
+
+    /**
+     * Clave de operación determinista e idempotente para una eventual reversión compensatoria ADJUSTMENT_OUT.
+     */
+    public function compensationKeyForSku(string $sku): string
+    {
+        return sprintf('%s:COMPENSATE:%s', self::PROPOSAL_ID, $this->normalizeCode($sku));
+    }
+
+    /**
+     * @return list<string>
+     */
+    public function operationKeys(): array
+    {
+        return array_values(array_map(
+            fn (array $item): string => $this->operationKeyForSku((string) $item['sku']),
+            $this->auditedProposalItems()
+        ));
+    }
+
+    /**
      * Propuesta auditada de los 6 productos maestros SIMPLE (6 productos / 89 unidades físicas).
      * Los campos de costo, proveedor, precios y cantidades de canal permanecen intencionalmente sin inventar.
      *
@@ -127,10 +154,12 @@ class IgoraMasterBootstrapPreviewService
 
         return array_map(function (array $item): array {
             $proposedName = sprintf('Tinte %s %s %s 60 ml', self::BRAND, self::LINE, $item['tone']);
+            $operationKey = $this->operationKeyForSku($item['sku']);
 
             return [
                 ...$item,
                 'proposed_name' => $proposedName,
+                'operation_key' => $operationKey,
                 'product_type' => InventoryProduct::SIMPLE,
                 'brand' => self::BRAND,
                 'line' => self::LINE,
@@ -143,10 +172,20 @@ class IgoraMasterBootstrapPreviewService
                     'barcode_secondary' => null,
                     'name' => $proposedName,
                     'brand' => self::BRAND,
+                    'description' => sprintf(
+                        'Alta controlada %s (%s). Conteo físico verificado: %d u. en %s (#%d). Sin habilitación comercial automática hasta aprobación.',
+                        self::PROPOSAL_ID,
+                        self::PHYSICAL_COUNT_DATE,
+                        $item['physical_count'],
+                        $item['location_code'],
+                        $item['location_id']
+                    ),
                     'product_type' => InventoryProduct::SIMPLE,
                     'primary_location_id' => $item['location_id'],
-                    'is_active' => true,
-                    // Campos deliberadamente omitidos / sin inventar:
+                    // Mantener inactivo hasta aprobación comercial: bloquea POS, Compras, Kits, Reservas automáticas y Sync ML,
+                    // mientras permite registrar el movimiento INITIAL en InventoryMovementService y auditarlo en almacén.
+                    'is_active' => false,
+                    // Campos deliberadamente omitidos / sin inventar (nullable verificados en migraciones):
                     'cost' => null,
                     'supplier' => null,
                     'price_mercado_libre' => null,
@@ -158,9 +197,15 @@ class IgoraMasterBootstrapPreviewService
                     'type' => InventoryMovement::INITIAL,
                     'quantity' => $item['physical_count'],
                     'inventory_location_id' => $item['location_id'],
-                    'occurred_at' => self::PHYSICAL_COUNT_DATE,
+                    // occurred_at se registra al instante efectivo de ejecución (sin inventar una hora histórica);
+                    // la fecha del conteo físico verificado (2026-11-19) se conserva en physical_count_date / metadata.
+                    'occurred_at' => null,
+                    'occurred_at_policy' => 'EXECUTION_TIMESTAMP',
+                    'physical_count_date' => self::PHYSICAL_COUNT_DATE,
+                    'reference_type' => 'igora_master_bootstrap',
                     'reference' => self::PROPOSAL_ID,
-                    'notes' => 'Propuesta read-only (sin escritura): reconfirmar conteo físico del 2026-11-19 frente a ventas, reservas y movimientos posteriores antes del alta real.',
+                    'external_key' => $operationKey,
+                    'notes' => 'Alta controlada de inventario inicial (PASO 33): conteo físico verificado el 2026-11-19 y reconfirmado antes de aplicar.',
                 ],
             ];
         }, $items);
