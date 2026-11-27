@@ -14,6 +14,9 @@ use App\Http\Controllers\InventoryLocationController;
 use App\Http\Controllers\InventoryMovementController;
 use App\Http\Controllers\InventoryProductController;
 use App\Http\Controllers\InventoryReservationController;
+use App\Http\Controllers\Inventory\Dispatches\ProvisionalItemController;
+use App\Http\Controllers\Inventory\Dispatches\WarehouseDispatchController;
+use App\Http\Controllers\Inventory\Dispatches\WarehouseDispatchDestinationController;
 use App\Http\Controllers\Inventory\IgoraGroupingPreviewController;
 use App\Http\Controllers\Inventory\ShelfAuditController;
 use App\Http\Controllers\LlantaComparisonController;
@@ -325,6 +328,53 @@ Route::middleware(['auth', 'role'])->group(function () {
         Route::get('/{inventoryMovement}', [InventoryMovementController::class, 'show'])
             ->whereNumber('inventoryMovement')->name('show');
     });
+
+    // SALIDAS DE ALMACÉN Y SURTIDO A SALONES (Fase 1 - Feature-gated fail-closed)
+    Route::prefix('almacen/salidas')
+        ->name('inventory.dispatches.')
+        ->middleware('warehouse_dispatches.enabled')
+        ->group(function () {
+            // Static routes strictly registered BEFORE parameterized routes (Control C)
+            Route::get('/', [WarehouseDispatchController::class, 'index'])->name('index');
+            Route::get('/crear', [WarehouseDispatchController::class, 'create'])->name('create');
+            Route::post('/', [WarehouseDispatchController::class, 'store'])->name('store');
+            Route::get('/buscar-productos', [WarehouseDispatchController::class, 'searchProducts'])->name('search-products');
+            Route::get('/resumen', [WarehouseDispatchController::class, 'summary'])->name('summary');
+            Route::get('/exportar-csv', [WarehouseDispatchController::class, 'exportCsv'])->name('export-csv');
+
+            Route::prefix('destinos')->name('destinations.')->group(function () {
+                Route::get('/', [WarehouseDispatchDestinationController::class, 'index'])->name('index');
+                Route::post('/', [WarehouseDispatchDestinationController::class, 'store'])->name('store');
+                Route::put('/{destination}', [WarehouseDispatchDestinationController::class, 'update'])
+                    ->whereNumber('destination')->name('update');
+                Route::patch('/{destination}/estado', [WarehouseDispatchDestinationController::class, 'toggle'])
+                    ->whereNumber('destination')->name('toggle');
+            });
+
+            Route::prefix('provisionales')->name('provisional.')->group(function () {
+                Route::get('/', [ProvisionalItemController::class, 'index'])->name('index');
+                Route::post('/{provisionalItem}/vincular', [ProvisionalItemController::class, 'link'])
+                    ->whereNumber('provisionalItem')->name('link');
+                Route::post('/{provisionalItem}/fusionar', [ProvisionalItemController::class, 'merge'])
+                    ->whereNumber('provisionalItem')->name('merge');
+            });
+
+            // Parameterized dispatch routes strictly constrained to numeric IDs (no DELETE route)
+            Route::get('/{inventoryDispatch}', [WarehouseDispatchController::class, 'show'])
+                ->whereNumber('inventoryDispatch')->name('show');
+            Route::get('/{inventoryDispatch}/editar', [WarehouseDispatchController::class, 'edit'])
+                ->whereNumber('inventoryDispatch')->name('edit');
+            Route::put('/{inventoryDispatch}', [WarehouseDispatchController::class, 'update'])
+                ->whereNumber('inventoryDispatch')->name('update');
+            Route::post('/{inventoryDispatch}/confirmar', [WarehouseDispatchController::class, 'confirm'])
+                ->whereNumber('inventoryDispatch')->name('confirm');
+            Route::post('/{inventoryDispatch}/cancelar-borrador', [WarehouseDispatchController::class, 'cancelDraft'])
+                ->whereNumber('inventoryDispatch')->name('cancel-draft');
+            Route::post('/{inventoryDispatch}/anular', [WarehouseDispatchController::class, 'cancelConfirmed'])
+                ->whereNumber('inventoryDispatch')->name('cancel-confirmed');
+            Route::get('/{inventoryDispatch}/vale-pdf', [WarehouseDispatchController::class, 'pdf'])
+                ->whereNumber('inventoryDispatch')->name('pdf');
+        });
 
     Route::prefix('almacen/reservas')->name('inventory.reservations.')->group(function () {
         Route::get('/', [InventoryReservationController::class, 'index'])->name('index');
