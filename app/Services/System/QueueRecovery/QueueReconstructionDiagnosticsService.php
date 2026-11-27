@@ -474,6 +474,7 @@ class QueueReconstructionDiagnosticsService
             'diagnostic_snapshot_semantics' => [
                 'consistency_model' => 'chunked_interval_reads_not_global_snapshot',
                 'holds_long_db_transaction' => false,
+                'concurrent_mutations_possible_note' => 'Cron, webhooks, syncs, and administrative operations may still modify records during interval reads even when Supervisor and automatic reservations/Beauty scheduler are disabled.',
                 'interval_started_at' => $intervalStartedIso,
                 'interval_completed_at' => $intervalCompletedIso,
                 'live_jobs_pk_verification' => $hasLiveJobsTable,

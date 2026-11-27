@@ -479,6 +479,250 @@ class OpsQueuesDiagnoseExhaustiveHardeningTest extends TestCase
         $this->assertSame(hash_file('sha256', $summaryPath), $marker['summary_output']['sha256']);
     }
 
+    public function test_d3_04_simulated_link_failure_aborts_fail_closed_without_rename_fallback_for_all_artifacts(): void
+    {
+        $this->seedOrder(804);
+        $manifestPath = $this->writeV2Manifest('d3_link_fail.json', [['id' => 1, 'entity_id' => 804]]);
+
+        // 1) Simulated link() failure on NDJSON -> aborts fail-closed, NO summary, NO marker, NO temp files!
+        $failAllLinkWriter = new QueueDiagnosticArtifactWriter(
+            new QueueRecoveryPathGuard,
+            linkCallback: static fn (string $src, string $dst): bool => false,
+        );
+        $this->app->instance(QueueReconstructionDiagnosticsService::class, $this->makeDiagnosticsService(artifactWriter: $failAllLinkWriter));
+
+        $ndjsonPath = $this->tmp('link_fail_ndjson.ndjson');
+        $summaryPath = $this->tmp('link_fail_summary.json');
+        $markerPath = $this->tmp('link_fail_marker.json');
+
+        $code = Artisan::call('ops:queues-diagnose-reconstruction', [
+            '--manifest' => $manifestPath,
+            '--ndjson-output' => $ndjsonPath,
+            '--output' => $summaryPath,
+            '--completion-marker' => $markerPath,
+        ]);
+        $out = Artisan::output();
+
+        $this->assertSame(1, $code);
+        $this->assertStringNotContainsString('COMPLETADO', $out);
+        $this->assertStringContainsString('atomic_publish_failed', $out);
+        $this->assertFileDoesNotExist($ndjsonPath);
+        $this->assertFileDoesNotExist($summaryPath);
+        $this->assertFileDoesNotExist($markerPath);
+        $this->assertSame([], glob($this->tempDir.DIRECTORY_SEPARATOR.'*.tmp.*') ?: []);
+
+        // 2) Simulated link() failure specifically on Summary JSON (after NDJSON succeeds) -> NO summary, NO marker, NO temp!
+        $failSummaryLinkWriter = new QueueDiagnosticArtifactWriter(
+            new QueueRecoveryPathGuard,
+            linkCallback: static function (string $src, string $dst) use ($summaryPath): bool {
+                if ($dst === $summaryPath) {
+                    return false;
+                }
+
+                return @link($src, $dst);
+            },
+        );
+        $this->app->instance(QueueReconstructionDiagnosticsService::class, $this->makeDiagnosticsService(artifactWriter: $failSummaryLinkWriter));
+
+        $ndjsonPath2 = $this->tmp('link_fail2_ndjson.ndjson');
+        $markerPath2 = $this->tmp('link_fail2_marker.json');
+
+        $code2 = Artisan::call('ops:queues-diagnose-reconstruction', [
+            '--manifest' => $manifestPath,
+            '--ndjson-output' => $ndjsonPath2,
+            '--output' => $summaryPath,
+            '--completion-marker' => $markerPath2,
+        ]);
+        $out2 = Artisan::output();
+
+        $this->assertSame(1, $code2);
+        $this->assertStringNotContainsString('COMPLETADO', $out2);
+        $this->assertStringContainsString('atomic_publish_failed', $out2);
+        $this->assertFileDoesNotExist($summaryPath);
+        $this->assertFileDoesNotExist($markerPath2);
+        $this->assertSame([], glob($this->tempDir.DIRECTORY_SEPARATOR.'*.tmp.*') ?: []);
+
+        // 3) Simulated link() failure specifically on Completion Marker -> NO marker, NO temp, exit code 1!
+        $ndjsonPath3 = $this->tmp('link_fail3_ndjson.ndjson');
+        $summaryPath3 = $this->tmp('link_fail3_summary.json');
+        $markerPath3 = $this->tmp('link_fail3_marker.json');
+
+        $failMarkerLinkWriter = new QueueDiagnosticArtifactWriter(
+            new QueueRecoveryPathGuard,
+            linkCallback: static function (string $src, string $dst) use ($markerPath3): bool {
+                if ($dst === $markerPath3) {
+                    return false;
+                }
+
+                return @link($src, $dst);
+            },
+        );
+        $this->app->instance(QueueReconstructionDiagnosticsService::class, $this->makeDiagnosticsService(artifactWriter: $failMarkerLinkWriter));
+
+        $code3 = Artisan::call('ops:queues-diagnose-reconstruction', [
+            '--manifest' => $manifestPath,
+            '--ndjson-output' => $ndjsonPath3,
+            '--output' => $summaryPath3,
+            '--completion-marker' => $markerPath3,
+        ]);
+        $out3 = Artisan::output();
+
+        $this->assertSame(1, $code3);
+        $this->assertStringNotContainsString('COMPLETADO', $out3);
+        $this->assertStringContainsString('atomic_publish_failed', $out3);
+        $this->assertFileDoesNotExist($markerPath3);
+        $this->assertSame([], glob($this->tempDir.DIRECTORY_SEPARATOR.'*.tmp.*') ?: []);
+    }
+
+    public function test_d3_05_concurrent_destination_creation_after_existence_check_preserves_exact_bytes_and_skips_marker(): void
+    {
+        $this->seedOrder(805);
+        $manifestPath = $this->writeV2Manifest('d3_race_exact.json', [['id' => 1, 'entity_id' => 805]]);
+
+        $concurrentBytes = "CONCURRENT_WINNER_EXACT_BYTES_\x00\x01\x02_SHA256_GUARD_998877\n";
+        $expectedConcurrentSha = hash('sha256', $concurrentBytes);
+
+        // Race happens AFTER openExclusiveStream() and AFTER assertSafeOutputPath(), immediately BEFORE real OS link()!
+        foreach (['ndjson', 'summary', 'marker'] as $targetRole) {
+            $ndjsonPath = $this->tmp("race_{$targetRole}_out.ndjson");
+            $summaryPath = $this->tmp("race_{$targetRole}_summary.json");
+            $markerPath = $this->tmp("race_{$targetRole}_marker.json");
+
+            $raceFile = match ($targetRole) {
+                'ndjson' => $ndjsonPath,
+                'summary' => $summaryPath,
+                'marker' => $markerPath,
+            };
+
+            $writer = new QueueDiagnosticArtifactWriter;
+            $writer->setBeforePublishHook(static function (string $tmpPath, string $destPath) use ($raceFile, $concurrentBytes): void {
+                if ($destPath === $raceFile) {
+                    file_put_contents($destPath, $concurrentBytes);
+                }
+            });
+
+            $this->app->instance(QueueReconstructionDiagnosticsService::class, $this->makeDiagnosticsService(artifactWriter: $writer));
+
+            $code = Artisan::call('ops:queues-diagnose-reconstruction', [
+                '--manifest' => $manifestPath,
+                '--ndjson-output' => $ndjsonPath,
+                '--output' => $summaryPath,
+                '--completion-marker' => $markerPath,
+            ]);
+            $out = Artisan::output();
+
+            $this->assertSame(1, $code, "Expected exit code 1 when concurrent race hits {$targetRole}");
+            $this->assertStringNotContainsString('COMPLETADO', $out);
+            $this->assertStringContainsString('artifact_already_exists', $out);
+
+            // Exact bytes of concurrently created file MUST be 100% preserved!
+            $this->assertSame($concurrentBytes, file_get_contents($raceFile));
+            $this->assertSame($expectedConcurrentSha, hash_file('sha256', $raceFile));
+
+            // Completion marker MUST NOT exist when NDJSON or Summary failed!
+            if ($targetRole !== 'marker') {
+                $this->assertFileDoesNotExist($markerPath);
+            }
+            if ($targetRole === 'ndjson') {
+                $this->assertFileDoesNotExist($summaryPath);
+            }
+
+            // ZERO temp files left behind!
+            $this->assertSame([], glob($this->tempDir.DIRECTORY_SEPARATOR.'*.tmp.*') ?: []);
+        }
+    }
+
+    public function test_d3_06_unavailable_atomic_link_aborts_fail_closed_without_rename_fallback(): void
+    {
+        $this->seedOrder(806);
+        $manifestPath = $this->writeV2Manifest('d3_unavail.json', [['id' => 1, 'entity_id' => 806]]);
+
+        $writer = new QueueDiagnosticArtifactWriter;
+        $writer->setForceLinkUnavailable(true);
+
+        $this->app->instance(QueueReconstructionDiagnosticsService::class, $this->makeDiagnosticsService(artifactWriter: $writer));
+
+        $ndjsonPath = $this->tmp('unavail_out.ndjson');
+        $summaryPath = $this->tmp('unavail_summary.json');
+        $markerPath = $this->tmp('unavail_marker.json');
+
+        $code = Artisan::call('ops:queues-diagnose-reconstruction', [
+            '--manifest' => $manifestPath,
+            '--ndjson-output' => $ndjsonPath,
+            '--output' => $summaryPath,
+            '--completion-marker' => $markerPath,
+        ]);
+        $out = Artisan::output();
+
+        $this->assertSame(1, $code);
+        $this->assertStringNotContainsString('COMPLETADO', $out);
+        $this->assertStringContainsString('atomic_publish_unavailable', $out);
+        $this->assertFileDoesNotExist($ndjsonPath);
+        $this->assertFileDoesNotExist($summaryPath);
+        $this->assertFileDoesNotExist($markerPath);
+        $this->assertSame([], glob($this->tempDir.DIRECTORY_SEPARATOR.'*.tmp.*') ?: []);
+    }
+
+    public function test_d3_07_preexisting_file_bytes_preserved_and_normal_atomic_publish_succeeds(): void
+    {
+        $this->seedOrder(807);
+        $manifestPath = $this->writeV2Manifest('d3_preexist.json', [['id' => 1, 'entity_id' => 807]]);
+
+        // 1) Pre-existing file exact bytes preserved and NO completion marker created
+        $existingBytes = "IMMUTABLE_PREEXISTING_REPORT_BYTES_123456\n";
+        $existingSha = hash('sha256', $existingBytes);
+        $preExisting = $this->tmp('preexisting_ndjson.ndjson');
+        file_put_contents($preExisting, $existingBytes);
+        $blockedMarker = $this->tmp('blocked_marker.json');
+
+        $codeBlocked = Artisan::call('ops:queues-diagnose-reconstruction', [
+            '--manifest' => $manifestPath,
+            '--ndjson-output' => $preExisting,
+            '--completion-marker' => $blockedMarker,
+        ]);
+        $this->assertSame(1, $codeBlocked);
+        $this->assertSame($existingBytes, file_get_contents($preExisting));
+        $this->assertSame($existingSha, hash_file('sha256', $preExisting));
+        $this->assertFileDoesNotExist($blockedMarker);
+        $this->assertSame([], glob($this->tempDir.DIRECTORY_SEPARATOR.'*.tmp.*') ?: []);
+
+        // 2) Normal atomic publication succeeds for NDJSON, summary JSON, and completion marker
+        $okNdjson = $this->tmp('ok_atomic.ndjson');
+        $okSummary = $this->tmp('ok_atomic_summary.json');
+        $okMarker = $this->tmp('ok_atomic_marker.json');
+
+        $codeOk = Artisan::call('ops:queues-diagnose-reconstruction', [
+            '--manifest' => $manifestPath,
+            '--ndjson-output' => $okNdjson,
+            '--output' => $okSummary,
+            '--completion-marker' => $okMarker,
+        ]);
+        $outOk = Artisan::output();
+
+        $this->assertSame(0, $codeOk, $outOk);
+        $this->assertStringContainsString('COMPLETADO', $outOk);
+        $this->assertFileExists($okNdjson);
+        $this->assertFileExists($okSummary);
+        $this->assertFileExists($okMarker);
+        $this->assertSame([], glob($this->tempDir.DIRECTORY_SEPARATOR.'*.tmp.*') ?: []);
+
+        $marker = json_decode((string) file_get_contents($okMarker), true, 64, JSON_THROW_ON_ERROR);
+        $this->assertSame('complete', $marker['status']);
+        $this->assertSame(hash_file('sha256', $okNdjson), $marker['ndjson_output']['sha256']);
+        $this->assertSame(hash_file('sha256', $okSummary), $marker['summary_output']['sha256']);
+
+        // On Linux/POSIX, also verify exact 0600 mode and nlink === 1 (temp unlinked cleanly)
+        if (PHP_OS_FAMILY !== 'Windows') {
+            foreach ([$okNdjson, $okSummary, $okMarker] as $published) {
+                clearstatcache(true, $published);
+                $this->assertSame(0600, fileperms($published) & 0777);
+                $st = stat($published);
+                $this->assertIsArray($st);
+                $this->assertSame(1, $st['nlink']);
+            }
+        }
+    }
+
     // =========================================================================
     // D4: Single-FD Manifest Integrity, Between-Passes Tampering, Duplicate Keys & R2.1 Parity
     // =========================================================================

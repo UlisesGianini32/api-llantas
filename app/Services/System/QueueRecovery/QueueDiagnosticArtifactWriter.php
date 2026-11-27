@@ -7,14 +7,17 @@ namespace App\Services\System\QueueRecovery;
 use Throwable;
 
 /**
- * Hardened file writer for R2-DIAG diagnostic reports (NDJSON entities + JSON summary).
+ * Hardened file writer for R2-DIAG diagnostic reports (NDJSON entities, JSON summary, completion marker).
  *
- * Composes `QueueRecoveryPathGuard` without modifying R2.1 prune/backup/restore logic (D3):
+ * Composes `QueueRecoveryPathGuard` without modifying R2.1 prune/backup/restore logic (D3 / PR #17):
  * - Rejects symlinks, traversal, forbidden repo paths, path collisions, and overwriting existing files.
  * - Creates temporary files exclusively (`xb` / O_CREAT|O_EXCL) under umask 0077 (0600 from creation).
  * - Checks partial writes, `fflush()`, `fsync()` (when available), and `fclose()`.
- * - Protects against concurrent destination creation via atomic non-clobbering `link()`+`unlink()` on POSIX
- *   and re-verified race guard on Windows.
+ * - Enforces strictly atomic non-clobbering publication via `link()` + `unlink($tempPath)` on BOTH
+ *   Linux/POSIX (`link(2)` -> EEXIST) and Windows NTFS (`CreateHardLinkW` -> ERROR_ALREADY_EXISTS).
+ * - NEVER falls back to `rename()` when `disallowOverwrite=true`; if `link()` fails or is unavailable
+ *   on the host OS/filesystem, aborts fail-closed, preserves any existing file untouched, and cleans up
+ *   the temporary file.
  * - Verifies effective POSIX permissions (`0600`) and post-publish SHA-256 hash on disk.
  * - Cleans up temporary files cleanly on any exception without touching pre-existing files or backups.
  */
@@ -26,24 +29,41 @@ class QueueDiagnosticArtifactWriter
     /** @var (callable(resource): bool)|null */
     private $fsyncCallback;
 
+    /** @var (callable(string, string): bool)|null */
+    private $linkCallback;
+
+    private bool $forceLinkUnavailable = false;
+
     /** @var (callable(string, string): void)|null */
     private $beforePublishHook = null;
 
     /**
      * @param  (callable(resource, string): (int|false))|null  $writeCallback
      * @param  (callable(resource): bool)|null  $fsyncCallback
+     * @param  (callable(string, string): bool)|null  $linkCallback
      */
     public function __construct(
         private readonly QueueRecoveryPathGuard $pathGuard = new QueueRecoveryPathGuard,
         ?callable $writeCallback = null,
         ?callable $fsyncCallback = null,
+        ?callable $linkCallback = null,
     ) {
         $this->writeCallback = $writeCallback;
         $this->fsyncCallback = $fsyncCallback;
+        $this->linkCallback = $linkCallback;
     }
 
     /**
-     * Test hook invoked right before publishing temp file to destination (e.g. to test concurrent file creation).
+     * Test hook to simulate environments/filesystems where atomic non-clobbering `link()` is unavailable.
+     */
+    public function setForceLinkUnavailable(bool $unavailable): void
+    {
+        $this->forceLinkUnavailable = $unavailable;
+    }
+
+    /**
+     * Test hook invoked strictly AFTER all pre-checks and immediately BEFORE atomic `link()`,
+     * allowing deterministic testing of concurrent destination creation.
      *
      * @param  (callable(string, string): void)|null  $hook
      */
@@ -206,6 +226,7 @@ class QueueDiagnosticArtifactWriter
         $disallowOverwrite = (bool) $stream['disallow_overwrite'];
 
         if (! @fflush($handle)) {
+            $this->abortStream($stream);
             throw new QueueRecoveryException(
                 "Falló fflush() al persistir '{$tempPath}'.",
                 'io_sync_failed',
@@ -218,6 +239,7 @@ class QueueDiagnosticArtifactWriter
             : (function_exists('fsync') ? @fsync($handle) : true);
 
         if (! $synced) {
+            $this->abortStream($stream);
             throw new QueueRecoveryException(
                 "Falló fsync() al sincronizar '{$tempPath}' en disco.",
                 'io_sync_failed',
@@ -227,6 +249,7 @@ class QueueDiagnosticArtifactWriter
 
         if (! @fclose($handle)) {
             $stream['closed'] = true;
+            $this->abortStream($stream);
             throw new QueueRecoveryException(
                 "Falló fclose() en '{$tempPath}'.",
                 'io_write_failed',
@@ -237,55 +260,67 @@ class QueueDiagnosticArtifactWriter
 
         $expectedSha256 = hash_final($stream['hash_ctx']);
 
+        // Validate path hierarchy safety before atomic publish.
+        try {
+            $this->pathGuard->assertSafeOutputPath($targetPath, false, false);
+        } catch (Throwable $e) {
+            $this->abortStream($stream);
+            throw $e;
+        }
+
+        // Test hook fires AFTER all pre-checks and immediately BEFORE the single atomic `link()` syscall.
         if ($this->beforePublishHook !== null) {
             ($this->beforePublishHook)($tempPath, $targetPath);
         }
 
-        // Re-validate safety right before atomic publish (rejects concurrent symlink or file creation).
-        $this->pathGuard->assertSafeOutputPath($targetPath, false, false);
-
         if ($disallowOverwrite) {
-            clearstatcache(true, $targetPath);
-            if (file_exists($targetPath) || is_link($targetPath)) {
+            $linkAvailable = ! $this->forceLinkUnavailable && ($this->linkCallback !== null || function_exists('link'));
+            if (! $linkAvailable) {
+                $this->abortStream($stream);
                 throw new QueueRecoveryException(
-                    "Creación concurrente detectada en el destino '{$targetPath}'; publicación abortada para evitar sobrescritura.",
-                    'artifact_already_exists',
-                    ['path' => $targetPath],
+                    "Operación atómica sin sobrescritura (link) no disponible para publicar '{$targetPath}'; abortando en modo fail-closed sin usar rename().",
+                    'atomic_publish_unavailable',
+                    ['path' => $targetPath, 'os_family' => PHP_OS_FAMILY],
                 );
             }
 
-            if (PHP_OS_FAMILY !== 'Windows' && function_exists('link')) {
-                // Atomic non-clobbering link() fails with EEXIST if destination appeared concurrently.
-                if (@link($tempPath, $targetPath)) {
-                    @unlink($tempPath);
-                } else {
-                    clearstatcache(true, $targetPath);
-                    if (file_exists($targetPath) || is_link($targetPath)) {
-                        throw new QueueRecoveryException(
-                            "Creación concurrente detectada en '{$targetPath}' durante publicación atómica.",
-                            'artifact_already_exists',
-                            ['path' => $targetPath],
-                        );
-                    }
-                    if (! @rename($tempPath, $targetPath)) {
-                        throw new QueueRecoveryException(
-                            "No se pudo publicar atómicamente '{$tempPath}' en '{$targetPath}'.",
-                            'io_write_failed',
-                            ['path' => $targetPath],
-                        );
-                    }
-                }
-            } else {
-                if (! @rename($tempPath, $targetPath)) {
+            // Strictly atomic non-clobbering publication:
+            // - Linux/POSIX: link(2) fails atomically with EEXIST if $targetPath exists (file or symlink).
+            // - Windows NTFS: CreateHardLinkW() fails atomically with ERROR_ALREADY_EXISTS if $targetPath exists.
+            // - NEVER falls back to rename()!
+            $linked = $this->linkCallback !== null
+                ? ($this->linkCallback)($tempPath, $targetPath)
+                : @link($tempPath, $targetPath);
+
+            if (! $linked) {
+                $lastError = error_get_last();
+                $this->abortStream($stream);
+
+                clearstatcache(true, $targetPath);
+                if (file_exists($targetPath) || is_link($targetPath)) {
                     throw new QueueRecoveryException(
-                        "No se pudo publicar '{$tempPath}' en '{$targetPath}'.",
-                        'io_write_failed',
+                        "Creación concurrente detectada en '{$targetPath}'; publicación atómica rechazada sin sobrescribir el destino.",
+                        'artifact_already_exists',
                         ['path' => $targetPath],
                     );
                 }
+
+                throw new QueueRecoveryException(
+                    "Falló la publicación atómica sin sobrescritura (link) hacia '{$targetPath}'; abortando en modo fail-closed sin fallback a rename().",
+                    'atomic_publish_failed',
+                    [
+                        'path' => $targetPath,
+                        'os_family' => PHP_OS_FAMILY,
+                        'os_error' => is_array($lastError) ? (string) ($lastError['message'] ?? '') : null,
+                    ],
+                );
             }
+
+            // Remove temporary directory entry now that $targetPath atomically references the inode.
+            @unlink($tempPath);
         } else {
             if (! @rename($tempPath, $targetPath)) {
+                $this->abortStream($stream);
                 throw new QueueRecoveryException(
                     "No se pudo publicar '{$tempPath}' en '{$targetPath}'.",
                     'io_write_failed',
