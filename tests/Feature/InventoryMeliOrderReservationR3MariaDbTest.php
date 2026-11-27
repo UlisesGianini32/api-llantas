@@ -20,6 +20,7 @@ use App\Services\InventoryMeliOrderReservationDispatcher;
 use App\Services\InventoryMeliOrderReservationService;
 use App\Services\InventoryStockService;
 use App\Services\MeliOrderStoreService;
+use App\Services\MercadoLibre\Orders\MeliOrderCancellationService;
 use Carbon\Carbon;
 use Illuminate\Database\QueryException;
 use Illuminate\Database\Schema\Blueprint;
@@ -468,6 +469,63 @@ class InventoryMeliOrderReservationR3MariaDbTest extends TestCase
         $this->assertSame(112, DB::table('jobs')->count());
     }
 
+    public function test_mariadb_pr16_final_persist_remote_complete_payload_then_full_sync_materializes_qty_4_and_keeps_shipping_coherent(): void
+    {
+        config()->set('inventory.meli_order_reservations.strict_atomic_queue', true);
+        [$product] = $this->seedProduct('SKU-M-PR16', 10);
+        $this->seedLink($product, 1, 'MLM-M-PR16', null, true);
+
+        $t1 = '2026-11-20T16:00:00Z';
+        $t2 = '2026-11-20T16:05:00Z';
+
+        $order = $this->seedOrder(1, 882001, 'paid', [['item_id' => 'MLM-M-PR16', 'key' => 'MLM-M-PR16:', 'qty' => 2]]);
+        $order->update([
+            'shipping_id' => '772001',
+            'shipping_status' => 'ready_to_ship',
+            'shipping_substatus' => 'ready_to_print',
+            'shipping_raw' => ['id' => 772001, 'status' => 'ready_to_ship', 'last_updated' => $t1],
+            'raw' => ['id' => 882001, 'status' => 'paid', 'date_created' => '2026-11-20T09:00:00Z', 'last_updated' => $t1],
+        ]);
+
+        $resService = app(InventoryMeliOrderReservationService::class);
+        (new ReconcileInventoryMeliOrderReservationsJob($order->id))->handle($resService);
+        $this->assertSame(2, (int) InventoryReservation::active()->sum('quantity'));
+        DB::table('jobs')->truncate();
+
+        $completeT2 = [
+            'id' => 882001,
+            'status' => 'paid',
+            'date_created' => '2026-11-20T09:00:00Z',
+            'last_updated' => $t2,
+            'shipping' => ['id' => 772002],
+            'order_items' => [[
+                'item' => ['id' => 'MLM-M-PR16'],
+                'quantity' => 4,
+                'unit_price' => 100,
+            ]],
+        ];
+
+        // 1. persistRemote() gets complete T2 (qty=4, new shipping_id=772002) WITHOUT matching shipment -> preserves T1 raw.last_updated & shipping_id=772001!
+        app(MeliOrderCancellationService::class)->persistRemote($order, $completeT2, null);
+        $order->refresh();
+        $this->assertSame('772001', (string) $order->shipping_id);
+        $this->assertSame(772001, (int) ($order->shipping_raw['id'] ?? 0));
+        $this->assertSame($t1, $order->raw['last_updated']);
+
+        // 2. Subsequent full sync with the EXACT same complete T2 (qty=4) materializes qty=4 and enqueues reconciliation!
+        DB::table('jobs')->truncate();
+        app(MeliOrderStoreService::class)->storeFromOrderApiResponse($completeT2);
+
+        $order->refresh()->load('items');
+        $this->assertSame(4, (int) $order->items->sole()->quantity);
+        $this->assertSame($t2, $order->raw['last_updated']);
+        $this->assertSame(1, DB::table('jobs')->count());
+
+        DB::table('jobs')->truncate();
+        (new ReconcileInventoryMeliOrderReservationsJob($order->id))->handle($resService);
+        $this->assertSame(4, (int) InventoryReservation::active()->sum('quantity'));
+    }
+
     // =========================================================================
     // Helpers
     // =========================================================================
@@ -544,10 +602,16 @@ class InventoryMeliOrderReservationR3MariaDbTest extends TestCase
             $table->id();
             $table->unsignedBigInteger('meli_account_id')->nullable();
             $table->unsignedBigInteger('order_id');
+            $table->string('topic')->nullable();
+            $table->string('resource')->nullable();
             $table->string('status')->nullable();
+            $table->string('display_id')->nullable();
+            $table->string('shipping_id')->nullable();
             $table->string('shipping_status')->nullable();
+            $table->string('shipping_substatus')->nullable();
             $table->json('shipping_raw')->nullable();
             $table->json('raw')->nullable();
+            $table->timestamp('processed_at')->nullable();
             $table->timestamps();
         });
         $schema->create('meli_order_items', function (Blueprint $table): void {

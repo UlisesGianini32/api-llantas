@@ -102,16 +102,42 @@ class MeliOrderCancellationService
                 $locked->meli_account_id !== null ? (int) $locked->meli_account_id : null,
             );
 
-            $incomingShippingId = data_get($remoteOrder, 'shipping.id') ?? data_get($shipment, 'id');
-            $shipmentDecision = $shipment !== null
-                ? $guard->evaluateShipmentUpdate(
+            $storedShippingId = filled($locked->shipping_id) ? trim((string) $locked->shipping_id) : null;
+            $orderShippingId = filled(data_get($remoteOrder, 'shipping.id'))
+                ? trim((string) data_get($remoteOrder, 'shipping.id'))
+                : null;
+            $shipmentPayloadId = ($shipment !== null && filled($shipment['id'] ?? null))
+                ? trim((string) $shipment['id'])
+                : null;
+
+            if ($shipment === null) {
+                $shipmentDecision = [
+                    'accept' => false,
+                    'reason' => 'no_shipment_payload',
+                    'stored_timestamp_utc' => null,
+                    'incoming_timestamp_utc' => null,
+                ];
+            } elseif ($orderDecision['accept']
+                && $orderShippingId !== null
+                && $shipmentPayloadId !== null
+                && $orderShippingId !== $shipmentPayloadId) {
+                // Never mix a shipment snapshot whose ID contradicts the accepted order's shipping.id.
+                $shipmentDecision = [
+                    'accept' => false,
+                    'reason' => 'shipment_order_id_mismatch',
+                    'stored_timestamp_utc' => null,
+                    'incoming_timestamp_utc' => null,
+                ];
+            } else {
+                $shipmentDecision = $guard->evaluateShipmentUpdate(
                     $locked,
                     $shipment,
                     filled($shipment['status'] ?? null) ? (string) $shipment['status'] : null,
-                    $incomingShippingId !== null ? (string) $incomingShippingId : null,
-                    orderAuthorizesNewShippingId: $orderDecision['accept'],
-                )
-                : ['accept' => false, 'reason' => 'no_shipment_payload', 'stored_timestamp_utc' => null, 'incoming_timestamp_utc' => null];
+                    $shipmentPayloadId ?? $orderShippingId,
+                    orderAuthorizesNewShippingId: $orderDecision['accept']
+                        && ($orderShippingId === null || $shipmentPayloadId === null || $orderShippingId === $shipmentPayloadId),
+                );
+            }
 
             if (! $orderDecision['accept'] && ! $shipmentDecision['accept']) {
                 \Illuminate\Support\Facades\Log::warning('MELI ORDERS: persistRemote descartado por control temporal o integridad', [
@@ -127,29 +153,50 @@ class MeliOrderCancellationService
 
             $updates = [];
             if ($orderDecision['accept']) {
-                $shippingId = data_get($remoteOrder, 'shipping.id');
-                $effectiveRaw = $orderDecision['advance_full_raw_timestamp']
-                    ? $remoteOrder
-                    : $guard->mergePartialOrderRaw(
-                        is_array($locked->raw) ? $locked->raw : [],
-                        $remoteOrder,
-                    );
+                // persistRemote() does NOT materialize `meli_order_items`, so ALWAYS preserve the
+                // materialized `raw.last_updated` version via mergePartialOrderRaw() (recording
+                // `_partial_status_last_updated`) until a full sync materializes the lines.
+                $effectiveRaw = $guard->mergePartialOrderRaw(
+                    is_array($locked->raw) ? $locked->raw : [],
+                    $remoteOrder,
+                );
+
+                // Never overwrite `shipping_id` to a different shipment without an accepted matching
+                // shipment snapshot, avoiding mixing new `shipping_id` with old `shipping_raw`.
+                $canAssignOrderShippingId = $orderShippingId !== null && (
+                    $storedShippingId === null
+                    || $storedShippingId === $orderShippingId
+                    || ($shipment !== null && $shipmentDecision['accept'] && ($shipmentPayloadId === null || $shipmentPayloadId === $orderShippingId))
+                );
 
                 $updates += array_filter([
                     'status' => filled($remoteOrder['status'] ?? null) ? (string) $remoteOrder['status'] : null,
                     'display_id' => filled($remoteOrder['display_id'] ?? null) ? (string) $remoteOrder['display_id'] : null,
-                    'shipping_id' => filled($shippingId) ? (string) $shippingId : null,
+                    'shipping_id' => $canAssignOrderShippingId ? $orderShippingId : null,
                     'raw' => $effectiveRaw,
                 ], static fn (mixed $value): bool => $value !== null);
             }
 
             if ($shipment !== null && $shipmentDecision['accept']) {
-                $updates += array_filter([
-                    'shipping_id' => filled($shipment['id'] ?? null) ? (string) $shipment['id'] : null,
-                    'shipping_status' => filled($shipment['status'] ?? null) ? (string) $shipment['status'] : null,
-                    'shipping_substatus' => filled($shipment['substatus'] ?? null) ? (string) $shipment['substatus'] : null,
-                    'shipping_raw' => $shipment,
-                ], static fn (mixed $value): bool => $value !== null);
+                $resolvedShipId = $shipmentPayloadId ?? $orderShippingId ?? $storedShippingId;
+                if ($resolvedShipId !== null) {
+                    $updates['shipping_id'] = $resolvedShipId;
+                }
+
+                if ($shipmentDecision['reason'] === 'shipping_id_replaced_by_newer_order') {
+                    // Coherent full replacement of shipment columns so zero attributes from the previous shipment leak.
+                    $updates['shipping_status'] = filled($shipment['status'] ?? null) ? (string) $shipment['status'] : null;
+                    $updates['shipping_substatus'] = filled($shipment['substatus'] ?? null) ? (string) $shipment['substatus'] : null;
+                    $updates['shipping_raw'] = $shipment;
+                } else {
+                    if (filled($shipment['status'] ?? null)) {
+                        $updates['shipping_status'] = (string) $shipment['status'];
+                    }
+                    if (filled($shipment['substatus'] ?? null)) {
+                        $updates['shipping_substatus'] = (string) $shipment['substatus'];
+                    }
+                    $updates['shipping_raw'] = $shipment;
+                }
             }
 
             if ($updates !== []) {

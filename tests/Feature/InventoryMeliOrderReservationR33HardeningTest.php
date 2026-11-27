@@ -539,6 +539,129 @@ class InventoryMeliOrderReservationR33HardeningTest extends TestCase
     }
 
     // =========================================================================
+    // PR #16 Final Fix — persistRemote() complete payload preserves materialized
+    // version so subsequent storeOrder() at T2 materializes qty=4 & reconciles,
+    // AND never mixes shipping_id with mismatched/stale shipping_raw
+    // =========================================================================
+    public function test_pr16_final_persist_remote_complete_payload_allows_subsequent_store_order_to_materialize_qty_and_preserves_shipping_coherence(): void
+    {
+        [$product] = $this->stockedProduct('SKU-PR16-FINAL', 10);
+        $this->link($product, 1, 'MLM-PR16-FINAL', null, true);
+
+        $user = $this->seedSyncUserAndStubSideEffects();
+        $sync = app(MeliOrderSyncService::class);
+        $cancelService = app(MeliOrderCancellationService::class);
+        $resService = app(InventoryMeliOrderReservationService::class);
+
+        $t1 = '2026-11-20T16:00:00Z';
+        $t2 = '2026-11-20T16:05:00Z';
+
+        $completePayloadT2 = [
+            'id' => 934900,
+            'status' => 'paid',
+            'date_created' => '2026-11-20T09:00:00Z',
+            'last_updated' => $t2,
+            'shipping' => ['id' => 770500],
+            'order_items' => [[
+                'item' => ['id' => 'MLM-PR16-FINAL', 'seller_sku' => 'SKU-PR16-FINAL'],
+                'quantity' => 4,
+                'unit_price' => 100,
+            ]],
+        ];
+
+        Http::fake([
+            'https://api.mercadolibre.com/users/me' => Http::response(['id' => 111111]),
+            'https://api.mercadolibre.com/orders/934900' => Http::sequence()
+                // Step 1: initial full sync at T1 with qty=2
+                ->push([
+                    'id' => 934900,
+                    'status' => 'paid',
+                    'date_created' => '2026-11-20T09:00:00Z',
+                    'last_updated' => $t1,
+                    'shipping' => ['id' => 770500],
+                    'order_items' => [[
+                        'item' => ['id' => 'MLM-PR16-FINAL', 'seller_sku' => 'SKU-PR16-FINAL'],
+                        'quantity' => 2,
+                        'unit_price' => 100,
+                    ]],
+                ])
+                // Step 3: subsequent full sync receiving the EXACT same complete payload T2 (qty=4)
+                ->push($completePayloadT2),
+            'https://api.mercadolibre.com/shipments/770500' => Http::response([
+                'id' => 770500,
+                'status' => 'ready_to_ship',
+                'substatus' => 'ready_to_print',
+                'mode' => 'me2',
+                'last_updated' => $t1,
+            ]),
+        ]);
+
+        // Step 1: Persist order at T1 (qty=2) and reconcile initial reservation (2 units).
+        $sync->syncOrderById($user, '934900');
+        $order = MeliOrder::where('order_id', 934900)->with('items')->firstOrFail();
+        $this->assertSame(2, (int) $order->items->sole()->quantity);
+        DB::table('jobs')->truncate();
+        (new ReconcileInventoryMeliOrderReservationsJob($order->id))->handle($resService);
+        $this->assertSame(2, (int) InventoryReservation::active()->sum('quantity'));
+
+        // Step 2a: persistRemote() receives complete payload T2 (qty=4) with a DIFFERENT shipping.id (770600)
+        //          and NO matching shipment (null) -> must NOT mix shipping_id=770600 with shipping_raw of 770500,
+        //          AND must preserve raw.last_updated = T1 because lines were not materialized!
+        $payloadT2DifferentShip = $completePayloadT2;
+        $payloadT2DifferentShip['shipping'] = ['id' => 770600];
+        $cancelService->persistRemote($order, $payloadT2DifferentShip, null);
+
+        $order->refresh();
+        $this->assertSame('770500', (string) $order->shipping_id, 'Must NOT mix new shipping_id with old shipping_raw when shipment is absent.');
+        $this->assertSame(770500, (int) ($order->shipping_raw['id'] ?? 0));
+        $this->assertSame($t1, $order->raw['last_updated'], 'persistRemote() must preserve materialized raw.last_updated=T1.');
+        $this->assertSame('2026-11-20T16:05:00.000000Z', $order->raw['_partial_status_last_updated']);
+
+        // Step 2b: persistRemote() with mismatched shipment object (order says 770600, shipment says 999999) -> must NOT mix!
+        $cancelService->persistRemote($order, $payloadT2DifferentShip, [
+            'id' => 999999,
+            'status' => 'shipped',
+            'last_updated' => '2026-11-20T16:10:00Z',
+        ]);
+        $order->refresh();
+        $this->assertSame('770500', (string) $order->shipping_id);
+        $this->assertSame('ready_to_ship', $order->shipping_status);
+        $this->assertSame(770500, (int) ($order->shipping_raw['id'] ?? 0));
+
+        // Step 3: storeOrder() subsequently receives the EXACT same complete payload T2 (qty=4)!
+        //         Must NOT be rejected as ambiguous_equal_timestamp_order_conflict; MUST materialize qty=4 and enqueue reconciliation!
+        DB::table('jobs')->truncate();
+        $sync->syncOrderById($user, '934900');
+
+        $order->refresh()->load('items');
+        $this->assertSame(4, (int) $order->items->sole()->quantity, 'Materialized line must now reflect quantity=4.');
+        $this->assertSame($t2, $order->raw['last_updated'], 'Full sync advances raw.last_updated to T2.');
+        $this->assertSame(1, DB::table('jobs')->count(), 'Material qty change 2->4 must enqueue reconciliation job.');
+
+        // Execute queued reconciliation -> active reservation converges from 2 to 4 (0 lost obligations)!
+        DB::table('jobs')->truncate();
+        (new ReconcileInventoryMeliOrderReservationsJob($order->id))->handle($resService);
+        $this->assertSame(4, (int) InventoryReservation::active()->sum('quantity'));
+
+        // Step 4: Coherent replacement of shipping_id (770500 -> 770600) when BOTH newer order (T3) AND matching shipment 770600 arrive:
+        $t3 = '2026-11-20T16:15:00Z';
+        $payloadT3 = $completePayloadT2;
+        $payloadT3['last_updated'] = $t3;
+        $payloadT3['shipping'] = ['id' => 770600];
+        $cancelService->persistRemote($order->fresh(), $payloadT3, [
+            'id' => 770600,
+            'status' => 'pending',
+            'substatus' => null,
+            'last_updated' => '2026-11-20T16:14:00Z',
+        ]);
+        $order->refresh();
+        $this->assertSame('770600', (string) $order->shipping_id);
+        $this->assertSame('pending', $order->shipping_status);
+        $this->assertNull($order->shipping_substatus, 'Old substatus from shipment 770500 must NOT leak onto shipment 770600.');
+        $this->assertSame(770600, (int) ($order->shipping_raw['id'] ?? 0));
+    }
+
+    // =========================================================================
     // Helpers
     // =========================================================================
 
