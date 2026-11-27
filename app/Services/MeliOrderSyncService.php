@@ -24,7 +24,12 @@ class MeliOrderSyncService
         protected SyscomOrderFromMeliService $syscomOrderFromMeli,
         protected MeliOrderDeliveryClassifier $deliveryClassifier,
         protected InventoryMeliOrderReservationDispatcher $reservationDispatcher,
-    ) {}
+        protected ?InventoryMeliOrderReconciliationFingerprint $reconciliationFingerprint = null,
+        protected ?MeliOrderRemoteFreshnessGuard $freshnessGuard = null,
+    ) {
+        $this->reconciliationFingerprint ??= app(InventoryMeliOrderReconciliationFingerprint::class);
+        $this->freshnessGuard ??= app(MeliOrderRemoteFreshnessGuard::class);
+    }
 
     /**
      * Sincroniza todas las órdenes de un día para la cuenta de Mercado Libre
@@ -439,8 +444,23 @@ class MeliOrderSyncService
                 );
 
                 $existingOrder = MeliOrder::query()
+                    ->with('items')
                     ->where('order_id', $orderId)
                     ->first();
+
+                $previousFingerprint = $existingOrder
+                    ? $this->reconciliationFingerprint->forOrder($existingOrder)
+                    : null;
+
+                // Prevent transient /shipments/{id} failures from clobbering a known
+                // fulfilled shipping_status back to null (which could otherwise trigger re-reservation).
+                if ($shipping['shipping_status'] === null
+                    && $existingOrder
+                    && in_array(strtolower(trim((string) ($existingOrder->shipping_status ?? ''))), ['shipped', 'delivered', 'in_transit'], true)) {
+                    $shipping['shipping_status'] = $existingOrder->shipping_status;
+                    $shipping['shipping_substatus'] ??= $existingOrder->shipping_substatus;
+                    $shipping['shipping_raw'] ??= $existingOrder->shipping_raw;
+                }
 
                 $itemShippingModes = $this->resolveItemShippingModes(
                     $user,
@@ -465,6 +485,136 @@ class MeliOrderSyncService
                 );
 
                 /*
+                 * Serializa actualizaciones concurrentes del mismo pedido bajo bloqueo de fila
+                 * (orden global: meli_orders -> inventory_meli_order_reconciliations -> jobs)
+                 * después de concluir las llamadas HTTP a Mercado Libre.
+                 */
+                $lockedExistingOrder = MeliOrder::query()
+                    ->where('order_id', $orderId)
+                    ->lockForUpdate()
+                    ->first();
+
+                $payloadClassification = $this->freshnessGuard->classifyOrderPayload($orderData);
+                $acceptOrderUpdate = $payloadClassification['valid'];
+                $acceptShipmentUpdate = true;
+                $replaceItems = $payloadClassification['kind'] === MeliOrderRemoteFreshnessGuard::PAYLOAD_COMPLETE;
+                $advanceFullRaw = $payloadClassification['kind'] !== MeliOrderRemoteFreshnessGuard::PAYLOAD_PARTIAL;
+                $orderFreshness = null;
+
+                if (! $payloadClassification['valid'] && ! $lockedExistingOrder) {
+                    Log::warning('ML sync storeOrder descartó payload nuevo inválido', [
+                        'order_id' => $orderId,
+                        'reason' => $payloadClassification['reason'],
+                    ]);
+
+                    return 0;
+                }
+
+                if ($lockedExistingOrder) {
+                    $lockedExistingOrder->load('items');
+                    $previousFingerprint = $this->reconciliationFingerprint->forOrder($lockedExistingOrder);
+
+                    $orderFreshness = $this->freshnessGuard->evaluateOrderUpdate(
+                        $lockedExistingOrder,
+                        $orderData,
+                        $meliAccountId,
+                    );
+                    $acceptOrderUpdate = $orderFreshness['accept'];
+                    $replaceItems = $orderFreshness['replace_items'];
+                    $advanceFullRaw = $orderFreshness['advance_full_raw_timestamp'];
+
+                    $incomingShipmentRaw = is_array($shipping['shipping_raw'] ?? null)
+                        ? $shipping['shipping_raw']
+                        : (is_array($orderData['shipping'] ?? null) ? $orderData['shipping'] : null);
+                    $shipmentFreshness = $this->freshnessGuard->evaluateShipmentUpdate(
+                        $lockedExistingOrder,
+                        $incomingShipmentRaw,
+                        $shipping['shipping_status'] ?? null,
+                        $shipping['shipping_id'] ?? null,
+                        orderAuthorizesNewShippingId: $acceptOrderUpdate,
+                    );
+                    $acceptShipmentUpdate = $shipmentFreshness['accept'];
+
+                    if (! $acceptOrderUpdate && ! $acceptShipmentUpdate) {
+                        Log::warning('ML sync storeOrder descartado por control temporal o integridad', [
+                            'meli_order_id' => $lockedExistingOrder->id,
+                            'order_id' => $orderId,
+                            'order_reason' => $orderFreshness['reason'],
+                            'order_payload_kind' => $orderFreshness['payload_kind'],
+                            'order_stored_ts_utc' => $orderFreshness['stored_timestamp_utc'],
+                            'order_incoming_ts_utc' => $orderFreshness['incoming_timestamp_utc'],
+                            'shipment_reason' => $shipmentFreshness['reason'],
+                            'shipment_stored_ts_utc' => $shipmentFreshness['stored_timestamp_utc'],
+                            'shipment_incoming_ts_utc' => $shipmentFreshness['incoming_timestamp_utc'],
+                        ]);
+
+                        return 0;
+                    }
+
+                    if (! $acceptShipmentUpdate) {
+                        Log::warning('ML sync storeOrder preservó envío local más reciente', [
+                            'meli_order_id' => $lockedExistingOrder->id,
+                            'order_id' => $orderId,
+                            'shipment_reason' => $shipmentFreshness['reason'],
+                            'shipment_stored_ts_utc' => $shipmentFreshness['stored_timestamp_utc'],
+                            'shipment_incoming_ts_utc' => $shipmentFreshness['incoming_timestamp_utc'],
+                        ]);
+
+                        $shipping['shipping_id'] = $lockedExistingOrder->shipping_id ?? $shipping['shipping_id'];
+                        $shipping['shipping_mode'] = $lockedExistingOrder->shipping_mode ?? $shipping['shipping_mode'];
+                        $shipping['shipping_type'] = $lockedExistingOrder->shipping_type ?? $shipping['shipping_type'];
+                        $shipping['shipping_status'] = $lockedExistingOrder->shipping_status;
+                        $shipping['shipping_substatus'] = $lockedExistingOrder->shipping_substatus;
+                        $shipping['shipping_logistic_type'] = $lockedExistingOrder->shipping_logistic_type ?? $shipping['shipping_logistic_type'];
+                        $shipping['shipping_process_date'] = $lockedExistingOrder->shipping_process_date ?? $shipping['shipping_process_date'];
+                        $shipping['shipping_raw'] = $lockedExistingOrder->shipping_raw;
+                    }
+                }
+
+                if ($lockedExistingOrder && ! $acceptOrderUpdate && $acceptShipmentUpdate) {
+                    Log::warning('ML sync storeOrder preservó pedido local más reciente y aplicó únicamente envío más reciente', [
+                        'meli_order_id' => $lockedExistingOrder->id,
+                        'order_id' => $orderId,
+                        'order_reason' => $orderFreshness['reason'] ?? 'stale_remote_order',
+                    ]);
+
+                    $lockedExistingOrder->forceFill([
+                        'shipping_id' => $shipping['shipping_id'] ?? $lockedExistingOrder->shipping_id,
+                        'shipping_mode' => $shipping['shipping_mode'] ?? $lockedExistingOrder->shipping_mode,
+                        'shipping_type' => $shipping['shipping_type'] ?? $lockedExistingOrder->shipping_type,
+                        'shipping_status' => $shipping['shipping_status'],
+                        'shipping_substatus' => $shipping['shipping_substatus'],
+                        'shipping_logistic_type' => $shipping['shipping_logistic_type'] ?? $lockedExistingOrder->shipping_logistic_type,
+                        'shipping_process_date' => $shipping['shipping_process_date'] ?? $lockedExistingOrder->shipping_process_date,
+                        'shipping_raw' => $shipping['shipping_raw'] ?? $lockedExistingOrder->shipping_raw,
+                    ])->save();
+                    $lockedExistingOrder->load('items');
+
+                    $this->reservationDispatcher->dispatchAfterCommit($lockedExistingOrder, $previousFingerprint);
+
+                    return 0;
+                }
+
+                if ($shipping['shipping_status'] === null
+                    && $lockedExistingOrder
+                    && in_array(strtolower(trim((string) ($lockedExistingOrder->shipping_status ?? ''))), ['shipped', 'delivered', 'in_transit'], true)) {
+                    $shipping['shipping_status'] = $lockedExistingOrder->shipping_status;
+                    $shipping['shipping_substatus'] ??= $lockedExistingOrder->shipping_substatus;
+                    $shipping['shipping_raw'] ??= $lockedExistingOrder->shipping_raw;
+                }
+
+                $effectiveStatus = array_key_exists('status', $orderData) && $orderData['status'] !== null
+                    ? $status
+                    : ($lockedExistingOrder?->status ?? $status);
+
+                $effectiveRaw = ($lockedExistingOrder && ! $advanceFullRaw)
+                    ? $this->freshnessGuard->mergePartialOrderRaw(
+                        is_array($lockedExistingOrder->raw) ? $lockedExistingOrder->raw : [],
+                        $orderData,
+                    )
+                    : $orderData;
+
+                /*
                  * order_id es único en Mercado Libre.
                  *
                  * Cuando una orden antigua ya existe sin meli_account_id,
@@ -478,8 +628,8 @@ class MeliOrderSyncService
                         'meli_account_id' => $meliAccountId,
                         'topic' => 'orders_v2',
                         'resource' => $resource,
-                        'status' => $status,
-                        'raw' => $orderData,
+                        'status' => $effectiveStatus,
+                        'raw' => $effectiveRaw,
 
                         'shipping_id' => $shipping['shipping_id'],
                         'pack_id' => $packId,
@@ -509,73 +659,73 @@ class MeliOrderSyncService
                 );
 
                 /*
-                 * Reemplazamos los artículos para evitar duplicados
-                 * cuando la misma orden se vuelve a sincronizar.
+                 * Reemplazamos los artículos SOLO cuando el payload contiene `order_items`
+                 * completos y válidos; jamás borramos líneas existentes ante payloads parciales.
                  */
-                MeliOrderItem::where(
-                    'meli_order_id',
-                    $order->id
-                )->delete();
-
-                $items = is_array(
-                    $orderData['order_items'] ?? null
-                )
-                    ? $orderData['order_items']
-                    : [];
-
                 $savedItems = 0;
-                $storesLineIdentity = Schema::hasColumn('meli_order_items', 'variation_id')
-                    && Schema::hasColumn('meli_order_items', 'remote_line_key');
+                if ($replaceItems) {
+                    MeliOrderItem::where(
+                        'meli_order_id',
+                        $order->id
+                    )->delete();
 
-                foreach ($items as $item) {
-                    if (!is_array($item)) {
-                        continue;
-                    }
-
-                    $itemInfo = is_array(
-                        $item['item'] ?? null
+                    $items = is_array(
+                        $orderData['order_items'] ?? null
                     )
-                        ? $item['item']
+                        ? $orderData['order_items']
                         : [];
 
-                    $variationId = data_get($itemInfo, 'variation_id') ?? data_get($item, 'variation_id');
-                    $listingId = trim((string) ($itemInfo['id'] ?? ''));
-                    $lineKey = $listingId !== '' ? $listingId.':'.(string) ($variationId ?? '') : null;
+                    $storesLineIdentity = Schema::hasColumn('meli_order_items', 'variation_id')
+                        && Schema::hasColumn('meli_order_items', 'remote_line_key');
 
-                    $variationText = $this->buildVariationText(
-                        $itemInfo,
-                        $item
-                    );
+                    foreach ($items as $item) {
+                        if (!is_array($item)) {
+                            continue;
+                        }
 
-                    MeliOrderItem::create([
-                        'meli_order_id' => $order->id,
-                        'item_id' => (string) (
-                            $itemInfo['id'] ?? ''
-                        ),
-                        ...($storesLineIdentity ? [
-                            'variation_id' => $variationId !== null ? (string) $variationId : null,
-                            'remote_line_key' => $lineKey,
-                        ] : []),
-                        'sku' => (string) (
-                            $itemInfo['seller_sku']
-                            ?? $itemInfo['seller_custom_field']
-                            ?? ''
-                        ),
-                        'title' => (string) (
-                            $itemInfo['title'] ?? ''
-                        ),
-                        'variation_text' => $variationText,
-                        'quantity' => (int) (
-                            $item['quantity'] ?? 0
-                        ),
-                        'unit_price' => (float) (
-                            $item['unit_price'] ?? 0
-                        ),
-                        'created_at' => $createdAt,
-                        'updated_at' => $updatedAt,
-                    ]);
+                        $itemInfo = is_array(
+                            $item['item'] ?? null
+                        )
+                            ? $item['item']
+                            : [];
 
-                    $savedItems++;
+                        $variationId = data_get($itemInfo, 'variation_id') ?? data_get($item, 'variation_id');
+                        $listingId = trim((string) ($itemInfo['id'] ?? ''));
+                        $lineKey = $listingId !== '' ? $listingId.':'.(string) ($variationId ?? '') : null;
+
+                        $variationText = $this->buildVariationText(
+                            $itemInfo,
+                            $item
+                        );
+
+                        MeliOrderItem::create([
+                            'meli_order_id' => $order->id,
+                            'item_id' => $listingId,
+                            ...($storesLineIdentity ? [
+                                'variation_id' => ($variationId !== null && trim((string) $variationId) !== '') ? trim((string) $variationId) : null,
+                                'remote_line_key' => $lineKey,
+                            ] : []),
+                            'sku' => (string) (
+                                $itemInfo['seller_sku']
+                                ?? $itemInfo['seller_custom_field']
+                                ?? ''
+                            ),
+                            'title' => (string) (
+                                $itemInfo['title'] ?? ''
+                            ),
+                            'variation_text' => $variationText,
+                            'quantity' => (int) (
+                                $item['quantity'] ?? 0
+                            ),
+                            'unit_price' => (float) (
+                                $item['unit_price'] ?? 0
+                            ),
+                            'created_at' => $createdAt,
+                            'updated_at' => $updatedAt,
+                        ]);
+
+                        $savedItems++;
+                    }
                 }
 
                 $order->load('items');
@@ -615,7 +765,7 @@ class MeliOrderSyncService
                 $this->syscomOrderFromMeli
                     ->handleAfterMeliSync($user, $order);
 
-                $this->reservationDispatcher->dispatchAfterCommit($order);
+                $this->reservationDispatcher->dispatchAfterCommit($order, $previousFingerprint);
 
                 return $savedItems;
             }
@@ -997,6 +1147,7 @@ class MeliOrderSyncService
              * No se deben actualizar órdenes de otra cuenta usando este token.
              */
             $orders = MeliOrder::query()
+                ->with('items')
                 ->where(
                     'shipping_id',
                     $shippingId
@@ -1033,16 +1184,78 @@ class MeliOrderSyncService
                 $attrs
             );
 
-            $n = MeliOrder::query()
-                ->where(
-                    'shipping_id',
-                    $shippingId
-                )
-                ->where(
-                    'meli_account_id',
-                    $meliAccountId
-                )
-                ->update($row);
+            $n = DB::transaction(function () use ($shippingId, $meliAccountId, $shipment, $attrs, $row): int {
+                $lockedOrders = MeliOrder::query()
+                    ->where('shipping_id', $shippingId)
+                    ->where('meli_account_id', $meliAccountId)
+                    ->orderBy('id')
+                    ->lockForUpdate()
+                    ->get();
+
+                if ($lockedOrders->isEmpty()) {
+                    return 0;
+                }
+
+                $lockedOrders->load('items');
+                $acceptedOrderIds = [];
+                $previousSnapshots = [];
+                $newShippingStatus = strtolower(trim((string) ($attrs['shipping_status'] ?? '')));
+
+                foreach ($lockedOrders as $existing) {
+                    $incomingShipId = filled($shipment['id'] ?? null) ? (string) $shipment['id'] : (string) $shippingId;
+                    $freshness = $this->freshnessGuard->evaluateShipmentUpdate(
+                        $existing,
+                        $shipment,
+                        $attrs['shipping_status'] ?? null,
+                        $incomingShipId,
+                        orderAuthorizesNewShippingId: false,
+                    );
+
+                    if (! $freshness['accept']) {
+                        Log::warning('ML refreshShipments descartó actualización de envío obsoleta o ambigua', [
+                            'meli_order_id' => $existing->id,
+                            'order_id' => $existing->order_id,
+                            'shipping_id' => $shippingId,
+                            'reason' => $freshness['reason'],
+                            'stored_timestamp_utc' => $freshness['stored_timestamp_utc'],
+                            'incoming_timestamp_utc' => $freshness['incoming_timestamp_utc'],
+                        ]);
+
+                        continue;
+                    }
+
+                    $acceptedOrderIds[] = (int) $existing->id;
+                    $oldShippingStatus = strtolower(trim((string) ($existing->shipping_status ?? '')));
+                    if ($oldShippingStatus !== $newShippingStatus) {
+                        $previousSnapshots[(int) $existing->id] = $this->reconciliationFingerprint->forOrder($existing);
+                    }
+                }
+
+                if ($acceptedOrderIds === []) {
+                    return 0;
+                }
+
+                $updatedCount = MeliOrder::query()
+                    ->whereIn('id', $acceptedOrderIds)
+                    ->update($row);
+
+                if ($previousSnapshots !== []) {
+                    $updatedOrders = MeliOrder::query()
+                        ->with('items')
+                        ->whereIn('id', array_keys($previousSnapshots))
+                        ->orderBy('id')
+                        ->get();
+
+                    foreach ($updatedOrders as $updatedOrder) {
+                        $this->reservationDispatcher->dispatchAfterCommit(
+                            $updatedOrder,
+                            $previousSnapshots[(int) $updatedOrder->id] ?? null,
+                        );
+                    }
+                }
+
+                return $updatedCount;
+            });
 
             $touched += $n;
 

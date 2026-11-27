@@ -15,24 +15,56 @@ class InventoryMeliAffectedStockDispatcher
 {
     public function dispatchForOrder(MeliOrder $order): int
     {
-        $productIds = $this->orderProductIds($order);
+        $linkIds = $this->resolveDispatchableLinkIdsForOrder($order);
 
-        if ($productIds->isEmpty()) {
-            return 0;
+        foreach ($linkIds as $linkId) {
+            SyncInventoryMeliStockLinkJob::dispatch($linkId);
         }
 
-        return $this->dispatchForProducts($productIds->all());
+        return count($linkIds);
     }
 
     /**
-     * @param list<int> $productIds
+     * Resolves the deterministic deduplicated list of representative link IDs whose stock
+     * should be synchronized for this order, allowing atomic same-DB queue handoff (H9).
+     *
+     * @return list<int>
+     */
+    public function resolveDispatchableLinkIdsForOrder(MeliOrder $order): array
+    {
+        $productIds = $this->orderProductIds($order);
+
+        if ($productIds->isEmpty()) {
+            return [];
+        }
+
+        return $this->resolveDispatchableLinkIdsForProducts($productIds->all());
+    }
+
+    /**
+     * @param  list<int>  $productIds
      */
     public function dispatchForProducts(array $productIds): int
+    {
+        $linkIds = $this->resolveDispatchableLinkIdsForProducts($productIds);
+
+        foreach ($linkIds as $linkId) {
+            SyncInventoryMeliStockLinkJob::dispatch($linkId);
+        }
+
+        return count($linkIds);
+    }
+
+    /**
+     * @param  list<int>  $productIds
+     * @return list<int>
+     */
+    public function resolveDispatchableLinkIdsForProducts(array $productIds): array
     {
         $affectedProductIds = $this->affectedProductIds($productIds);
 
         if ($affectedProductIds->isEmpty()) {
-            return 0;
+            return [];
         }
 
         $links = InventoryChannelLink::query()
@@ -45,7 +77,7 @@ class InventoryMeliAffectedStockDispatcher
             ->get();
 
         $dispatched = [];
-        $count = 0;
+        $linkIds = [];
 
         foreach ($links as $link) {
             $key = $this->dispatchKey($link);
@@ -55,13 +87,10 @@ class InventoryMeliAffectedStockDispatcher
             }
 
             $dispatched[$key] = true;
-
-            SyncInventoryMeliStockLinkJob::dispatch((int) $link->getKey());
-
-            $count++;
+            $linkIds[] = (int) $link->getKey();
         }
 
-        return $count;
+        return $linkIds;
     }
 
     /**
