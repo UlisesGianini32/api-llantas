@@ -118,7 +118,7 @@ class OpsQueuesDiagnoseExhaustiveTest extends TestCase
         $this->assertStringNotContainsString('APP_USR-SECRET', $rawNdjson);
 
         $report = json_decode($rawJson, true, 64, JSON_THROW_ON_ERROR);
-        $this->assertSame('2.0', $report['format_version']);
+        $this->assertSame(QueueReconstructionDiagnosticsService::FORMAT_VERSION, $report['format_version']);
         $this->assertTrue($report['invariants']['all_passed']);
         $this->assertSame(7, $report['invariants']['accounted_orders']);
         $this->assertSame(0, $report['invariants']['unclassified_orders']);
