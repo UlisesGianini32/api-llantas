@@ -4,8 +4,12 @@ declare(strict_types=1);
 
 namespace App\Services\System\QueueRecovery;
 
+use HashContext;
+
 /**
- * Lightweight buffered byte cursor for streaming JSON manifest files in O(1) memory.
+ * Lightweight buffered byte cursor for streaming JSON manifest files in O(1) memory
+ * over a SINGLE open file descriptor, with optional incremental SHA-256 hashing of
+ * consumed bytes so Pass 1 and Pass 2 verify exact byte-for-byte identity (D4).
  *
  * @internal
  */
@@ -25,8 +29,11 @@ final class JsonByteCursor
         private readonly int $chunkBytes = 65536,
         int $startOffset = 0,
         private readonly ?int $endOffset = null,
+        private readonly ?HashContext $streamHashCtx = null,
     ) {
-        fseek($this->fh, $startOffset);
+        if (fseek($this->fh, $startOffset) !== 0) {
+            throw new QueueRecoveryException('No se pudo posicionar el cursor de lectura del manifiesto.', 'manifest_invalid');
+        }
         $this->streamPos = $startOffset;
     }
 
@@ -64,6 +71,21 @@ final class JsonByteCursor
         }
     }
 
+    /**
+     * Verifies there are no non-whitespace trailing bytes after the root JSON object
+     * and finishes feeding any remaining whitespace into `$streamHashCtx`.
+     */
+    public function assertOnlyWhitespaceUntilEof(): void
+    {
+        $this->skipWhitespace();
+        if ($this->peekByte() !== null) {
+            throw new QueueRecoveryException(
+                'El manifiesto JSON contiene datos residuales inesperados después del objeto raíz.',
+                'manifest_invalid',
+            );
+        }
+    }
+
     public function readJsonStringLiteral(): string
     {
         $first = $this->consumeByte();
@@ -95,9 +117,10 @@ final class JsonByteCursor
     }
 
     /**
-     * Skips forward until the matching closing `]` of the current JSON array is consumed.
+     * Skips forward until the matching closing `]` of the current JSON array is consumed,
+     * optionally hashing the exact interior bytes (excluding the closing `]`) into `$interiorHashCtx`.
      */
-    public function skipRestOfArray(): void
+    public function skipRestOfArray(?HashContext $interiorHashCtx = null): void
     {
         $depth = 1;
         $inString = false;
@@ -110,7 +133,8 @@ final class JsonByteCursor
 
             $buf = $this->buffer;
             $len = $this->bufferLength;
-            $i = $this->bufferOffset;
+            $start = $this->bufferOffset;
+            $i = $start;
 
             while ($i < $len) {
                 $ch = $buf[$i++];
@@ -133,6 +157,9 @@ final class JsonByteCursor
                 } elseif ($ch === ']') {
                     $depth--;
                     if ($depth === 0) {
+                        if ($interiorHashCtx !== null && ($i - 1) > $start) {
+                            hash_update($interiorHashCtx, substr($buf, $start, ($i - 1) - $start));
+                        }
                         $this->bufferOffset = $i;
 
                         return;
@@ -140,6 +167,9 @@ final class JsonByteCursor
                 }
             }
 
+            if ($interiorHashCtx !== null && $i > $start) {
+                hash_update($interiorHashCtx, substr($buf, $start, $i - $start));
+            }
             $this->bufferOffset = $i;
         }
     }
@@ -235,6 +265,10 @@ final class JsonByteCursor
         $chunk = fread($this->fh, $maxToRead);
         if (! is_string($chunk) || $chunk === '') {
             return false;
+        }
+
+        if ($this->streamHashCtx !== null) {
+            hash_update($this->streamHashCtx, $chunk);
         }
 
         $this->buffer = $chunk;
