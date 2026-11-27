@@ -63,6 +63,9 @@ class QueueOrderExhaustiveClassifier
      * Classifies an order referenced by a manifest that does not exist in `meli_orders`.
      *
      * @param  list<int>  $associatedJobIds
+     * @param  list<int>  $associatedUnreservedJobIds
+     * @param  list<int>  $associatedReservedJobIds
+     * @param  array<string, mixed>|null  $liveQueueVerification
      * @return array<string, mixed>
      */
     public function classifyMissingOrder(
@@ -72,12 +75,26 @@ class QueueOrderExhaustiveClassifier
         bool $associatedJobIdsTruncated,
         int $reservedJobsCount,
         bool $r3TablePresent,
+        array $associatedUnreservedJobIds = [],
+        int $associatedUnreservedJobsCount = 0,
+        bool $associatedUnreservedJobIdsTruncated = false,
+        array $associatedReservedJobIds = [],
+        bool $associatedReservedJobIdsTruncated = false,
+        bool $manifestMetadataConflict = false,
+        ?array $liveQueueVerification = null,
     ): array {
         $reasonCodes = ['order_missing_from_db'];
         $secondaryAnomalies = ['missing_orders_in_manifest'];
         if ($reservedJobsCount > 0) {
             $reasonCodes[] = 'reserved_jobs_detected_for_order';
+            $reasonCodes[] = $associatedUnreservedJobsCount === 0
+                ? 'manifest_reserved_jobs_only'
+                : 'manifest_reserved_jobs_detected';
             $secondaryAnomalies[] = 'reserved_jobs_detected_for_order';
+        }
+        if ($manifestMetadataConflict) {
+            $reasonCodes[] = 'manifest_metadata_conflict';
+            $secondaryAnomalies[] = 'manifest_metadata_conflict';
         }
 
         $missingEvidence = [
@@ -97,17 +114,31 @@ class QueueOrderExhaustiveClassifier
                 'meli_account_id' => null,
                 'associated_job_ids' => $associatedJobIds,
                 'associated_job_ids_truncated' => $associatedJobIdsTruncated,
+                'associated_job_ids_sample_limit' => QueueManifestStreamReader::MAX_JOB_ID_SAMPLE_PER_ORDER,
                 'associated_jobs_count' => $associatedJobsCount,
+                'associated_unreserved_job_ids' => $associatedUnreservedJobIds,
+                'associated_unreserved_job_ids_truncated' => $associatedUnreservedJobIdsTruncated,
+                'associated_unreserved_jobs_count' => $associatedUnreservedJobsCount,
+                'associated_reserved_job_ids' => $associatedReservedJobIds,
+                'associated_reserved_job_ids_truncated' => $associatedReservedJobIdsTruncated,
+                'associated_reserved_jobs_count' => $reservedJobsCount,
                 'order_status' => null,
                 'shipping_status' => null,
                 'allocation_status' => 'UNKNOWN_ORDER_MISSING',
                 'reservation_status' => 'UNKNOWN_ORDER_MISSING',
                 'primary_classification' => self::PRIMARY_PENDING_HUMAN_REVIEW,
-                'reason_codes' => $reasonCodes,
-                'secondary_anomalies' => $secondaryAnomalies,
+                'reason_codes' => array_values(array_unique($reasonCodes)),
+                'secondary_anomalies' => array_values(array_unique($secondaryAnomalies)),
                 'available_evidence' => [
                     'exists_in_meli_orders' => false,
                     'reserved_jobs_count' => $reservedJobsCount,
+                    'manifest_queue_state' => [
+                        'manifest_unreserved_jobs_count' => $associatedUnreservedJobsCount,
+                        'manifest_reserved_jobs_count' => $reservedJobsCount,
+                        'reserved_at_reflects_manifest_snapshot_only' => true,
+                        'live_queue_state_verified' => $liveQueueVerification !== null,
+                        'live_queue_verification' => $liveQueueVerification,
+                    ],
                     'r3_durable_state_table_present' => $r3TablePresent,
                 ],
                 'missing_evidence' => $missingEvidence,
@@ -153,6 +184,18 @@ class QueueOrderExhaustiveClassifier
         $associatedJobsCount = (int) $ctx['associated_jobs_count'];
         $associatedJobIdsTruncated = (bool) $ctx['associated_job_ids_truncated'];
         $reservedJobsCount = (int) $ctx['reserved_jobs_count'];
+        /** @var list<int> $associatedUnreservedJobIds */
+        $associatedUnreservedJobIds = $ctx['associated_unreserved_job_ids'] ?? $associatedJobIds;
+        $associatedUnreservedJobsCount = (int) ($ctx['associated_unreserved_jobs_count'] ?? max(0, $associatedJobsCount - $reservedJobsCount));
+        $associatedUnreservedJobIdsTruncated = (bool) ($ctx['associated_unreserved_job_ids_truncated'] ?? false);
+        /** @var list<int> $associatedReservedJobIds */
+        $associatedReservedJobIds = $ctx['associated_reserved_job_ids'] ?? [];
+        $associatedReservedJobIdsTruncated = (bool) ($ctx['associated_reserved_job_ids_truncated'] ?? false);
+        $manifestAccountHint = $ctx['manifest_account_hint'] ?? null;
+        $manifestRemoteOrderHint = $ctx['manifest_remote_order_hint'] ?? null;
+        $manifestMetadataConflict = (bool) ($ctx['manifest_metadata_conflict'] ?? false);
+        /** @var array<string, mixed>|null $liveQueueVerification */
+        $liveQueueVerification = $ctx['live_queue_verification'] ?? null;
 
         /** @var list<object> $orderItems */
         $orderItems = $ctx['order_items'];
@@ -219,7 +262,17 @@ class QueueOrderExhaustiveClassifier
 
         if ($reservedJobsCount > 0) {
             $humanReviewReasons[] = 'reserved_jobs_detected_for_order';
+            $humanReviewReasons[] = $associatedUnreservedJobsCount === 0
+                ? 'manifest_reserved_jobs_only'
+                : 'manifest_reserved_jobs_detected';
             $secondaryAnomalies[] = 'reserved_jobs_detected_for_order';
+        }
+
+        if ($manifestMetadataConflict
+            || ($manifestAccountHint !== null && $accountId !== null && (int) $manifestAccountHint !== $accountId)
+            || ($manifestRemoteOrderHint !== null && $remoteOrderId !== null && (string) $manifestRemoteOrderHint !== $remoteOrderId)) {
+            $humanReviewReasons[] = 'manifest_metadata_conflict';
+            $secondaryAnomalies[] = 'manifest_metadata_conflict';
         }
 
         // 1. Account validity check
@@ -1069,7 +1122,14 @@ class QueueOrderExhaustiveClassifier
             'meli_account_id' => $accountId,
             'associated_job_ids' => $associatedJobIds,
             'associated_job_ids_truncated' => $associatedJobIdsTruncated,
+            'associated_job_ids_sample_limit' => QueueManifestStreamReader::MAX_JOB_ID_SAMPLE_PER_ORDER,
             'associated_jobs_count' => $associatedJobsCount,
+            'associated_unreserved_job_ids' => $associatedUnreservedJobIds,
+            'associated_unreserved_job_ids_truncated' => $associatedUnreservedJobIdsTruncated,
+            'associated_unreserved_jobs_count' => $associatedUnreservedJobsCount,
+            'associated_reserved_job_ids' => $associatedReservedJobIds,
+            'associated_reserved_job_ids_truncated' => $associatedReservedJobIdsTruncated,
+            'associated_reserved_jobs_count' => $reservedJobsCount,
             'order_status' => $status !== '' ? $status : null,
             'shipping_status' => $shippingStatus !== '' ? $shippingStatus : null,
             'allocation_status' => $allocationStatus,
@@ -1094,6 +1154,13 @@ class QueueOrderExhaustiveClassifier
                 'is_valid_pre_cutover' => $isValidPreCutover,
                 'policy_category' => $policyCategory,
                 'reserved_jobs_count' => $reservedJobsCount,
+                'manifest_queue_state' => [
+                    'manifest_unreserved_jobs_count' => $associatedUnreservedJobsCount,
+                    'manifest_reserved_jobs_count' => $reservedJobsCount,
+                    'reserved_at_reflects_manifest_snapshot_only' => true,
+                    'live_queue_state_verified' => $liveQueueVerification !== null,
+                    'live_queue_verification' => $liveQueueVerification,
+                ],
                 'r3_reconciliation' => $r3Evidence,
             ],
             'missing_evidence' => array_values(array_unique($missingEvidence)),

@@ -15,27 +15,33 @@ use Illuminate\Support\Facades\Schema;
 use Throwable;
 
 /**
- * Strictly READ-ONLY exhaustive reconstruction diagnostics for R2-DIAG (format_version 2.0).
+ * Strictly READ-ONLY exhaustive reconstruction diagnostics for R2-DIAG.1 (format_version 2.1).
  *
  * Guarantees:
  * - 100% read-only: never mutates any DB table, never executes jobs, never calls Mercado Libre HTTP APIs.
- * - Exhaustive, mutually exclusive 7-category primary classification for EVERY distinct order in scope,
- *   alongside overlapping secondary anomalies and non-authorizing operational recommendations.
+ * - Exhaustive, mutually exclusive 7-category primary classification for EVERY identifiable distinct order
+ *   in scope (including orders whose ONLY manifest jobs are reserved — D2), alongside overlapping secondary
+ *   anomalies and non-authorizing operational recommendations.
  * - Fail-closed invariants: throws `QueueRecoveryException(..., 'diagnostic_invariant_violation')`
  *   if ANY accounting or partitioning invariant fails.
- * - Memory-bounded streaming manifest reader + incremental NDJSON writer with SHA-256 verification
- *   designed for 100k–2.76M historical jobs under < 160 MiB peak PHP memory.
+ * - Single-FD streaming manifest verification (D1, D4) + hardened exclusive `0600` artifact writer with
+ *   collision checks, non-overwrite, `fflush`+`fsync`, non-clobbering publish, post-publish disk SHA-256
+ *   verification, and unambiguous multi-file publication protocol (D3).
+ * - Interval-based chunked reads (never holds long-running DB transactions on production).
  * - Full compatibility with both R3 durable state (`inventory_meli_order_reconciliations`)
  *   and pre-R3 legacy production schemas, plus backwards-compatible R2.1 report keys.
  */
 class QueueReconstructionDiagnosticsService
 {
-    public const FORMAT_VERSION = '2.0';
+    public const FORMAT_VERSION = '2.1';
 
     public const DEFAULT_MAX_INLINE_ENTITIES = 2000;
 
     /** @var (callable(array<string, mixed>): array<string, mixed>)|null */
     private $invariantCheckMutator = null;
+
+    /** @var (callable(int): void)|null */
+    private $betweenOrderChunksHook = null;
 
     public function __construct(
         private readonly QueueRecoveryManifest $manifestManager,
@@ -45,6 +51,7 @@ class QueueReconstructionDiagnosticsService
         private readonly QueueManifestStreamReader $manifestStreamReader = new QueueManifestStreamReader,
         private readonly QueueOrderExhaustiveClassifier $orderClassifier = new QueueOrderExhaustiveClassifier,
         private readonly QueueRecoveryPathGuard $pathGuard = new QueueRecoveryPathGuard,
+        private readonly QueueDiagnosticArtifactWriter $artifactWriter = new QueueDiagnosticArtifactWriter,
     ) {}
 
     /**
@@ -58,11 +65,22 @@ class QueueReconstructionDiagnosticsService
     }
 
     /**
-     * Runs exhaustive, strictly read-only diagnostics with fail-closed invariants and optional
-     * streaming NDJSON output for large manifests.
+     * Test hook invoked between order chunks to observe/test concurrent data changes during interval reads.
+     *
+     * @param  (callable(int): void)|null  $hook
+     */
+    public function setBetweenOrderChunksHook(?callable $hook): void
+    {
+        $this->betweenOrderChunksHook = $hook;
+    }
+
+    /**
+     * Runs exhaustive, strictly read-only diagnostics with fail-closed invariants and hardened
+     * streaming NDJSON / JSON summary / completion-marker publication.
      *
      * @param  array{
      *     manifest_path?: ?string,
+     *     backup_path?: ?string,
      *     expected_manifest_sha256?: ?string,
      *     hmac_key?: ?string,
      *     account_id?: ?int,
@@ -70,14 +88,19 @@ class QueueReconstructionDiagnosticsService
      *     chunk?: int,
      *     connection?: ?string,
      *     ndjson_output_path?: ?string,
+     *     output_path?: ?string,
+     *     completion_marker_path?: ?string,
      *     max_inline_entities?: ?int,
-     *     summary_only?: bool
+     *     summary_only?: bool,
+     *     verify_live_jobs?: bool,
+     *     queue_table?: ?string
      * }  $options
      * @return array<string, mixed>
      */
     public function diagnose(array $options = []): array
     {
         $startedAt = microtime(true);
+        $intervalStartedIso = now()->utc()->toIso8601String();
         $connName = is_string($options['connection'] ?? null) && trim($options['connection']) !== ''
             ? trim($options['connection'])
             : (string) config('database.default');
@@ -91,19 +114,70 @@ class QueueReconstructionDiagnosticsService
         $maxInlineEntities = $summaryOnly
             ? 0
             : max(0, (int) ($options['max_inline_entities'] ?? self::DEFAULT_MAX_INLINE_ENTITIES));
+        $verifyLiveJobs = (bool) ($options['verify_live_jobs'] ?? false);
+        $queueTable = is_string($options['queue_table'] ?? null) && trim($options['queue_table']) !== ''
+            ? trim($options['queue_table'])
+            : 'jobs';
 
+        $manifestPath = isset($options['manifest_path']) && trim((string) $options['manifest_path']) !== ''
+            ? trim((string) $options['manifest_path'])
+            : null;
+        $backupPath = isset($options['backup_path']) && trim((string) $options['backup_path']) !== ''
+            ? trim((string) $options['backup_path'])
+            : null;
         $ndjsonOutputPath = isset($options['ndjson_output_path']) && trim((string) $options['ndjson_output_path']) !== ''
             ? trim((string) $options['ndjson_output_path'])
             : null;
+        $summaryOutputPath = isset($options['output_path']) && trim((string) $options['output_path']) !== ''
+            ? trim((string) $options['output_path'])
+            : null;
+        $completionMarkerPath = isset($options['completion_marker_path']) && trim((string) $options['completion_marker_path']) !== ''
+            ? trim((string) $options['completion_marker_path'])
+            : null;
+
+        // D3: Pre-validate path collisions & non-overwrite BEFORE any scan or file creation!
+        $this->artifactWriter->assertNoPathCollisions([
+            'manifest' => $manifestPath,
+            'backup' => $backupPath,
+            'ndjson_output' => $ndjsonOutputPath,
+            'summary_output' => $summaryOutputPath,
+            'completion_marker' => $completionMarkerPath,
+        ]);
+
+        if ($summaryOutputPath !== null) {
+            $safeSummary = $this->pathGuard->assertSafeOutputPath($summaryOutputPath, false, false);
+            clearstatcache(true, $safeSummary);
+            if (file_exists($safeSummary) || is_link($safeSummary)) {
+                throw new QueueRecoveryException(
+                    "El archivo de resumen JSON ya existe y no se permite sobrescritura: '{$safeSummary}'.",
+                    'artifact_already_exists',
+                    ['path' => $safeSummary],
+                );
+            }
+            $summaryOutputPath = $safeSummary;
+        }
+
+        if ($completionMarkerPath !== null) {
+            $safeMarker = $this->pathGuard->assertSafeOutputPath($completionMarkerPath, false, false);
+            clearstatcache(true, $safeMarker);
+            if (file_exists($safeMarker) || is_link($safeMarker)) {
+                throw new QueueRecoveryException(
+                    "El marcador de completitud ya existe y no se permite sobrescritura: '{$safeMarker}'.",
+                    'artifact_already_exists',
+                    ['path' => $safeMarker],
+                );
+            }
+            $completionMarkerPath = $safeMarker;
+        }
 
         $manifestData = null;
         $scopedOrderIds = null;
         $scopedDiscountIds = null;
         $manifestMeta = null;
 
-        if (isset($options['manifest_path']) && trim((string) $options['manifest_path']) !== '') {
+        if ($manifestPath !== null) {
             $manifestData = $this->manifestStreamReader->readAndVerify(
-                trim((string) $options['manifest_path']),
+                $manifestPath,
                 $this->inspector,
                 isset($options['expected_manifest_sha256']) ? (string) $options['expected_manifest_sha256'] : null,
                 isset($options['hmac_key']) ? (string) $options['hmac_key'] : null,
@@ -117,8 +191,12 @@ class QueueReconstructionDiagnosticsService
                 'schema_version' => $manifestData['schema_version'],
                 'incident_id' => $manifestData['incident_id'],
                 'manifest_sha256' => $manifestData['manifest_sha256'],
+                'integrity_checksum_sha256' => $manifestData['manifest_sha256'],
                 'file_sha256' => $manifestData['file_sha256'],
-                'hmac_verified' => $manifestData['hmac_verified'],
+                'expected_hash_verified' => (bool) ($manifestData['expected_hash_verified'] ?? false),
+                'hmac_verified' => (bool) $manifestData['hmac_verified'],
+                'hmac_authenticated' => (bool) $manifestData['hmac_verified'],
+                'checksum_is_not_authentication' => true,
                 'distinct_orders_in_manifest' => count($scopedOrderIds),
                 'distinct_discounts_in_manifest' => count($scopedDiscountIds),
                 'total_manifest_entries' => (int) $manifestData['job_accounting']['total_manifest_entries'],
@@ -145,6 +223,8 @@ class QueueReconstructionDiagnosticsService
             'meli_price_changes' => $schema->hasTable('meli_price_changes'),
             'meli_price_manager_items' => $schema->hasTable('meli_price_manager_items'),
         ];
+
+        $hasLiveJobsTable = $verifyLiveJobs && $schema->hasTable($queueTable);
 
         $validAccountIds = [];
         if ($tables['meli_accounts']) {
@@ -211,36 +291,25 @@ class QueueReconstructionDiagnosticsService
         $inlineEntities = [];
         $inlineTruncated = false;
 
-        // Open incremental atomic NDJSON writer when requested.
-        $ndjsonHandle = null;
-        $ndjsonTempPath = null;
-        $ndjsonHashCtx = null;
-        $ndjsonRecordsWritten = 0;
-        $ndjsonBytesWritten = 0;
-
+        // D3: Open exclusive 0600 NDJSON temp stream via QueueDiagnosticArtifactWriter (never overwrites existing files!).
+        $ndjsonStream = null;
         if ($ndjsonOutputPath !== null) {
-            $safeNdjsonPath = $this->pathGuard->assertSafeOutputPath($ndjsonOutputPath, false, false);
-            $dir = dirname($safeNdjsonPath);
-            if (! is_dir($dir) && ! @mkdir($dir, 0750, true) && ! is_dir($dir)) {
-                throw new QueueRecoveryException("No se pudo crear el directorio para salida NDJSON: '{$dir}'.", 'ndjson_write_failed');
-            }
-            $ndjsonTempPath = $safeNdjsonPath.'.tmp.'.getmypid().'.'.bin2hex(random_bytes(4));
-            $ndjsonHandle = @fopen($ndjsonTempPath, 'wb');
-            if ($ndjsonHandle === false) {
-                throw new QueueRecoveryException("No se pudo abrir archivo temporal NDJSON: '{$ndjsonTempPath}'.", 'ndjson_write_failed');
-            }
-            $ndjsonHashCtx = hash_init('sha256');
-            $ndjsonOutputPath = $safeNdjsonPath;
+            $ndjsonStream = $this->artifactWriter->openExclusiveStream($ndjsonOutputPath, disallowOverwrite: true, disallowInsideRepo: false);
+            $ndjsonOutputPath = (string) $ndjsonStream['target_path'];
         }
 
         $orderStats = [
             'expected_distinct_orders' => 0,
             'accounted_orders' => 0,
             'accounted_order_jobs' => 0,
+            'accounted_unreserved_order_jobs' => 0,
+            'accounted_reserved_order_jobs' => 0,
             'duplicate_primary_classifications' => 0,
             'missing_orders_count' => 0,
             'filtered_out_by_account_count' => 0,
         ];
+
+        $ndjsonPublishedMeta = null;
 
         try {
             if ($tables['meli_orders'] || $scopedOrderIds !== null) {
@@ -254,6 +323,8 @@ class QueueReconstructionDiagnosticsService
                     $cutoverAt,
                     $chunk,
                     $maxInlineEntities,
+                    $hasLiveJobsTable,
+                    $queueTable,
                     $categories,
                     $categoryCounts,
                     $schemaAnomalies,
@@ -268,10 +339,7 @@ class QueueReconstructionDiagnosticsService
                     $jobSecurityCounters,
                     $inlineEntities,
                     $inlineTruncated,
-                    $ndjsonHandle,
-                    $ndjsonHashCtx,
-                    $ndjsonRecordsWritten,
-                    $ndjsonBytesWritten,
+                    $ndjsonStream,
                     $orderStats,
                 );
             }
@@ -298,31 +366,18 @@ class QueueReconstructionDiagnosticsService
                 $accountFilter,
                 $orderStats,
                 $primaryPartitionCounts,
-                $ndjsonOutputPath !== null,
-                $ndjsonRecordsWritten,
+                $ndjsonStream !== null,
+                $ndjsonStream !== null ? (int) $ndjsonStream['records_written'] : 0,
             );
+
+            // Phase 1 of joint publication: flush, fsync, close, non-clobbering publish & disk SHA-256 verify NDJSON!
+            if ($ndjsonStream !== null) {
+                $ndjsonPublishedMeta = $this->artifactWriter->publishStream($ndjsonStream);
+            }
         } catch (Throwable $e) {
-            if (is_resource($ndjsonHandle)) {
-                fclose($ndjsonHandle);
-            }
-            if ($ndjsonTempPath !== null && is_file($ndjsonTempPath)) {
-                @unlink($ndjsonTempPath);
-            }
+            $this->artifactWriter->abortStream($ndjsonStream);
 
             throw $e;
-        }
-
-        $ndjsonSha256 = null;
-        if (is_resource($ndjsonHandle) && $ndjsonTempPath !== null && $ndjsonOutputPath !== null && $ndjsonHashCtx !== null) {
-            fflush($ndjsonHandle);
-            fclose($ndjsonHandle);
-            $ndjsonSha256 = hash_final($ndjsonHashCtx);
-            @chmod($ndjsonTempPath, 0600);
-            if (! @rename($ndjsonTempPath, $ndjsonOutputPath)) {
-                @unlink($ndjsonTempPath);
-                throw new QueueRecoveryException("No se pudo finalizar el archivo NDJSON en '{$ndjsonOutputPath}'.", 'ndjson_write_failed');
-            }
-            @chmod($ndjsonOutputPath, 0600);
         }
 
         ksort($secondaryAnomalyCounts);
@@ -331,20 +386,31 @@ class QueueReconstructionDiagnosticsService
         $jobAccounting = $manifestData['job_accounting'] ?? [
             'total_manifest_entries' => 0,
             'reservation_job_entries' => 0,
+            'reservation_unreserved_job_entries' => 0,
+            'reservation_reserved_job_entries' => 0,
+            'total_order_job_entries' => 0,
+            'non_order_reserved_job_entries' => 0,
             'beauty_job_entries' => 0,
+            'other_class_job_entries' => 0,
+            'other_class_job_samples' => [],
             'reserved_job_entries' => 0,
             'reserved_job_entries_sample' => [],
             'invalid_or_unverifiable_job_entries' => 0,
+            'conflicting_identity_job_entries' => 0,
             'invalid_or_unverifiable_job_samples' => [],
             'duplicate_manifest_job_id_entries' => 0,
             'duplicate_manifest_job_ids_sample' => [],
             'upper_bound_exceeded_entries' => 0,
             'distinct_orders_in_manifest' => 0,
+            'reserved_only_orders_in_manifest' => 0,
+            'mixed_reserved_and_unreserved_orders_in_manifest' => 0,
             'distinct_discounts_in_manifest' => 0,
             'orders_with_single_job' => 0,
             'orders_with_multiple_jobs' => 0,
             'extra_duplicate_jobs_for_same_order' => 0,
             'jobs_per_order_distribution' => [],
+            'exact_seen_job_tracking_limit' => QueueManifestStreamReader::MAX_EXACT_SEEN_JOB_TRACKING,
+            'strict_ascending_mode_activated' => false,
             'manifest_declared_preserved_reserved' => 0,
             'manifest_declared_preserved_invalid_json' => 0,
             'manifest_declared_preserved_inconsistent' => 0,
@@ -357,7 +423,12 @@ class QueueReconstructionDiagnosticsService
         $historicalRecoverySecurity = [
             'total_jobs_in_manifest' => (int) $jobAccounting['total_manifest_entries'],
             'reservation_jobs_in_manifest' => (int) $jobAccounting['reservation_job_entries'],
+            'reservation_unreserved_jobs_in_manifest' => (int) ($jobAccounting['reservation_unreserved_job_entries'] ?? $jobAccounting['reservation_job_entries']),
+            'reservation_reserved_jobs_in_manifest' => (int) ($jobAccounting['reservation_reserved_job_entries'] ?? 0),
+            'total_order_jobs_in_manifest' => (int) ($jobAccounting['total_order_job_entries'] ?? $jobAccounting['reservation_job_entries']),
             'distinct_orders_in_manifest' => (int) $jobAccounting['distinct_orders_in_manifest'],
+            'reserved_only_orders_in_manifest' => (int) ($jobAccounting['reserved_only_orders_in_manifest'] ?? 0),
+            'mixed_reserved_and_unreserved_orders_in_manifest' => (int) ($jobAccounting['mixed_reserved_and_unreserved_orders_in_manifest'] ?? 0),
             'orders_with_single_job' => (int) $jobAccounting['orders_with_single_job'],
             'orders_with_multiple_jobs' => (int) $jobAccounting['orders_with_multiple_jobs'],
             'extra_duplicate_jobs_for_same_order' => (int) $jobAccounting['extra_duplicate_jobs_for_same_order'],
@@ -366,6 +437,8 @@ class QueueReconstructionDiagnosticsService
             'invalid_payload_jobs_count' => (int) $jobAccounting['invalid_or_unverifiable_job_entries']
                 + (int) $jobAccounting['manifest_declared_preserved_invalid_json']
                 + (int) $jobAccounting['manifest_declared_preserved_inconsistent'],
+            'conflicting_identity_jobs_count' => (int) ($jobAccounting['conflicting_identity_job_entries'] ?? 0),
+            'other_class_jobs_in_entries' => (int) ($jobAccounting['other_class_job_entries'] ?? 0),
             'other_module_jobs_preserved' => (int) $jobAccounting['manifest_declared_preserved_other_modules'],
             'jobs_for_missing_orders' => $jobSecurityCounters['jobs_for_missing_orders'],
             'jobs_for_ambiguous_orders' => $jobsByPrimaryCategory[QueueOrderExhaustiveClassifier::PRIMARY_AMBIGUOUS_ENTITIES],
@@ -380,21 +453,37 @@ class QueueReconstructionDiagnosticsService
             'safety_guards' => [
                 'duplicate_entity_id_does_not_imply_deletable' => true,
                 'single_job_orders_must_not_lose_reconciliation_obligation' => true,
+                'manifest_reserved_at_is_historical_snapshot_not_live_worker_proof' => true,
+                'live_queue_pk_verification_enabled' => $hasLiveJobsTable,
                 'automatic_job_deletion_authorized' => false,
                 'automatic_inventory_mutation_authorized' => false,
             ],
         ];
 
+        $intervalCompletedIso = now()->utc()->toIso8601String();
         $durationMs = round((microtime(true) - $startedAt) * 1000, 2);
 
-        return [
+        $report = [
             'format_version' => self::FORMAT_VERSION,
-            'generated_at' => now()->utc()->toIso8601String(),
+            'generated_at' => $intervalCompletedIso,
             'mode' => 'read_only_diagnosis',
             'connection' => $connName,
             'database' => $db->getDatabaseName(),
             'cutover_at' => $cutoverAt?->toIso8601String(),
             'account_filter' => $accountFilter,
+            'diagnostic_snapshot_semantics' => [
+                'consistency_model' => 'chunked_interval_reads_not_global_snapshot',
+                'holds_long_db_transaction' => false,
+                'interval_started_at' => $intervalStartedIso,
+                'interval_completed_at' => $intervalCompletedIso,
+                'live_jobs_pk_verification' => $hasLiveJobsTable,
+            ],
+            'publication_protocol' => [
+                'scheme' => 'two_phase_ndjson_then_summary_with_optional_completion_marker',
+                'complete_output_rule' => 'An NDJSON file is complete ONLY when the paired summary JSON (or completion marker) exists, passes disk SHA-256 verification, and references its exact ndjson_output.sha256 and record count.',
+                'summary_published' => false,
+                'completion_marker_path' => $completionMarkerPath,
+            ],
             'manifest_scope' => $manifestMeta,
             'tables_present' => $tables,
             'r3_compatibility' => [
@@ -412,12 +501,7 @@ class QueueReconstructionDiagnosticsService
                 'inline_entities_count' => count($inlineEntities),
                 'inline_limit' => $maxInlineEntities,
                 'inline_truncated' => $inlineTruncated,
-                'ndjson_output' => $ndjsonOutputPath !== null ? [
-                    'path' => $ndjsonOutputPath,
-                    'sha256' => $ndjsonSha256,
-                    'records' => $ndjsonRecordsWritten,
-                    'size_bytes' => $ndjsonBytesWritten,
-                ] : null,
+                'ndjson_output' => $ndjsonPublishedMeta,
                 'entities' => $inlineEntities,
             ],
             'manifest_job_accounting' => $jobAccounting,
@@ -457,6 +541,45 @@ class QueueReconstructionDiagnosticsService
             'schema_anomalies' => $schemaAnomalies,
             'categories' => $categories,
         ];
+
+        // Phase 2 of joint publication: publish verified Summary JSON (if requested).
+        $summaryPublishedMeta = null;
+        if ($summaryOutputPath !== null) {
+            $report['publication_protocol']['summary_published'] = true;
+            $json = json_encode($report, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR)."\n";
+            $summaryPublishedMeta = $this->artifactWriter->writeAndPublishString(
+                $summaryOutputPath,
+                $json,
+                disallowOverwrite: true,
+                disallowInsideRepo: false,
+            );
+            $report['publication_protocol']['summary_output'] = $summaryPublishedMeta;
+        }
+
+        // Phase 3 (optional): publish final Completion Marker referencing exact verified hashes of ALL artifacts!
+        if ($completionMarkerPath !== null) {
+            $markerPayload = [
+                'status' => 'complete',
+                'format_version' => self::FORMAT_VERSION,
+                'completed_at' => now()->utc()->toIso8601String(),
+                'invariants_passed' => true,
+                'distinct_orders_in_scope' => $invariants['distinct_orders_in_scope'],
+                'accounted_orders' => $invariants['accounted_orders'],
+                'manifest_sha256' => $manifestMeta['manifest_sha256'] ?? null,
+                'ndjson_output' => $ndjsonPublishedMeta,
+                'summary_output' => $summaryPublishedMeta,
+            ];
+            $markerJson = json_encode($markerPayload, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR)."\n";
+            $markerMeta = $this->artifactWriter->writeAndPublishString(
+                $completionMarkerPath,
+                $markerJson,
+                disallowOverwrite: true,
+                disallowInsideRepo: false,
+            );
+            $report['publication_protocol']['completion_marker_output'] = $markerMeta;
+        }
+
+        return $report;
     }
 
     /**
@@ -477,8 +600,7 @@ class QueueReconstructionDiagnosticsService
      * @param  array<string, int>  $jobsByPrimaryCategory
      * @param  array<string, int>  $jobSecurityCounters
      * @param  list<array<string, mixed>>  $inlineEntities
-     * @param  resource|null  $ndjsonHandle
-     * @param  \HashContext|null  $ndjsonHashCtx
+     * @param  array<string, mixed>|null  $ndjsonStream
      * @param  array<string, int>  $orderStats
      */
     private function diagnoseOrders(
@@ -491,6 +613,8 @@ class QueueReconstructionDiagnosticsService
         ?CarbonImmutable $cutoverAt,
         int $chunk,
         int $maxInlineEntities,
+        bool $hasLiveJobsTable,
+        string $queueTable,
         array &$categories,
         array &$categoryCounts,
         array &$schemaAnomalies,
@@ -505,10 +629,7 @@ class QueueReconstructionDiagnosticsService
         array &$jobSecurityCounters,
         array &$inlineEntities,
         bool &$inlineTruncated,
-        $ndjsonHandle,
-        $ndjsonHashCtx,
-        int &$ndjsonRecordsWritten,
-        int &$ndjsonBytesWritten,
+        ?array &$ndjsonStream,
         array &$orderStats,
     ): void {
         $schema = Schema::connection($db->getName());
@@ -530,7 +651,6 @@ class QueueReconstructionDiagnosticsService
             'mov_notes' => $tables['inventory_movements'] && $schema->hasColumn('inventory_movements', 'notes'),
         ];
 
-        // Preload compact catalog maps ONCE (O(products + links), zero per-order N+1).
         $productsById = [];
         $kitProductIds = [];
         $componentProductIds = [];
@@ -566,7 +686,6 @@ class QueueReconstructionDiagnosticsService
             }
         }
 
-        // Pre-index ALL ML channel links (active AND inactive, reservation enabled AND disabled!)
         $allLinksByKey = [];
         $activeLinkAccountsByListing = [];
         $sharedStockGroupProducts = [];
@@ -611,7 +730,6 @@ class QueueReconstructionDiagnosticsService
                     $activeLinkAccountsByListing[$listingId][$accKey] = true;
                 }
 
-                // Shared stock group conflict detection matches InventoryMeliSharedStockGroupService::conflict()
                 if ($isActive && $syncEnabled && $varId === '' && $remoteUpId !== null) {
                     $groupKey = $accKey.'|'.$remoteUpId;
                     $sharedStockGroupProducts[$groupKey][(int) $link->inventory_product_id] = true;
@@ -628,8 +746,14 @@ class QueueReconstructionDiagnosticsService
         unset($sharedStockGroupProducts);
 
         $orderJobCounts = $manifestData['order_job_counts'] ?? [];
-        $orderJobSampleCsv = $manifestData['order_job_sample_csv'] ?? [];
+        $orderUnreservedCounts = $manifestData['order_unreserved_counts'] ?? [];
         $orderReservedCounts = $manifestData['order_reserved_counts'] ?? [];
+        $orderJobSampleCsv = $manifestData['order_job_sample_csv'] ?? [];
+        $orderUnreservedSampleCsv = $manifestData['order_unreserved_job_sample_csv'] ?? [];
+        $orderReservedSampleCsv = $manifestData['order_reserved_job_sample_csv'] ?? [];
+        $orderAccountHints = $manifestData['order_manifest_account_hints'] ?? [];
+        $orderRemoteHints = $manifestData['order_manifest_remote_order_hints'] ?? [];
+        $orderMetaConflicts = $manifestData['order_manifest_metadata_conflicts'] ?? [];
 
         $orderSelectCols = ['id', 'meli_account_id', 'order_id', 'status', 'shipping_status', 'raw', 'created_at'];
         if ($columns['meli_orders_shipping_id']) {
@@ -645,16 +769,26 @@ class QueueReconstructionDiagnosticsService
         $cursor = 0;
         $scopedTotal = $scopedOrderIds !== null ? count($scopedOrderIds) : 0;
         $scopedOffset = 0;
+        $chunkNumber = 0;
 
         if ($scopedOrderIds !== null) {
             $orderStats['expected_distinct_orders'] = $scopedTotal;
         }
 
         while (true) {
+            if ($scopedOrderIds !== null && $scopedOffset >= $scopedTotal) {
+                break;
+            }
+            if ($scopedOrderIds === null && ! $tables['meli_orders']) {
+                break;
+            }
+
+            $chunkNumber++;
+            if ($this->betweenOrderChunksHook !== null && $chunkNumber > 1) {
+                ($this->betweenOrderChunksHook)($chunkNumber);
+            }
+
             if ($scopedOrderIds !== null) {
-                if ($scopedOffset >= $scopedTotal) {
-                    break;
-                }
                 $chunkIds = array_slice($scopedOrderIds, $scopedOffset, $chunk);
                 $scopedOffset += $chunk;
 
@@ -666,10 +800,6 @@ class QueueReconstructionDiagnosticsService
                         ->get()
                     : collect();
             } else {
-                if (! $tables['meli_orders']) {
-                    break;
-                }
-
                 $orders = $db->table('meli_orders')
                     ->select($orderSelectCols)
                     ->where('id', '>', $cursor)
@@ -689,7 +819,6 @@ class QueueReconstructionDiagnosticsService
                 continue;
             }
 
-            // If manifest-scoped AND account_filter was explicitly requested, track filtered-out rows cleanly.
             if ($scopedOrderIds !== null && $accountFilter !== null) {
                 $filtered = [];
                 foreach ($orders as $o) {
@@ -719,6 +848,11 @@ class QueueReconstructionDiagnosticsService
                 ->values()
                 ->all();
 
+            // Optional read-only PK lookup on `jobs` (ONLY when --verify-live-jobs is set; NEVER loads payloads!)
+            $liveJobsById = $hasLiveJobsTable
+                ? $this->loadLiveJobsBySamplePk($db, $queueTable, $batchOrderIds, $orderJobSampleCsv)
+                : [];
+
             // Batch Query 1: meli_order_items
             $itemsByOrderId = [];
             if ($tables['meli_order_items']) {
@@ -734,7 +868,7 @@ class QueueReconstructionDiagnosticsService
                 }
             }
 
-            // Batch Query 2: inventory_channel_order_allocations (by remote_order_id across ALL accounts to catch cross-account conflicts!)
+            // Batch Query 2: inventory_channel_order_allocations
             $allocsByRemoteKey = [];
             $allocsByRemoteOrderId = [];
             $allocSimpleResIds = [];
@@ -760,7 +894,7 @@ class QueueReconstructionDiagnosticsService
                 }
             }
 
-            // Batch Query 3: inventory_reservations (by source_id AND referenced allocation reservation_ids)
+            // Batch Query 3: inventory_reservations
             $reservationsById = [];
             $directResByOrderId = [];
             if ($tables['inventory_reservations']) {
@@ -789,7 +923,7 @@ class QueueReconstructionDiagnosticsService
                 }
             }
 
-            // Batch Query 4: inventory_kit_reservations (by source_id AND referenced allocation reservation_ids)
+            // Batch Query 4: inventory_kit_reservations
             $kitReservationsById = [];
             $directKitResByOrderId = [];
             if ($tables['inventory_kit_reservations']) {
@@ -818,7 +952,6 @@ class QueueReconstructionDiagnosticsService
                 }
             }
 
-            // Collect product IDs (including kit components!) + fulfillment movement keys for this batch.
             $allBatchProductIds = [];
             $batchFulfillmentKeys = [];
             foreach ($orders as $order) {
@@ -884,7 +1017,7 @@ class QueueReconstructionDiagnosticsService
                 }
             }
 
-            // Batch Query 6: manual non-reservation movements for involved products
+            // Batch Query 6: manual non-reservation movements
             $manualMovementsByProduct = [];
             if ($tables['inventory_movements'] && $allBatchProductIds !== []) {
                 $movCols = ['id', 'inventory_product_id', 'type', 'quantity', 'reference_type', 'created_at'];
@@ -915,7 +1048,7 @@ class QueueReconstructionDiagnosticsService
                 }
             }
 
-            // Batch Query 7: R3 durable reconciliation state (ONLY when table exists!)
+            // Batch Query 7: R3 durable reconciliation state
             $r3ByOrderId = [];
             if ($tables['inventory_meli_order_reconciliations']) {
                 foreach ($db->table('inventory_meli_order_reconciliations')->whereIn('meli_order_id', $batchOrderIds)->get() as $r3) {
@@ -923,7 +1056,6 @@ class QueueReconstructionDiagnosticsService
                 }
             }
 
-            // Classify every order in this chunk with ZERO additional DB queries!
             foreach ($orders as $order) {
                 $oid = (int) $order->id;
                 $accStr = (string) ($order->meli_account_id ?? '');
@@ -940,17 +1072,31 @@ class QueueReconstructionDiagnosticsService
                 }
 
                 $jobsCount = $orderJobCounts[$oid] ?? 0;
-                $jobIds = isset($orderJobSampleCsv[$oid]) && $orderJobSampleCsv[$oid] !== ''
-                    ? array_map('intval', explode(',', $orderJobSampleCsv[$oid]))
-                    : [];
-                $jobIdsTruncated = $jobsCount > count($jobIds);
+                $unreservedCount = $orderUnreservedCounts[$oid] ?? 0;
                 $reservedCount = $orderReservedCounts[$oid] ?? 0;
+
+                $jobIds = $this->parseCsvIds($orderJobSampleCsv[$oid] ?? '');
+                $unreservedJobIds = $this->parseCsvIds($orderUnreservedSampleCsv[$oid] ?? '');
+                $reservedJobIds = $this->parseCsvIds($orderReservedSampleCsv[$oid] ?? '');
+
+                $liveCheck = $hasLiveJobsTable
+                    ? $this->summarizeLiveQueueForOrder($jobIds, $reservedCount, $liveJobsById)
+                    : null;
 
                 $result = $this->orderClassifier->classifyExistingOrder($order, [
                     'associated_job_ids' => $jobIds,
                     'associated_jobs_count' => $jobsCount,
-                    'associated_job_ids_truncated' => $jobIdsTruncated,
+                    'associated_job_ids_truncated' => $jobsCount > count($jobIds),
+                    'associated_unreserved_job_ids' => $unreservedJobIds,
+                    'associated_unreserved_jobs_count' => $unreservedCount,
+                    'associated_unreserved_job_ids_truncated' => $unreservedCount > count($unreservedJobIds),
+                    'associated_reserved_job_ids' => $reservedJobIds,
+                    'associated_reserved_job_ids_truncated' => $reservedCount > count($reservedJobIds),
                     'reserved_jobs_count' => $reservedCount,
+                    'manifest_account_hint' => $orderAccountHints[$oid] ?? null,
+                    'manifest_remote_order_hint' => $orderRemoteHints[$oid] ?? null,
+                    'manifest_metadata_conflict' => isset($orderMetaConflicts[$oid]),
+                    'live_queue_verification' => $liveCheck,
                     'order_items' => $itemsByOrderId[$oid] ?? [],
                     'allocations' => $allocs,
                     'cross_account_allocations' => $crossAccountAllocs,
@@ -994,36 +1140,50 @@ class QueueReconstructionDiagnosticsService
                     $jobSecurityCounters,
                     $inlineEntities,
                     $inlineTruncated,
-                    $ndjsonHandle,
-                    $ndjsonHashCtx,
-                    $ndjsonRecordsWritten,
-                    $ndjsonBytesWritten,
+                    $ndjsonStream,
                     $orderStats,
                 );
             }
         }
 
-        // Account for EVERY manifest-scoped order that does not exist in `meli_orders`!
+        // Account for EVERY manifest-scoped order that does not exist in `meli_orders` (including reserved-only!)
         if ($scopedOrderIds !== null && $accountFilter === null) {
+            $missingIds = [];
             foreach ($scopedOrderIds as $scopedId) {
-                if (isset($foundScopedOrderIds[$scopedId])) {
-                    continue;
+                if (! isset($foundScopedOrderIds[$scopedId])) {
+                    $missingIds[] = $scopedId;
                 }
+            }
 
+            $missingLiveJobsById = ($hasLiveJobsTable && $missingIds !== [])
+                ? $this->loadLiveJobsBySamplePk($db, $queueTable, $missingIds, $orderJobSampleCsv)
+                : [];
+
+            foreach ($missingIds as $scopedId) {
                 $jobsCount = $orderJobCounts[$scopedId] ?? 0;
-                $jobIds = isset($orderJobSampleCsv[$scopedId]) && $orderJobSampleCsv[$scopedId] !== ''
-                    ? array_map('intval', explode(',', $orderJobSampleCsv[$scopedId]))
-                    : [];
-                $jobIdsTruncated = $jobsCount > count($jobIds);
+                $unreservedCount = $orderUnreservedCounts[$scopedId] ?? 0;
                 $reservedCount = $orderReservedCounts[$scopedId] ?? 0;
+                $jobIds = $this->parseCsvIds($orderJobSampleCsv[$scopedId] ?? '');
+                $unreservedJobIds = $this->parseCsvIds($orderUnreservedSampleCsv[$scopedId] ?? '');
+                $reservedJobIds = $this->parseCsvIds($orderReservedSampleCsv[$scopedId] ?? '');
+                $liveCheck = $hasLiveJobsTable
+                    ? $this->summarizeLiveQueueForOrder($jobIds, $reservedCount, $missingLiveJobsById)
+                    : null;
 
                 $result = $this->orderClassifier->classifyMissingOrder(
                     $scopedId,
                     $jobIds,
                     $jobsCount,
-                    $jobIdsTruncated,
+                    $jobsCount > count($jobIds),
                     $reservedCount,
                     $tables['inventory_meli_order_reconciliations'],
+                    $unreservedJobIds,
+                    $unreservedCount,
+                    $unreservedCount > count($unreservedJobIds),
+                    $reservedJobIds,
+                    $reservedCount > count($reservedJobIds),
+                    isset($orderMetaConflicts[$scopedId]),
+                    $liveCheck,
                 );
 
                 $orderStats['missing_orders_count']++;
@@ -1048,10 +1208,7 @@ class QueueReconstructionDiagnosticsService
                     $jobSecurityCounters,
                     $inlineEntities,
                     $inlineTruncated,
-                    $ndjsonHandle,
-                    $ndjsonHashCtx,
-                    $ndjsonRecordsWritten,
-                    $ndjsonBytesWritten,
+                    $ndjsonStream,
                     $orderStats,
                 );
             }
@@ -1059,9 +1216,82 @@ class QueueReconstructionDiagnosticsService
     }
 
     /**
-     * Records a single exhaustively classified order into partition counts, NDJSON stream,
-     * bounded inline arrays, R3 stats, and backwards-compatible R2.1 category/anomaly lists.
+     * Optional read-only PK lookup on `jobs` (selects ONLY id, queue, reserved_at, attempts — NEVER payload!).
      *
+     * @param  list<int>  $orderIds
+     * @param  array<int, string>  $orderJobSampleCsv
+     * @return array<int, object>
+     */
+    private function loadLiveJobsBySamplePk(
+        ConnectionInterface $db,
+        string $queueTable,
+        array $orderIds,
+        array $orderJobSampleCsv,
+    ): array {
+        $sampleIds = [];
+        foreach ($orderIds as $oid) {
+            foreach ($this->parseCsvIds($orderJobSampleCsv[$oid] ?? '') as $jid) {
+                $sampleIds[$jid] = true;
+            }
+        }
+
+        if ($sampleIds === []) {
+            return [];
+        }
+
+        $rowsById = [];
+        foreach (array_chunk(array_keys($sampleIds), 500) as $idChunk) {
+            foreach ($db->table($queueTable)->select(['id', 'queue', 'reserved_at', 'attempts'])->whereIn('id', $idChunk)->get() as $row) {
+                $rowsById[(int) $row->id] = $row;
+            }
+        }
+
+        return $rowsById;
+    }
+
+    /**
+     * @param  list<int>  $sampleJobIds
+     * @param  array<int, object>  $liveJobsById
+     * @return array<string, mixed>
+     */
+    private function summarizeLiveQueueForOrder(array $sampleJobIds, int $manifestReservedCount, array $liveJobsById): array
+    {
+        $presentInLive = 0;
+        $absentInLive = 0;
+        $currentlyReservedInLive = 0;
+
+        foreach ($sampleJobIds as $jid) {
+            if (! isset($liveJobsById[$jid])) {
+                $absentInLive++;
+
+                continue;
+            }
+            $presentInLive++;
+            if ($liveJobsById[$jid]->reserved_at !== null) {
+                $currentlyReservedInLive++;
+            }
+        }
+
+        return [
+            'sampled_job_ids_checked' => count($sampleJobIds),
+            'present_in_live_jobs' => $presentInLive,
+            'absent_in_live_jobs' => $absentInLive,
+            'currently_reserved_in_live_jobs' => $currentlyReservedInLive,
+            'manifest_vs_live_reserved_differs' => $currentlyReservedInLive !== $manifestReservedCount,
+        ];
+    }
+
+    /** @return list<int> */
+    private function parseCsvIds(string $csv): array
+    {
+        if ($csv === '') {
+            return [];
+        }
+
+        return array_map('intval', explode(',', $csv));
+    }
+
+    /**
      * @param  array<string, mixed>  $result
      * @param  array<int, bool>  $classifiedOrderIds
      * @param  array<string, list<array<string, mixed>>>  $categories
@@ -1077,8 +1307,7 @@ class QueueReconstructionDiagnosticsService
      * @param  array<string, int>  $jobsByPrimaryCategory
      * @param  array<string, int>  $jobSecurityCounters
      * @param  list<array<string, mixed>>  $inlineEntities
-     * @param  resource|null  $ndjsonHandle
-     * @param  \HashContext|null  $ndjsonHashCtx
+     * @param  array<string, mixed>|null  $ndjsonStream
      * @param  array<string, int>  $orderStats
      */
     private function recordClassifiedOrder(
@@ -1100,10 +1329,7 @@ class QueueReconstructionDiagnosticsService
         array &$jobSecurityCounters,
         array &$inlineEntities,
         bool &$inlineTruncated,
-        $ndjsonHandle,
-        $ndjsonHashCtx,
-        int &$ndjsonRecordsWritten,
-        int &$ndjsonBytesWritten,
+        ?array &$ndjsonStream,
         array &$orderStats,
     ): void {
         $entity = $result['entity'];
@@ -1113,6 +1339,8 @@ class QueueReconstructionDiagnosticsService
         $oid = (int) $entity['local_order_id'];
         $primary = (string) $entity['primary_classification'];
         $jobsCount = (int) $entity['associated_jobs_count'];
+        $unreservedCount = (int) ($entity['associated_unreserved_jobs_count'] ?? $jobsCount);
+        $reservedCount = (int) ($entity['associated_reserved_jobs_count'] ?? 0);
 
         if (isset($classifiedOrderIds[$oid])) {
             $orderStats['duplicate_primary_classifications']++;
@@ -1123,6 +1351,8 @@ class QueueReconstructionDiagnosticsService
 
         $orderStats['accounted_orders']++;
         $orderStats['accounted_order_jobs'] += $jobsCount;
+        $orderStats['accounted_unreserved_order_jobs'] += $unreservedCount;
+        $orderStats['accounted_reserved_order_jobs'] += $reservedCount;
 
         if (! array_key_exists($primary, $primaryPartitionCounts)) {
             throw new QueueRecoveryException(
@@ -1144,7 +1374,6 @@ class QueueReconstructionDiagnosticsService
             $reasonCodeCounts[$rc] = ($reasonCodeCounts[$rc] ?? 0) + 1;
         }
 
-        // R3 durable state summary metrics
         if ($r3TablePresent) {
             $r3Ev = $entity['available_evidence']['r3_reconciliation'] ?? null;
             if (! is_array($r3Ev)) {
@@ -1166,27 +1395,18 @@ class QueueReconstructionDiagnosticsService
             }
         }
 
-        // Stream full entity record to NDJSON incrementally (constant memory!).
-        if (is_resource($ndjsonHandle) && $ndjsonHashCtx !== null) {
+        // D3: Incremental write with partial-write check + SHA-256 update!
+        if ($ndjsonStream !== null) {
             $line = json_encode($entity, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR)."\n";
-            $written = fwrite($ndjsonHandle, $line);
-            if ($written === false || $written !== strlen($line)) {
-                throw new QueueRecoveryException('Error escribiendo línea NDJSON de diagnóstico.', 'ndjson_write_failed');
-            }
-            hash_update($ndjsonHashCtx, $line);
-            $ndjsonRecordsWritten++;
-            $ndjsonBytesWritten += $written;
+            $this->artifactWriter->writeStreamChunk($ndjsonStream, $line, countRecord: true);
         }
 
-        // Bounded inline entities for JSON summary
         if (count($inlineEntities) < $maxInlineEntities) {
             $inlineEntities[] = $entity;
         } elseif ($maxInlineEntities >= 0) {
             $inlineTruncated = true;
         }
 
-        // Populate backwards-compatible R2.1 `reconstructibility_summary`, `categories`, and `schema_anomalies`
-        // (with exact totals always maintained and inline arrays bounded by `$maxInlineEntities`).
         if ($primary === QueueOrderExhaustiveClassifier::PRIMARY_PENDING_HUMAN_REVIEW) {
             $classificationCounts['pending_human_review']++;
             if (count($classification['pending_human_review']) < $maxInlineEntities) {
@@ -1324,7 +1544,7 @@ class QueueReconstructionDiagnosticsService
     }
 
     /**
-     * Evaluates and verifies ALL mandatory R2-DIAG invariants fail-closed.
+     * Evaluates and verifies ALL mandatory R2-DIAG.1 invariants fail-closed (with zero double counting).
      *
      * @param  array<string, mixed>|null  $manifestData
      * @param  array<string, int>  $orderStats
@@ -1358,6 +1578,8 @@ class QueueReconstructionDiagnosticsService
             'duplicate_primary_classifications' => $duplicatePrimary,
             'missing_orders_accounted' => $orderStats['missing_orders_count'],
             'accounted_order_jobs' => $orderStats['accounted_order_jobs'],
+            'accounted_unreserved_order_jobs' => $orderStats['accounted_unreserved_order_jobs'],
+            'accounted_reserved_order_jobs' => $orderStats['accounted_reserved_order_jobs'],
             'total_manifest_entries' => $manifestData !== null ? (int) $manifestData['job_accounting']['total_manifest_entries'] : null,
             'ndjson_records_written' => $ndjsonEnabled ? $ndjsonRecordsWritten : null,
             'all_passed' => true,
@@ -1399,9 +1621,17 @@ class QueueReconstructionDiagnosticsService
 
         if ($manifestData !== null && $accountFilter === null) {
             $ja = $manifestData['job_accounting'];
+            $expectedTotalOrderJobs = (int) ($ja['total_order_job_entries'] ?? $ja['reservation_job_entries']);
+            $expectedUnreservedOrderJobs = (int) ($ja['reservation_unreserved_job_entries'] ?? $ja['reservation_job_entries']);
+            $expectedReservedOrderJobs = (int) ($ja['reservation_reserved_job_entries'] ?? 0);
+            $nonOrderReservedJobs = (int) ($ja['non_order_reserved_job_entries'] ?? 0);
+            $otherClassJobs = (int) ($ja['other_class_job_entries'] ?? 0);
+
+            // Disjoint sum across EVERY manifest entry (zero double counting!):
             $reconciledManifestEntries = $invariants['accounted_order_jobs']
                 + (int) $ja['beauty_job_entries']
-                + (int) $ja['reserved_job_entries']
+                + $nonOrderReservedJobs
+                + $otherClassJobs
                 + (int) $ja['invalid_or_unverifiable_job_entries']
                 + (int) $ja['duplicate_manifest_job_id_entries'];
 
@@ -1413,11 +1643,22 @@ class QueueReconstructionDiagnosticsService
                 );
             }
 
-            if ($invariants['accounted_order_jobs'] !== (int) $ja['reservation_job_entries']) {
+            if ($invariants['accounted_order_jobs'] !== $expectedTotalOrderJobs) {
                 $violations[] = sprintf(
-                    'accounted_order_jobs (%d) != reservation_job_entries (%d)',
+                    'accounted_order_jobs (%d) != total_order_job_entries (%d)',
                     $invariants['accounted_order_jobs'],
-                    (int) $ja['reservation_job_entries'],
+                    $expectedTotalOrderJobs,
+                );
+            }
+
+            if ($invariants['accounted_unreserved_order_jobs'] !== $expectedUnreservedOrderJobs
+                || $invariants['accounted_reserved_order_jobs'] !== $expectedReservedOrderJobs) {
+                $violations[] = sprintf(
+                    'order_job_reserved_split_mismatch: accounted=(%d unres, %d res) != manifest=(%d unres, %d res)',
+                    $invariants['accounted_unreserved_order_jobs'],
+                    $invariants['accounted_reserved_order_jobs'],
+                    $expectedUnreservedOrderJobs,
+                    $expectedReservedOrderJobs,
                 );
             }
         }
