@@ -47,6 +47,13 @@ class HandleInertiaRequests extends Middleware
                 'notifications_summary' => null,
                 'autopartes_access' => $autopartes,
                 'autopartes_nav' => $autopartesNav,
+                'warehouse_dispatches' => [
+                    'enabled' => false,
+                    'read_only' => false,
+                    'apply_ledger' => false,
+                    'meli_stock_sync_enabled' => false,
+                    'can_access' => false,
+                ],
                 'flash' => [
                     'success' => fn () => $request->hasSession() ? $request->session()->get('success') : null,
                     'error' => fn () => $request->hasSession() ? $request->session()->get('error') : null,
@@ -58,6 +65,15 @@ class HandleInertiaRequests extends Middleware
         return [
             ...parent::share($request),
             'autopartes_access' => $autopartes,
+            'warehouse_dispatches' => fn () => [
+                'enabled' => (bool) config('inventory.warehouse_dispatches.enabled', false),
+                'read_only' => (bool) config('inventory.warehouse_dispatches.read_only', false),
+                'apply_ledger' => (bool) config('inventory.warehouse_dispatches.apply_ledger', false),
+                'meli_stock_sync_enabled' => false,
+                'can_access' => $user !== null
+                    && (bool) config('inventory.warehouse_dispatches.enabled', false)
+                    && ($user->isAdmin() || $user->isOperations() || $user->isWarehouse()),
+            ],
             'auth' => [
                 'user' => $user
                     ? [

@@ -2,8 +2,12 @@
 
 namespace App\Providers;
 
+use App\Models\InventoryDispatch;
+use App\Models\InventoryDispatchDestination;
 use App\Models\PurchaseOrder;
 use App\Policies\PurchaseOrderPolicy;
+use App\Policies\WarehouseDispatchDestinationPolicy;
+use App\Policies\WarehouseDispatchPolicy;
 use App\Services\TelegramAlertService;
 use App\Support\AutopartesFailedJobProvider;
 use App\Support\PilotDatabaseGuard;
@@ -30,6 +34,8 @@ class AppServiceProvider extends ServiceProvider
     public function boot(): void
     {
         Gate::policy(PurchaseOrder::class, PurchaseOrderPolicy::class);
+        Gate::policy(InventoryDispatch::class, WarehouseDispatchPolicy::class);
+        Gate::policy(InventoryDispatchDestination::class, WarehouseDispatchDestinationPolicy::class);
 
         PilotDatabaseGuard::enforceIfConfigured();
 

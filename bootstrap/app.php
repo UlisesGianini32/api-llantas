@@ -19,8 +19,14 @@ return Application::configure(basePath: dirname(__DIR__))
             \App\Http\Middleware\RequireAutopartesEnabled::class,
         );
 
+        $middleware->prependToPriorityList(
+            \Illuminate\Routing\Middleware\SubstituteBindings::class,
+            \App\Http\Middleware\RequireWarehouseDispatchesEnabled::class,
+        );
+
         $middleware->alias([
             'role' => RequireRole::class,
+            'warehouse_dispatches.enabled' => \App\Http\Middleware\RequireWarehouseDispatchesEnabled::class,
         ]);
 
         $middleware->web(append: [
