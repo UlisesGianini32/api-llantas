@@ -22,10 +22,7 @@ class StoreInventoryMovementRequest extends FormRequest
                 'required',
                 'string',
                 Rule::in([
-                    ...array_values(array_diff(
-                        InventoryMovement::types(),
-                        [InventoryMovement::TRANSFER_IN, InventoryMovement::TRANSFER_OUT],
-                    )),
+                    ...InventoryMovement::manualTypes(),
                     'TRANSFER',
                 ]),
             ],

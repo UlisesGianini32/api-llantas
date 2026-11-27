@@ -25,12 +25,23 @@ class InventoryMovement extends Model
 
     public const TRANSFER_OUT = 'TRANSFER_OUT';
 
+    public const DISPATCH_OUT = 'DISPATCH_OUT';
+
+    public const DISPATCH_RETURN = 'DISPATCH_RETURN';
+
+    /** @var list<string> */
+    public const DISPATCH_RESERVED_TYPES = [
+        self::DISPATCH_OUT,
+        self::DISPATCH_RETURN,
+    ];
+
     public const POSITIVE_TYPES = [
         self::INITIAL,
         self::RECEIPT,
         self::RETURN,
         self::ADJUSTMENT_IN,
         self::TRANSFER_IN,
+        self::DISPATCH_RETURN,
     ];
 
     public const NEGATIVE_TYPES = [
@@ -38,6 +49,7 @@ class InventoryMovement extends Model
         self::ADJUSTMENT_OUT,
         self::DAMAGE,
         self::TRANSFER_OUT,
+        self::DISPATCH_OUT,
     ];
 
     protected $fillable = [
@@ -83,5 +95,28 @@ class InventoryMovement extends Model
     public static function types(): array
     {
         return array_merge(self::POSITIVE_TYPES, self::NEGATIVE_TYPES);
+    }
+
+    /**
+     * Movement types permitted from generic manual movement endpoints/forms.
+     * Excludes TRANSFER_IN/TRANSFER_OUT (handled via TRANSFER) and dispatch-reserved types.
+     *
+     * @return list<string>
+     */
+    public static function manualTypes(): array
+    {
+        return array_values(array_diff(
+            self::types(),
+            [
+                self::TRANSFER_IN,
+                self::TRANSFER_OUT,
+                ...self::DISPATCH_RESERVED_TYPES,
+            ],
+        ));
+    }
+
+    public static function isDispatchReservedType(string $type): bool
+    {
+        return in_array($type, self::DISPATCH_RESERVED_TYPES, true);
     }
 }

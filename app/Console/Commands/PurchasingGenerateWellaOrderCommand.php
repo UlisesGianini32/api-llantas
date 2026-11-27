@@ -259,6 +259,7 @@ class PurchasingGenerateWellaOrderCommand extends Command
 
                 if (Schema::hasTable('inventory_movements')) {
                     $localSales = (int) abs(InventoryMovement::where('inventory_product_id', $product->id)
+                        ->whereNotIn('type', InventoryMovement::DISPATCH_RESERVED_TYPES)
                         ->where(function ($q) {
                             $q->where('type', InventoryMovement::SALE)->orWhere('quantity', '<', 0);
                         })

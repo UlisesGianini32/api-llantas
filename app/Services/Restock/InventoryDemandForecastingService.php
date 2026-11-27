@@ -380,6 +380,7 @@ class InventoryDemandForecastingService
             ->selectRaw('SUM(CASE WHEN occurred_at >= ? AND occurred_at <= ? THEN ABS(quantity) ELSE 0 END) as sales_ly_month', [$lyMonthStart, $lyMonthEnd])
             ->selectRaw('SUM(CASE WHEN occurred_at >= ? AND occurred_at <= ? THEN ABS(quantity) ELSE 0 END) as sales_ly_year', [$lyYearStart, $lyYearEnd])
             ->whereIn('inventory_product_id', $productIds)
+            ->whereNotIn('type', InventoryMovement::DISPATCH_RESERVED_TYPES)
             ->where(function ($q) {
                 $q->where('type', InventoryMovement::SALE)
                     ->orWhere('quantity', '<', 0);
@@ -648,6 +649,7 @@ class InventoryDemandForecastingService
         // 1. Ventas en almacén físico local (mostrador POS, salidas)
         $localSales = (int) abs(InventoryMovement::query()
             ->where('inventory_product_id', $product->id)
+            ->whereNotIn('type', InventoryMovement::DISPATCH_RESERVED_TYPES)
             ->where(function ($q) {
                 $q->where('type', InventoryMovement::SALE)
                     ->orWhere('quantity', '<', 0);

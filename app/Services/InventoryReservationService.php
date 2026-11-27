@@ -157,6 +157,9 @@ class InventoryReservationService
             }
 
             $type = $movementData['type'] ?? InventoryMovement::SALE;
+            if (InventoryMovement::isDispatchReservedType((string) $type)) {
+                throw new InvalidArgumentException('Los tipos de movimiento reservados para Salidas de Almacén no pueden utilizarse al cumplir reservas.');
+            }
             if (! in_array($type, InventoryMovement::NEGATIVE_TYPES, true)) {
                 throw new InvalidArgumentException('El movimiento de cumplimiento debe ser una salida.');
             }

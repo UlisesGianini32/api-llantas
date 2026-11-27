@@ -22,6 +22,12 @@ class InventoryActorPresenter
             return $movement->createdBy->name;
         }
 
+        if ($movement->reference_type === 'inventory_dispatch') {
+            $dispatchRef = trim((string) ($movement->reference ?: ($movement->metadata['dispatch_number'] ?? '')));
+
+            return $dispatchRef !== '' ? "Salida de Almacén ({$dispatchRef})" : 'Salida de Almacén';
+        }
+
         // Si la referencia directa apunta a una orden de MeLi
         if ($movement->reference_type === 'meli_order' && $movement->reference_id) {
             $accountLabel = self::getAccountLabelByOrderId($movement->reference_id);

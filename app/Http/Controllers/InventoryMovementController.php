@@ -74,6 +74,8 @@ class InventoryMovementController extends Controller
                 'INITIAL',
                 'TRANSFER_IN',
                 'TRANSFER_OUT',
+                'DISPATCH_OUT',
+                'DISPATCH_RETURN',
             ],
         ]);
     }
