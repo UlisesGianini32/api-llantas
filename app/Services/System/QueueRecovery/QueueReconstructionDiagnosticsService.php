@@ -12,34 +12,54 @@ use Carbon\CarbonImmutable;
 use Illuminate\Database\ConnectionInterface;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
+use Throwable;
 
 /**
- * Strictly READ-ONLY reconstruction diagnostics inventory for R2.1.
- * Aligned to the real production schema (`inventory_movements.occurred_at`,
- * `meli_beauty_scheduled_discount_items`, `meli_order_items.remote_line_key`,
- * `inventory_channel_links`, `meli_accounts`).
+ * Strictly READ-ONLY exhaustive reconstruction diagnostics for R2-DIAG (format_version 2.0).
  *
- * Never mutates any database table, never executes jobs, and never makes HTTP calls to Mercado Libre.
+ * Guarantees:
+ * - 100% read-only: never mutates any DB table, never executes jobs, never calls Mercado Libre HTTP APIs.
+ * - Exhaustive, mutually exclusive 7-category primary classification for EVERY distinct order in scope,
+ *   alongside overlapping secondary anomalies and non-authorizing operational recommendations.
+ * - Fail-closed invariants: throws `QueueRecoveryException(..., 'diagnostic_invariant_violation')`
+ *   if ANY accounting or partitioning invariant fails.
+ * - Memory-bounded streaming manifest reader + incremental NDJSON writer with SHA-256 verification
+ *   designed for 100k–2.76M historical jobs under < 160 MiB peak PHP memory.
+ * - Full compatibility with both R3 durable state (`inventory_meli_order_reconciliations`)
+ *   and pre-R3 legacy production schemas, plus backwards-compatible R2.1 report keys.
  */
 class QueueReconstructionDiagnosticsService
 {
-    /** @var list<string> */
-    private const FULFILLED_SHIPPING_STATUSES = ['shipped', 'delivered', 'in_transit'];
+    public const FORMAT_VERSION = '2.0';
+
+    public const DEFAULT_MAX_INLINE_ENTITIES = 2000;
+
+    /** @var (callable(array<string, mixed>): array<string, mixed>)|null */
+    private $invariantCheckMutator = null;
 
     public function __construct(
         private readonly QueueRecoveryManifest $manifestManager,
         private readonly QueuePayloadInspector $inspector,
         private readonly InventoryMeliOrderReservationCutover $cutover,
         private readonly MeliBeautyPromotionWindow $beautyWindow,
+        private readonly QueueManifestStreamReader $manifestStreamReader = new QueueManifestStreamReader,
+        private readonly QueueOrderExhaustiveClassifier $orderClassifier = new QueueOrderExhaustiveClassifier,
+        private readonly QueueRecoveryPathGuard $pathGuard = new QueueRecoveryPathGuard,
     ) {}
 
     /**
-     * Generates a complete read-only inventory distinguishing all 11 R2 categories,
-     * real-schema anomalies (deleted/modified Beauty rules, ambiguous links, missing remote_line_key,
-     * account mismatches), and explicit 3-tier classification:
-     * - reconstructible_candidates
-     * - ambiguous_entities
-     * - pending_human_review
+     * Test hook to inject an invariant violation and prove fail-closed behavior deterministically.
+     *
+     * @param  (callable(array<string, mixed>): array<string, mixed>)|null  $mutator
+     */
+    public function setInvariantCheckMutator(?callable $mutator): void
+    {
+        $this->invariantCheckMutator = $mutator;
+    }
+
+    /**
+     * Runs exhaustive, strictly read-only diagnostics with fail-closed invariants and optional
+     * streaming NDJSON output for large manifests.
      *
      * @param  array{
      *     manifest_path?: ?string,
@@ -48,12 +68,16 @@ class QueueReconstructionDiagnosticsService
      *     account_id?: ?int,
      *     cutover?: ?string,
      *     chunk?: int,
-     *     connection?: ?string
+     *     connection?: ?string,
+     *     ndjson_output_path?: ?string,
+     *     max_inline_entities?: ?int,
+     *     summary_only?: bool
      * }  $options
      * @return array<string, mixed>
      */
     public function diagnose(array $options = []): array
     {
+        $startedAt = microtime(true);
         $connName = is_string($options['connection'] ?? null) && trim($options['connection']) !== ''
             ? trim($options['connection'])
             : (string) config('database.default');
@@ -63,38 +87,41 @@ class QueueReconstructionDiagnosticsService
         $accountFilter = isset($options['account_id']) && $options['account_id'] !== null && $options['account_id'] !== ''
             ? (int) $options['account_id']
             : null;
+        $summaryOnly = (bool) ($options['summary_only'] ?? false);
+        $maxInlineEntities = $summaryOnly
+            ? 0
+            : max(0, (int) ($options['max_inline_entities'] ?? self::DEFAULT_MAX_INLINE_ENTITIES));
 
+        $ndjsonOutputPath = isset($options['ndjson_output_path']) && trim((string) $options['ndjson_output_path']) !== ''
+            ? trim((string) $options['ndjson_output_path'])
+            : null;
+
+        $manifestData = null;
         $scopedOrderIds = null;
         $scopedDiscountIds = null;
         $manifestMeta = null;
 
         if (isset($options['manifest_path']) && trim((string) $options['manifest_path']) !== '') {
-            $manifest = $this->manifestManager->loadAndVerify(
+            $manifestData = $this->manifestStreamReader->readAndVerify(
                 trim((string) $options['manifest_path']),
                 $this->inspector,
                 isset($options['expected_manifest_sha256']) ? (string) $options['expected_manifest_sha256'] : null,
                 isset($options['hmac_key']) ? (string) $options['hmac_key'] : null,
-                requireOperatorApproval: false,
             );
-            $scopedOrderIds = [];
-            $scopedDiscountIds = [];
-            foreach ((array) $manifest['entries'] as $entry) {
-                if (($entry['entity_type'] ?? null) === 'meli_order') {
-                    $scopedOrderIds[(int) $entry['entity_id']] = true;
-                } elseif (($entry['entity_type'] ?? null) === 'beauty_discount') {
-                    $scopedDiscountIds[(int) $entry['entity_id']] = true;
-                }
-            }
-            $scopedOrderIds = array_keys($scopedOrderIds);
-            sort($scopedOrderIds);
-            $scopedDiscountIds = array_keys($scopedDiscountIds);
-            sort($scopedDiscountIds);
+
+            $scopedOrderIds = array_keys($manifestData['order_job_counts']);
+            $scopedDiscountIds = $manifestData['discount_ids'];
 
             $manifestMeta = [
-                'incident_id' => $manifest['incident_id'],
-                'manifest_sha256' => $manifest['manifest_sha256'],
+                'format' => $manifestData['format'],
+                'schema_version' => $manifestData['schema_version'],
+                'incident_id' => $manifestData['incident_id'],
+                'manifest_sha256' => $manifestData['manifest_sha256'],
+                'file_sha256' => $manifestData['file_sha256'],
+                'hmac_verified' => $manifestData['hmac_verified'],
                 'distinct_orders_in_manifest' => count($scopedOrderIds),
                 'distinct_discounts_in_manifest' => count($scopedDiscountIds),
+                'total_manifest_entries' => (int) $manifestData['job_accounting']['total_manifest_entries'],
             ];
         }
 
@@ -111,6 +138,7 @@ class QueueReconstructionDiagnosticsService
             'inventory_kit_components' => $schema->hasTable('inventory_kit_components'),
             'inventory_products' => $schema->hasTable('inventory_products'),
             'inventory_movements' => $schema->hasTable('inventory_movements'),
+            'inventory_meli_order_reconciliations' => $schema->hasTable('inventory_meli_order_reconciliations'),
             'meli_beauty_scheduled_discounts' => $schema->hasTable('meli_beauty_scheduled_discounts'),
             'meli_beauty_scheduled_discount_items' => $schema->hasTable('meli_beauty_scheduled_discount_items'),
             'meli_scheduled_price_states' => $schema->hasTable('meli_scheduled_price_states'),
@@ -138,6 +166,7 @@ class QueueReconstructionDiagnosticsService
             'expired_beauty_promotions' => [],
             'remote_states_requiring_verification' => [],
         ];
+        $categoryCounts = array_fill_keys(array_keys($categories), 0);
 
         $schemaAnomalies = [
             'missing_orders_in_manifest' => [],
@@ -147,52 +176,219 @@ class QueueReconstructionDiagnosticsService
             'deleted_beauty_rules' => [],
             'modified_beauty_rules_orphaned_states' => [],
         ];
+        $schemaAnomalyCounts = array_fill_keys(array_keys($schemaAnomalies), 0);
 
         $classification = [
             'reconstructible_candidates' => [],
             'ambiguous_entities' => [],
             'pending_human_review' => [],
         ];
+        $classificationCounts = [
+            'reconstructible_candidates' => 0,
+            'ambiguous_entities' => 0,
+            'pending_human_review' => 0,
+        ];
 
-        if ($tables['meli_orders']) {
-            $this->diagnoseOrders(
-                $db,
-                $tables,
-                $validAccountIds,
-                $scopedOrderIds,
+        $primaryPartitionCounts = array_fill_keys(QueueOrderExhaustiveClassifier::PRIMARY_CATEGORIES, 0);
+        $secondaryAnomalyCounts = [];
+        $reasonCodeCounts = [];
+        $r3StateCounts = [
+            'IDLE' => 0,
+            'PENDING' => 0,
+            'PROCESSING' => 0,
+            'FAILED' => 0,
+            'ABSENT_ROW' => 0,
+            'EXPIRED_LEASES' => 0,
+            'STOCK_SYNC_REQUIRED' => 0,
+            'PENDING_REVISION_UNPROCESSED' => 0,
+        ];
+        $jobsByPrimaryCategory = array_fill_keys(QueueOrderExhaustiveClassifier::PRIMARY_CATEGORIES, 0);
+        $jobSecurityCounters = [
+            'jobs_for_missing_orders' => 0,
+            'jobs_for_pending_obligations' => 0,
+        ];
+
+        $inlineEntities = [];
+        $inlineTruncated = false;
+
+        // Open incremental atomic NDJSON writer when requested.
+        $ndjsonHandle = null;
+        $ndjsonTempPath = null;
+        $ndjsonHashCtx = null;
+        $ndjsonRecordsWritten = 0;
+        $ndjsonBytesWritten = 0;
+
+        if ($ndjsonOutputPath !== null) {
+            $safeNdjsonPath = $this->pathGuard->assertSafeOutputPath($ndjsonOutputPath, false, false);
+            $dir = dirname($safeNdjsonPath);
+            if (! is_dir($dir) && ! @mkdir($dir, 0750, true) && ! is_dir($dir)) {
+                throw new QueueRecoveryException("No se pudo crear el directorio para salida NDJSON: '{$dir}'.", 'ndjson_write_failed');
+            }
+            $ndjsonTempPath = $safeNdjsonPath.'.tmp.'.getmypid().'.'.bin2hex(random_bytes(4));
+            $ndjsonHandle = @fopen($ndjsonTempPath, 'wb');
+            if ($ndjsonHandle === false) {
+                throw new QueueRecoveryException("No se pudo abrir archivo temporal NDJSON: '{$ndjsonTempPath}'.", 'ndjson_write_failed');
+            }
+            $ndjsonHashCtx = hash_init('sha256');
+            $ndjsonOutputPath = $safeNdjsonPath;
+        }
+
+        $orderStats = [
+            'expected_distinct_orders' => 0,
+            'accounted_orders' => 0,
+            'accounted_order_jobs' => 0,
+            'duplicate_primary_classifications' => 0,
+            'missing_orders_count' => 0,
+            'filtered_out_by_account_count' => 0,
+        ];
+
+        try {
+            if ($tables['meli_orders'] || $scopedOrderIds !== null) {
+                $this->diagnoseOrders(
+                    $db,
+                    $tables,
+                    $validAccountIds,
+                    $scopedOrderIds,
+                    $manifestData,
+                    $accountFilter,
+                    $cutoverAt,
+                    $chunk,
+                    $maxInlineEntities,
+                    $categories,
+                    $categoryCounts,
+                    $schemaAnomalies,
+                    $schemaAnomalyCounts,
+                    $classification,
+                    $classificationCounts,
+                    $primaryPartitionCounts,
+                    $secondaryAnomalyCounts,
+                    $reasonCodeCounts,
+                    $r3StateCounts,
+                    $jobsByPrimaryCategory,
+                    $jobSecurityCounters,
+                    $inlineEntities,
+                    $inlineTruncated,
+                    $ndjsonHandle,
+                    $ndjsonHashCtx,
+                    $ndjsonRecordsWritten,
+                    $ndjsonBytesWritten,
+                    $orderStats,
+                );
+            }
+
+            if ($tables['meli_beauty_scheduled_discounts']) {
+                $this->diagnoseBeautyPromotions(
+                    $db,
+                    $tables,
+                    $validAccountIds,
+                    $scopedDiscountIds,
+                    $accountFilter,
+                    $maxInlineEntities,
+                    $categories,
+                    $categoryCounts,
+                    $schemaAnomalies,
+                    $schemaAnomalyCounts,
+                    $classification,
+                    $classificationCounts,
+                );
+            }
+
+            $invariants = $this->evaluateAndVerifyInvariants(
+                $manifestData,
                 $accountFilter,
-                $cutoverAt,
-                $chunk,
-                $categories,
-                $schemaAnomalies,
-                $classification,
+                $orderStats,
+                $primaryPartitionCounts,
+                $ndjsonOutputPath !== null,
+                $ndjsonRecordsWritten,
             );
+        } catch (Throwable $e) {
+            if (is_resource($ndjsonHandle)) {
+                fclose($ndjsonHandle);
+            }
+            if ($ndjsonTempPath !== null && is_file($ndjsonTempPath)) {
+                @unlink($ndjsonTempPath);
+            }
+
+            throw $e;
         }
 
-        if ($tables['meli_beauty_scheduled_discounts']) {
-            $this->diagnoseBeautyPromotions(
-                $db,
-                $tables,
-                $validAccountIds,
-                $scopedDiscountIds,
-                $accountFilter,
-                $categories,
-                $schemaAnomalies,
-                $classification,
-            );
+        $ndjsonSha256 = null;
+        if (is_resource($ndjsonHandle) && $ndjsonTempPath !== null && $ndjsonOutputPath !== null && $ndjsonHashCtx !== null) {
+            fflush($ndjsonHandle);
+            fclose($ndjsonHandle);
+            $ndjsonSha256 = hash_final($ndjsonHashCtx);
+            @chmod($ndjsonTempPath, 0600);
+            if (! @rename($ndjsonTempPath, $ndjsonOutputPath)) {
+                @unlink($ndjsonTempPath);
+                throw new QueueRecoveryException("No se pudo finalizar el archivo NDJSON en '{$ndjsonOutputPath}'.", 'ndjson_write_failed');
+            }
+            @chmod($ndjsonOutputPath, 0600);
         }
 
-        $counts = [];
-        foreach ($categories as $key => $items) {
-            $counts[$key] = count($items);
-        }
+        ksort($secondaryAnomalyCounts);
+        ksort($reasonCodeCounts);
 
-        $anomalyCounts = [];
-        foreach ($schemaAnomalies as $key => $items) {
-            $anomalyCounts[$key] = count($items);
-        }
+        $jobAccounting = $manifestData['job_accounting'] ?? [
+            'total_manifest_entries' => 0,
+            'reservation_job_entries' => 0,
+            'beauty_job_entries' => 0,
+            'reserved_job_entries' => 0,
+            'reserved_job_entries_sample' => [],
+            'invalid_or_unverifiable_job_entries' => 0,
+            'invalid_or_unverifiable_job_samples' => [],
+            'duplicate_manifest_job_id_entries' => 0,
+            'duplicate_manifest_job_ids_sample' => [],
+            'upper_bound_exceeded_entries' => 0,
+            'distinct_orders_in_manifest' => 0,
+            'distinct_discounts_in_manifest' => 0,
+            'orders_with_single_job' => 0,
+            'orders_with_multiple_jobs' => 0,
+            'extra_duplicate_jobs_for_same_order' => 0,
+            'jobs_per_order_distribution' => [],
+            'manifest_declared_preserved_reserved' => 0,
+            'manifest_declared_preserved_invalid_json' => 0,
+            'manifest_declared_preserved_inconsistent' => 0,
+            'manifest_declared_preserved_other_modules' => 0,
+            'manifest_declared_reserved_job_ids_sample' => [],
+            'manifest_declared_invalid_payload_job_ids_sample' => [],
+            'manifest_declared_inconsistent_payload_job_ids_sample' => [],
+        ];
+
+        $historicalRecoverySecurity = [
+            'total_jobs_in_manifest' => (int) $jobAccounting['total_manifest_entries'],
+            'reservation_jobs_in_manifest' => (int) $jobAccounting['reservation_job_entries'],
+            'distinct_orders_in_manifest' => (int) $jobAccounting['distinct_orders_in_manifest'],
+            'orders_with_single_job' => (int) $jobAccounting['orders_with_single_job'],
+            'orders_with_multiple_jobs' => (int) $jobAccounting['orders_with_multiple_jobs'],
+            'extra_duplicate_jobs_for_same_order' => (int) $jobAccounting['extra_duplicate_jobs_for_same_order'],
+            'jobs_per_order_distribution' => $jobAccounting['jobs_per_order_distribution'],
+            'reserved_jobs_count' => (int) $jobAccounting['reserved_job_entries'] + (int) $jobAccounting['manifest_declared_preserved_reserved'],
+            'invalid_payload_jobs_count' => (int) $jobAccounting['invalid_or_unverifiable_job_entries']
+                + (int) $jobAccounting['manifest_declared_preserved_invalid_json']
+                + (int) $jobAccounting['manifest_declared_preserved_inconsistent'],
+            'other_module_jobs_preserved' => (int) $jobAccounting['manifest_declared_preserved_other_modules'],
+            'jobs_for_missing_orders' => $jobSecurityCounters['jobs_for_missing_orders'],
+            'jobs_for_ambiguous_orders' => $jobsByPrimaryCategory[QueueOrderExhaustiveClassifier::PRIMARY_AMBIGUOUS_ENTITIES],
+            'jobs_for_pending_human_review_orders' => $jobsByPrimaryCategory[QueueOrderExhaustiveClassifier::PRIMARY_PENDING_HUMAN_REVIEW],
+            'jobs_for_pending_obligations' => $jobSecurityCounters['jobs_for_pending_obligations'],
+            'jobs_for_reconstructible_candidates' => $jobsByPrimaryCategory[QueueOrderExhaustiveClassifier::PRIMARY_RECONSTRUCTIBLE_CANDIDATES],
+            'jobs_for_consistent_orders' => $jobsByPrimaryCategory[QueueOrderExhaustiveClassifier::PRIMARY_CONSISTENT_NO_ACTION_NEEDED],
+            'jobs_for_out_of_scope_orders' => $jobsByPrimaryCategory[QueueOrderExhaustiveClassifier::PRIMARY_OUT_OF_SCOPE_NO_LINK]
+                + $jobsByPrimaryCategory[QueueOrderExhaustiveClassifier::PRIMARY_OUT_OF_SCOPE_PRE_CUTOVER_OR_IGNORED],
+            'jobs_for_insufficient_evidence_orders' => $jobsByPrimaryCategory[QueueOrderExhaustiveClassifier::PRIMARY_INSUFFICIENT_EVIDENCE],
+            'jobs_by_primary_classification' => $jobsByPrimaryCategory,
+            'safety_guards' => [
+                'duplicate_entity_id_does_not_imply_deletable' => true,
+                'single_job_orders_must_not_lose_reconciliation_obligation' => true,
+                'automatic_job_deletion_authorized' => false,
+                'automatic_inventory_mutation_authorized' => false,
+            ],
+        ];
+
+        $durationMs = round((microtime(true) - $startedAt) * 1000, 2);
 
         return [
+            'format_version' => self::FORMAT_VERSION,
             'generated_at' => now()->utc()->toIso8601String(),
             'mode' => 'read_only_diagnosis',
             'connection' => $connName,
@@ -201,8 +397,42 @@ class QueueReconstructionDiagnosticsService
             'account_filter' => $accountFilter,
             'manifest_scope' => $manifestMeta,
             'tables_present' => $tables,
+            'r3_compatibility' => [
+                'r3_durable_state_table_present' => $tables['inventory_meli_order_reconciliations'],
+                'schema_mode' => $tables['inventory_meli_order_reconciliations'] ? 'r3_durable_enabled' : 'pre_r3_legacy',
+                'absence_treated_as_reconciled' => false,
+                'state_counts' => $tables['inventory_meli_order_reconciliations'] ? $r3StateCounts : null,
+            ],
+            'invariants' => $invariants,
+            'exhaustive_classification' => [
+                'priority_order' => QueueOrderExhaustiveClassifier::PRIMARY_CATEGORIES,
+                'primary_partition_counts' => $primaryPartitionCounts,
+                'secondary_anomaly_counts' => $secondaryAnomalyCounts,
+                'reason_code_counts' => $reasonCodeCounts,
+                'inline_entities_count' => count($inlineEntities),
+                'inline_limit' => $maxInlineEntities,
+                'inline_truncated' => $inlineTruncated,
+                'ndjson_output' => $ndjsonOutputPath !== null ? [
+                    'path' => $ndjsonOutputPath,
+                    'sha256' => $ndjsonSha256,
+                    'records' => $ndjsonRecordsWritten,
+                    'size_bytes' => $ndjsonBytesWritten,
+                ] : null,
+                'entities' => $inlineEntities,
+            ],
+            'manifest_job_accounting' => $jobAccounting,
+            'historical_recovery_security' => $historicalRecoverySecurity,
+            'performance_metrics' => [
+                'duration_ms' => $durationMs,
+                'peak_memory_bytes' => memory_get_peak_usage(true),
+                'peak_memory_mib' => round(memory_get_peak_usage(true) / 1048576, 2),
+                'chunk_size' => $chunk,
+            ],
+            // Backwards-compatible R2.1 keys preserved verbatim:
             'reconstructibility_policy' => [
                 'automatic_reconstructibility_assumed' => false,
+                'automatic_job_deletion_authorized' => false,
+                'automatic_inventory_mutation_authorized' => false,
                 'categories_requiring_manual_or_remote_verification' => [
                     'shipped_during_outage_never_reserved',
                     'orders_with_manual_movements',
@@ -216,14 +446,10 @@ class QueueReconstructionDiagnosticsService
                     'account_mismatches',
                 ],
             ],
-            'counts' => $counts,
-            'anomaly_counts' => $anomalyCounts,
+            'counts' => $categoryCounts,
+            'anomaly_counts' => $schemaAnomalyCounts,
             'reconstructibility_summary' => [
-                'counts' => [
-                    'reconstructible_candidates' => count($classification['reconstructible_candidates']),
-                    'ambiguous_entities' => count($classification['ambiguous_entities']),
-                    'pending_human_review' => count($classification['pending_human_review']),
-                ],
+                'counts' => $classificationCounts,
                 'reconstructible_candidates' => $classification['reconstructible_candidates'],
                 'ambiguous_entities' => $classification['ambiguous_entities'],
                 'pending_human_review' => $classification['pending_human_review'],
@@ -237,82 +463,215 @@ class QueueReconstructionDiagnosticsService
      * @param  array<string, bool>  $tables
      * @param  array<int, bool>  $validAccountIds
      * @param  list<int>|null  $scopedOrderIds
+     * @param  array<string, mixed>|null  $manifestData
      * @param  array<string, list<array<string, mixed>>>  $categories
+     * @param  array<string, int>  $categoryCounts
      * @param  array<string, list<array<string, mixed>>>  $schemaAnomalies
+     * @param  array<string, int>  $schemaAnomalyCounts
      * @param  array<string, list<array<string, mixed>>>  $classification
+     * @param  array<string, int>  $classificationCounts
+     * @param  array<string, int>  $primaryPartitionCounts
+     * @param  array<string, int>  $secondaryAnomalyCounts
+     * @param  array<string, int>  $reasonCodeCounts
+     * @param  array<string, int>  $r3StateCounts
+     * @param  array<string, int>  $jobsByPrimaryCategory
+     * @param  array<string, int>  $jobSecurityCounters
+     * @param  list<array<string, mixed>>  $inlineEntities
+     * @param  resource|null  $ndjsonHandle
+     * @param  \HashContext|null  $ndjsonHashCtx
+     * @param  array<string, int>  $orderStats
      */
     private function diagnoseOrders(
         ConnectionInterface $db,
         array $tables,
         array $validAccountIds,
         ?array $scopedOrderIds,
+        ?array $manifestData,
         ?int $accountFilter,
         ?CarbonImmutable $cutoverAt,
         int $chunk,
+        int $maxInlineEntities,
         array &$categories,
+        array &$categoryCounts,
         array &$schemaAnomalies,
+        array &$schemaAnomalyCounts,
         array &$classification,
+        array &$classificationCounts,
+        array &$primaryPartitionCounts,
+        array &$secondaryAnomalyCounts,
+        array &$reasonCodeCounts,
+        array &$r3StateCounts,
+        array &$jobsByPrimaryCategory,
+        array &$jobSecurityCounters,
+        array &$inlineEntities,
+        bool &$inlineTruncated,
+        $ndjsonHandle,
+        $ndjsonHashCtx,
+        int &$ndjsonRecordsWritten,
+        int &$ndjsonBytesWritten,
+        array &$orderStats,
     ): void {
         $schema = Schema::connection($db->getName());
-        $hasMovOccurredAt = $tables['inventory_movements'] && $schema->hasColumn('inventory_movements', 'occurred_at');
-        $hasItemVarCol = $tables['meli_order_items'] && $schema->hasColumn('meli_order_items', 'variation_id');
-        $hasItemLineKeyCol = $tables['meli_order_items'] && $schema->hasColumn('meli_order_items', 'remote_line_key');
+        $columns = [
+            'meli_orders_shipping_id' => $tables['meli_orders'] && $schema->hasColumn('meli_orders', 'shipping_id'),
+            'meli_orders_shipping_raw' => $tables['meli_orders'] && $schema->hasColumn('meli_orders', 'shipping_raw'),
+            'item_variation_id' => $tables['meli_order_items'] && $schema->hasColumn('meli_order_items', 'variation_id'),
+            'item_remote_line_key' => $tables['meli_order_items'] && $schema->hasColumn('meli_order_items', 'remote_line_key'),
+            'link_order_reservation_enabled' => $tables['inventory_channel_links'] && $schema->hasColumn('inventory_channel_links', 'order_reservation_enabled'),
+            'link_stock_sync_enabled' => $tables['inventory_channel_links'] && $schema->hasColumn('inventory_channel_links', 'stock_sync_enabled'),
+            'link_remote_user_product_id' => $tables['inventory_channel_links'] && $schema->hasColumn('inventory_channel_links', 'remote_user_product_id'),
+            'alloc_diagnostic_code' => $tables['inventory_channel_order_allocations'] && $schema->hasColumn('inventory_channel_order_allocations', 'diagnostic_code'),
+            'res_metadata' => $tables['inventory_reservations'] && $schema->hasColumn('inventory_reservations', 'metadata'),
+            'kit_res_metadata' => $tables['inventory_kit_reservations'] && $schema->hasColumn('inventory_kit_reservations', 'metadata'),
+            'mov_occurred_at' => $tables['inventory_movements'] && $schema->hasColumn('inventory_movements', 'occurred_at'),
+            'mov_external_key' => $tables['inventory_movements'] && $schema->hasColumn('inventory_movements', 'external_key'),
+            'mov_reference_id' => $tables['inventory_movements'] && $schema->hasColumn('inventory_movements', 'reference_id'),
+            'mov_reference' => $tables['inventory_movements'] && $schema->hasColumn('inventory_movements', 'reference'),
+            'mov_notes' => $tables['inventory_movements'] && $schema->hasColumn('inventory_movements', 'notes'),
+        ];
 
+        // Preload compact catalog maps ONCE (O(products + links), zero per-order N+1).
+        $productsById = [];
         $kitProductIds = [];
         $componentProductIds = [];
+        $kitComponentsByKitId = [];
+
         if ($tables['inventory_products']) {
-            foreach ($db->table('inventory_products')->where('product_type', 'kit')->pluck('id') as $pid) {
-                $kitProductIds[(int) $pid] = true;
+            $prodCols = ['id', 'sku', 'is_active'];
+            $hasProductType = $schema->hasColumn('inventory_products', 'product_type');
+            if ($hasProductType) {
+                $prodCols[] = 'product_type';
+            }
+            foreach ($db->table('inventory_products')->get($prodCols) as $p) {
+                $pid = (int) $p->id;
+                $ptype = $hasProductType ? strtolower(trim((string) ($p->product_type ?? 'simple'))) : 'simple';
+                $productsById[$pid] = [
+                    'sku' => $p->sku !== null ? (string) $p->sku : null,
+                    'is_active' => (bool) ($p->is_active ?? true),
+                    'product_type' => $ptype,
+                ];
+                if ($ptype === 'kit') {
+                    $kitProductIds[$pid] = true;
+                }
             }
         }
+
         if ($tables['inventory_kit_components']) {
             foreach ($db->table('inventory_kit_components')->select(['kit_product_id', 'component_product_id'])->get() as $kc) {
-                $kitProductIds[(int) $kc->kit_product_id] = true;
-                $componentProductIds[(int) $kc->component_product_id] = true;
+                $kpid = (int) $kc->kit_product_id;
+                $cpid = (int) $kc->component_product_id;
+                $kitProductIds[$kpid] = true;
+                $componentProductIds[$cpid] = true;
+                $kitComponentsByKitId[$kpid][] = $cpid;
             }
         }
 
-        // Pre-index active ML channel links with order_reservation_enabled = true.
-        $reservationLinksByKey = [];
+        // Pre-index ALL ML channel links (active AND inactive, reservation enabled AND disabled!)
+        $allLinksByKey = [];
+        $activeLinkAccountsByListing = [];
+        $sharedStockGroupProducts = [];
+
         if ($tables['inventory_channel_links']) {
-            $hasOrderResCol = $schema->hasColumn('inventory_channel_links', 'order_reservation_enabled');
-            $linkQuery = $db->table('inventory_channel_links')
-                ->where('channel', InventoryChannelLink::MERCADO_LIBRE)
-                ->where('is_active', true);
-
-            if ($hasOrderResCol) {
-                $linkQuery->where('order_reservation_enabled', true);
+            $linkCols = ['id', 'account_key', 'external_listing_id', 'external_variant_id', 'inventory_product_id', 'is_active'];
+            if ($columns['link_order_reservation_enabled']) {
+                $linkCols[] = 'order_reservation_enabled';
+            }
+            if ($columns['link_stock_sync_enabled']) {
+                $linkCols[] = 'stock_sync_enabled';
+            }
+            if ($columns['link_remote_user_product_id']) {
+                $linkCols[] = 'remote_user_product_id';
             }
 
-            foreach ($linkQuery->get(['id', 'account_key', 'external_listing_id', 'external_variant_id', 'inventory_product_id']) as $link) {
-                $key = $link->account_key.'|'.$link->external_listing_id.'|'.($link->external_variant_id ?? '');
-                $reservationLinksByKey[$key][] = [
+            foreach ($db->table('inventory_channel_links')->where('channel', InventoryChannelLink::MERCADO_LIBRE)->get($linkCols) as $link) {
+                $accKey = (string) $link->account_key;
+                $listingId = (string) $link->external_listing_id;
+                $varId = $link->external_variant_id !== null && trim((string) $link->external_variant_id) !== ''
+                    ? trim((string) $link->external_variant_id)
+                    : '';
+                $isActive = (bool) ($link->is_active ?? true);
+                $resEnabled = $columns['link_order_reservation_enabled'] ? (bool) ($link->order_reservation_enabled ?? false) : true;
+                $syncEnabled = $columns['link_stock_sync_enabled'] ? (bool) ($link->stock_sync_enabled ?? false) : false;
+                $remoteUpId = $columns['link_remote_user_product_id'] && $link->remote_user_product_id !== null && trim((string) $link->remote_user_product_id) !== ''
+                    ? trim((string) $link->remote_user_product_id)
+                    : null;
+
+                $key = $accKey.'|'.$listingId.'|'.$varId;
+                $allLinksByKey[$key][] = [
                     'link_id' => (int) $link->id,
+                    'account_key' => $accKey,
                     'inventory_product_id' => (int) $link->inventory_product_id,
+                    'is_active' => $isActive,
+                    'order_reservation_enabled' => $resEnabled,
+                    'stock_sync_enabled' => $syncEnabled,
+                    'remote_user_product_id' => $remoteUpId,
                 ];
+
+                if ($isActive) {
+                    $activeLinkAccountsByListing[$listingId][$accKey] = true;
+                }
+
+                // Shared stock group conflict detection matches InventoryMeliSharedStockGroupService::conflict()
+                if ($isActive && $syncEnabled && $varId === '' && $remoteUpId !== null) {
+                    $groupKey = $accKey.'|'.$remoteUpId;
+                    $sharedStockGroupProducts[$groupKey][(int) $link->inventory_product_id] = true;
+                }
             }
         }
 
-        $cursor = 0;
-        $scopedChunks = $scopedOrderIds !== null ? array_chunk($scopedOrderIds, $chunk) : null;
-        $scopedIndex = 0;
+        $sharedStockConflictGroups = [];
+        foreach ($sharedStockGroupProducts as $gKey => $pSet) {
+            if (count($pSet) > 1) {
+                $sharedStockConflictGroups[$gKey] = true;
+            }
+        }
+        unset($sharedStockGroupProducts);
+
+        $orderJobCounts = $manifestData['order_job_counts'] ?? [];
+        $orderJobSampleCsv = $manifestData['order_job_sample_csv'] ?? [];
+        $orderReservedCounts = $manifestData['order_reserved_counts'] ?? [];
+
+        $orderSelectCols = ['id', 'meli_account_id', 'order_id', 'status', 'shipping_status', 'raw', 'created_at'];
+        if ($columns['meli_orders_shipping_id']) {
+            $orderSelectCols[] = 'shipping_id';
+        }
+        if ($columns['meli_orders_shipping_raw']) {
+            $orderSelectCols[] = 'shipping_raw';
+        }
+
+        $nowUtc = now()->utc()->toImmutable();
+        $classifiedOrderIds = [];
         $foundScopedOrderIds = [];
+        $cursor = 0;
+        $scopedTotal = $scopedOrderIds !== null ? count($scopedOrderIds) : 0;
+        $scopedOffset = 0;
+
+        if ($scopedOrderIds !== null) {
+            $orderStats['expected_distinct_orders'] = $scopedTotal;
+        }
 
         while (true) {
-            if ($scopedChunks !== null) {
-                if (! isset($scopedChunks[$scopedIndex])) {
+            if ($scopedOrderIds !== null) {
+                if ($scopedOffset >= $scopedTotal) {
                     break;
                 }
-                $orders = $db->table('meli_orders')
-                    ->select(['id', 'meli_account_id', 'order_id', 'status', 'shipping_status', 'raw', 'created_at'])
-                    ->whereIn('id', $scopedChunks[$scopedIndex])
-                    ->when($accountFilter !== null, fn ($q) => $q->where('meli_account_id', $accountFilter))
-                    ->orderBy('id')
-                    ->get();
-                $scopedIndex++;
+                $chunkIds = array_slice($scopedOrderIds, $scopedOffset, $chunk);
+                $scopedOffset += $chunk;
+
+                $orders = $tables['meli_orders']
+                    ? $db->table('meli_orders')
+                        ->select($orderSelectCols)
+                        ->whereIn('id', $chunkIds)
+                        ->orderBy('id')
+                        ->get()
+                    : collect();
             } else {
+                if (! $tables['meli_orders']) {
+                    break;
+                }
+
                 $orders = $db->table('meli_orders')
-                    ->select(['id', 'meli_account_id', 'order_id', 'status', 'shipping_status', 'raw', 'created_at'])
+                    ->select($orderSelectCols)
                     ->where('id', '>', $cursor)
                     ->when($accountFilter !== null, fn ($q) => $q->where('meli_account_id', $accountFilter))
                     ->orderBy('id')
@@ -323,107 +682,223 @@ class QueueReconstructionDiagnosticsService
                     break;
                 }
                 $cursor = (int) $orders->last()->id;
+                $orderStats['expected_distinct_orders'] += $orders->count();
             }
 
             if ($orders->isEmpty()) {
                 continue;
             }
 
-            $batchOrderIds = $orders->pluck('id')->map(static fn ($id): int => (int) $id)->all();
-            foreach ($batchOrderIds as $foundId) {
-                $foundScopedOrderIds[$foundId] = true;
+            // If manifest-scoped AND account_filter was explicitly requested, track filtered-out rows cleanly.
+            if ($scopedOrderIds !== null && $accountFilter !== null) {
+                $filtered = [];
+                foreach ($orders as $o) {
+                    $oid = (int) $o->id;
+                    $foundScopedOrderIds[$oid] = true;
+                    if ($o->meli_account_id !== null && (int) $o->meli_account_id === $accountFilter) {
+                        $filtered[] = $o;
+                    } else {
+                        $orderStats['filtered_out_by_account_count']++;
+                    }
+                }
+                if ($filtered === []) {
+                    continue;
+                }
+                $orders = collect($filtered);
+            } else {
+                foreach ($orders as $o) {
+                    $foundScopedOrderIds[(int) $o->id] = true;
+                }
             }
 
-            $batchRemoteIds = $orders->pluck('order_id')->filter()->map(static fn ($id): string => (string) $id)->unique()->values()->all();
+            $batchOrderIds = $orders->pluck('id')->map(static fn ($id): int => (int) $id)->all();
+            $batchRemoteIds = $orders->pluck('order_id')
+                ->filter(static fn ($id): bool => $id !== null && trim((string) $id) !== '')
+                ->map(static fn ($id): string => trim((string) $id))
+                ->unique()
+                ->values()
+                ->all();
 
-            // Load items for this batch.
+            // Batch Query 1: meli_order_items
             $itemsByOrderId = [];
             if ($tables['meli_order_items']) {
-                $cols = ['id', 'meli_order_id', 'item_id', 'sku', 'quantity'];
-                if ($hasItemVarCol) {
-                    $cols[] = 'variation_id';
+                $itemCols = ['id', 'meli_order_id', 'item_id', 'sku', 'quantity'];
+                if ($columns['item_variation_id']) {
+                    $itemCols[] = 'variation_id';
                 }
-                if ($hasItemLineKeyCol) {
-                    $cols[] = 'remote_line_key';
+                if ($columns['item_remote_line_key']) {
+                    $itemCols[] = 'remote_line_key';
                 }
-
-                foreach ($db->table('meli_order_items')->whereIn('meli_order_id', $batchOrderIds)->get($cols) as $item) {
+                foreach ($db->table('meli_order_items')->whereIn('meli_order_id', $batchOrderIds)->get($itemCols) as $item) {
                     $itemsByOrderId[(int) $item->meli_order_id][] = $item;
                 }
             }
 
-            // Load allocations for this batch.
+            // Batch Query 2: inventory_channel_order_allocations (by remote_order_id across ALL accounts to catch cross-account conflicts!)
             $allocsByRemoteKey = [];
+            $allocsByRemoteOrderId = [];
+            $allocSimpleResIds = [];
+            $allocKitResIds = [];
             if ($tables['inventory_channel_order_allocations'] && $batchRemoteIds !== []) {
-                $allocs = $db->table('inventory_channel_order_allocations')
+                $allocRows = $db->table('inventory_channel_order_allocations')
                     ->where('channel', InventoryChannelLink::MERCADO_LIBRE)
                     ->whereIn('remote_order_id', $batchRemoteIds)
                     ->get();
 
-                foreach ($allocs as $alloc) {
-                    $key = $alloc->account_key.'|'.$alloc->remote_order_id;
+                foreach ($allocRows as $alloc) {
+                    $rOrderId = (string) $alloc->remote_order_id;
+                    $key = ((string) $alloc->account_key).'|'.$rOrderId;
                     $allocsByRemoteKey[$key][] = $alloc;
+                    $allocsByRemoteOrderId[$rOrderId][] = $alloc;
+                    if ($alloc->reservation_id !== null) {
+                        if ((string) ($alloc->reservation_kind ?? '') === 'KIT') {
+                            $allocKitResIds[(int) $alloc->reservation_id] = true;
+                        } else {
+                            $allocSimpleResIds[(int) $alloc->reservation_id] = true;
+                        }
+                    }
                 }
             }
 
-            // Load direct active reservations / kit reservations by source_id for this batch.
-            $activeResByOrderId = [];
+            // Batch Query 3: inventory_reservations (by source_id AND referenced allocation reservation_ids)
+            $reservationsById = [];
+            $directResByOrderId = [];
             if ($tables['inventory_reservations']) {
-                $rows = $db->table('inventory_reservations')
-                    ->where('source_type', 'meli_order')
-                    ->where('status', 'ACTIVE')
-                    ->whereIn('source_id', $batchOrderIds)
-                    ->get(['id', 'source_id', 'inventory_product_id', 'quantity']);
-                foreach ($rows as $r) {
-                    $activeResByOrderId[(int) $r->source_id][] = $r;
+                $resCols = ['id', 'source_type', 'source_id', 'inventory_product_id', 'quantity', 'status'];
+                if ($columns['res_metadata']) {
+                    $resCols[] = 'metadata';
+                }
+
+                $resRows = $db->table('inventory_reservations')
+                    ->where(function ($q) use ($batchOrderIds, $allocSimpleResIds): void {
+                        $q->where(function ($sub) use ($batchOrderIds): void {
+                            $sub->where('source_type', 'meli_order')
+                                ->whereIn('source_id', $batchOrderIds);
+                        });
+                        if ($allocSimpleResIds !== []) {
+                            $q->orWhereIn('id', array_keys($allocSimpleResIds));
+                        }
+                    })
+                    ->get($resCols);
+
+                foreach ($resRows as $r) {
+                    $reservationsById[(int) $r->id] = $r;
+                    if ((string) ($r->source_type ?? '') === 'meli_order' && $r->source_id !== null) {
+                        $directResByOrderId[(int) $r->source_id][] = $r;
+                    }
                 }
             }
 
-            $activeKitResByOrderId = [];
+            // Batch Query 4: inventory_kit_reservations (by source_id AND referenced allocation reservation_ids)
+            $kitReservationsById = [];
+            $directKitResByOrderId = [];
             if ($tables['inventory_kit_reservations']) {
-                $rows = $db->table('inventory_kit_reservations')
-                    ->where('source_type', 'meli_order')
-                    ->where('status', 'ACTIVE')
-                    ->whereIn('source_id', $batchOrderIds)
-                    ->get(['id', 'source_id', 'kit_product_id', 'quantity']);
-                foreach ($rows as $r) {
-                    $activeKitResByOrderId[(int) $r->source_id][] = $r;
+                $kitResCols = ['id', 'source_type', 'source_id', 'kit_product_id', 'quantity', 'status'];
+                if ($columns['kit_res_metadata']) {
+                    $kitResCols[] = 'metadata';
+                }
+
+                $kitResRows = $db->table('inventory_kit_reservations')
+                    ->where(function ($q) use ($batchOrderIds, $allocKitResIds): void {
+                        $q->where(function ($sub) use ($batchOrderIds): void {
+                            $sub->where('source_type', 'meli_order')
+                                ->whereIn('source_id', $batchOrderIds);
+                        });
+                        if ($allocKitResIds !== []) {
+                            $q->orWhereIn('id', array_keys($allocKitResIds));
+                        }
+                    })
+                    ->get($kitResCols);
+
+                foreach ($kitResRows as $r) {
+                    $kitReservationsById[(int) $r->id] = $r;
+                    if ((string) ($r->source_type ?? '') === 'meli_order' && $r->source_id !== null) {
+                        $directKitResByOrderId[(int) $r->source_id][] = $r;
+                    }
                 }
             }
 
-            // Collect affected product IDs in this batch to detect manual movements.
-            $productIdsByOrderId = [];
+            // Collect product IDs (including kit components!) + fulfillment movement keys for this batch.
             $allBatchProductIds = [];
+            $batchFulfillmentKeys = [];
             foreach ($orders as $order) {
                 $oid = (int) $order->id;
+                $accStr = (string) ($order->meli_account_id ?? '');
+                $remStr = trim((string) ($order->order_id ?? ''));
                 $orderItems = $itemsByOrderId[$oid] ?? [];
-                $allocs = $allocsByRemoteKey[((string) $order->meli_account_id).'|'.((string) $order->order_id)] ?? [];
-                $pids = [];
+                $allocs = $allocsByRemoteKey[$accStr.'|'.$remStr] ?? [];
 
                 foreach ($allocs as $a) {
                     if ($a->inventory_product_id !== null) {
-                        $pids[(int) $a->inventory_product_id] = true;
+                        $pid = (int) $a->inventory_product_id;
+                        $allBatchProductIds[$pid] = true;
+                        foreach ($kitComponentsByKitId[$pid] ?? [] as $cpid) {
+                            $allBatchProductIds[$cpid] = true;
+                        }
+                    }
+                }
+                foreach ($directResByOrderId[$oid] ?? [] as $dr) {
+                    if ($dr->inventory_product_id !== null) {
+                        $allBatchProductIds[(int) $dr->inventory_product_id] = true;
+                    }
+                }
+                foreach ($directKitResByOrderId[$oid] ?? [] as $dkr) {
+                    if ($dkr->kit_product_id !== null) {
+                        $kpid = (int) $dkr->kit_product_id;
+                        $allBatchProductIds[$kpid] = true;
+                        foreach ($kitComponentsByKitId[$kpid] ?? [] as $cpid) {
+                            $allBatchProductIds[$cpid] = true;
+                        }
                     }
                 }
                 foreach ($orderItems as $oi) {
-                    $var = $hasItemVarCol && $oi->variation_id !== null ? (string) $oi->variation_id : '';
-                    $lk = ((string) $order->meli_account_id).'|'.((string) $oi->item_id).'|'.$var;
-                    foreach ($reservationLinksByKey[$lk] ?? [] as $matchedLink) {
-                        $pids[$matchedLink['inventory_product_id']] = true;
+                    $var = $columns['item_variation_id'] && $oi->variation_id !== null ? trim((string) $oi->variation_id) : '';
+                    $lk = $accStr.'|'.trim((string) ($oi->item_id ?? '')).'|'.$var;
+                    foreach ($allLinksByKey[$lk] ?? [] as $ml) {
+                        $pid = (int) $ml['inventory_product_id'];
+                        $allBatchProductIds[$pid] = true;
+                        foreach ($kitComponentsByKitId[$pid] ?? [] as $cpid) {
+                            $allBatchProductIds[$cpid] = true;
+                        }
                     }
-                }
-                $productIdsByOrderId[$oid] = array_keys($pids);
-                foreach ($pids as $pid => $_) {
-                    $allBatchProductIds[$pid] = true;
+
+                    if ($columns['mov_external_key'] && $remStr !== '') {
+                        $lineKey = $columns['item_remote_line_key'] && $oi->remote_line_key !== null ? trim((string) $oi->remote_line_key) : '';
+                        $identityLine = $lineKey !== '' ? $lineKey : 'legacy-row:'.(int) $oi->id;
+                        $identityHash = hash('sha256', implode("\0", ['mercado_libre', $accStr, $remStr, $identityLine]));
+                        $batchFulfillmentKeys[] = 'meli-order:'.$identityHash.':fulfill';
+                        $batchFulfillmentKeys[] = 'meli-order:'.$remStr.':line:'.($lineKey !== '' ? $lineKey : (string) $oi->id).':fulfill';
+                    }
                 }
             }
 
-            // Detect manual movements using real production column `occurred_at` (with fallback to `created_at`).
+            // Batch Query 5: fulfillment movements by unique `external_key`
+            $existingFulfillmentKeys = [];
+            if ($tables['inventory_movements'] && $columns['mov_external_key'] && $batchFulfillmentKeys !== []) {
+                foreach (array_chunk(array_values(array_unique($batchFulfillmentKeys)), 500) as $keyChunk) {
+                    foreach ($db->table('inventory_movements')->whereIn('external_key', $keyChunk)->pluck('external_key') as $fk) {
+                        if (is_string($fk) && $fk !== '') {
+                            $existingFulfillmentKeys[$fk] = true;
+                        }
+                    }
+                }
+            }
+
+            // Batch Query 6: manual non-reservation movements for involved products
             $manualMovementsByProduct = [];
             if ($tables['inventory_movements'] && $allBatchProductIds !== []) {
                 $movCols = ['id', 'inventory_product_id', 'type', 'quantity', 'reference_type', 'created_at'];
-                if ($hasMovOccurredAt) {
+                if ($columns['mov_occurred_at']) {
                     $movCols[] = 'occurred_at';
+                }
+                if ($columns['mov_reference_id']) {
+                    $movCols[] = 'reference_id';
+                }
+                if ($columns['mov_reference']) {
+                    $movCols[] = 'reference';
+                }
+                if ($columns['mov_notes']) {
+                    $movCols[] = 'notes';
                 }
 
                 $movs = $db->table('inventory_movements')
@@ -440,231 +915,533 @@ class QueueReconstructionDiagnosticsService
                 }
             }
 
+            // Batch Query 7: R3 durable reconciliation state (ONLY when table exists!)
+            $r3ByOrderId = [];
+            if ($tables['inventory_meli_order_reconciliations']) {
+                foreach ($db->table('inventory_meli_order_reconciliations')->whereIn('meli_order_id', $batchOrderIds)->get() as $r3) {
+                    $r3ByOrderId[(int) $r3->meli_order_id] = $r3;
+                }
+            }
+
+            // Classify every order in this chunk with ZERO additional DB queries!
             foreach ($orders as $order) {
                 $oid = (int) $order->id;
-                $accountId = $order->meli_account_id !== null ? (int) $order->meli_account_id : null;
-                $status = strtolower(trim((string) ($order->status ?? '')));
-                $shippingStatus = strtolower(trim((string) ($order->shipping_status ?? '')));
-                $orderItems = $itemsByOrderId[$oid] ?? [];
-                $allocs = $allocsByRemoteKey[((string) $order->meli_account_id).'|'.((string) $order->order_id)] ?? [];
-                $activeAllocs = array_values(array_filter($allocs, static fn ($a): bool => (string) $a->status === 'ACTIVE'));
-                $fulfilledAllocs = array_values(array_filter($allocs, static fn ($a): bool => (string) $a->status === 'FULFILLED'));
-                $hasActiveReservation = $activeAllocs !== []
-                    || isset($activeResByOrderId[$oid])
-                    || isset($activeKitResByOrderId[$oid]);
+                $accStr = (string) ($order->meli_account_id ?? '');
+                $remStr = trim((string) ($order->order_id ?? ''));
 
-                $afterCutover = $this->orderIsAfterCutover($order, $cutoverAt);
-
-                $hasReservationEnabledLink = false;
-                $ambiguousLinkKeys = [];
-                $missingLineKeyCount = 0;
-
-                foreach ($orderItems as $oi) {
-                    $var = $hasItemVarCol && $oi->variation_id !== null ? (string) $oi->variation_id : '';
-                    $lk = ((string) $order->meli_account_id).'|'.((string) $oi->item_id).'|'.$var;
-                    if (isset($reservationLinksByKey[$lk])) {
-                        $hasReservationEnabledLink = true;
-                        if (count($reservationLinksByKey[$lk]) > 1) {
-                            $ambiguousLinkKeys[] = [
-                                'item_id' => (string) $oi->item_id,
-                                'variation_id' => $var !== '' ? $var : null,
-                                'link_count' => count($reservationLinksByKey[$lk]),
-                                'link_ids' => array_column($reservationLinksByKey[$lk], 'link_id'),
-                            ];
-                        }
-                    }
-
-                    if ($hasItemLineKeyCol && ($oi->remote_line_key === null || trim((string) $oi->remote_line_key) === '')) {
-                        $missingLineKeyCount++;
-                    }
-                }
-
-                $accountMismatch = $accountId === null || ($tables['meli_accounts'] && ! isset($validAccountIds[$accountId]));
-
-                $summary = [
-                    'meli_order_id' => $oid,
-                    'meli_account_id' => $accountId,
-                    'remote_order_id' => (string) $order->order_id,
-                    'status' => $status,
-                    'shipping_status' => $shippingStatus !== '' ? $shippingStatus : null,
-                    'items_count' => count($orderItems),
-                    'active_allocations' => count($activeAllocs),
-                ];
-
-                $ambiguityReasons = [];
-                $humanReviewReasons = [];
-
-                if ($accountMismatch) {
-                    $schemaAnomalies['account_mismatches'][] = [
-                        'entity_type' => 'meli_order',
-                        'entity_id' => $oid,
-                        'meli_account_id' => $accountId,
-                    ];
-                    $humanReviewReasons[] = 'account_mismatch';
-                }
-
-                if ($ambiguousLinkKeys !== []) {
-                    $schemaAnomalies['ambiguous_channel_links'][] = [
-                        ...$summary,
-                        'ambiguous_links' => $ambiguousLinkKeys,
-                    ];
-                    $ambiguityReasons[] = 'ambiguous_channel_link';
-                }
-
-                if ($missingLineKeyCount > 0 && ($hasActiveReservation || $hasReservationEnabledLink)) {
-                    $schemaAnomalies['missing_remote_line_key_orders'][] = [
-                        ...$summary,
-                        'items_missing_remote_line_key' => $missingLineKeyCount,
-                    ];
-                    $ambiguityReasons[] = 'missing_remote_line_key';
-                }
-
-                $isCancelledWithActive = $status === 'cancelled' && $hasActiveReservation;
-                if ($isCancelledWithActive) {
-                    $categories['cancelled_orders_with_active_reservations'][] = $summary;
-                }
-
-                $isShippedWithActive = $status !== 'cancelled'
-                    && in_array($shippingStatus, self::FULFILLED_SHIPPING_STATUSES, true)
-                    && $hasActiveReservation;
-                if ($isShippedWithActive) {
-                    $categories['shipped_orders_with_active_reservations'][] = $summary;
-                }
-
-                $isPaidPending = $status === 'paid'
-                    && ! in_array($shippingStatus, self::FULFILLED_SHIPPING_STATUSES, true)
-                    && $afterCutover
-                    && $hasReservationEnabledLink
-                    && ! $hasActiveReservation;
-                if ($isPaidPending) {
-                    $categories['paid_orders_pending_reservation'][] = $summary;
-                }
-
-                $isShippedNeverReserved = $status !== 'cancelled'
-                    && in_array($shippingStatus, self::FULFILLED_SHIPPING_STATUSES, true)
-                    && $afterCutover
-                    && $hasReservationEnabledLink
-                    && ! $hasActiveReservation
-                    && $fulfilledAllocs === [];
-                if ($isShippedNeverReserved) {
-                    $categories['shipped_during_outage_never_reserved'][] = [
-                        ...$summary,
-                        'requires_manual_verification' => true,
-                    ];
-                    $humanReviewReasons[] = 'shipped_during_outage_never_reserved';
-                }
-
-                // 5. Orders with manual movements on affected products (using real `occurred_at` when present).
-                $orderCreatedAt = $this->parseOrderTimestamp($order);
-                $matchedManualMovements = [];
-                foreach ($productIdsByOrderId[$oid] ?? [] as $pid) {
-                    foreach ($manualMovementsByProduct[$pid] ?? [] as $mov) {
-                        $rawTimestamp = ($hasMovOccurredAt && ! empty($mov->occurred_at))
-                            ? (string) $mov->occurred_at
-                            : (! empty($mov->created_at) ? (string) $mov->created_at : null);
-                        $movAt = $rawTimestamp !== null ? CarbonImmutable::parse($rawTimestamp) : null;
-                        if ($orderCreatedAt === null || $movAt === null || $movAt->greaterThanOrEqualTo($orderCreatedAt)) {
-                            $matchedManualMovements[] = [
-                                'movement_id' => (int) $mov->id,
-                                'inventory_product_id' => $pid,
-                                'type' => (string) $mov->type,
-                                'quantity' => (int) $mov->quantity,
-                                'occurred_at' => $rawTimestamp,
-                            ];
+                $allocs = $allocsByRemoteKey[$accStr.'|'.$remStr] ?? [];
+                $crossAccountAllocs = [];
+                if ($remStr !== '' && isset($allocsByRemoteOrderId[$remStr])) {
+                    foreach ($allocsByRemoteOrderId[$remStr] as $ca) {
+                        if ((string) $ca->account_key !== $accStr) {
+                            $crossAccountAllocs[] = $ca;
                         }
                     }
                 }
-                if ($matchedManualMovements !== []) {
-                    $categories['orders_with_manual_movements'][] = [
-                        ...$summary,
-                        'manual_movements_count' => count($matchedManualMovements),
-                        'manual_movements_sample' => array_slice($matchedManualMovements, 0, 5),
-                        'requires_manual_verification' => true,
-                    ];
-                    $ambiguityReasons[] = 'manual_movements_detected';
-                }
 
-                // 6. Multiline orders
-                if (count($orderItems) > 1 && ($hasActiveReservation || $hasReservationEnabledLink)) {
-                    $categories['multiline_orders'][] = [
-                        ...$summary,
-                        'requires_manual_verification' => true,
-                    ];
-                    $ambiguityReasons[] = 'multiline_order';
-                }
+                $jobsCount = $orderJobCounts[$oid] ?? 0;
+                $jobIds = isset($orderJobSampleCsv[$oid]) && $orderJobSampleCsv[$oid] !== ''
+                    ? array_map('intval', explode(',', $orderJobSampleCsv[$oid]))
+                    : [];
+                $jobIdsTruncated = $jobsCount > count($jobIds);
+                $reservedCount = $orderReservedCounts[$oid] ?? 0;
 
-                // 7. Kits and components
-                $kitPids = [];
-                $componentPids = [];
-                foreach ($productIdsByOrderId[$oid] ?? [] as $pid) {
-                    if (isset($kitProductIds[$pid])) {
-                        $kitPids[] = $pid;
-                    }
-                    if (isset($componentProductIds[$pid])) {
-                        $componentPids[] = $pid;
-                    }
-                }
-                $hasKitAllocation = collect($allocs)->contains(static fn ($a): bool => (string) $a->reservation_kind === 'KIT');
-                if ($kitPids !== [] || $componentPids !== [] || $hasKitAllocation || isset($activeKitResByOrderId[$oid])) {
-                    $categories['kits_and_components'][] = [
-                        ...$summary,
-                        'kit_product_ids' => array_values(array_unique($kitPids)),
-                        'component_product_ids' => array_values(array_unique($componentPids)),
-                        'has_active_kit_reservation' => isset($activeKitResByOrderId[$oid]),
-                        'requires_manual_verification' => true,
-                    ];
-                    $ambiguityReasons[] = 'kit_or_component_involved';
-                }
+                $result = $this->orderClassifier->classifyExistingOrder($order, [
+                    'associated_job_ids' => $jobIds,
+                    'associated_jobs_count' => $jobsCount,
+                    'associated_job_ids_truncated' => $jobIdsTruncated,
+                    'reserved_jobs_count' => $reservedCount,
+                    'order_items' => $itemsByOrderId[$oid] ?? [],
+                    'allocations' => $allocs,
+                    'cross_account_allocations' => $crossAccountAllocs,
+                    'reservations_by_id' => $reservationsById,
+                    'kit_reservations_by_id' => $kitReservationsById,
+                    'direct_reservations' => $directResByOrderId[$oid] ?? [],
+                    'direct_kit_reservations' => $directKitResByOrderId[$oid] ?? [],
+                    'existing_fulfillment_keys' => $existingFulfillmentKeys,
+                    'manual_movements_by_product' => $manualMovementsByProduct,
+                    'all_links_by_key' => $allLinksByKey,
+                    'active_link_accounts_by_listing' => $activeLinkAccountsByListing,
+                    'shared_stock_conflict_groups' => $sharedStockConflictGroups,
+                    'products_by_id' => $productsById,
+                    'kit_product_ids' => $kitProductIds,
+                    'component_product_ids' => $componentProductIds,
+                    'kit_components_by_kit_id' => $kitComponentsByKitId,
+                    'valid_account_ids' => $validAccountIds,
+                    'tables' => $tables,
+                    'columns' => $columns,
+                    'cutover_at' => $cutoverAt,
+                    'now_utc' => $nowUtc,
+                    'r3_reconciliation' => $r3ByOrderId[$oid] ?? null,
+                ]);
 
-                // 3-tier classification for this order:
-                if ($humanReviewReasons !== []) {
-                    $classification['pending_human_review'][] = [
-                        'entity_type' => 'meli_order',
-                        'entity_id' => $oid,
-                        'meli_account_id' => $accountId,
-                        'reasons' => array_values(array_unique(array_merge($humanReviewReasons, $ambiguityReasons))),
-                    ];
-                } elseif ($ambiguityReasons !== []) {
-                    $classification['ambiguous_entities'][] = [
-                        'entity_type' => 'meli_order',
-                        'entity_id' => $oid,
-                        'meli_account_id' => $accountId,
-                        'reasons' => array_values(array_unique($ambiguityReasons)),
-                    ];
-                } elseif ($isCancelledWithActive || $isShippedWithActive || $isPaidPending) {
-                    $actionHint = match (true) {
-                        $isCancelledWithActive => 'release_active_reservation_for_cancelled_order',
-                        $isShippedWithActive => 'fulfill_active_reservation_for_shipped_order',
-                        default => 'evaluate_reservation_for_paid_order',
-                    };
-                    $classification['reconstructible_candidates'][] = [
-                        'entity_type' => 'meli_order',
-                        'entity_id' => $oid,
-                        'meli_account_id' => $accountId,
-                        'candidate_action' => $actionHint,
-                        'automatic_execution_allowed' => false,
-                    ];
-                }
+                $this->recordClassifiedOrder(
+                    $result,
+                    $tables['inventory_meli_order_reconciliations'],
+                    $maxInlineEntities,
+                    $classifiedOrderIds,
+                    $categories,
+                    $categoryCounts,
+                    $schemaAnomalies,
+                    $schemaAnomalyCounts,
+                    $classification,
+                    $classificationCounts,
+                    $primaryPartitionCounts,
+                    $secondaryAnomalyCounts,
+                    $reasonCodeCounts,
+                    $r3StateCounts,
+                    $jobsByPrimaryCategory,
+                    $jobSecurityCounters,
+                    $inlineEntities,
+                    $inlineTruncated,
+                    $ndjsonHandle,
+                    $ndjsonHashCtx,
+                    $ndjsonRecordsWritten,
+                    $ndjsonBytesWritten,
+                    $orderStats,
+                );
             }
         }
 
-        // Flag any manifest-scoped orders that no longer exist in `meli_orders`.
+        // Account for EVERY manifest-scoped order that does not exist in `meli_orders`!
         if ($scopedOrderIds !== null && $accountFilter === null) {
             foreach ($scopedOrderIds as $scopedId) {
-                if (! isset($foundScopedOrderIds[$scopedId])) {
-                    $schemaAnomalies['missing_orders_in_manifest'][] = [
-                        'meli_order_id' => $scopedId,
-                        'reason' => 'order_not_found_in_meli_orders',
-                    ];
-                    $classification['pending_human_review'][] = [
-                        'entity_type' => 'meli_order',
-                        'entity_id' => $scopedId,
-                        'meli_account_id' => null,
-                        'reasons' => ['order_missing_from_db'],
-                    ];
+                if (isset($foundScopedOrderIds[$scopedId])) {
+                    continue;
+                }
+
+                $jobsCount = $orderJobCounts[$scopedId] ?? 0;
+                $jobIds = isset($orderJobSampleCsv[$scopedId]) && $orderJobSampleCsv[$scopedId] !== ''
+                    ? array_map('intval', explode(',', $orderJobSampleCsv[$scopedId]))
+                    : [];
+                $jobIdsTruncated = $jobsCount > count($jobIds);
+                $reservedCount = $orderReservedCounts[$scopedId] ?? 0;
+
+                $result = $this->orderClassifier->classifyMissingOrder(
+                    $scopedId,
+                    $jobIds,
+                    $jobsCount,
+                    $jobIdsTruncated,
+                    $reservedCount,
+                    $tables['inventory_meli_order_reconciliations'],
+                );
+
+                $orderStats['missing_orders_count']++;
+                $jobSecurityCounters['jobs_for_missing_orders'] += $jobsCount;
+
+                $this->recordClassifiedOrder(
+                    $result,
+                    $tables['inventory_meli_order_reconciliations'],
+                    $maxInlineEntities,
+                    $classifiedOrderIds,
+                    $categories,
+                    $categoryCounts,
+                    $schemaAnomalies,
+                    $schemaAnomalyCounts,
+                    $classification,
+                    $classificationCounts,
+                    $primaryPartitionCounts,
+                    $secondaryAnomalyCounts,
+                    $reasonCodeCounts,
+                    $r3StateCounts,
+                    $jobsByPrimaryCategory,
+                    $jobSecurityCounters,
+                    $inlineEntities,
+                    $inlineTruncated,
+                    $ndjsonHandle,
+                    $ndjsonHashCtx,
+                    $ndjsonRecordsWritten,
+                    $ndjsonBytesWritten,
+                    $orderStats,
+                );
+            }
+        }
+    }
+
+    /**
+     * Records a single exhaustively classified order into partition counts, NDJSON stream,
+     * bounded inline arrays, R3 stats, and backwards-compatible R2.1 category/anomaly lists.
+     *
+     * @param  array<string, mixed>  $result
+     * @param  array<int, bool>  $classifiedOrderIds
+     * @param  array<string, list<array<string, mixed>>>  $categories
+     * @param  array<string, int>  $categoryCounts
+     * @param  array<string, list<array<string, mixed>>>  $schemaAnomalies
+     * @param  array<string, int>  $schemaAnomalyCounts
+     * @param  array<string, list<array<string, mixed>>>  $classification
+     * @param  array<string, int>  $classificationCounts
+     * @param  array<string, int>  $primaryPartitionCounts
+     * @param  array<string, int>  $secondaryAnomalyCounts
+     * @param  array<string, int>  $reasonCodeCounts
+     * @param  array<string, int>  $r3StateCounts
+     * @param  array<string, int>  $jobsByPrimaryCategory
+     * @param  array<string, int>  $jobSecurityCounters
+     * @param  list<array<string, mixed>>  $inlineEntities
+     * @param  resource|null  $ndjsonHandle
+     * @param  \HashContext|null  $ndjsonHashCtx
+     * @param  array<string, int>  $orderStats
+     */
+    private function recordClassifiedOrder(
+        array $result,
+        bool $r3TablePresent,
+        int $maxInlineEntities,
+        array &$classifiedOrderIds,
+        array &$categories,
+        array &$categoryCounts,
+        array &$schemaAnomalies,
+        array &$schemaAnomalyCounts,
+        array &$classification,
+        array &$classificationCounts,
+        array &$primaryPartitionCounts,
+        array &$secondaryAnomalyCounts,
+        array &$reasonCodeCounts,
+        array &$r3StateCounts,
+        array &$jobsByPrimaryCategory,
+        array &$jobSecurityCounters,
+        array &$inlineEntities,
+        bool &$inlineTruncated,
+        $ndjsonHandle,
+        $ndjsonHashCtx,
+        int &$ndjsonRecordsWritten,
+        int &$ndjsonBytesWritten,
+        array &$orderStats,
+    ): void {
+        $entity = $result['entity'];
+        $flags = $result['legacy_flags'];
+        $meta = $result['summary_meta'];
+
+        $oid = (int) $entity['local_order_id'];
+        $primary = (string) $entity['primary_classification'];
+        $jobsCount = (int) $entity['associated_jobs_count'];
+
+        if (isset($classifiedOrderIds[$oid])) {
+            $orderStats['duplicate_primary_classifications']++;
+
+            return;
+        }
+        $classifiedOrderIds[$oid] = true;
+
+        $orderStats['accounted_orders']++;
+        $orderStats['accounted_order_jobs'] += $jobsCount;
+
+        if (! array_key_exists($primary, $primaryPartitionCounts)) {
+            throw new QueueRecoveryException(
+                "Clasificación principal desconocida '{$primary}' para pedido #{$oid}.",
+                'diagnostic_invariant_violation',
+            );
+        }
+
+        $primaryPartitionCounts[$primary]++;
+        $jobsByPrimaryCategory[$primary] += $jobsCount;
+        if (! empty($meta['has_pending_obligation'])) {
+            $jobSecurityCounters['jobs_for_pending_obligations'] += $jobsCount;
+        }
+
+        foreach ($entity['secondary_anomalies'] as $anomalyCode) {
+            $secondaryAnomalyCounts[$anomalyCode] = ($secondaryAnomalyCounts[$anomalyCode] ?? 0) + 1;
+        }
+        foreach ($entity['reason_codes'] as $rc) {
+            $reasonCodeCounts[$rc] = ($reasonCodeCounts[$rc] ?? 0) + 1;
+        }
+
+        // R3 durable state summary metrics
+        if ($r3TablePresent) {
+            $r3Ev = $entity['available_evidence']['r3_reconciliation'] ?? null;
+            if (! is_array($r3Ev)) {
+                $r3StateCounts['ABSENT_ROW']++;
+            } else {
+                $st = (string) ($r3Ev['state'] ?? 'IDLE');
+                if (isset($r3StateCounts[$st])) {
+                    $r3StateCounts[$st]++;
+                }
+                if (! empty($r3Ev['lease_expired'])) {
+                    $r3StateCounts['EXPIRED_LEASES']++;
+                }
+                if (! empty($r3Ev['stock_sync_required'])) {
+                    $r3StateCounts['STOCK_SYNC_REQUIRED']++;
+                }
+                if ((int) ($r3Ev['requested_revision'] ?? 0) > (int) ($r3Ev['processed_revision'] ?? 0)) {
+                    $r3StateCounts['PENDING_REVISION_UNPROCESSED']++;
                 }
             }
         }
+
+        // Stream full entity record to NDJSON incrementally (constant memory!).
+        if (is_resource($ndjsonHandle) && $ndjsonHashCtx !== null) {
+            $line = json_encode($entity, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR)."\n";
+            $written = fwrite($ndjsonHandle, $line);
+            if ($written === false || $written !== strlen($line)) {
+                throw new QueueRecoveryException('Error escribiendo línea NDJSON de diagnóstico.', 'ndjson_write_failed');
+            }
+            hash_update($ndjsonHashCtx, $line);
+            $ndjsonRecordsWritten++;
+            $ndjsonBytesWritten += $written;
+        }
+
+        // Bounded inline entities for JSON summary
+        if (count($inlineEntities) < $maxInlineEntities) {
+            $inlineEntities[] = $entity;
+        } elseif ($maxInlineEntities >= 0) {
+            $inlineTruncated = true;
+        }
+
+        // Populate backwards-compatible R2.1 `reconstructibility_summary`, `categories`, and `schema_anomalies`
+        // (with exact totals always maintained and inline arrays bounded by `$maxInlineEntities`).
+        if ($primary === QueueOrderExhaustiveClassifier::PRIMARY_PENDING_HUMAN_REVIEW) {
+            $classificationCounts['pending_human_review']++;
+            if (count($classification['pending_human_review']) < $maxInlineEntities) {
+                $classification['pending_human_review'][] = [
+                    'entity_type' => 'meli_order',
+                    'entity_id' => $oid,
+                    'meli_account_id' => $entity['meli_account_id'],
+                    'reasons' => $entity['reason_codes'],
+                ];
+            }
+        } elseif ($primary === QueueOrderExhaustiveClassifier::PRIMARY_AMBIGUOUS_ENTITIES) {
+            $classificationCounts['ambiguous_entities']++;
+            if (count($classification['ambiguous_entities']) < $maxInlineEntities) {
+                $classification['ambiguous_entities'][] = [
+                    'entity_type' => 'meli_order',
+                    'entity_id' => $oid,
+                    'meli_account_id' => $entity['meli_account_id'],
+                    'reasons' => $entity['reason_codes'],
+                ];
+            }
+        } elseif ($primary === QueueOrderExhaustiveClassifier::PRIMARY_RECONSTRUCTIBLE_CANDIDATES) {
+            $classificationCounts['reconstructible_candidates']++;
+            if (count($classification['reconstructible_candidates']) < $maxInlineEntities) {
+                $classification['reconstructible_candidates'][] = [
+                    'entity_type' => 'meli_order',
+                    'entity_id' => $oid,
+                    'meli_account_id' => $entity['meli_account_id'],
+                    'candidate_action' => $entity['operational_recommendation']['candidate_action'],
+                    'automatic_execution_allowed' => false,
+                ];
+            }
+        }
+
+        if (! empty($flags['missing_order'])) {
+            $schemaAnomalyCounts['missing_orders_in_manifest']++;
+            if (count($schemaAnomalies['missing_orders_in_manifest']) < $maxInlineEntities) {
+                $schemaAnomalies['missing_orders_in_manifest'][] = [
+                    'meli_order_id' => $oid,
+                    'reason' => 'order_not_found_in_meli_orders',
+                ];
+            }
+
+            return;
+        }
+
+        $summary = $flags['summary'];
+
+        if (! empty($flags['account_mismatch'])) {
+            $schemaAnomalyCounts['account_mismatches']++;
+            if (count($schemaAnomalies['account_mismatches']) < $maxInlineEntities) {
+                $schemaAnomalies['account_mismatches'][] = [
+                    'entity_type' => 'meli_order',
+                    'entity_id' => $oid,
+                    'meli_account_id' => $entity['meli_account_id'],
+                ];
+            }
+        }
+        if (! empty($flags['ambiguous_link_keys'])) {
+            $schemaAnomalyCounts['ambiguous_channel_links']++;
+            if (count($schemaAnomalies['ambiguous_channel_links']) < $maxInlineEntities) {
+                $schemaAnomalies['ambiguous_channel_links'][] = [
+                    ...$summary,
+                    'ambiguous_links' => $flags['ambiguous_link_keys'],
+                ];
+            }
+        }
+        if ((int) ($flags['missing_line_key_count'] ?? 0) > 0) {
+            $schemaAnomalyCounts['missing_remote_line_key_orders']++;
+            if (count($schemaAnomalies['missing_remote_line_key_orders']) < $maxInlineEntities) {
+                $schemaAnomalies['missing_remote_line_key_orders'][] = [
+                    ...$summary,
+                    'items_missing_remote_line_key' => (int) $flags['missing_line_key_count'],
+                ];
+            }
+        }
+        if (! empty($flags['is_cancelled_with_active'])) {
+            $categoryCounts['cancelled_orders_with_active_reservations']++;
+            if (count($categories['cancelled_orders_with_active_reservations']) < $maxInlineEntities) {
+                $categories['cancelled_orders_with_active_reservations'][] = $summary;
+            }
+        }
+        if (! empty($flags['is_shipped_with_active'])) {
+            $categoryCounts['shipped_orders_with_active_reservations']++;
+            if (count($categories['shipped_orders_with_active_reservations']) < $maxInlineEntities) {
+                $categories['shipped_orders_with_active_reservations'][] = $summary;
+            }
+        }
+        if (! empty($flags['is_paid_pending'])) {
+            $categoryCounts['paid_orders_pending_reservation']++;
+            if (count($categories['paid_orders_pending_reservation']) < $maxInlineEntities) {
+                $categories['paid_orders_pending_reservation'][] = $summary;
+            }
+        }
+        if (! empty($flags['is_shipped_never_reserved'])) {
+            $categoryCounts['shipped_during_outage_never_reserved']++;
+            if (count($categories['shipped_during_outage_never_reserved']) < $maxInlineEntities) {
+                $categories['shipped_during_outage_never_reserved'][] = [
+                    ...$summary,
+                    'requires_manual_verification' => true,
+                ];
+            }
+        }
+        if (! empty($flags['matched_manual_movements'])) {
+            $categoryCounts['orders_with_manual_movements']++;
+            if (count($categories['orders_with_manual_movements']) < $maxInlineEntities) {
+                $categories['orders_with_manual_movements'][] = [
+                    ...$summary,
+                    'manual_movements_count' => count($flags['matched_manual_movements']),
+                    'manual_movements_sample' => array_slice($flags['matched_manual_movements'], 0, 5),
+                    'requires_manual_verification' => true,
+                ];
+            }
+        }
+        if (! empty($flags['is_multiline'])) {
+            $categoryCounts['multiline_orders']++;
+            if (count($categories['multiline_orders']) < $maxInlineEntities) {
+                $categories['multiline_orders'][] = [
+                    ...$summary,
+                    'requires_manual_verification' => true,
+                ];
+            }
+        }
+        if (! empty($flags['involves_kit_or_component'])) {
+            $categoryCounts['kits_and_components']++;
+            if (count($categories['kits_and_components']) < $maxInlineEntities) {
+                $categories['kits_and_components'][] = [
+                    ...$summary,
+                    'kit_product_ids' => array_values(array_unique($flags['kit_pids'] ?? [])),
+                    'component_product_ids' => array_values(array_unique($flags['component_pids'] ?? [])),
+                    'has_active_kit_reservation' => (bool) ($flags['has_active_kit_reservation'] ?? false),
+                    'requires_manual_verification' => true,
+                ];
+            }
+        }
+    }
+
+    /**
+     * Evaluates and verifies ALL mandatory R2-DIAG invariants fail-closed.
+     *
+     * @param  array<string, mixed>|null  $manifestData
+     * @param  array<string, int>  $orderStats
+     * @param  array<string, int>  $primaryPartitionCounts
+     * @return array<string, mixed>
+     */
+    private function evaluateAndVerifyInvariants(
+        ?array $manifestData,
+        ?int $accountFilter,
+        array $orderStats,
+        array $primaryPartitionCounts,
+        bool $ndjsonEnabled,
+        int $ndjsonRecordsWritten,
+    ): array {
+        $expectedDistinctOrders = ($manifestData !== null && $accountFilter !== null)
+            ? max(0, $orderStats['expected_distinct_orders'] - $orderStats['filtered_out_by_account_count'])
+            : $orderStats['expected_distinct_orders'];
+
+        $accountedOrders = $orderStats['accounted_orders'];
+        $primaryPartitionSum = array_sum($primaryPartitionCounts);
+        $unclassifiedOrders = $expectedDistinctOrders - $accountedOrders;
+        $duplicatePrimary = $orderStats['duplicate_primary_classifications'];
+
+        $invariants = [
+            'scope_mode' => $manifestData !== null ? 'manifest' : 'database_scan',
+            'distinct_orders_in_scope' => $expectedDistinctOrders,
+            'distinct_orders_in_manifest' => $manifestData !== null ? (int) $manifestData['job_accounting']['distinct_orders_in_manifest'] : null,
+            'accounted_orders' => $accountedOrders,
+            'unclassified_orders' => $unclassifiedOrders,
+            'sum_primary_partition_counts' => $primaryPartitionSum,
+            'duplicate_primary_classifications' => $duplicatePrimary,
+            'missing_orders_accounted' => $orderStats['missing_orders_count'],
+            'accounted_order_jobs' => $orderStats['accounted_order_jobs'],
+            'total_manifest_entries' => $manifestData !== null ? (int) $manifestData['job_accounting']['total_manifest_entries'] : null,
+            'ndjson_records_written' => $ndjsonEnabled ? $ndjsonRecordsWritten : null,
+            'all_passed' => true,
+            'violations' => [],
+        ];
+
+        if ($this->invariantCheckMutator !== null) {
+            $invariants = ($this->invariantCheckMutator)($invariants);
+        }
+
+        $violations = [];
+
+        if ($invariants['accounted_orders'] !== $invariants['distinct_orders_in_scope']) {
+            $violations[] = sprintf(
+                'accounted_orders (%d) != distinct_orders_in_scope (%d)',
+                $invariants['accounted_orders'],
+                $invariants['distinct_orders_in_scope'],
+            );
+        }
+
+        if ($invariants['unclassified_orders'] !== 0) {
+            $violations[] = sprintf('unclassified_orders (%d) != 0', $invariants['unclassified_orders']);
+        }
+
+        if ($invariants['sum_primary_partition_counts'] !== $invariants['distinct_orders_in_scope']) {
+            $violations[] = sprintf(
+                'sum(primary_partition_counts) (%d) != distinct_orders_in_scope (%d)',
+                $invariants['sum_primary_partition_counts'],
+                $invariants['distinct_orders_in_scope'],
+            );
+        }
+
+        if ($invariants['duplicate_primary_classifications'] !== 0) {
+            $violations[] = sprintf(
+                'duplicate_primary_classifications (%d) != 0',
+                $invariants['duplicate_primary_classifications'],
+            );
+        }
+
+        if ($manifestData !== null && $accountFilter === null) {
+            $ja = $manifestData['job_accounting'];
+            $reconciledManifestEntries = $invariants['accounted_order_jobs']
+                + (int) $ja['beauty_job_entries']
+                + (int) $ja['reserved_job_entries']
+                + (int) $ja['invalid_or_unverifiable_job_entries']
+                + (int) $ja['duplicate_manifest_job_id_entries'];
+
+            if ($reconciledManifestEntries !== (int) $ja['total_manifest_entries']) {
+                $violations[] = sprintf(
+                    'manifest_job_total_mismatch: reconciled (%d) != total_manifest_entries (%d)',
+                    $reconciledManifestEntries,
+                    (int) $ja['total_manifest_entries'],
+                );
+            }
+
+            if ($invariants['accounted_order_jobs'] !== (int) $ja['reservation_job_entries']) {
+                $violations[] = sprintf(
+                    'accounted_order_jobs (%d) != reservation_job_entries (%d)',
+                    $invariants['accounted_order_jobs'],
+                    (int) $ja['reservation_job_entries'],
+                );
+            }
+        }
+
+        if ($ndjsonEnabled && $invariants['ndjson_records_written'] !== $invariants['distinct_orders_in_scope']) {
+            $violations[] = sprintf(
+                'ndjson_records_written (%d) != distinct_orders_in_scope (%d)',
+                (int) $invariants['ndjson_records_written'],
+                $invariants['distinct_orders_in_scope'],
+            );
+        }
+
+        if ($violations !== []) {
+            $invariants['all_passed'] = false;
+            $invariants['violations'] = $violations;
+
+            throw new QueueRecoveryException(
+                'Fallo de invariantes obligatorias de diagnóstico exhaustivo: '.implode('; ', $violations),
+                'diagnostic_invariant_violation',
+                ['invariants' => $invariants],
+            );
+        }
+
+        return $invariants;
     }
 
     /**
@@ -672,8 +1449,11 @@ class QueueReconstructionDiagnosticsService
      * @param  array<int, bool>  $validAccountIds
      * @param  list<int>|null  $scopedDiscountIds
      * @param  array<string, list<array<string, mixed>>>  $categories
+     * @param  array<string, int>  $categoryCounts
      * @param  array<string, list<array<string, mixed>>>  $schemaAnomalies
+     * @param  array<string, int>  $schemaAnomalyCounts
      * @param  array<string, list<array<string, mixed>>>  $classification
+     * @param  array<string, int>  $classificationCounts
      */
     private function diagnoseBeautyPromotions(
         ConnectionInterface $db,
@@ -681,9 +1461,13 @@ class QueueReconstructionDiagnosticsService
         array $validAccountIds,
         ?array $scopedDiscountIds,
         ?int $accountFilter,
+        int $maxInlineEntities,
         array &$categories,
+        array &$categoryCounts,
         array &$schemaAnomalies,
+        array &$schemaAnomalyCounts,
         array &$classification,
+        array &$classificationCounts,
     ): void {
         $rulesQuery = $db->table('meli_beauty_scheduled_discounts')->orderBy('id');
         if ($scopedDiscountIds !== null) {
@@ -702,7 +1486,6 @@ class QueueReconstructionDiagnosticsService
             $foundRuleIds[(int) $r->id] = true;
         }
 
-        // Detect deleted Beauty rules referenced by manifest OR by orphaned `meli_scheduled_price_states`.
         $deletedRuleIds = [];
         if ($scopedDiscountIds !== null && $accountFilter === null) {
             foreach ($scopedDiscountIds as $did) {
@@ -722,35 +1505,44 @@ class QueueReconstructionDiagnosticsService
                 $did = (int) $st->meli_beauty_scheduled_discount_id;
                 if (! isset($foundRuleIds[$did]) && ! $db->table('meli_beauty_scheduled_discounts')->where('id', $did)->exists()) {
                     $deletedRuleIds[$did] = 'orphaned_scheduled_price_state_without_rule';
-                    $categories['remote_states_requiring_verification'][] = [
-                        'discount_id' => $did,
-                        'meli_account_id' => null,
-                        'price_manager_item_id' => (int) $st->price_manager_item_id,
-                        'meli_item_id' => null,
-                        'sku' => null,
-                        'local_state_status' => (string) $st->status,
-                        'window_status' => 'rule_deleted',
-                        'base_price' => $st->base_price !== null ? (float) $st->base_price : null,
-                        'promotional_price' => $st->promotional_price !== null ? (float) $st->promotional_price : null,
-                        'failure_message' => $st->failure_message !== null ? mb_substr((string) $st->failure_message, 0, 200) : null,
-                        'recent_failed_changes' => 0,
-                        'requires_remote_verification' => true,
-                    ];
+                    $categoryCounts['remote_states_requiring_verification']++;
+                    if (count($categories['remote_states_requiring_verification']) < $maxInlineEntities) {
+                        $categories['remote_states_requiring_verification'][] = [
+                            'discount_id' => $did,
+                            'meli_account_id' => null,
+                            'price_manager_item_id' => (int) $st->price_manager_item_id,
+                            'meli_item_id' => null,
+                            'sku' => null,
+                            'local_state_status' => (string) $st->status,
+                            'window_status' => 'rule_deleted',
+                            'base_price' => $st->base_price !== null ? (float) $st->base_price : null,
+                            'promotional_price' => $st->promotional_price !== null ? (float) $st->promotional_price : null,
+                            'failure_message' => $st->failure_message !== null ? mb_substr((string) $st->failure_message, 0, 200) : null,
+                            'recent_failed_changes' => 0,
+                            'requires_remote_verification' => true,
+                        ];
+                    }
                 }
             }
         }
 
         foreach ($deletedRuleIds as $did => $reason) {
-            $schemaAnomalies['deleted_beauty_rules'][] = [
-                'discount_id' => $did,
-                'reason' => $reason,
-            ];
-            $classification['pending_human_review'][] = [
-                'entity_type' => 'beauty_discount',
-                'entity_id' => $did,
-                'meli_account_id' => null,
-                'reasons' => [$reason],
-            ];
+            $schemaAnomalyCounts['deleted_beauty_rules']++;
+            if (count($schemaAnomalies['deleted_beauty_rules']) < $maxInlineEntities) {
+                $schemaAnomalies['deleted_beauty_rules'][] = [
+                    'discount_id' => $did,
+                    'reason' => $reason,
+                ];
+            }
+            $classificationCounts['pending_human_review']++;
+            if (count($classification['pending_human_review']) < $maxInlineEntities) {
+                $classification['pending_human_review'][] = [
+                    'entity_type' => 'beauty_discount',
+                    'entity_id' => $did,
+                    'meli_account_id' => null,
+                    'reasons' => [$reason],
+                ];
+            }
         }
 
         if ($rules->isEmpty()) {
@@ -759,7 +1551,6 @@ class QueueReconstructionDiagnosticsService
 
         $ruleIds = array_keys($foundRuleIds);
 
-        // Load explicit item links from `meli_beauty_scheduled_discount_items` (real production schema) to detect modified rules.
         $explicitItemsByRule = [];
         if ($tables['meli_beauty_scheduled_discount_items']) {
             $pivotRows = $db->table('meli_beauty_scheduled_discount_items')
@@ -837,15 +1628,16 @@ class QueueReconstructionDiagnosticsService
 
             $accountMismatch = $accountId === null || ($tables['meli_accounts'] && ! isset($validAccountIds[$accountId]));
             if ($accountMismatch) {
-                $schemaAnomalies['account_mismatches'][] = [
-                    'entity_type' => 'beauty_discount',
-                    'entity_id' => $model->id,
-                    'meli_account_id' => $accountId,
-                ];
+                $schemaAnomalyCounts['account_mismatches']++;
+                if (count($schemaAnomalies['account_mismatches']) < $maxInlineEntities) {
+                    $schemaAnomalies['account_mismatches'][] = [
+                        'entity_type' => 'beauty_discount',
+                        'entity_id' => $model->id,
+                        'meli_account_id' => $accountId,
+                    ];
+                }
             }
 
-            // Detect modified Beauty rule: rule has explicit items in `meli_beauty_scheduled_discount_items`,
-            // yet an active/restore_pending/failed state references an item no longer attached to the rule!
             $orphanedItemIds = [];
             if ($explicitItems !== []) {
                 foreach (array_merge($activeStates, $restorePendingStates, $failedStates) as $st) {
@@ -856,12 +1648,15 @@ class QueueReconstructionDiagnosticsService
                 }
             }
             if ($orphanedItemIds !== []) {
-                $schemaAnomalies['modified_beauty_rules_orphaned_states'][] = [
-                    'discount_id' => $model->id,
-                    'meli_account_id' => $accountId,
-                    'orphaned_price_manager_item_ids' => array_values(array_unique($orphanedItemIds)),
-                    'reason' => 'state_item_removed_from_meli_beauty_scheduled_discount_items',
-                ];
+                $schemaAnomalyCounts['modified_beauty_rules_orphaned_states']++;
+                if (count($schemaAnomalies['modified_beauty_rules_orphaned_states']) < $maxInlineEntities) {
+                    $schemaAnomalies['modified_beauty_rules_orphaned_states'][] = [
+                        'discount_id' => $model->id,
+                        'meli_account_id' => $accountId,
+                        'orphaned_price_manager_item_ids' => array_values(array_unique($orphanedItemIds)),
+                        'reason' => 'state_item_removed_from_meli_beauty_scheduled_discount_items',
+                    ];
+                }
             }
 
             $ruleSummary = [
@@ -880,43 +1675,54 @@ class QueueReconstructionDiagnosticsService
 
             if (((bool) ($row->active ?? false) && in_array($windowStatus, ['in_window', 'outside_hours', 'scheduled'], true))
                 || $activeStates !== []) {
-                $categories['active_beauty_promotions'][] = $ruleSummary;
+                $categoryCounts['active_beauty_promotions']++;
+                if (count($categories['active_beauty_promotions']) < $maxInlineEntities) {
+                    $categories['active_beauty_promotions'][] = $ruleSummary;
+                }
             }
 
             $needsRestore = $restorePendingStates !== []
                 || ($activeStates !== [] && in_array($windowStatus, ['disabled', 'finished', 'outside_hours'], true));
             if ($needsRestore) {
-                $categories['beauty_promotions_pending_restore'][] = [
-                    ...$ruleSummary,
-                    'items_needing_restore' => count($restorePendingStates) + ($windowStatus !== 'in_window' ? count($activeStates) : 0),
-                ];
+                $categoryCounts['beauty_promotions_pending_restore']++;
+                if (count($categories['beauty_promotions_pending_restore']) < $maxInlineEntities) {
+                    $categories['beauty_promotions_pending_restore'][] = [
+                        ...$ruleSummary,
+                        'items_needing_restore' => count($restorePendingStates) + ($windowStatus !== 'in_window' ? count($activeStates) : 0),
+                    ];
+                }
             }
 
             if ($windowStatus === 'finished') {
-                $categories['expired_beauty_promotions'][] = $ruleSummary;
+                $categoryCounts['expired_beauty_promotions']++;
+                if (count($categories['expired_beauty_promotions']) < $maxInlineEntities) {
+                    $categories['expired_beauty_promotions'][] = $ruleSummary;
+                }
             }
 
             $remoteStatesCount = count($activeStates) + count($restorePendingStates) + count($failedStates);
             foreach (array_merge($activeStates, $restorePendingStates, $failedStates) as $st) {
                 $itemInfo = $itemsById[(int) $st->price_manager_item_id] ?? ['meli_item_id' => null, 'sku' => null];
-                $categories['remote_states_requiring_verification'][] = [
-                    'discount_id' => $model->id,
-                    'meli_account_id' => $accountId,
-                    'price_manager_item_id' => (int) $st->price_manager_item_id,
-                    'meli_item_id' => $itemInfo['meli_item_id'],
-                    'sku' => $itemInfo['sku'],
-                    'local_state_status' => (string) $st->status,
-                    'window_status' => $windowStatus,
-                    'orphaned_from_rule_items' => in_array((int) $st->price_manager_item_id, $orphanedItemIds, true),
-                    'base_price' => $st->base_price !== null ? (float) $st->base_price : null,
-                    'promotional_price' => $st->promotional_price !== null ? (float) $st->promotional_price : null,
-                    'failure_message' => $st->failure_message !== null ? mb_substr((string) $st->failure_message, 0, 200) : null,
-                    'recent_failed_changes' => count($recentFailedChangesByItem[(int) $st->price_manager_item_id] ?? []),
-                    'requires_remote_verification' => true,
-                ];
+                $categoryCounts['remote_states_requiring_verification']++;
+                if (count($categories['remote_states_requiring_verification']) < $maxInlineEntities) {
+                    $categories['remote_states_requiring_verification'][] = [
+                        'discount_id' => $model->id,
+                        'meli_account_id' => $accountId,
+                        'price_manager_item_id' => (int) $st->price_manager_item_id,
+                        'meli_item_id' => $itemInfo['meli_item_id'],
+                        'sku' => $itemInfo['sku'],
+                        'local_state_status' => (string) $st->status,
+                        'window_status' => $windowStatus,
+                        'orphaned_from_rule_items' => in_array((int) $st->price_manager_item_id, $orphanedItemIds, true),
+                        'base_price' => $st->base_price !== null ? (float) $st->base_price : null,
+                        'promotional_price' => $st->promotional_price !== null ? (float) $st->promotional_price : null,
+                        'failure_message' => $st->failure_message !== null ? mb_substr((string) $st->failure_message, 0, 200) : null,
+                        'recent_failed_changes' => count($recentFailedChangesByItem[(int) $st->price_manager_item_id] ?? []),
+                        'requires_remote_verification' => true,
+                    ];
+                }
             }
 
-            // 3-tier classification for this Beauty rule:
             if ($accountMismatch || $needsRestore || $failedStates !== [] || $orphanedItemIds !== [] || $remoteStatesCount > 0) {
                 $reasons = [];
                 if ($accountMismatch) {
@@ -935,20 +1741,26 @@ class QueueReconstructionDiagnosticsService
                     $reasons[] = 'remote_meli_state_verification_required';
                 }
 
-                $classification['pending_human_review'][] = [
-                    'entity_type' => 'beauty_discount',
-                    'entity_id' => $model->id,
-                    'meli_account_id' => $accountId,
-                    'reasons' => array_values(array_unique($reasons)),
-                ];
+                $classificationCounts['pending_human_review']++;
+                if (count($classification['pending_human_review']) < $maxInlineEntities) {
+                    $classification['pending_human_review'][] = [
+                        'entity_type' => 'beauty_discount',
+                        'entity_id' => $model->id,
+                        'meli_account_id' => $accountId,
+                        'reasons' => array_values(array_unique($reasons)),
+                    ];
+                }
             } else {
-                $classification['reconstructible_candidates'][] = [
-                    'entity_type' => 'beauty_discount',
-                    'entity_id' => $model->id,
-                    'meli_account_id' => $accountId,
-                    'candidate_action' => $windowStatus === 'finished' ? 'no_action_expired_without_active_states' : 'evaluate_rule_window_when_scheduler_resumes',
-                    'automatic_execution_allowed' => false,
-                ];
+                $classificationCounts['reconstructible_candidates']++;
+                if (count($classification['reconstructible_candidates']) < $maxInlineEntities) {
+                    $classification['reconstructible_candidates'][] = [
+                        'entity_type' => 'beauty_discount',
+                        'entity_id' => $model->id,
+                        'meli_account_id' => $accountId,
+                        'candidate_action' => $windowStatus === 'finished' ? 'no_action_expired_without_active_states' : 'evaluate_rule_window_when_scheduler_resumes',
+                        'automatic_execution_allowed' => false,
+                    ];
+                }
             }
         }
     }
@@ -958,50 +1770,11 @@ class QueueReconstructionDiagnosticsService
         if ($override !== null && trim($override) !== '') {
             try {
                 return CarbonImmutable::parse(trim($override));
-            } catch (\Throwable) {
+            } catch (Throwable) {
                 return null;
             }
         }
 
         return $this->cutover->configuredAt();
-    }
-
-    private function orderIsAfterCutover(object $order, ?CarbonImmutable $cutoverAt): bool
-    {
-        if ($cutoverAt === null) {
-            return true;
-        }
-
-        $created = $this->parseOrderTimestamp($order);
-        if ($created === null) {
-            return false;
-        }
-
-        return $created->greaterThanOrEqualTo($cutoverAt);
-    }
-
-    private function parseOrderTimestamp(object $order): ?CarbonImmutable
-    {
-        $raw = $order->raw ?? null;
-        if (is_string($raw) && $raw !== '') {
-            $decoded = json_decode($raw, true);
-            if (is_array($decoded) && is_string($decoded['date_created'] ?? null) && trim($decoded['date_created']) !== '') {
-                try {
-                    return CarbonImmutable::parse(trim($decoded['date_created']));
-                } catch (\Throwable) {
-                    // Fallback to column below.
-                }
-            }
-        }
-
-        if (! empty($order->created_at)) {
-            try {
-                return CarbonImmutable::parse((string) $order->created_at);
-            } catch (\Throwable) {
-                return null;
-            }
-        }
-
-        return null;
     }
 }
