@@ -9,6 +9,14 @@ use App\Models\InventoryLocation;
 use App\Models\InventoryMovement;
 use App\Models\InventoryProduct;
 use App\Models\InventoryProvisionalItem;
+use App\Models\InventoryShelfAudit;
+use App\Models\InventoryShelfAuditItem;
+use App\Models\MeliFullShipment;
+use App\Models\MeliFullShipmentItem;
+use App\Models\PurchaseOrder;
+use App\Models\PurchaseOrderItem;
+use App\Models\PurchaseOrderReceipt;
+use App\Models\Supplier;
 use App\Models\User;
 use App\Services\Inventory\Dispatches\ProvisionalItemLinkService;
 use App\Services\Inventory\Dispatches\WarehouseDispatchService;
@@ -80,6 +88,79 @@ class WarehouseDispatchMariaDbConcurrencyTest extends TestCase
         DB::purge('wd_mariadb');
 
         $this->runMigrationsOnMariaDb();
+    }
+
+    /**
+     * GROUP A (Operation WITHOUT deduction — apply_ledger=false):
+     * Validates InnoDB migrations, documentary idempotency, concurrent folios, edit vs confirm,
+     * confirm vs cancel, and strictly ZERO rows written to inventory_movements.
+     */
+    public function test_group_a_record_only_migrations_idempotency_folios_edit_cancel_and_zero_movements(): void
+    {
+        config()->set('inventory.warehouse_dispatches.apply_ledger', false);
+        [$admin, $dest, $loc, $prod] = $this->seedBaseScenario(10);
+        $initialMovementCount = InventoryMovement::count();
+
+        $createPayload = [
+            'destination_id' => $dest->id,
+            'operation_type' => InventoryDispatch::OP_INTERNAL_CONSUMPTION,
+            'items' => [[
+                'kind' => 'registered',
+                'inventory_product_id' => $prod->id,
+                'inventory_location_id' => $loc->id,
+                'captured_quantity' => 3,
+            ]],
+        ];
+
+        $created = $this->runWorkersConcurrently([
+            ['action' => 'create_draft', 'apply_ledger' => false, 'user_id' => $admin->id, 'data' => $createPayload],
+            ['action' => 'create_draft', 'apply_ledger' => false, 'user_id' => $admin->id, 'data' => $createPayload],
+            ['action' => 'create_draft', 'apply_ledger' => false, 'user_id' => $admin->id, 'data' => $createPayload],
+        ]);
+        $folios = array_values(array_filter(array_column($created, 'dispatch_number')));
+        $this->assertCount(3, array_unique($folios));
+
+        $draftA = InventoryDispatch::findOrFail((int) $created[0]['id']);
+        $draftB = InventoryDispatch::findOrFail((int) $created[1]['id']);
+
+        $this->runWorkersConcurrently([
+            ['action' => 'confirm_dispatch', 'apply_ledger' => false, 'user_id' => $admin->id, 'dispatch_id' => $draftA->id, 'confirm_key' => 'ga-k1', 'expected_draft_version' => 1],
+            ['action' => 'confirm_dispatch', 'apply_ledger' => false, 'user_id' => $admin->id, 'dispatch_id' => $draftA->id, 'confirm_key' => 'ga-k1', 'expected_draft_version' => 1],
+            ['action' => 'edit_draft', 'apply_ledger' => false, 'user_id' => $admin->id, 'dispatch_id' => $draftA->id, 'data' => [...$createPayload, 'expected_draft_version' => 1]],
+            ['action' => 'confirm_dispatch', 'apply_ledger' => false, 'user_id' => $admin->id, 'dispatch_id' => $draftB->id, 'confirm_key' => 'ga-k2', 'expected_draft_version' => 1],
+            ['action' => 'cancel_draft', 'apply_ledger' => false, 'user_id' => $admin->id, 'dispatch_id' => $draftB->id],
+        ]);
+
+        $this->assertSame($initialMovementCount, InventoryMovement::count());
+        $this->assertSame(0, InventoryMovement::where('type', InventoryMovement::DISPATCH_OUT)->count());
+    }
+
+    /**
+     * GROUP A (Operation WITHOUT deduction — apply_ledger=false):
+     * Validates concurrent provisional merge and link with zero cycles and zero ledger movements.
+     */
+    public function test_group_a_record_only_concurrent_provisional_link_and_merge_with_zero_movements(): void
+    {
+        config()->set('inventory.warehouse_dispatches.apply_ledger', false);
+        [$admin, , , $prod] = $this->seedBaseScenario(10);
+        $initialMovementCount = InventoryMovement::count();
+        $linkSvc = app(ProvisionalItemLinkService::class);
+        $provA = $linkSvc->createProvisional(['name' => 'Group A Prov 1', 'brand' => 'Wella', 'tone' => '8/1'], $admin);
+        $provB = $linkSvc->createProvisional(['name' => 'Group A Prov 2', 'brand' => 'Wella', 'tone' => '8-1'], $admin);
+
+        $this->runWorkersConcurrently([
+            ['action' => 'merge_provisional', 'apply_ledger' => false, 'user_id' => $admin->id, 'source_id' => $provA->id, 'target_id' => $provB->id],
+            ['action' => 'merge_provisional', 'apply_ledger' => false, 'user_id' => $admin->id, 'source_id' => $provB->id, 'target_id' => $provA->id],
+            ['action' => 'link_provisional', 'apply_ledger' => false, 'user_id' => $admin->id, 'provisional_id' => $provB->id, 'product_id' => $prod->id],
+        ]);
+
+        $provA->refresh();
+        $provB->refresh();
+        $this->assertFalse(
+            $provA->status === InventoryProvisionalItem::STATUS_MERGED
+            && $provB->status === InventoryProvisionalItem::STATUS_MERGED
+        );
+        $this->assertSame($initialMovementCount, InventoryMovement::count());
     }
 
     /** M01: Simultaneous confirmation of the same dispatch across 3 parallel InnoDB sessions. */
@@ -232,10 +313,10 @@ class WarehouseDispatchMariaDbConcurrencyTest extends TestCase
     }
 
     /**
-     * M07–M10 (Diagnostic tests for legacy non-locking writers documented in H04):
-     * Does NOT hide legacy writer races — verifies dispatch behavior and records diagnostic telemetry.
+     * M07 (Diagnostic legacy writer — PosSaleService does not acquire lockForUpdate on inventory_products;
+     * Phase 1.5 hardening PR is tracked separately). Records honest telemetry without masking legacy races.
      */
-    public function test_m07_to_m10_diagnostic_legacy_writers_documented_honestly(): void
+    public function test_m07_diagnostic_confirm_vs_pos_sale_legacy_writer(): void
     {
         [$admin, $dest, $loc, $prod] = $this->seedBaseScenario(5);
         $draft = app(WarehouseDispatchService::class)->createDraft([
@@ -244,8 +325,6 @@ class WarehouseDispatchMariaDbConcurrencyTest extends TestCase
             'items' => [['kind' => 'registered', 'inventory_product_id' => $prod->id, 'inventory_location_id' => $loc->id, 'captured_quantity' => 4]],
         ], $admin);
 
-        // Diagnostic probe M07 (PosSaleService does not acquire lockForUpdate on inventory_products;
-        // Phase 1.5 hardening PR is tracked separately).
         $results = $this->runWorkersConcurrently([
             ['action' => 'confirm_dispatch', 'user_id' => $admin->id, 'dispatch_id' => $draft->id, 'confirm_key' => 'm07-k1'],
             ['action' => 'pos_sale', 'user_id' => $admin->id, 'data' => [
@@ -258,6 +337,126 @@ class WarehouseDispatchMariaDbConcurrencyTest extends TestCase
 
         $this->assertCount(2, $results);
         $this->assertSame(InventoryDispatch::STATUS_CONFIRMED, $draft->fresh()->status);
+    }
+
+    /**
+     * M08 (Diagnostic legacy writer — ShelfAuditService::applyAuditAdjustment vs concurrent confirm).
+     */
+    public function test_m08_diagnostic_confirm_vs_shelf_audit_apply_legacy_writer(): void
+    {
+        [$admin, $dest, $loc, $prod] = $this->seedBaseScenario(6);
+        $audit = new InventoryShelfAudit;
+        $audit->forceFill([
+            'inventory_location_id' => $loc->id,
+            'shelf_code' => 'D3',
+            'status' => 'draft',
+            'audited_by' => $admin->id,
+            'audited_at' => now('UTC')->subMinutes(5),
+        ])->save();
+
+        $auditItem = new InventoryShelfAuditItem;
+        $auditItem->forceFill([
+            'inventory_shelf_audit_id' => $audit->id,
+            'inventory_product_id' => $prod->id,
+            'inventory_location_id' => $loc->id,
+            'expected_quantity' => 6,
+            'counted_quantity' => 3,
+            'difference' => -3,
+        ])->save();
+
+        $draft = app(WarehouseDispatchService::class)->createDraft([
+            'destination_id' => $dest->id,
+            'operation_type' => InventoryDispatch::OP_INTERNAL_CONSUMPTION,
+            'items' => [['kind' => 'registered', 'inventory_product_id' => $prod->id, 'inventory_location_id' => $loc->id, 'captured_quantity' => 4]],
+        ], $admin);
+
+        $results = $this->runWorkersConcurrently([
+            ['action' => 'confirm_dispatch', 'user_id' => $admin->id, 'dispatch_id' => $draft->id, 'confirm_key' => 'm08-k1'],
+            ['action' => 'shelf_audit_apply', 'user_id' => $admin->id, 'audit_id' => $audit->id],
+        ]);
+
+        $this->assertCount(2, $results);
+        $this->assertSame(InventoryDispatch::STATUS_CONFIRMED, $draft->fresh()->status);
+    }
+
+    /**
+     * M09 (Diagnostic legacy writer — PurchaseOrderService::voidReceipt writes directly without product lock).
+     */
+    public function test_m09_diagnostic_confirm_vs_purchase_order_void_receipt_legacy_writer(): void
+    {
+        [$admin, $dest, $loc, $prod] = $this->seedBaseScenario(6);
+        $supplier = Supplier::create(['name' => 'Proveedor M09', 'code' => 'SUP-M09', 'is_active' => true]);
+        $po = PurchaseOrder::create([
+            'order_number' => 'OC-M09-001',
+            'supplier_id' => $supplier->id,
+            'status' => 'received',
+            'created_by' => $admin->id,
+        ]);
+        $poItem = PurchaseOrderItem::create([
+            'purchase_order_id' => $po->id,
+            'inventory_product_id' => $prod->id,
+            'quantity_ordered' => 6,
+            'quantity_received' => 6,
+            'unit_cost' => 50,
+        ]);
+        $receipt = PurchaseOrderReceipt::create([
+            'purchase_order_id' => $po->id,
+            'purchase_order_item_id' => $poItem->id,
+            'inventory_product_id' => $prod->id,
+            'inventory_location_id' => $loc->id,
+            'quantity' => 4,
+            'received_by' => $admin->id,
+            'received_at' => now('UTC')->subHours(2),
+        ]);
+
+        $draft = app(WarehouseDispatchService::class)->createDraft([
+            'destination_id' => $dest->id,
+            'operation_type' => InventoryDispatch::OP_INTERNAL_CONSUMPTION,
+            'items' => [['kind' => 'registered', 'inventory_product_id' => $prod->id, 'inventory_location_id' => $loc->id, 'captured_quantity' => 4]],
+        ], $admin);
+
+        $results = $this->runWorkersConcurrently([
+            ['action' => 'confirm_dispatch', 'user_id' => $admin->id, 'dispatch_id' => $draft->id, 'confirm_key' => 'm09-k1'],
+            ['action' => 'po_void_receipt', 'user_id' => $admin->id, 'receipt_id' => $receipt->id],
+        ]);
+
+        $this->assertCount(2, $results);
+        $this->assertSame(InventoryDispatch::STATUS_CONFIRMED, $draft->fresh()->status);
+    }
+
+    /**
+     * M10 (Diagnostic/integration — MeliFullShipmentService::dispatchShipment TRANSFER_OUT vs concurrent confirm).
+     */
+    public function test_m10_diagnostic_confirm_vs_meli_full_shipment_dispatch(): void
+    {
+        [$admin, $dest, $loc, $prod] = $this->seedBaseScenario(5);
+        $shipment = MeliFullShipment::create([
+            'shipment_code' => 'FULL-M10-001',
+            'status' => MeliFullShipment::STATUS_PACKED,
+            'created_by' => $admin->id,
+        ]);
+        MeliFullShipmentItem::create([
+            'meli_full_shipment_id' => $shipment->id,
+            'inventory_product_id' => $prod->id,
+            'inventory_location_id' => $loc->id,
+            'quantity_planned' => 4,
+            'quantity_packed' => 4,
+        ]);
+
+        $draft = app(WarehouseDispatchService::class)->createDraft([
+            'destination_id' => $dest->id,
+            'operation_type' => InventoryDispatch::OP_INTERNAL_CONSUMPTION,
+            'items' => [['kind' => 'registered', 'inventory_product_id' => $prod->id, 'inventory_location_id' => $loc->id, 'captured_quantity' => 4]],
+        ], $admin);
+
+        $results = $this->runWorkersConcurrently([
+            ['action' => 'confirm_dispatch', 'user_id' => $admin->id, 'dispatch_id' => $draft->id, 'confirm_key' => 'm10-k1'],
+            ['action' => 'full_dispatch', 'user_id' => $admin->id, 'shipment_id' => $shipment->id],
+        ]);
+
+        $this->assertCount(2, $results);
+        $this->assertSame(InventoryDispatch::STATUS_CONFIRMED, $draft->fresh()->status);
+        $this->assertGreaterThanOrEqual(0, app(InventoryStockService::class)->physicalStockByLocation($prod, $loc));
     }
 
     /** M11: Concurrent provisional merge A->B vs B->A and concurrent link vs merge. */

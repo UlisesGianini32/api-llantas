@@ -70,6 +70,17 @@ class InventoryDispatchItem extends Model
         'line_notes',
     ];
 
+    /**
+     * Defense-in-depth (H06): prevent accidental model serialization from leaking
+     * acquisition costs or stylist prices. Authorized views read explicitly via WarehouseDispatchPresenter.
+     *
+     * @var list<string>
+     */
+    protected $hidden = [
+        'unit_cost_snapshot',
+        'unit_price_stylist_snapshot',
+    ];
+
     protected function casts(): array
     {
         return [

@@ -9,6 +9,21 @@ return new class extends Migration
     public function up(): void
     {
         if (Schema::hasTable('inventory_dispatch_events')) {
+            $requiredColumns = [
+                'id', 'inventory_dispatch_id', 'inventory_dispatch_item_id',
+                'provisional_item_id', 'event_type', 'from_status', 'to_status',
+                'actor_user_id', 'reason', 'payload', 'occurred_at', 'created_at',
+            ];
+            $missing = array_values(array_filter(
+                $requiredColumns,
+                static fn (string $col): bool => ! Schema::hasColumn('inventory_dispatch_events', $col),
+            ));
+            if ($missing !== []) {
+                throw new RuntimeException(
+                    'La tabla preexistente inventory_dispatch_events tiene un esquema parcial o incompatible; columnas faltantes: '.implode(', ', $missing)
+                );
+            }
+
             return;
         }
 

@@ -109,6 +109,7 @@ class WarehouseDispatchController extends Controller
         Gate::forUser($request->user())->authorize('viewAny', InventoryDispatch::class);
 
         $filters = [
+            'search' => trim((string) $request->input('search', '')),
             'destination_id' => $request->input('destination_id') ? (int) $request->input('destination_id') : null,
             'operation_type' => trim((string) $request->input('operation_type', '')),
             'brand' => trim((string) $request->input('brand', '')),
@@ -129,6 +130,7 @@ class WarehouseDispatchController extends Controller
         $user = $request->user();
         Gate::forUser($user)->authorize('exportSummary', InventoryDispatch::class);
 
+        $mode = strtolower(trim((string) $request->input('mode', 'detail')));
         $filters = [
             'search' => trim((string) $request->input('search', '')),
             'destination_id' => $request->input('destination_id') ? (int) $request->input('destination_id') : null,
@@ -141,14 +143,71 @@ class WarehouseDispatchController extends Controller
             'date_to' => trim((string) $request->input('date_to', '')),
             'only_provisional' => $request->boolean('only_provisional'),
             'only_discrepancies' => $request->boolean('only_discrepancies'),
+            'include_all_statuses' => $request->boolean('include_all_statuses'),
         ];
+
+        if ($mode === 'summary') {
+            $summaryRows = $this->buildInformativeSummary($filters, limit: 1000);
+            $filename = 'resumen-salidas-almacen-'.now(InventoryDateTime::OPERATING_TIMEZONE)->format('Ymd-His').'.csv';
+
+            return response()->streamDownload(function () use ($summaryRows): void {
+                $out = fopen('php://output', 'w');
+                if ($out === false) {
+                    return;
+                }
+                fwrite($out, "\xEF\xBB\xBF");
+
+                fputcsv($out, [
+                    'Origen',
+                    'SKU / Código',
+                    'Código Provisional Canónico',
+                    'Código Barras',
+                    'Producto',
+                    'Marca',
+                    'Tono',
+                    'Presentación',
+                    'Tipo Operación',
+                    'Salón(es) / Destino(s)',
+                    'Salidas Confirmadas',
+                    'Piezas Físicas Normalizadas',
+                    'Contenedores Sin Conversión',
+                    'Partidas Sin Descuento Ledger',
+                ]);
+
+                foreach ($summaryRows as $row) {
+                    fputcsv($out, [
+                        $this->sanitizeCsvCell($row['item_kind']),
+                        $this->sanitizeCsvCell($row['display_code']),
+                        $this->sanitizeCsvCell($row['provisional_code']),
+                        $this->sanitizeCsvCell($row['display_barcode']),
+                        $this->sanitizeCsvCell($row['display_name']),
+                        $this->sanitizeCsvCell($row['display_brand']),
+                        $this->sanitizeCsvCell($row['display_tone']),
+                        $this->sanitizeCsvCell($row['display_presentation']),
+                        $this->sanitizeCsvCell($row['operation_type']),
+                        $this->sanitizeCsvCell($row['destinations_summary']),
+                        (int) $row['dispatches_count'],
+                        (int) $row['total_physical_units'],
+                        (int) $row['unconverted_containers_qty'],
+                        (int) $row['pending_ledger_lines'],
+                    ]);
+                }
+
+                fclose($out);
+            }, $filename, [
+                'Content-Type' => 'text/csv; charset=UTF-8',
+                'Cache-Control' => 'private, no-store, max-age=0, must-revalidate',
+            ]);
+        }
 
         $canViewCosts = Gate::forUser($user)->allows('viewCosts', InventoryDispatch::class);
         $canViewStylist = Gate::forUser($user)->allows('viewStylistPrices', InventoryDispatch::class);
 
         $query = InventoryDispatchItem::query()
             ->join('inventory_dispatches as d', 'd.id', '=', 'inventory_dispatch_items.inventory_dispatch_id')
+            ->leftJoin('inventory_products as p', 'p.id', '=', 'inventory_dispatch_items.inventory_product_id')
             ->leftJoin('inventory_provisional_items as pi', 'pi.id', '=', 'inventory_dispatch_items.provisional_item_id')
+            ->leftJoin('inventory_provisional_items as canon', 'canon.id', '=', 'pi.canonical_provisional_id')
             ->select([
                 'd.dispatch_number',
                 'd.status as dispatch_status',
@@ -173,9 +232,23 @@ class WarehouseDispatchController extends Controller
                 'inventory_dispatch_items.normalized_physical_quantity',
                 'inventory_dispatch_items.unit_cost_snapshot',
                 'inventory_dispatch_items.unit_price_stylist_snapshot',
-                'pi.provisional_code',
+                'p.sku as master_sku',
+                'p.name as master_name',
+                'p.barcode as master_barcode',
+                'pi.provisional_code as original_provisional_code',
+                DB::raw('COALESCE(canon.provisional_code, pi.provisional_code) as canonical_provisional_code'),
             ]);
 
+        if ($filters['search'] !== '') {
+            $s = $filters['search'];
+            $query->where(function ($q) use ($s): void {
+                $q->where('d.dispatch_number', 'like', "%{$s}%")
+                    ->orWhere('d.destination_code_snapshot', 'like', "%{$s}%")
+                    ->orWhere('d.destination_name_snapshot', 'like', "%{$s}%")
+                    ->orWhere('d.received_by_name', 'like', "%{$s}%")
+                    ->orWhere('d.notes', 'like', "%{$s}%");
+            });
+        }
         if ($filters['destination_id']) {
             $query->where('d.destination_id', $filters['destination_id']);
         }
@@ -184,12 +257,45 @@ class WarehouseDispatchController extends Controller
         }
         if ($filters['status'] !== '') {
             $query->where('d.status', $filters['status']);
+        } elseif (! $filters['include_all_statuses']) {
+            // Default active-demand export excludes DRAFT and CANCELLED dispatches.
+            $query->where('d.status', InventoryDispatch::STATUS_CONFIRMED);
         }
         if ($filters['apply_status'] !== '') {
             $query->where('inventory_dispatch_items.inventory_apply_status', $filters['apply_status']);
         }
         if ($filters['brand'] !== '') {
-            $query->where('inventory_dispatch_items.captured_brand', 'like', "%{$filters['brand']}%");
+            $brand = $filters['brand'];
+            $query->where(function ($q) use ($brand): void {
+                $q->where('inventory_dispatch_items.captured_brand', 'like', "%{$brand}%")
+                    ->orWhere('p.brand', 'like', "%{$brand}%")
+                    ->orWhere('canon.brand', 'like', "%{$brand}%")
+                    ->orWhere('pi.brand', 'like', "%{$brand}%");
+            });
+        }
+        if ($filters['product_search'] !== '') {
+            $ps = $filters['product_search'];
+            $query->where(function ($q) use ($ps): void {
+                $q->where('inventory_dispatch_items.captured_name', 'like', "%{$ps}%")
+                    ->orWhere('inventory_dispatch_items.captured_sku', 'like', "%{$ps}%")
+                    ->orWhere('inventory_dispatch_items.captured_barcode', 'like', "%{$ps}%")
+                    ->orWhere('inventory_dispatch_items.captured_tone', 'like', "%{$ps}%")
+                    ->orWhere('inventory_dispatch_items.captured_presentation', 'like', "%{$ps}%")
+                    ->orWhere('p.sku', 'like', "%{$ps}%")
+                    ->orWhere('p.name', 'like', "%{$ps}%")
+                    ->orWhere('p.barcode', 'like', "%{$ps}%")
+                    ->orWhere('pi.provisional_code', 'like', "%{$ps}%")
+                    ->orWhere('canon.provisional_code', 'like', "%{$ps}%");
+            });
+        }
+        if ($filters['only_provisional']) {
+            $query->whereNull('inventory_dispatch_items.inventory_product_id');
+        }
+        if ($filters['only_discrepancies']) {
+            $query->whereIn('inventory_dispatch_items.inventory_apply_status', [
+                InventoryDispatchItem::APPLY_DISCREPANCY_INSUFFICIENT_STOCK,
+                InventoryDispatchItem::APPLY_NEEDS_RECONCILIATION,
+            ]);
         }
         if ($filters['date_from'] !== '') {
             $fromUtc = InventoryDateTime::toUtc($filters['date_from'].' 00:00:00');
@@ -217,26 +323,28 @@ class WarehouseDispatchController extends Controller
             $headers = [
                 'Folio',
                 'Estado',
-                'Tipo Operacion',
+                'Tipo Operación',
                 'Fecha Efectiva (Hermosillo)',
-                'Destino Codigo',
+                'Destino Código',
                 'Destino Nombre',
-                'Entrego',
-                'Recibio',
-                'Identificacion',
+                'Entregó',
+                'Recibió',
+                'Identificación',
                 'Estado Inventario',
-                'Codigo Provisional',
-                'SKU',
-                'Codigo Barras',
+                'Código Provisional Original',
+                'Código Provisional Canónico',
+                'SKU Maestro',
+                'SKU Capturado',
+                'Código Barras',
                 'Producto',
                 'Marca',
                 'Tono',
-                'Presentacion',
-                'Ubicacion',
+                'Presentación',
+                'Ubicación',
                 'Cantidad Capturada',
                 'Unidad Capturada',
-                'Factor Conversion',
-                'Piezas Fisicas Normalizadas',
+                'Factor Conversión',
+                'Piezas Físicas Normalizadas',
             ];
             if ($canViewCosts) {
                 $headers[] = 'Costo Unitario Referencial';
@@ -252,6 +360,11 @@ class WarehouseDispatchController extends Controller
                     ? \Carbon\Carbon::parse($row->effective_at, 'UTC')->setTimezone(InventoryDateTime::OPERATING_TIMEZONE)->format('Y-m-d H:i')
                     : '';
 
+                // Preserve barcodes strictly as strings (never cast to int/float so leading zeros remain intact).
+                $barcode = $row->captured_barcode !== null && $row->captured_barcode !== ''
+                    ? (string) $row->captured_barcode
+                    : (string) ($row->master_barcode ?? '');
+
                 $line = [
                     $this->sanitizeCsvCell($row->dispatch_number),
                     $this->sanitizeCsvCell($row->dispatch_status),
@@ -263,10 +376,12 @@ class WarehouseDispatchController extends Controller
                     $this->sanitizeCsvCell($row->received_by_name),
                     $this->sanitizeCsvCell($row->identification_status),
                     $this->sanitizeCsvCell($row->inventory_apply_status),
-                    $this->sanitizeCsvCell($row->provisional_code),
+                    $this->sanitizeCsvCell($row->original_provisional_code),
+                    $this->sanitizeCsvCell($row->canonical_provisional_code),
+                    $this->sanitizeCsvCell($row->master_sku),
                     $this->sanitizeCsvCell($row->captured_sku),
-                    $this->sanitizeCsvCell($row->captured_barcode),
-                    $this->sanitizeCsvCell($row->captured_name),
+                    $this->sanitizeCsvCell($barcode),
+                    $this->sanitizeCsvCell($row->master_name ?: $row->captured_name),
                     $this->sanitizeCsvCell($row->captured_brand),
                     $this->sanitizeCsvCell($row->captured_tone),
                     $this->sanitizeCsvCell($row->captured_presentation),
@@ -724,7 +839,7 @@ class WarehouseDispatchController extends Controller
      * @param  array<string, mixed>  $filters
      * @return list<array<string, mixed>>
      */
-    private function buildInformativeSummary(array $filters): array
+    private function buildInformativeSummary(array $filters, int $limit = 100): array
     {
         $query = DB::table('inventory_dispatch_items as di')
             ->join('inventory_dispatches as d', 'd.id', '=', 'di.inventory_dispatch_id')
@@ -733,6 +848,16 @@ class WarehouseDispatchController extends Controller
             ->leftJoin('inventory_provisional_items as canon', 'canon.id', '=', 'pi.canonical_provisional_id')
             ->where('d.status', InventoryDispatch::STATUS_CONFIRMED);
 
+        if (! empty($filters['search'])) {
+            $s = $filters['search'];
+            $query->where(function ($q) use ($s): void {
+                $q->where('d.dispatch_number', 'like', "%{$s}%")
+                    ->orWhere('d.destination_code_snapshot', 'like', "%{$s}%")
+                    ->orWhere('d.destination_name_snapshot', 'like', "%{$s}%")
+                    ->orWhere('d.received_by_name', 'like', "%{$s}%")
+                    ->orWhere('d.notes', 'like', "%{$s}%");
+            });
+        }
         if (! empty($filters['destination_id'])) {
             $query->where('d.destination_id', (int) $filters['destination_id']);
         }
@@ -740,7 +865,13 @@ class WarehouseDispatchController extends Controller
             $query->where('d.operation_type', $filters['operation_type']);
         }
         if (! empty($filters['brand'])) {
-            $query->where('di.captured_brand', 'like', "%{$filters['brand']}%");
+            $brand = $filters['brand'];
+            $query->where(function ($q) use ($brand): void {
+                $q->where('di.captured_brand', 'like', "%{$brand}%")
+                    ->orWhere('p.brand', 'like', "%{$brand}%")
+                    ->orWhere('canon.brand', 'like', "%{$brand}%")
+                    ->orWhere('pi.brand', 'like', "%{$brand}%");
+            });
         }
         if (! empty($filters['product_search'])) {
             $ps = $filters['product_search'];
@@ -748,7 +879,13 @@ class WarehouseDispatchController extends Controller
                 $q->where('di.captured_name', 'like', "%{$ps}%")
                     ->orWhere('di.captured_sku', 'like', "%{$ps}%")
                     ->orWhere('di.captured_barcode', 'like', "%{$ps}%")
-                    ->orWhere('di.captured_tone', 'like', "%{$ps}%");
+                    ->orWhere('di.captured_tone', 'like', "%{$ps}%")
+                    ->orWhere('di.captured_presentation', 'like', "%{$ps}%")
+                    ->orWhere('p.sku', 'like', "%{$ps}%")
+                    ->orWhere('p.name', 'like', "%{$ps}%")
+                    ->orWhere('p.barcode', 'like', "%{$ps}%")
+                    ->orWhere('pi.provisional_code', 'like', "%{$ps}%")
+                    ->orWhere('canon.provisional_code', 'like', "%{$ps}%");
             });
         }
         if (! empty($filters['date_from'])) {
@@ -770,12 +907,16 @@ class WarehouseDispatchController extends Controller
         $rows = $query
             ->selectRaw("CASE WHEN di.inventory_product_id IS NOT NULL THEN 'REGISTERED' ELSE 'PROVISIONAL' END as item_kind")
             ->selectRaw('di.inventory_product_id')
-            ->selectRaw('COALESCE(pi.canonical_provisional_id, di.provisional_item_id) as canonical_provisional_id')
+            ->selectRaw('CASE WHEN di.inventory_product_id IS NOT NULL THEN NULL ELSE COALESCE(pi.canonical_provisional_id, di.provisional_item_id) END as canonical_provisional_id')
             ->selectRaw('d.operation_type')
             ->selectRaw('MAX(COALESCE(p.sku, canon.provisional_code, pi.provisional_code, di.captured_sku)) as display_code')
+            ->selectRaw('MAX(CASE WHEN di.inventory_product_id IS NOT NULL THEN NULL ELSE COALESCE(canon.provisional_code, pi.provisional_code) END) as provisional_code')
+            ->selectRaw('MAX(COALESCE(p.barcode, canon.barcode, pi.barcode, di.captured_barcode)) as display_barcode')
             ->selectRaw('MAX(COALESCE(p.name, canon.name, pi.name, di.captured_name)) as display_name')
             ->selectRaw('MAX(COALESCE(p.brand, canon.brand, pi.brand, di.captured_brand)) as display_brand')
             ->selectRaw('MAX(COALESCE(canon.tone, pi.tone, di.captured_tone)) as display_tone')
+            ->selectRaw('MAX(COALESCE(canon.presentation, pi.presentation, di.captured_presentation)) as display_presentation')
+            ->selectRaw('GROUP_CONCAT(DISTINCT d.destination_name_snapshot) as destinations_raw')
             ->selectRaw('COUNT(DISTINCT d.id) as dispatches_count')
             ->selectRaw('COALESCE(SUM(CASE WHEN di.normalized_physical_quantity IS NOT NULL THEN di.normalized_physical_quantity ELSE 0 END), 0) as total_physical_units')
             ->selectRaw('COALESCE(SUM(CASE WHEN di.normalized_physical_quantity IS NULL THEN di.captured_quantity ELSE 0 END), 0) as unconverted_containers_qty')
@@ -783,28 +924,37 @@ class WarehouseDispatchController extends Controller
             ->groupBy(
                 DB::raw("CASE WHEN di.inventory_product_id IS NOT NULL THEN 'REGISTERED' ELSE 'PROVISIONAL' END"),
                 'di.inventory_product_id',
-                DB::raw('COALESCE(pi.canonical_provisional_id, di.provisional_item_id)'),
+                DB::raw('CASE WHEN di.inventory_product_id IS NOT NULL THEN NULL ELSE COALESCE(pi.canonical_provisional_id, di.provisional_item_id) END'),
                 'd.operation_type',
             )
             ->orderByDesc('total_physical_units')
             ->orderByDesc('unconverted_containers_qty')
-            ->limit(100)
+            ->limit($limit)
             ->get();
 
-        return $rows->map(fn ($row): array => [
-            'item_kind' => (string) $row->item_kind,
-            'inventory_product_id' => $row->inventory_product_id ? (int) $row->inventory_product_id : null,
-            'canonical_provisional_id' => $row->canonical_provisional_id ? (int) $row->canonical_provisional_id : null,
-            'operation_type' => (string) $row->operation_type,
-            'display_code' => $row->display_code,
-            'display_name' => (string) $row->display_name,
-            'display_brand' => $row->display_brand,
-            'display_tone' => $row->display_tone,
-            'dispatches_count' => (int) $row->dispatches_count,
-            'total_physical_units' => (int) $row->total_physical_units,
-            'unconverted_containers_qty' => (int) $row->unconverted_containers_qty,
-            'pending_ledger_lines' => (int) $row->pending_ledger_lines,
-        ])->values()->all();
+        return $rows->map(function ($row): array {
+            $destList = array_values(array_filter(array_map('trim', explode(',', (string) ($row->destinations_raw ?? '')))));
+            sort($destList);
+
+            return [
+                'item_kind' => (string) $row->item_kind,
+                'inventory_product_id' => $row->inventory_product_id ? (int) $row->inventory_product_id : null,
+                'canonical_provisional_id' => $row->canonical_provisional_id ? (int) $row->canonical_provisional_id : null,
+                'provisional_code' => $row->provisional_code !== null ? (string) $row->provisional_code : null,
+                'operation_type' => (string) $row->operation_type,
+                'display_code' => $row->display_code !== null ? (string) $row->display_code : null,
+                'display_barcode' => $row->display_barcode !== null ? (string) $row->display_barcode : null,
+                'display_name' => (string) $row->display_name,
+                'display_brand' => $row->display_brand !== null ? (string) $row->display_brand : null,
+                'display_tone' => $row->display_tone !== null ? (string) $row->display_tone : null,
+                'display_presentation' => $row->display_presentation !== null ? (string) $row->display_presentation : null,
+                'destinations_summary' => implode(', ', $destList),
+                'dispatches_count' => (int) $row->dispatches_count,
+                'total_physical_units' => (int) $row->total_physical_units,
+                'unconverted_containers_qty' => (int) $row->unconverted_containers_qty,
+                'pending_ledger_lines' => (int) $row->pending_ledger_lines,
+            ];
+        })->values()->all();
     }
 
     private function sanitizeCsvCell(mixed $value): string

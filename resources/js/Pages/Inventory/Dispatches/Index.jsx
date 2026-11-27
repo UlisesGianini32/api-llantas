@@ -65,8 +65,11 @@ export default function Index({
         router.get('/almacen/salidas', {}, { preserveState: true, replace: true })
     }
 
-    const buildCsvHref = () => {
+    const buildCsvHref = (mode = 'detail') => {
         const params = new URLSearchParams()
+        if (mode === 'summary') {
+            params.set('mode', 'summary')
+        }
         Object.entries(form).forEach(([k, v]) => {
             if (v !== '' && v !== false && v !== null) params.set(k, String(v))
         })
@@ -116,12 +119,20 @@ export default function Index({
                             Pendientes de vincular
                         </Link>
                         {capabilities.can_export_summary && (
-                            <a
-                                href={buildCsvHref()}
-                                className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-200"
-                            >
-                                Exportar CSV
-                            </a>
+                            <>
+                                <a
+                                    href={buildCsvHref('detail')}
+                                    className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-200"
+                                >
+                                    Exportar CSV
+                                </a>
+                                <a
+                                    href={buildCsvHref('summary')}
+                                    className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-200"
+                                >
+                                    CSV Resumen
+                                </a>
+                            </>
                         )}
                         {capabilities.can_create && !isReadOnly && (
                             <Link
@@ -404,8 +415,9 @@ export default function Index({
                                 <thead className="bg-slate-50 dark:bg-neutral-950">
                                     <tr>
                                         <th className="px-3 py-2 text-left font-bold">Origen</th>
-                                        <th className="px-3 py-2 text-left font-bold">Código</th>
-                                        <th className="px-3 py-2 text-left font-bold">Producto / Marca / Tono</th>
+                                        <th className="px-3 py-2 text-left font-bold">SKU / Código / Barras</th>
+                                        <th className="px-3 py-2 text-left font-bold">Producto / Marca / Tono / Pres.</th>
+                                        <th className="px-3 py-2 text-left font-bold">Salón(es)</th>
                                         <th className="px-3 py-2 text-left font-bold">Tipo de salida</th>
                                         <th className="px-3 py-2 text-right font-bold">Salidas</th>
                                         <th className="px-3 py-2 text-right font-bold">Piezas físicas</th>
@@ -415,7 +427,7 @@ export default function Index({
                                 <tbody className="divide-y divide-slate-100 dark:divide-neutral-800">
                                     {summary.length === 0 ? (
                                         <tr>
-                                            <td colSpan={7} className="px-3 py-6 text-center text-slate-500">
+                                            <td colSpan={8} className="px-3 py-6 text-center text-slate-500">
                                                 Sin entregas confirmadas para los filtros actuales.
                                             </td>
                                         </tr>
@@ -431,12 +443,24 @@ export default function Index({
                                                         {row.item_kind === 'REGISTERED' ? 'Catálogo' : 'Provisional'}
                                                     </span>
                                                 </td>
-                                                <td className="px-3 py-2 font-mono">{row.display_code || '—'}</td>
+                                                <td className="px-3 py-2 font-mono">
+                                                    <div>{row.display_code || '—'}</div>
+                                                    {row.display_barcode && (
+                                                        <div className="text-[10px] text-slate-500">{row.display_barcode}</div>
+                                                    )}
+                                                </td>
                                                 <td className="px-3 py-2">
                                                     <div className="font-semibold">{row.display_name}</div>
                                                     <div className="text-[11px] text-slate-500">
-                                                        {[row.display_brand, row.display_tone ? `Tono ${row.display_tone}` : null].filter(Boolean).join(' · ') || '—'}
+                                                        {[
+                                                            row.display_brand,
+                                                            row.display_tone ? `Tono ${row.display_tone}` : null,
+                                                            row.display_presentation,
+                                                        ].filter(Boolean).join(' · ') || '—'}
                                                     </div>
+                                                </td>
+                                                <td className="px-3 py-2 text-[11px] text-slate-600 dark:text-neutral-300">
+                                                    {row.destinations_summary || '—'}
                                                 </td>
                                                 <td className="px-3 py-2">
                                                     {OPERATION_TYPE_LABELS[row.operation_type] || row.operation_type}

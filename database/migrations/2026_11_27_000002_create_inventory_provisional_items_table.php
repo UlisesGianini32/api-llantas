@@ -9,6 +9,31 @@ return new class extends Migration
     public function up(): void
     {
         if (Schema::hasTable('inventory_provisional_items')) {
+            $requiredColumns = [
+                'id', 'provisional_code', 'barcode', 'known_sku', 'name', 'brand', 'line',
+                'tone', 'presentation', 'unit_of_measure', 'default_units_per_container',
+                'notes', 'status', 'linked_inventory_product_id', 'linked_at', 'linked_by_user_id',
+                'link_notes', 'merged_into_provisional_id', 'canonical_provisional_id',
+                'merged_at', 'merged_by_user_id', 'merge_reason', 'created_by', 'created_at', 'updated_at',
+            ];
+            $missing = array_values(array_filter(
+                $requiredColumns,
+                static fn (string $col): bool => ! Schema::hasColumn('inventory_provisional_items', $col),
+            ));
+            if ($missing !== []) {
+                throw new RuntimeException(
+                    'La tabla preexistente inventory_provisional_items tiene un esquema parcial o incompatible; columnas faltantes: '.implode(', ', $missing)
+                );
+            }
+
+            $hasCodeUnique = collect(Schema::getIndexes('inventory_provisional_items'))
+                ->contains(static fn (array $idx): bool => ! empty($idx['unique']) && ($idx['columns'] ?? []) === ['provisional_code']);
+            if (! $hasCodeUnique) {
+                throw new RuntimeException(
+                    'La tabla preexistente inventory_provisional_items carece del índice único requerido sobre provisional_code.'
+                );
+            }
+
             return;
         }
 

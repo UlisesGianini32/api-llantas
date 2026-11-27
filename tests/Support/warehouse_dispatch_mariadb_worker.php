@@ -16,12 +16,18 @@ $kernel->bootstrap();
 use App\Models\InventoryDispatch;
 use App\Models\InventoryProduct;
 use App\Models\InventoryProvisionalItem;
+use App\Models\InventoryShelfAudit;
+use App\Models\MeliFullShipment;
+use App\Models\PurchaseOrderReceipt;
 use App\Models\User;
 use App\Services\Inventory\Dispatches\ProvisionalItemLinkService;
 use App\Services\Inventory\Dispatches\WarehouseDispatchService;
+use App\Services\Inventory\ShelfAuditService;
 use App\Services\InventoryMovementService;
 use App\Services\InventoryReservationService;
+use App\Services\MeliFullShipmentService;
 use App\Services\Pos\PosSaleService;
+use App\Services\Purchasing\PurchaseOrderService;
 use Illuminate\Support\Facades\DB;
 use Tests\Support\StagingDatabaseGuard;
 
@@ -45,7 +51,7 @@ config()->set('database.default', 'wd_mariadb');
 config()->set('database.connections.wd_mariadb', $conn);
 config()->set('inventory.warehouse_dispatches.enabled', true);
 config()->set('inventory.warehouse_dispatches.read_only', false);
-config()->set('inventory.warehouse_dispatches.apply_ledger', true);
+config()->set('inventory.warehouse_dispatches.apply_ledger', (bool) ($payload['apply_ledger'] ?? true));
 DB::purge('wd_mariadb');
 
 // Wait until synchronized start timestamp if provided
@@ -103,6 +109,24 @@ try {
             $sale = app(PosSaleService::class)->createSale($payload['data'], $actor);
 
             return ['ok' => true, 'sale_id' => $sale->id];
+        })(),
+        'shelf_audit_apply' => (function () use ($payload, $actor): array {
+            $audit = InventoryShelfAudit::findOrFail((int) $payload['audit_id']);
+            $applied = app(ShelfAuditService::class)->applyAuditAdjustment($audit, $actor, 'Concurrent M08');
+
+            return ['ok' => true, 'audit_id' => $applied->id, 'status' => $applied->status];
+        })(),
+        'po_void_receipt' => (function () use ($payload, $actor): array {
+            $receipt = PurchaseOrderReceipt::findOrFail((int) $payload['receipt_id']);
+            $po = app(PurchaseOrderService::class)->voidReceipt($receipt, $actor, 'Concurrent M09');
+
+            return ['ok' => true, 'purchase_order_id' => $po->id];
+        })(),
+        'full_dispatch' => (function () use ($payload, $actor): array {
+            $shipment = MeliFullShipment::findOrFail((int) $payload['shipment_id']);
+            $dispatched = app(MeliFullShipmentService::class)->dispatchShipment($shipment, $actor);
+
+            return ['ok' => true, 'shipment_id' => $dispatched->id, 'status' => $dispatched->status];
         })(),
         'merge_provisional' => (function () use ($payload, $actor): array {
             $src = InventoryProvisionalItem::findOrFail((int) $payload['source_id']);

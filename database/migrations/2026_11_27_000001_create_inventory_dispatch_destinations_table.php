@@ -9,6 +9,29 @@ return new class extends Migration
     public function up(): void
     {
         if (Schema::hasTable('inventory_dispatch_destinations')) {
+            $requiredColumns = [
+                'id', 'code', 'name', 'destination_type', 'contact_name', 'phone',
+                'address', 'customer_id', 'default_operation_type', 'is_active',
+                'notes', 'created_by', 'created_at', 'updated_at',
+            ];
+            $missing = array_values(array_filter(
+                $requiredColumns,
+                static fn (string $col): bool => ! Schema::hasColumn('inventory_dispatch_destinations', $col),
+            ));
+            if ($missing !== []) {
+                throw new RuntimeException(
+                    'La tabla preexistente inventory_dispatch_destinations tiene un esquema parcial o incompatible; columnas faltantes: '.implode(', ', $missing)
+                );
+            }
+
+            $hasCodeUnique = collect(Schema::getIndexes('inventory_dispatch_destinations'))
+                ->contains(static fn (array $idx): bool => ! empty($idx['unique']) && ($idx['columns'] ?? []) === ['code']);
+            if (! $hasCodeUnique) {
+                throw new RuntimeException(
+                    'La tabla preexistente inventory_dispatch_destinations carece del índice único requerido sobre code.'
+                );
+            }
+
             return;
         }
 

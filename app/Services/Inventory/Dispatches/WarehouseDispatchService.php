@@ -364,6 +364,10 @@ class WarehouseDispatchService
                 if ($locked->isConfirmed()) {
                     if ($locked->confirm_idempotency_key === $confirmKey
                         && $locked->confirm_payload_hash === $canonicalConfirmHash) {
+                        if ((int) $locked->confirmed_by_user_id !== (int) $actor->getKey()) {
+                            throw new WarehouseDispatchConflictException('La clave de confirmación pertenece a otro usuario.');
+                        }
+
                         return $locked->fresh(['destination', 'sourceLocation', 'items.product', 'items.provisionalItem', 'items.location', 'events.actor']);
                     }
 
@@ -903,6 +907,10 @@ class WarehouseDispatchService
         // Always authorize before revealing an existing idempotent document (Section 4.2).
         if (! $this->policy->view($actor, $existing)) {
             throw new AuthorizationException('No tienes permiso para acceder al documento asociado a esta clave de idempotencia.');
+        }
+
+        if ((int) $existing->created_by !== (int) $actor->getKey()) {
+            throw new WarehouseDispatchConflictException('La clave de idempotencia de creación pertenece a otro usuario.');
         }
 
         if ($existing->create_payload_hash !== null && hash_equals($existing->create_payload_hash, $payloadHash)) {

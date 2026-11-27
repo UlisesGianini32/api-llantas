@@ -9,6 +9,43 @@ return new class extends Migration
     public function up(): void
     {
         if (Schema::hasTable('inventory_dispatches')) {
+            $requiredColumns = [
+                'id', 'dispatch_number', 'create_idempotency_key', 'create_payload_hash',
+                'confirm_idempotency_key', 'confirm_payload_hash', 'draft_version',
+                'destination_id', 'destination_code_snapshot', 'destination_name_snapshot',
+                'destination_type_snapshot', 'source_location_id', 'operation_type',
+                'commercial_status', 'status', 'effective_at', 'is_retroactive',
+                'retroactive_reason', 'captured_at', 'confirmed_at', 'cancelled_at',
+                'delivered_by_user_id', 'delivered_by_name_snapshot', 'received_by_name',
+                'received_by_user_id', 'confirmed_by_user_id', 'confirmed_by_name_snapshot',
+                'cancelled_by_user_id', 'cancel_reason', 'cancel_physical_situation',
+                'total_lines_count', 'total_physical_units', 'unconverted_containers_count',
+                'total_units_returned', 'reference_subtotal_cost', 'reference_cost_complete',
+                'reference_subtotal_stylist', 'reference_stylist_complete', 'notes',
+                'metadata', 'created_by', 'created_at', 'updated_at',
+            ];
+            $missing = array_values(array_filter(
+                $requiredColumns,
+                static fn (string $col): bool => ! Schema::hasColumn('inventory_dispatches', $col),
+            ));
+            if ($missing !== []) {
+                throw new RuntimeException(
+                    'La tabla preexistente inventory_dispatches tiene un esquema parcial o incompatible; columnas faltantes: '.implode(', ', $missing)
+                );
+            }
+
+            $indexes = collect(Schema::getIndexes('inventory_dispatches'));
+            foreach (['dispatch_number', 'create_idempotency_key', 'confirm_idempotency_key'] as $uniqueCol) {
+                $hasUnique = $indexes->contains(
+                    static fn (array $idx): bool => ! empty($idx['unique']) && ($idx['columns'] ?? []) === [$uniqueCol]
+                );
+                if (! $hasUnique) {
+                    throw new RuntimeException(
+                        "La tabla preexistente inventory_dispatches carece del índice único requerido sobre {$uniqueCol}."
+                    );
+                }
+            }
+
             return;
         }
 

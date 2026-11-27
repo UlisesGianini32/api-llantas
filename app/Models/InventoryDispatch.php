@@ -54,6 +54,19 @@ class InventoryDispatch extends Model
         'retroactive_reason',
     ];
 
+    /**
+     * Defense-in-depth (H06): prevent accidental model serialization from leaking
+     * cost or stylist price snapshots. Authorized views read explicitly via WarehouseDispatchPresenter.
+     *
+     * @var list<string>
+     */
+    protected $hidden = [
+        'reference_subtotal_cost',
+        'reference_cost_complete',
+        'reference_subtotal_stylist',
+        'reference_stylist_complete',
+    ];
+
     protected function casts(): array
     {
         return [

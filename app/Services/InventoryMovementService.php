@@ -10,7 +10,10 @@ use App\Models\InventoryMovement;
 use App\Models\InventoryProduct;
 use App\Models\InventoryReservation;
 use App\Models\User;
+use App\Policies\WarehouseDispatchPolicy;
+use App\Services\Inventory\Dispatches\WarehouseDispatchFeatureGuard;
 use Carbon\Carbon;
+use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Support\Facades\DB;
 use InvalidArgumentException;
@@ -44,7 +47,8 @@ class InventoryMovementService
 
     /**
      * Exclusive, verified entry point for recording Phase 1 warehouse dispatch deductions.
-     * Validates exact document, line item, product, location, quantity, reference and external_key.
+     * Validates feature flags, actor authorization, DB-locked document & item state,
+     * active non-kit product, location, normalized quantity, reference, and external_key.
      * DISPATCH_RETURN remains strictly blocked in Phase 1.
      */
     public function recordForDispatch(
@@ -53,50 +57,113 @@ class InventoryMovementService
         int $physicalQuantity,
         ?User $user = null,
     ): InventoryMovement {
+        $guard = app(WarehouseDispatchFeatureGuard::class);
+        $guard->assertWritable();
+
+        if (! $guard->isApplyLedgerEnabled()) {
+            throw new InvalidArgumentException('El descuento automático al ledger de Salidas de Almacén está deshabilitado.');
+        }
+
+        if (! $user instanceof User) {
+            throw new AuthorizationException('Se requiere un usuario autenticado y autorizado para generar movimientos DISPATCH_OUT.');
+        }
+
         if (! $dispatch->exists || ! $item->exists) {
             throw new InvalidArgumentException('El documento y la partida de salida deben existir antes de descontar inventario.');
         }
 
-        if ((int) $item->inventory_dispatch_id !== (int) $dispatch->getKey()) {
-            throw new InvalidArgumentException('La partida no pertenece al documento de salida indicado.');
+        if ($physicalQuantity <= 0) {
+            throw new InvalidArgumentException('La cantidad física solicitada debe ser un entero mayor que cero.');
         }
 
-        if ($dispatch->status !== InventoryDispatch::STATUS_DRAFT) {
-            throw new InvalidArgumentException('Solo se permite generar movimientos DISPATCH_OUT durante la confirmación de un borrador válido.');
-        }
+        return DB::transaction(function () use ($dispatch, $item, $physicalQuantity, $user): InventoryMovement {
+            $freshDispatch = InventoryDispatch::query()
+                ->lockForUpdate()
+                ->find($dispatch->getKey());
+            $freshItem = InventoryDispatchItem::query()
+                ->lockForUpdate()
+                ->find($item->getKey());
 
-        if ($physicalQuantity <= 0 || $item->normalized_physical_quantity === null || (int) $item->normalized_physical_quantity !== $physicalQuantity) {
-            throw new InvalidArgumentException('La cantidad física solicitada no coincide con la cantidad normalizada de la partida.');
-        }
+            if (! $freshDispatch || ! $freshItem) {
+                throw new InvalidArgumentException('El documento o la partida de salida no existen en la base de datos.');
+            }
 
-        if (! $item->inventory_product_id || ! $item->inventory_location_id) {
-            throw new InvalidArgumentException('La partida requiere producto maestro y ubicación física para descontar inventario.');
-        }
+            if (! app(WarehouseDispatchPolicy::class)->confirm($user, $freshDispatch)) {
+                throw new AuthorizationException('El usuario no tiene permisos para generar movimientos de salida de almacén.');
+            }
 
-        $expectedKey = sprintf('warehouse-dispatch:%d:item:%d:out', (int) $dispatch->getKey(), (int) $item->getKey());
+            if ((int) $freshItem->inventory_dispatch_id !== (int) $freshDispatch->getKey()) {
+                throw new InvalidArgumentException('La partida no pertenece al documento de salida indicado.');
+            }
 
-        return $this->persistMovement([
-            'inventory_product_id' => (int) $item->inventory_product_id,
-            'inventory_location_id' => (int) $item->inventory_location_id,
-            'type' => InventoryMovement::DISPATCH_OUT,
-            'quantity' => -$physicalQuantity,
-            'reference_type' => 'inventory_dispatch',
-            'reference_id' => (int) $dispatch->getKey(),
-            'reference' => (string) $dispatch->dispatch_number,
-            'notes' => $item->line_notes ?: $dispatch->notes,
-            'metadata' => [
-                'dispatch_id' => (int) $dispatch->getKey(),
-                'dispatch_number' => (string) $dispatch->dispatch_number,
-                'dispatch_item_id' => (int) $item->getKey(),
-                'destination_id' => (int) $dispatch->destination_id,
-                'destination_code' => $dispatch->destination_code_snapshot,
-                'operation_type' => (string) $dispatch->operation_type,
-                'effective_at' => $dispatch->effective_at?->copy()->utc()->toIso8601String(),
-            ],
-            'occurred_at' => $dispatch->effective_at?->copy()->utc() ?? now('UTC'),
-            'external_key' => $expectedKey,
-            'created_by' => $user?->getKey(),
-        ], $user, allowDispatchReserved: true);
+            if ($freshDispatch->status !== InventoryDispatch::STATUS_DRAFT) {
+                throw new InvalidArgumentException('Solo se permite generar movimientos DISPATCH_OUT durante la confirmación de un borrador válido.');
+            }
+
+            if (trim((string) $freshDispatch->dispatch_number) === '') {
+                throw new InvalidArgumentException('El documento de salida carece de un folio válido para referenciar el movimiento.');
+            }
+
+            if ($freshDispatch->effective_at === null || $freshDispatch->effective_at->copy()->utc()->isFuture()) {
+                throw new InvalidArgumentException('La fecha efectiva del documento de salida no es válida para generar un movimiento.');
+            }
+
+            if ($freshItem->identification_status !== InventoryDispatchItem::ID_REGISTERED) {
+                throw new InvalidArgumentException('Solo las partidas con producto maestro registrado pueden descontar inventario.');
+            }
+
+            if ($freshItem->inventory_apply_status !== InventoryDispatchItem::APPLY_PENDING
+                || $freshItem->inventory_movement_id !== null) {
+                throw new InvalidArgumentException('La partida ya fue procesada o no está pendiente de aplicación al ledger.');
+            }
+
+            if ($freshItem->normalized_physical_quantity === null
+                || (int) $freshItem->normalized_physical_quantity !== $physicalQuantity) {
+                throw new InvalidArgumentException('La cantidad física solicitada no coincide con la cantidad normalizada de la partida.');
+            }
+
+            if (! $freshItem->inventory_product_id || ! $freshItem->inventory_location_id) {
+                throw new InvalidArgumentException('La partida requiere producto maestro y ubicación física para descontar inventario.');
+            }
+
+            $product = InventoryProduct::query()
+                ->lockForUpdate()
+                ->find($freshItem->inventory_product_id);
+            if (! $product) {
+                throw (new ModelNotFoundException)->setModel(InventoryProduct::class);
+            }
+            if (! $product->is_active) {
+                throw new InvalidArgumentException('No se permite descontar inventario para un producto maestro inactivo.');
+            }
+            if ($product->isKit() || $product->isBundleOrKit()) {
+                throw new InvalidArgumentException('Los kits y paquetes no pueden descontar inventario desde Salidas de Almacén en Fase 1.');
+            }
+
+            $expectedKey = sprintf('warehouse-dispatch:%d:item:%d:out', (int) $freshDispatch->getKey(), (int) $freshItem->getKey());
+
+            return $this->persistMovement([
+                'inventory_product_id' => (int) $freshItem->inventory_product_id,
+                'inventory_location_id' => (int) $freshItem->inventory_location_id,
+                'type' => InventoryMovement::DISPATCH_OUT,
+                'quantity' => -$physicalQuantity,
+                'reference_type' => 'inventory_dispatch',
+                'reference_id' => (int) $freshDispatch->getKey(),
+                'reference' => (string) $freshDispatch->dispatch_number,
+                'notes' => $freshItem->line_notes ?: $freshDispatch->notes,
+                'metadata' => [
+                    'dispatch_id' => (int) $freshDispatch->getKey(),
+                    'dispatch_number' => (string) $freshDispatch->dispatch_number,
+                    'dispatch_item_id' => (int) $freshItem->getKey(),
+                    'destination_id' => (int) $freshDispatch->destination_id,
+                    'destination_code' => $freshDispatch->destination_code_snapshot,
+                    'operation_type' => (string) $freshDispatch->operation_type,
+                    'effective_at' => $freshDispatch->effective_at->copy()->utc()->toIso8601String(),
+                ],
+                'occurred_at' => $freshDispatch->effective_at->copy()->utc(),
+                'external_key' => $expectedKey,
+                'created_by' => $user->getKey(),
+            ], $user, allowDispatchReserved: true);
+        });
     }
 
     /**

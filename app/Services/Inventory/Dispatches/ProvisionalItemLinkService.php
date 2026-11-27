@@ -182,82 +182,14 @@ class ProvisionalItemLinkService
 
                 // Update historical dispatch items belonging to this canonical provisional identity,
                 // preserving provisional_item_id and captured_* snapshots. ZERO inventory movements created.
-                $items = InventoryDispatchItem::query()
-                    ->with('dispatch')
-                    ->whereIn('provisional_item_id', $memberIds)
-                    ->whereNull('inventory_product_id')
-                    ->orderBy('inventory_dispatch_id')
-                    ->orderBy('id')
-                    ->lockForUpdate()
-                    ->get();
-
-                $linkedItemsCount = 0;
-                foreach ($items as $item) {
-                    $dispatch = $item->dispatch;
-                    if (! $dispatch) {
-                        continue;
-                    }
-
-                    if ($dispatch->status === InventoryDispatch::STATUS_DRAFT) {
-                        $item->forceFill([
-                            'inventory_product_id' => $master->getKey(),
-                            'identification_status' => InventoryDispatchItem::ID_REGISTERED,
-                            'linked_at' => $now,
-                            'linked_by_user_id' => $actor->getKey(),
-                        ])->save();
-                        $linkedItemsCount++;
-
-                        continue;
-                    }
-
-                    if ($dispatch->status === InventoryDispatch::STATUS_CONFIRMED) {
-                        $cutover = $this->cutoverEvaluator->evaluate(
-                            (int) $master->getKey(),
-                            $item->inventory_location_id ? (int) $item->inventory_location_id : null,
-                            $dispatch->effective_at->copy()->utc(),
-                        );
-
-                        $applyStatus = $cutover['decision'] === WarehouseDispatchCutoverEvaluator::DECISION_SKIPPED_PRE_COUNT
-                            ? InventoryDispatchItem::APPLY_SKIPPED_PRE_PHYSICAL_COUNT
-                            : InventoryDispatchItem::APPLY_NEEDS_RECONCILIATION;
-
-                        $note = $cutover['decision'] === WarehouseDispatchCutoverEvaluator::DECISION_SKIPPED_PRE_COUNT
-                            ? $cutover['reason']
-                            : 'Vinculado posteriormente al catálogo maestro; no se descontó inventario automáticamente y queda sujeto a conciliación supervisada.';
-
-                        $item->forceFill([
-                            'inventory_product_id' => $master->getKey(),
-                            'identification_status' => InventoryDispatchItem::ID_LINKED_POST_DISPATCH,
-                            'linked_at' => $now,
-                            'linked_by_user_id' => $actor->getKey(),
-                            'inventory_apply_status' => $applyStatus,
-                            'cutover_evaluated_at' => $now,
-                            'cutover_reference_type' => $cutover['reference_type'],
-                            'cutover_reference_id' => $cutover['reference_id'],
-                            'cutover_boundary_at' => $cutover['boundary_at'],
-                            'inventory_resolution_notes' => $note,
-                        ])->save();
-
-                        $this->recordEvent(
-                            provisionalItemId: (int) $locked->getKey(),
-                            eventType: InventoryDispatchEvent::EVENT_PROVISIONAL_LINKED,
-                            fromStatus: InventoryDispatchItem::APPLY_SKIPPED_PROVISIONAL,
-                            toStatus: $applyStatus,
-                            actor: $actor,
-                            reason: $this->nullableTrim($notes),
-                            payload: [
-                                'linked_inventory_product_id' => (int) $master->getKey(),
-                                'linked_sku' => (string) $master->sku,
-                                'ledger_movements_created' => 0,
-                            ],
-                            occurredAt: $now,
-                            dispatchId: (int) $dispatch->getKey(),
-                            dispatchItemId: (int) $item->getKey(),
-                        );
-
-                        $linkedItemsCount++;
-                    }
-                }
+                $linkedItemsCount = $this->propagateMasterLinkToDispatchItems(
+                    provisionalItemIds: $memberIds,
+                    canonicalProvisionalId: (int) $locked->getKey(),
+                    master: $master,
+                    actor: $actor,
+                    notes: $notes,
+                    now: $now,
+                );
 
                 $this->recordEvent(
                     provisionalItemId: (int) $locked->getKey(),
@@ -386,6 +318,30 @@ class ProvisionalItemLinkService
                 // Note (H08): We intentionally DO NOT rewrite inventory_dispatch_items.provisional_item_id.
                 // Historical dispatch items preserve the exact original capture identity while reports/links
                 // resolve canonical identity via canonical_provisional_id.
+                // However, if the canonical target is ALREADY linked to a master product, propagate the master
+                // inventory_product_id link onto unlinked items of source and its flattened children with ZERO
+                // ledger movements so summary/CSV never split them away from the master identity.
+                $propagatedLinkedItems = 0;
+                if ($lockedTarget->status === InventoryProvisionalItem::STATUS_LINKED
+                    && $lockedTarget->linked_inventory_product_id !== null) {
+                    $master = InventoryProduct::query()
+                        ->lockForUpdate()
+                        ->findOrFail($lockedTarget->linked_inventory_product_id);
+
+                    $mergedMemberIds = array_values(array_unique(array_merge(
+                        [(int) $lockedSource->getKey()],
+                        $children->pluck('id')->map(fn ($id): int => (int) $id)->all(),
+                    )));
+
+                    $propagatedLinkedItems = $this->propagateMasterLinkToDispatchItems(
+                        provisionalItemIds: $mergedMemberIds,
+                        canonicalProvisionalId: (int) $lockedTarget->getKey(),
+                        master: $master,
+                        actor: $actor,
+                        notes: "Propagado automáticamente al fusionar {$lockedSource->provisional_code} en {$lockedTarget->provisional_code} ({$trimmedReason}).",
+                        now: $now,
+                    );
+                }
 
                 $this->recordEvent(
                     provisionalItemId: (int) $lockedSource->getKey(),
@@ -400,6 +356,7 @@ class ProvisionalItemLinkService
                         'target_provisional_id' => (int) $lockedTarget->getKey(),
                         'target_code' => $lockedTarget->provisional_code,
                         'canonical_provisional_id' => $canonicalTargetId,
+                        'propagated_linked_items' => $propagatedLinkedItems,
                         'ledger_movements_created' => 0,
                     ],
                     occurredAt: $now,
@@ -408,6 +365,100 @@ class ProvisionalItemLinkService
                 return $lockedTarget->fresh();
             });
         });
+    }
+
+    /**
+     * Propagate a master InventoryProduct link onto unlinked dispatch items belonging to
+     * a canonical provisional group, preserving provisional_item_id & snapshots with ZERO ledger movements.
+     *
+     * @param  list<int>  $provisionalItemIds
+     */
+    private function propagateMasterLinkToDispatchItems(
+        array $provisionalItemIds,
+        int $canonicalProvisionalId,
+        InventoryProduct $master,
+        User $actor,
+        ?string $notes,
+        \Carbon\Carbon $now,
+    ): int {
+        $items = InventoryDispatchItem::query()
+            ->with('dispatch')
+            ->whereIn('provisional_item_id', $provisionalItemIds)
+            ->whereNull('inventory_product_id')
+            ->orderBy('inventory_dispatch_id')
+            ->orderBy('id')
+            ->lockForUpdate()
+            ->get();
+
+        $linkedItemsCount = 0;
+        foreach ($items as $item) {
+            $dispatch = $item->dispatch;
+            if (! $dispatch) {
+                continue;
+            }
+
+            if ($dispatch->status === InventoryDispatch::STATUS_DRAFT) {
+                $item->forceFill([
+                    'inventory_product_id' => $master->getKey(),
+                    'identification_status' => InventoryDispatchItem::ID_REGISTERED,
+                    'linked_at' => $now,
+                    'linked_by_user_id' => $actor->getKey(),
+                ])->save();
+                $linkedItemsCount++;
+
+                continue;
+            }
+
+            if ($dispatch->status === InventoryDispatch::STATUS_CONFIRMED) {
+                $cutover = $this->cutoverEvaluator->evaluate(
+                    (int) $master->getKey(),
+                    $item->inventory_location_id ? (int) $item->inventory_location_id : null,
+                    $dispatch->effective_at->copy()->utc(),
+                );
+
+                $applyStatus = $cutover['decision'] === WarehouseDispatchCutoverEvaluator::DECISION_SKIPPED_PRE_COUNT
+                    ? InventoryDispatchItem::APPLY_SKIPPED_PRE_PHYSICAL_COUNT
+                    : InventoryDispatchItem::APPLY_NEEDS_RECONCILIATION;
+
+                $note = $cutover['decision'] === WarehouseDispatchCutoverEvaluator::DECISION_SKIPPED_PRE_COUNT
+                    ? $cutover['reason']
+                    : 'Vinculado posteriormente al catálogo maestro; no se descontó inventario automáticamente y queda sujeto a conciliación supervisada.';
+
+                $item->forceFill([
+                    'inventory_product_id' => $master->getKey(),
+                    'identification_status' => InventoryDispatchItem::ID_LINKED_POST_DISPATCH,
+                    'linked_at' => $now,
+                    'linked_by_user_id' => $actor->getKey(),
+                    'inventory_apply_status' => $applyStatus,
+                    'cutover_evaluated_at' => $now,
+                    'cutover_reference_type' => $cutover['reference_type'],
+                    'cutover_reference_id' => $cutover['reference_id'],
+                    'cutover_boundary_at' => $cutover['boundary_at'],
+                    'inventory_resolution_notes' => $note,
+                ])->save();
+
+                $this->recordEvent(
+                    provisionalItemId: $canonicalProvisionalId,
+                    eventType: InventoryDispatchEvent::EVENT_PROVISIONAL_LINKED,
+                    fromStatus: InventoryDispatchItem::APPLY_SKIPPED_PROVISIONAL,
+                    toStatus: $applyStatus,
+                    actor: $actor,
+                    reason: $this->nullableTrim($notes),
+                    payload: [
+                        'linked_inventory_product_id' => (int) $master->getKey(),
+                        'linked_sku' => (string) $master->sku,
+                        'ledger_movements_created' => 0,
+                    ],
+                    occurredAt: $now,
+                    dispatchId: (int) $dispatch->getKey(),
+                    dispatchItemId: (int) $item->getKey(),
+                );
+
+                $linkedItemsCount++;
+            }
+        }
+
+        return $linkedItemsCount;
     }
 
     private function assertCompatibleAttributes(InventoryProvisionalItem $source, InventoryProvisionalItem $target): void

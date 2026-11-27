@@ -9,6 +9,38 @@ return new class extends Migration
     public function up(): void
     {
         if (Schema::hasTable('inventory_dispatch_items')) {
+            $requiredColumns = [
+                'id', 'inventory_dispatch_id', 'line_order', 'inventory_product_id',
+                'provisional_item_id', 'inventory_location_id', 'location_code_snapshot',
+                'capture_method', 'captured_barcode', 'captured_sku', 'captured_name',
+                'captured_brand', 'captured_line', 'captured_tone', 'captured_presentation',
+                'captured_quantity', 'captured_unit_of_measure', 'unit_conversion_factor',
+                'normalized_physical_quantity', 'quantity_returned', 'unit_cost_snapshot',
+                'unit_price_stylist_snapshot', 'line_notes', 'identification_status',
+                'linked_at', 'linked_by_user_id', 'inventory_apply_status',
+                'cutover_evaluated_at', 'cutover_reference_type', 'cutover_reference_id',
+                'cutover_boundary_at', 'inventory_movement_id', 'inventory_movement_external_key',
+                'inventory_applied_at', 'inventory_applied_by_user_id',
+                'inventory_resolution_notes', 'meli_sync_status', 'created_at', 'updated_at',
+            ];
+            $missing = array_values(array_filter(
+                $requiredColumns,
+                static fn (string $col): bool => ! Schema::hasColumn('inventory_dispatch_items', $col),
+            ));
+            if ($missing !== []) {
+                throw new RuntimeException(
+                    'La tabla preexistente inventory_dispatch_items tiene un esquema parcial o incompatible; columnas faltantes: '.implode(', ', $missing)
+                );
+            }
+
+            $hasExtKeyUnique = collect(Schema::getIndexes('inventory_dispatch_items'))
+                ->contains(static fn (array $idx): bool => ! empty($idx['unique']) && ($idx['columns'] ?? []) === ['inventory_movement_external_key']);
+            if (! $hasExtKeyUnique) {
+                throw new RuntimeException(
+                    'La tabla preexistente inventory_dispatch_items carece del índice único requerido sobre inventory_movement_external_key.'
+                );
+            }
+
             return;
         }
 
