@@ -154,7 +154,9 @@ export default function Form({
     }, [searchQuery, searchBrand, searchTone, sourceLocationId])
 
     const addRegisteredProduct = (product, captureMethod = 'TEXT_SEARCH') => {
-        const chosenLocationId = product.suggested_location_id || (sourceLocationId ? Number(sourceLocationId) : null)
+        const chosenLocationId = sourceLocationId
+            ? Number(sourceLocationId)
+            : (product.suggested_location_id || null)
         const { lines: next } = upsertDispatchLine(lines, {
             kind: 'registered',
             inventory_product_id: product.inventory_product_id,
@@ -286,11 +288,14 @@ export default function Form({
     }
 
     const handleHidKeyDown = (e) => {
-        if (e.key === 'Enter') {
+        if (e.key === 'Enter' || e.keyCode === 13) {
             e.preventDefault()
+            e.stopPropagation()
             const code = scanCode.trim()
             setScanCode('')
-            processScanCode(code, false)
+            if (code) {
+                processScanCode(code, false)
+            }
         }
     }
 
@@ -426,7 +431,7 @@ export default function Form({
         <AppShell title={isEdit ? `Editar ${dispatch.dispatch_number}` : 'Nueva Salida de Almacén'}>
             <Head title={isEdit ? `Editar ${dispatch.dispatch_number}` : 'Nueva Salida de Almacén'} />
 
-            <form onSubmit={handleSubmit} className="space-y-4">
+            <form onSubmit={(e) => e.preventDefault()} className="space-y-4">
                 <div className={`rounded-xl border px-4 py-2.5 text-xs ${modeMeta.badgeClass}`}>
                     <strong>{modeMeta.label}:</strong> {modeMeta.description}
                 </div>
@@ -441,7 +446,8 @@ export default function Form({
                         </h1>
                     </div>
                     <button
-                        type="submit"
+                        type="button"
+                        onClick={handleSubmit}
                         disabled={submitting || isReadOnly || lines.length === 0}
                         className="rounded-lg bg-emerald-600 px-5 py-2.5 text-xs font-bold text-white shadow-sm hover:bg-emerald-700 disabled:opacity-50"
                     >
